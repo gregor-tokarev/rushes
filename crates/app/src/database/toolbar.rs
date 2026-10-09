@@ -10,7 +10,7 @@ use gpui_kit::component::popover::Popover;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Side, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -456,6 +456,7 @@ fn sort_popover(
                     // A column has at most one rule, so it names the rule's
                     // controls; `ix` only addresses the edit.
                     let key = column_key(sort.column);
+                    let current = sort.column;
                     let direction = sort.direction;
                     let label = column_name(sort.column, &properties).unwrap_or_default();
                     let choices = columns.clone();
@@ -463,49 +464,70 @@ fn sort_popover(
                     let picker_panel = panel.clone();
                     h_flex()
                         .gap_1()
+                        // The menu's trigger container only fills the row
+                        // inside a stretching column, as in a table cell.
                         .child(
-                            Button::new(SharedString::from(format!("sort-column-{key}")))
-                                .outline()
-                                .small()
-                                .flex_1()
-                                .icon(column_icon(sort.column, &properties))
-                                .label(label)
-                                .dropdown_caret(true)
-                                .dropdown_menu(move |menu, _, _| {
-                                    choices.iter().fold(
-                                        menu.max_h(gpui_kit::px(320.)).scrollable(true),
-                                        |menu, column| {
-                                            let column = *column;
-                                            let panel = picker_panel.clone();
-                                            menu.item(
-                                                PopupMenuItem::new(
-                                                    column_name(column, &picker_properties)
-                                                        .unwrap_or_default(),
-                                                )
-                                                .icon(column_icon(column, &picker_properties))
-                                                .on_click(move |_, _, cx| {
-                                                    _ = panel.update(cx, |panel, cx| {
-                                                        panel.update_view(
-                                                            |view| {
-                                                                set_sort_column(
-                                                                    &mut view.sorts,
-                                                                    ix,
-                                                                    column,
-                                                                )
-                                                            },
-                                                            cx,
-                                                        )
-                                                    });
-                                                }),
+                            v_flex().flex_1().min_w_0().child(
+                                Button::new(SharedString::from(format!("sort-column-{key}")))
+                                    .outline()
+                                    .small()
+                                    .w_full()
+                                    .accessibility_label(label.clone())
+                                    // Icon and label form one child so the caret's
+                                    // `justify_between` keeps them at the leading edge.
+                                    .child(
+                                        h_flex()
+                                            .gap_1p5()
+                                            .min_w_0()
+                                            .child(
+                                                Icon::new(column_icon(sort.column, &properties))
+                                                    .xsmall(),
                                             )
-                                        },
+                                            .child(div().min_w_0().truncate().child(label)),
                                     )
-                                }),
+                                    .dropdown_caret(true)
+                                    .dropdown_menu(move |menu, window, _| {
+                                        choices.iter().fold(
+                                            // Each item has an icon, so the check
+                                            // goes on the trailing side.
+                                            menu.max_h(window.rem_size() * 20.)
+                                                .scrollable(true)
+                                                .check_side(Side::Right),
+                                            |menu, column| {
+                                                let column = *column;
+                                                let panel = picker_panel.clone();
+                                                menu.item(
+                                                    PopupMenuItem::new(
+                                                        column_name(column, &picker_properties)
+                                                            .unwrap_or_default(),
+                                                    )
+                                                    .icon(column_icon(column, &picker_properties))
+                                                    .checked(column == current)
+                                                    .on_click(move |_, _, cx| {
+                                                        _ = panel.update(cx, |panel, cx| {
+                                                            panel.update_view(
+                                                                |view| {
+                                                                    set_sort_column(
+                                                                        &mut view.sorts,
+                                                                        ix,
+                                                                        column,
+                                                                    )
+                                                                },
+                                                                cx,
+                                                            )
+                                                        });
+                                                    }),
+                                                )
+                                            },
+                                        )
+                                    }),
+                            ),
                         )
                         .child(
                             Button::new(SharedString::from(format!("sort-direction-{key}")))
                                 .outline()
                                 .small()
+                                .w_32()
                                 .icon(match direction {
                                     SortDirection::Ascending => IconName::ArrowUp,
                                     SortDirection::Descending => IconName::ArrowDown,
