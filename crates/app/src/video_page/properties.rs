@@ -18,7 +18,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Side, Sizable as _, WindowExt 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, TestSupportExt as _, Window, div,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, TestSupportExt as _, Window, div,
 };
 use videocrm_core::{
     PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, TagColor, Video, VideoFormat, VideoId,
@@ -37,6 +37,9 @@ pub struct PropertiesPanel {
     collapsed: bool,
     publish_date: Entity<DatePickerState>,
     tag_input: Entity<InputState>,
+    /// Whether the media folder exists, checked off the UI thread after each data change.
+    folder_exists: bool,
+    folder_check: Option<Task<()>>,
     /// Text, number and URL properties.
     inputs: HashMap<PropertyId, Entity<InputState>>,
     dates: HashMap<PropertyId, Entity<DatePickerState>>,
@@ -74,6 +77,8 @@ impl PropertiesPanel {
             collapsed: false,
             publish_date,
             tag_input,
+            folder_exists: false,
+            folder_check: None,
             inputs: HashMap::new(),
             dates: HashMap::new(),
             editor_subscriptions: HashMap::new(),
@@ -123,6 +128,20 @@ impl PropertiesPanel {
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(video) = self.video(cx).cloned() else { return };
         let properties = self.state.read(cx).properties().to_vec();
+
+        let folder = video.folder.clone();
+        self.folder_check = Some(cx.spawn(async move |this, cx| {
+            let exists = match folder {
+                Some(folder) => cx.background_spawn(async move { folder.is_dir() }).await,
+                None => false,
+            };
+            _ = this.update(cx, |this, cx| {
+                if this.folder_exists != exists {
+                    this.folder_exists = exists;
+                    cx.notify();
+                }
+            });
+        }));
 
         let stored = video.publish_date;
         if self.publish_date.read(cx).date() != Date::Single(stored) {
@@ -338,7 +357,7 @@ impl PropertiesPanel {
     }
 
     fn render_media_folder(&self, video: &Video, cx: &mut Context<Self>) -> impl IntoElement {
-        let folder = video.folder.clone().filter(|folder| folder.is_dir());
+        let folder = video.folder.clone().filter(|_| self.folder_exists);
         h_flex()
             .w_full()
             .min_w_0()
