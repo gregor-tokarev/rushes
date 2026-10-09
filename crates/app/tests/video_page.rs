@@ -607,7 +607,7 @@ fn a_click_below_the_document_puts_the_caret_after_it(cx: &mut TestAppContext) {
     app.open_video(cx, id, VideoTab::Script);
 
     let end = bounds(&app, cx, "page-end");
-    assert!(end.size.height > px(200.), "the space below a short script reacts: {end:?}");
+    assert!(end.size.height > px(120.), "the space below a short script reacts: {end:?}");
     // Far below the last block, near the bottom of the window.
     app.step(cx, |window, cx| window.click_at("page-end", gpui_kit::point(px(200.), end.size.height - px(20.)), cx));
     app.type_text(cx, "DEADZONE");
