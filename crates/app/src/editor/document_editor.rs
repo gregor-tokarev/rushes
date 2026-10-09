@@ -132,6 +132,7 @@ impl DocumentEditor {
         let focus_handle = cx.focus_handle();
         let focus_out = cx.on_focus_out(&focus_handle, window, |this, _, _, cx| {
             this.slash = None;
+            this.selected = None;
             this.set_focused(None, cx);
             cx.notify();
         });

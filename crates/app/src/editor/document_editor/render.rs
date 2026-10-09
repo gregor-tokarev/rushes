@@ -248,7 +248,7 @@ impl DocumentEditor {
         };
         let drop_after =
             self.drop_target.filter(|target| row.dragging && target.block == id).map(|target| target.after);
-        let indent = if is_list(block.kind) { block.indent } else { 0 };
+        let indent = if is_list(block.kind) { block.indent.min(blocks::MAX_INDENT) } else { 0 };
 
         let content = div()
             .relative()

@@ -110,11 +110,12 @@ pub fn indent(blocks: &mut [Block], ix: usize, delta: i8) -> bool {
         return false;
     }
     let limit = match ix.checked_sub(1).map(|previous| &blocks[previous]) {
-        Some(previous) if is_list(previous.kind) => (previous.indent + 1).min(MAX_INDENT),
+        Some(previous) if is_list(previous.kind) => previous.indent.saturating_add(1).min(MAX_INDENT),
         _ => 0,
     };
     let current = blocks[ix].indent;
-    let target = if delta > 0 { (current + 1).min(limit).max(current) } else { current.saturating_sub(1) };
+    let target =
+        if delta > 0 { current.saturating_add(1).min(limit).max(current) } else { current.saturating_sub(1) };
     if target == current {
         return false;
     }
@@ -302,6 +303,11 @@ mod tests {
         let mut deep: Vec<_> = (0..6).map(|i| nested(BlockKind::Todo, "t", i.min(3))).collect();
         assert!(!indent(&mut deep, 4, 1), "max indent");
         assert_eq!(deep[4].indent, MAX_INDENT);
+
+        // Stored documents may carry any indent; arithmetic must not overflow.
+        let mut corrupt = vec![nested(BlockKind::Bulleted, "a", u8::MAX), nested(BlockKind::Bulleted, "b", 9)];
+        assert!(!indent(&mut corrupt, 1, 1));
+        assert!(indent(&mut corrupt, 1, -1));
     }
 
     #[test]
