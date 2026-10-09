@@ -41,7 +41,8 @@ impl AccountBadge {
                     .collect::<Vec<_>>();
                 let detail = match uploading.as_slice() {
                     [] => account.channel_handle.clone().unwrap_or_else(|| account.email.clone()),
-                    [(_, Some(retry))] => format!("{} · retrying", retry.headline()),
+                    // The sidebar is narrow; the Upload card says what went wrong.
+                    [(_, Some(_))] => "Retrying the upload…".to_owned(),
                     [(transfer, None)] => format!("Uploading · {}%", (transfer.fraction() * 100.0).floor()),
                     several => format!("Uploading {} videos", several.len()),
                 };
