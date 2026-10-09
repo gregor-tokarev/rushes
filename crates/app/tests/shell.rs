@@ -7,8 +7,8 @@ use std::sync::Arc;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, ElementId, Entity, Focusable as _, TestAppContext, Window,
-    WindowBounds, WindowOptions, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, ElementId, Entity, Focusable as _, Pixels, Size, TestAppContext,
+    Window, WindowBounds, WindowOptions, px, size,
 };
 use videocrm::ai_edit::PipelineService;
 use videocrm::onboarding::{StartChoice, Step};
@@ -34,6 +34,11 @@ struct Fixture {
 impl Fixture {
     /// A workspace over a fresh in-memory store holding `titles` as videos.
     fn open(cx: &mut TestAppContext, onboarded: bool, titles: &[&str]) -> Self {
+        Self::open_sized(cx, onboarded, titles, size(px(1440.), px(900.)))
+    }
+
+    /// [`Fixture::open`] in a window of `window_size`.
+    fn open_sized(cx: &mut TestAppContext, onboarded: bool, titles: &[&str], window_size: Size<Pixels>) -> Self {
         cx.update(|cx| {
             gpui_kit::init(cx);
             shell::init(cx);
@@ -61,7 +66,7 @@ impl Fixture {
             YoutubeService::init(state.clone(), cx);
             PipelineService::init(state.clone(), cx);
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::new(Default::default(), size(px(1440.), px(900.))))),
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(Default::default(), window_size))),
                 ..Default::default()
             };
             let handle = state.clone();
@@ -269,6 +274,28 @@ fn a_board_column_preselects_the_status_and_enter_submits(cx: &mut TestAppContex
     app.press(cx, "escape");
     assert!(!app.has_dialog(cx));
     assert_eq!(cx.read(|cx| app.state.read(cx).rows().len()), 1);
+}
+
+#[gpui_kit::test]
+fn onboarding_keeps_its_buttons_in_view_at_the_minimum_window_size(cx: &mut TestAppContext) {
+    // main.rs's minimum window size.
+    let app = Fixture::open_sized(cx, false, &[], size(px(960.), px(600.)));
+    let onboarding = cx.read(|cx| app.workspace.read(cx).onboarding().cloned().expect("onboarding"));
+    for _ in Step::ALL {
+        let in_view = cx
+            .update_window(app.window, |_, window, _| {
+                let viewport = window.viewport_size();
+                let next = window.find("onboarding-next").bounds();
+                next.bottom() <= viewport.height && next.right() <= viewport.width
+            })
+            .unwrap();
+        let step = cx.read(|cx| onboarding.read(cx).step());
+        assert!(in_view, "Continue is on screen on the {step:?} step");
+        if step == Step::GetStarted {
+            break;
+        }
+        app.click(cx, "onboarding-next");
+    }
 }
 
 #[gpui_kit::test]

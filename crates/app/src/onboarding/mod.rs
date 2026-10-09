@@ -9,8 +9,9 @@ use gpui_kit::component::stepper::{Stepper, StepperItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div, rems,
+    AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
+    Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
+    rems,
 };
 
 use crate::ai_edit::DoctorChecklist;
@@ -18,6 +19,7 @@ use crate::publish::YoutubeSettings;
 use crate::settings_page::{Commit, MediaFolderField};
 use crate::state::AppState;
 use crate::ui::ChoiceCard;
+use crate::ui::settings::FieldStack;
 use crate::wizard;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,16 +221,10 @@ impl Onboarding {
                     ))
                     .into_any_element()
             }
-            Step::MediaFolder => v_flex()
-                .gap_2()
-                .child(div().text_sm().font_medium().child("Media folder"))
-                .child(self.media_folder.clone())
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Each video gets its own folder inside, with footage/ for raw takes. You can change this later in Settings."),
-                )
+            // The same field as in Settings > General.
+            Step::MediaFolder => FieldStack::new("Media folder")
+                .description("Each video gets its own folder inside, with footage/ for raw takes. You can change this later in Settings.")
+                .control(self.media_folder.clone())
                 .into_any_element(),
             Step::Youtube => self.youtube.clone().map_or_else(|| div().into_any_element(), IntoElement::into_any_element),
             Step::AiEditing => self.doctor.clone().map_or_else(|| div().into_any_element(), IntoElement::into_any_element),
@@ -287,8 +283,12 @@ fn step_copy(step: Step) -> (&'static str, &'static str) {
     }
 }
 
+/// Windows shorter than this give the onboarding card less room above it.
+const SHORT_WINDOW: Rems = Rems(48.);
+
 impl Render for Onboarding {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let short = window.viewport_size().height < SHORT_WINDOW.to_pixels(window.rem_size());
         let (title, description): (SharedString, SharedString) = {
             let (title, description) = step_copy(self.step);
             (title.into(), description.into())
@@ -297,18 +297,21 @@ impl Render for Onboarding {
         let last = self.step == Step::GetStarted;
         let optional = matches!(self.step, Step::Youtube | Step::AiEditing);
 
+        // The stepper and the buttons stay in view; the step between them scrolls.
         let card = v_flex()
             .id("onboarding-card")
             .test_support()
             .w_full()
             .max_w(rems(42.5))
+            .max_h_full()
+            .min_h_0()
             .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
             .shadow_lg()
             .child(
-                div().px_8().pt_6().pb_5().border_b_1().border_color(cx.theme().border).child(
+                div().flex_none().px_8().pt_6().pb_5().border_b_1().border_color(cx.theme().border).child(
                     Stepper::new("onboarding-steps")
                         .small()
                         .text_center(true)
@@ -327,21 +330,30 @@ impl Render for Onboarding {
                 ),
             )
             .child(
-                v_flex()
-                    .px_8()
-                    .pt_6()
-                    .pb_6()
-                    .gap_5()
+                div()
+                    .id("onboarding-step")
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
                     .child(
                         v_flex()
-                            .gap_1()
-                            .child(div().text_2xl().font_semibold().child(title))
-                            .child(div().text_sm().text_color(cx.theme().muted_foreground).child(description)),
+                            .px_8()
+                            .pt_6()
+                            .pb_6()
+                            .gap_5()
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(div().text_2xl().font_semibold().child(title))
+                                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(description)),
+                            )
+                            .child(self.render_body(cx)),
                     )
-                    .child(self.render_body(cx)),
+                    .vertical_scrollbar(&self.scroll),
             )
             .child(
                 h_flex()
+                    .flex_none()
                     .px_8()
                     .py_4()
                     .gap_2()
@@ -373,14 +385,14 @@ impl Render for Onboarding {
                     ),
             );
 
-        div()
+        v_flex()
             .id("onboarding")
             .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .bg(cx.theme().muted.opacity(0.4))
+            .items_center()
+            .px_6()
             // Anchored at the top so the stepper stays put while steps change height.
-            .child(v_flex().w_full().items_center().px_6().pt_20().pb_10().child(card))
-            .vertical_scrollbar(&self.scroll)
+            .map(|this| if short { this.pt_6().pb_6() } else { this.pt_20().pb_10() })
+            .bg(cx.theme().muted.opacity(0.4))
+            .child(card)
     }
 }
