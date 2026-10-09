@@ -40,10 +40,10 @@ pub struct PropertiesPanel {
     /// Whether the media folder exists, checked off the UI thread after each data change.
     folder_exists: bool,
     folder_check: Option<Task<()>>,
-    /// Text, number and URL properties.
-    inputs: HashMap<PropertyId, Entity<InputState>>,
-    dates: HashMap<PropertyId, Entity<DatePickerState>>,
-    editor_subscriptions: HashMap<PropertyId, Subscription>,
+    /// Editors of text, number and URL properties, each with the subscription
+    /// that commits it, so both go away when the property changes type.
+    inputs: HashMap<PropertyId, (Entity<InputState>, Subscription)>,
+    dates: HashMap<PropertyId, (Entity<DatePickerState>, Subscription)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -81,7 +81,6 @@ impl PropertiesPanel {
             folder_check: None,
             inputs: HashMap::new(),
             dates: HashMap::new(),
-            editor_subscriptions: HashMap::new(),
             _subscriptions: subscriptions,
         };
         panel.sync(window, cx);
@@ -148,15 +147,18 @@ impl PropertiesPanel {
             self.publish_date.update(cx, |picker, cx| picker.set_date(Date::Single(stored), window, cx));
         }
 
-        self.inputs.retain(|id, _| properties.iter().any(|property| property.id == *id));
-        self.dates.retain(|id, _| properties.iter().any(|property| property.id == *id));
+        let has = |id: &PropertyId, kind: fn(&PropertyKind) -> bool| {
+            properties.iter().any(|property| property.id == *id && kind(&property.kind))
+        };
+        self.inputs.retain(|id, _| has(id, is_text_like));
+        self.dates.retain(|id, _| has(id, |kind| *kind == PropertyKind::Date));
         for property in &properties {
             let value = video.properties.get(&property.id);
             match &property.kind {
                 PropertyKind::Text | PropertyKind::Number | PropertyKind::Url => {
                     let text = value.map(property_text).unwrap_or_default();
                     match self.inputs.get(&property.id) {
-                        Some(input) => {
+                        Some((input, _)) => {
                             let editing = input.read(cx).focus_handle(cx).is_focused(window);
                             if !editing && input.read(cx).value().as_ref() != text {
                                 input.update(cx, |input, cx| input.set_value(text, window, cx));
@@ -173,8 +175,7 @@ impl PropertiesPanel {
                                         this.commit_text(id, text, cx);
                                     }
                                 });
-                            self.editor_subscriptions.insert(property.id, subscription);
-                            self.inputs.insert(property.id, input);
+                            self.inputs.insert(property.id, (input, subscription));
                         }
                     }
                 }
@@ -184,7 +185,7 @@ impl PropertiesPanel {
                         _ => None,
                     };
                     match self.dates.get(&property.id) {
-                        Some(picker) => {
+                        Some((picker, _)) => {
                             if picker.read(cx).date() != Date::Single(date) {
                                 picker.update(cx, |picker, cx| picker.set_date(Date::Single(date), window, cx));
                             }
@@ -201,15 +202,13 @@ impl PropertiesPanel {
                                 let date = date.map(|date| date.date());
                                 this.set_value(id, date.map(|date| PropertyValue::Date(Some(date))), cx);
                             });
-                            self.editor_subscriptions.insert(property.id, subscription);
-                            self.dates.insert(property.id, picker);
+                            self.dates.insert(property.id, (picker, subscription));
                         }
                     }
                 }
                 _ => {}
             }
         }
-        self.editor_subscriptions.retain(|id, _| self.inputs.contains_key(id) || self.dates.contains_key(id));
         cx.notify();
     }
 
@@ -399,7 +398,7 @@ impl PropertiesPanel {
         let id = property.id;
         match &property.kind {
             PropertyKind::Text | PropertyKind::Number | PropertyKind::Url => {
-                let Some(input) = self.inputs.get(&id) else { return div().into_any_element() };
+                let Some((input, _)) = self.inputs.get(&id) else { return div().into_any_element() };
                 let url = match value {
                     Some(PropertyValue::Url(url)) if !url.trim().is_empty() => Some(url.clone()),
                     _ => None,
@@ -439,7 +438,7 @@ impl PropertiesPanel {
                     .into_any_element()
             }
             PropertyKind::Date => match self.dates.get(&id) {
-                Some(picker) => div()
+                Some((picker, _)) => div()
                     .w_56()
                     .child(DatePicker::new(picker).appearance(false).small().cleanable(true).placeholder("Empty"))
                     .into_any_element(),
@@ -547,6 +546,11 @@ impl PropertiesPanel {
         });
         name.update(cx, |input, cx| input.focus(window, cx));
     }
+}
+
+/// Kinds edited in a text input.
+fn is_text_like(kind: &PropertyKind) -> bool {
+    matches!(kind, PropertyKind::Text | PropertyKind::Number | PropertyKind::Url)
 }
 
 /// Text shown for a stored text, number or URL value.

@@ -19,7 +19,9 @@ use videocrm::state::AppState;
 use videocrm::video_page::SAVE_DELAY;
 use videocrm_core::settings::AppSettings;
 use videocrm_core::templates::TemplateKind;
-use videocrm_core::{BlockId, DocumentKind, NewVideo, Store, VideoId, VideoStatus};
+use videocrm_core::{
+    BlockId, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, Store, VideoId, VideoStatus,
+};
 
 struct Fixture {
     window: AnyWindowHandle,
@@ -462,6 +464,34 @@ fn enter_in_the_title_continues_at_the_end_of_the_hook(cx: &mut TestAppContext) 
     let video = cx.read(|cx| app.state.read(cx).video(id).cloned().expect("video"));
     assert_eq!(video.title, "Desk setup tour (2026)");
     assert_eq!(video.hook, "Everything that survived a year later");
+}
+
+#[gpui_kit::test]
+fn a_property_keeps_saving_after_its_type_changes_back(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
+
+    let mut property =
+        PropertyDef { id: PropertyId::new(), name: "Sponsor".into(), kind: PropertyKind::Text, position: 0 };
+    let set_kind = |app: &Fixture, cx: &mut TestAppContext, property: &PropertyDef, kind: PropertyKind| {
+        let (state, property) = (app.state.clone(), PropertyDef { kind, ..property.clone() });
+        app.step(cx, move |_, cx| state.update(cx, |state, cx| state.update_property(property, cx)));
+    };
+    let state = app.state.clone();
+    let created = property.clone();
+    app.step(cx, move |_, cx| state.update(cx, |state, cx| state.insert_property(created, cx)));
+    // The database's column menu can change a property's type while the page is open.
+    set_kind(&app, cx, &property, PropertyKind::Date);
+    set_kind(&app, cx, &property, PropertyKind::Text);
+    property.kind = PropertyKind::Text;
+
+    app.click(cx, ElementId::Name(format!("property-input-{}", property.id).into()));
+    app.type_text(cx, "Glyph Keyboards");
+    app.press(cx, "enter");
+    let value =
+        cx.read(|cx| app.state.read(cx).video(id).and_then(|video| video.properties.get(&property.id).cloned()));
+    assert_eq!(value, Some(PropertyValue::Text("Glyph Keyboards".into())));
 }
 
 #[gpui_kit::test]
