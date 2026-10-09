@@ -68,7 +68,9 @@ impl MediaFolderField {
                     this.commit(Commit::Keep, false, window, cx).detach();
                 }
                 InputEvent::Change => {
-                    if this.error.take().is_some() {
+                    // The error was about the text the creator is now changing.
+                    let had_error = this.error.take().is_some();
+                    if had_error {
                         cx.notify();
                     }
                 }
