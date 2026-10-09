@@ -647,7 +647,7 @@ impl Render for PropertiesPanel {
                             .ghost()
                             .xsmall()
                             .icon(IconName::Plus)
-                            .label("Add property")
+                            .label("Add property…")
                             .on_click(cx.listener(|this, _, window, cx| this.open_add_property(window, cx))),
                     )
                     .child(
