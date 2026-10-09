@@ -5,40 +5,23 @@
 //! threads (sign-in, uploads) or the background executor (short API calls).
 
 mod chapters;
+mod icons;
+mod panel;
 mod rules;
 mod service;
 mod transfer;
+mod ui;
 mod upload;
 
 use gpui_kit::*;
-use videocrm_core::VideoId;
 
 pub use chapters::{CHAPTERS_HEADING, Chapter, chapters, chapters_text, insert_chapters};
+pub use icons::{PublishIcons, WithPublishIcons};
+pub use panel::PublishPanel;
 pub use rules::{BlockingReason, CATEGORIES, Category, blocking_reasons, tags_length};
 pub use service::{Connection, YoutubeEvent, YoutubeService, backend_config};
 pub use transfer::Transfer;
 pub use upload::{INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, UploadError};
-
-/// The Publish tab of a video page.
-pub struct PublishPanel {
-    video_id: VideoId,
-}
-
-impl PublishPanel {
-    pub fn new(video_id: VideoId, _window: &mut Window, _cx: &mut Context<Self>) -> Self {
-        Self { video_id }
-    }
-
-    pub fn video_id(&self) -> VideoId {
-        self.video_id
-    }
-}
-
-impl Render for PublishPanel {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().child("Publish")
-    }
-}
 
 /// The Uploads page: every upload job, with resume for interrupted ones.
 pub struct UploadsPage;
