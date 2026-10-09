@@ -929,3 +929,24 @@ fn history_skips_deleted_videos(cx: &mut TestAppContext) {
     assert_eq!(app.route(cx), Route::default());
     assert!(!cx.read(|cx| app.state.read(cx).can_go_back()));
 }
+
+#[gpui_kit::test]
+fn a_command_named_in_full_beats_a_loosely_matching_video(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["My 2026 Desk Setup: Everything That Survived"]);
+    for query in ["settings", "set", "Sett"] {
+        app.navigate(cx, Route::default());
+        app.press(cx, "ctrl-k");
+        app.type_text(cx, query);
+        app.press(cx, "enter");
+        assert!(!app.has_dialog(cx));
+        assert_eq!(app.route(cx), Route::Settings { section: SettingsSection::General }, "query {query:?}");
+    }
+
+    // The video still wins on its own words.
+    app.navigate(cx, Route::default());
+    app.press(cx, "ctrl-k");
+    app.type_text(cx, "desk setup");
+    app.press(cx, "enter");
+    let desk = app.video_id(cx, "My 2026 Desk Setup: Everything That Survived");
+    assert_eq!(app.route(cx), Route::Video { id: desk, tab: VideoTab::Script });
+}
