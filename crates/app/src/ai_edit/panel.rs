@@ -10,8 +10,8 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, TestSupportExt as _, Window, div,
+    App, AppContext as _, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, SharedString, Styled as _, Subscription, TestSupportExt as _, Window, div,
 };
 use videocrm_core::settings::EditPreferences;
 use videocrm_core::{Block, DocumentKind, PipelineRun, RunId, RunStatus, Video, VideoId};
@@ -26,6 +26,7 @@ use crate::database::Chip;
 use crate::database::colors::run_status_color;
 use crate::state::{AppEvent, AppState};
 use crate::ui::format_when;
+use crate::ui::{Card, SectionHeader};
 
 /// The "Footage & AI edit" tab of a video page: the raw takes, the edit brief, and
 /// the video's AI edits with the selected one in detail.
@@ -272,7 +273,7 @@ impl AiEditPanel {
         }
     }
 
-    fn render_section_header(&self, cx: &mut Context<Self>) -> Div {
+    fn render_section_header(&self, cx: &mut Context<Self>) -> SectionHeader {
         let runs = self.runs(cx);
         let selected = self.run_view.read(cx).run_id();
         let now = Local::now();
@@ -324,15 +325,12 @@ impl AiEditPanel {
                 }))
                 .into_any_element()
         });
-        section_header(
-            "AI edit",
-            "video-use cuts the takes: it proposes a strategy, you approve, it renders.",
-            history.map(IntoElement::into_any_element).into_iter().chain(new_edit),
-            cx,
-        )
+        SectionHeader::new("AI edit")
+            .description("video-use cuts the takes: it proposes a strategy, you approve, it renders.")
+            .actions(history.map(IntoElement::into_any_element).into_iter().chain(new_edit))
     }
 
-    fn render_composer(&self, cx: &mut Context<Self>) -> Div {
+    fn render_composer(&self, cx: &mut Context<Self>) -> Card {
         let blocker = self.start_blocker(cx);
         let doctor_missing = self.service.read(cx).doctor().is_some_and(|doctor| !doctor.ready());
         let has_runs = !self.runs(cx).is_empty();
@@ -365,32 +363,17 @@ impl AiEditPanel {
                 })
         };
 
-        v_flex()
+        Card::new()
             .gap_4()
-            .p_4()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
-            .child(
-                h_flex()
-                    .gap_3()
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Edit brief"))
-                            .child(div().text_xs().text_color(theme.muted_foreground).child(
-                                "What the agent should make of the footage. Drafted from the video and its script.",
-                            )),
-                    )
-                    .child(
-                        Button::new("brief-reset")
-                            .ghost()
-                            .small()
-                            .icon(IconName::RotateCcw)
-                            .label("Reset to default")
-                            .on_click(cx.listener(|this, _, window, cx| this.reset_brief(window, cx))),
-                    ),
+            .title("Edit brief")
+            .description("What the agent should make of the footage. Drafted from the video and its script.")
+            .action(
+                Button::new("brief-reset")
+                    .ghost()
+                    .small()
+                    .icon(IconName::RotateCcw)
+                    .label("Reset to default")
+                    .on_click(cx.listener(|this, _, window, cx| this.reset_brief(window, cx))),
             )
             .when(self.brief_stale, |this| {
                 this.child(
@@ -462,17 +445,18 @@ impl AiEditPanel {
                         this.child(div().text_sm().text_color(theme.muted_foreground).child(reason))
                     })
                     .when(has_runs, |this| {
-                        this.child(Button::new("ai-edit-cancel-new").ghost().label("Cancel").on_click(cx.listener(
-                            |this, _, _, cx| {
+                        this.child(Button::new("ai-edit-cancel-new").ghost().small().label("Cancel").on_click(
+                            cx.listener(|this, _, _, cx| {
                                 this.composing = false;
                                 this.start_error = None;
                                 cx.notify();
-                            },
-                        )))
+                            }),
+                        ))
                     })
                     .child(
                         Button::new("ai-edit-start")
                             .primary()
+                            .small()
                             .icon(IconName::WandSparkles)
                             .label("Start AI edit")
                             .disabled(blocker.is_some())
@@ -483,24 +467,6 @@ impl AiEditPanel {
                 this.child(div().text_sm().text_color(theme.danger).child(error))
             })
     }
-}
-
-/// A section title with its trailing actions, and a description below.
-pub(super) fn section_header(
-    title: &'static str,
-    description: impl Into<SharedString>,
-    actions: impl IntoIterator<Item = AnyElement>,
-    cx: &App,
-) -> Div {
-    v_flex()
-        .gap_0p5()
-        .child(
-            h_flex()
-                .gap_2()
-                .child(div().flex_1().min_w_0().text_base().font_weight(FontWeight::SEMIBOLD).child(title))
-                .children(actions),
-        )
-        .child(div().text_sm().text_color(cx.theme().muted_foreground).child(description.into()))
 }
 
 /// One run in the history menu.

@@ -50,6 +50,35 @@ fn settle(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_narrow_publish_tab_puts_the_cards_under_the_form(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |_| {});
+    let options = WindowOptions {
+        // The page column at the app's minimum window size.
+        window_bounds: Some(WindowBounds::Windowed(Bounds::new(Default::default(), size(px(560.), px(2400.))))),
+        ..WindowOptions::default()
+    };
+    let (handle, _panel) = cx
+        .update(|cx| {
+            gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)))
+        })
+        .unwrap();
+    // The first frame measures the panel, the next one lays it out for that width.
+    for _ in 0..2 {
+        window(cx, handle, |window, cx| window.render_frame(cx));
+        cx.run_until_parked();
+    }
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        let panel = window.find("publish-panel").bounds();
+        let title = window.find("publish-title").bounds();
+        let upload = window.find("publish-upload").bounds();
+        assert!(upload.top() > title.bottom(), "the cards follow the form: {upload:?} vs {title:?}");
+        assert!(upload.right() <= panel.right(), "nothing reaches past the column: {upload:?} vs {panel:?}");
+    });
+}
+
+#[gpui_kit::test]
 fn the_publish_form_saves_metadata_and_explains_what_blocks_the_upload(cx: &mut TestAppContext) {
     let workspace = Workspace::open(cx, YoutubeBackend::default());
     let video_id = workspace.create_video(cx, "Desk setup 2026", |_| {});

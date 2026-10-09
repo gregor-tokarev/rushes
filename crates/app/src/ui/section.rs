@@ -1,9 +1,9 @@
 //! Sections of a page or tab, and the one card surface.
 
-use gpui_kit::component::{ActiveTheme as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Div, ElementId, InteractiveElement as _, IntoElement, ParentElement, RenderOnce, SharedString,
+    AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement, RenderOnce, SharedString,
     StyleRefinement, Styled, TestSupportExt as _, Window, div,
 };
 
@@ -56,11 +56,14 @@ impl RenderOnce for SectionHeader {
 
 /// The one outlined surface of the app's pages: a hairline border on the
 /// large radius, inset by `p_4`. Its title, when it has one, sits inside it,
-/// with an optional description and actions on the title's trailing side.
+/// with an optional leading icon, a description and actions on the title's
+/// trailing side. Style refinements (gap, border colour) apply over these
+/// defaults.
 #[derive(IntoElement)]
 pub struct Card {
-    base: Div,
+    style: StyleRefinement,
     id: Option<ElementId>,
+    icon: Option<Icon>,
     title: Option<SharedString>,
     description: Option<SharedString>,
     actions: Vec<AnyElement>,
@@ -69,12 +72,26 @@ pub struct Card {
 
 impl Card {
     pub fn new() -> Self {
-        Self { base: div(), id: None, title: None, description: None, actions: Vec::new(), children: Vec::new() }
+        Self {
+            style: StyleRefinement::default(),
+            id: None,
+            icon: None,
+            title: None,
+            description: None,
+            actions: Vec::new(),
+            children: Vec::new(),
+        }
     }
 
     /// Makes the card observable by this id in tests and keyed for state.
     pub fn id(mut self, id: impl Into<ElementId>) -> Self {
         self.id = Some(id.into());
+        self
+    }
+
+    /// An icon before the title, for a card that reports a state.
+    pub fn icon(mut self, icon: impl Into<Icon>) -> Self {
+        self.icon = Some(icon.into());
         self
     }
 
@@ -102,7 +119,7 @@ impl Default for Card {
 
 impl Styled for Card {
     fn style(&mut self) -> &mut StyleRefinement {
-        self.base.style()
+        &mut self.style
     }
 }
 
@@ -120,6 +137,7 @@ impl RenderOnce for Card {
             h_flex()
                 .gap_3()
                 .items_start()
+                .children(self.icon.map(|icon| div().pt_0p5().child(icon.small())))
                 .child(
                     v_flex()
                         .flex_1()
@@ -132,15 +150,13 @@ impl RenderOnce for Card {
                 )
                 .children(self.actions)
         });
-        let card = self
-            .base
-            .flex()
-            .flex_col()
+        let card = v_flex()
             .gap_3()
             .p_4()
             .rounded(theme.radius_lg)
             .border_1()
             .border_color(theme.border)
+            .refine_style(&self.style)
             .children(heading)
             .children(self.children);
         match self.id {

@@ -32,6 +32,7 @@ use super::service::{LivePhase, PipelineService, split_failure};
 use super::timeline::{LogEvent, MarkerKind, PhaseKind, TimelineItem, fold_timeline};
 use crate::route::VideoTab;
 use crate::state::AppState;
+use crate::ui::Card;
 
 /// Height of the activity box once the log outgrows it, in rems.
 const TIMELINE_HEIGHT: f32 = 30.;
@@ -381,13 +382,16 @@ impl RunView {
             )
     }
 
-    fn render_strategy(&self, run: &PipelineRun, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn render_strategy(&self, run: &PipelineRun, window: &mut Window, cx: &mut Context<Self>) -> Card {
         let strategy = run.summary.clone().unwrap_or_else(|| "The agent did not describe a strategy.".to_owned());
         let id = run.id;
         let feedback = self.render_feedback(FeedbackPurpose::Strategy, window, cx);
         let theme = cx.theme();
-        card(cx)
-            .child(card_title(IconName::FileText, "Proposed strategy", "Approve it to render, or ask for changes.", cx))
+        Card::new()
+            .gap_4()
+            .icon(Icon::new(IconName::FileText).text_color(theme.muted_foreground))
+            .title("Proposed strategy")
+            .description("Approve it to render, or ask for changes.")
             .child(markdown(element_id("strategy", id), strategy).into_any_element())
             .child(
                 v_flex()
@@ -428,7 +432,7 @@ impl RunView {
             })
     }
 
-    fn render_output(&self, run: &PipelineRun, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn render_output(&self, run: &PipelineRun, window: &mut Window, cx: &mut Context<Self>) -> Card {
         let output = run.output.clone().unwrap_or_default();
         let is_upload_file =
             self.state.read(cx).video(run.video_id).is_some_and(|video| video.publish.file.as_ref() == Some(&output));
@@ -451,7 +455,8 @@ impl RunView {
         let name =
             output.file_name().map_or_else(|| output.display().to_string(), |name| name.to_string_lossy().into_owned());
 
-        card(cx)
+        Card::new()
+            .gap_4()
             .child(
                 h_flex()
                     .gap_3()
@@ -508,7 +513,7 @@ impl RunView {
                                 .ghost()
                                 .small()
                                 .icon(IconName::FolderOpen)
-                                .label("Show in folder")
+                                .label("Open folder")
                                 .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
                         )
                         .child(div().flex_1())
@@ -534,7 +539,7 @@ impl RunView {
             })
     }
 
-    fn render_failure(&self, run: &PipelineRun, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn render_failure(&self, run: &PipelineRun, window: &mut Window, cx: &mut Context<Self>) -> Card {
         let cancelled = run.status == RunStatus::Cancelled;
         // A discarded strategy is kept; bringing it back costs nothing.
         let restorable = cancelled && self.service.read(cx).can_restore(run.id);
@@ -554,14 +559,11 @@ impl RunView {
             (IconName::CircleX, "Edit failed", theme.danger)
         };
 
-        card(cx)
+        Card::new()
+            .gap_4()
             .when(!cancelled, |this| this.border_color(theme.danger.opacity(0.4)))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(Icon::new(icon).small().text_color(color))
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title)),
-            )
+            .icon(Icon::new(icon).text_color(color))
+            .title(title)
             .when(!message.is_empty(), |this| this.child(div().text_sm().child(message)))
             .when_some(stderr, |this, stderr| this.child(code_block(stderr, cx)))
             .children(feedback)
@@ -871,11 +873,13 @@ impl Render for RunView {
         };
         let live = self.live(cx);
         let stepper = self.render_stepper(&run, cx).into_any_element();
-        let state_card = match (live, run.status) {
-            (Some(live), _) => Some(self.render_live(live, cx)),
-            (None, RunStatus::AwaitingApproval) => Some(self.render_strategy(&run, window, cx)),
-            (None, RunStatus::Succeeded) => Some(self.render_output(&run, window, cx)),
-            (None, RunStatus::Failed | RunStatus::Cancelled) => Some(self.render_failure(&run, window, cx)),
+        let state_card: Option<AnyElement> = match (live, run.status) {
+            (Some(live), _) => Some(self.render_live(live, cx).into_any_element()),
+            (None, RunStatus::AwaitingApproval) => Some(self.render_strategy(&run, window, cx).into_any_element()),
+            (None, RunStatus::Succeeded) => Some(self.render_output(&run, window, cx).into_any_element()),
+            (None, RunStatus::Failed | RunStatus::Cancelled) => {
+                Some(self.render_failure(&run, window, cx).into_any_element())
+            }
             (None, _) => None,
         };
         let timeline = self.render_timeline(live.is_some(), window, cx);
@@ -912,21 +916,6 @@ fn log_edges(rows: &ListState, padding: Pixels) -> (bool, bool) {
     let end = log_content_height(rows, padding)
         .map_or(px(0.), |content| (content - rows.viewport_bounds().size.height).max(px(0.)));
     (scrolled <= px(0.), scrolled >= end - px(1.))
-}
-
-/// A bordered section of the run view.
-fn card(cx: &App) -> Div {
-    let theme = cx.theme();
-    v_flex().gap_4().p_4().rounded(theme.radius_lg).border_1().border_color(theme.border)
-}
-
-fn card_title(icon: IconName, title: &'static str, description: &'static str, cx: &App) -> Div {
-    let theme = cx.theme();
-    h_flex().gap_3().child(Icon::new(icon).text_color(theme.muted_foreground)).child(
-        v_flex()
-            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(div().text_xs().text_color(theme.muted_foreground).child(description)),
-    )
 }
 
 /// A timeline row that marks a turn of the run: a label between two rules.

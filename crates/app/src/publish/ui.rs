@@ -7,7 +7,6 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::group_box::{GroupBox, GroupBoxVariants as _};
 use gpui_kit::component::link::Link;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::spinner::Spinner;
@@ -26,10 +25,11 @@ use crate::database::Chip;
 use crate::database::colors::upload_status_color;
 use crate::route::SettingsSection;
 use crate::state::AppState;
+use crate::ui::{Card, SectionHeader};
 
 /// Heading of a group of fields.
-pub(super) fn section_heading(title: &'static str, cx: &App) -> Div {
-    div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(cx.theme().foreground).child(title)
+pub(super) fn section_heading(title: &'static str) -> SectionHeader {
+    SectionHeader::new(title)
 }
 
 /// A labelled control: label (with an optional `used/limit` counter), the control,
@@ -110,9 +110,9 @@ pub(super) fn status_line(
     )
 }
 
-/// A titled, outlined card of the side column.
-pub(super) fn card(id: impl Into<ElementId>, title: &'static str) -> GroupBox {
-    GroupBox::new().id(id).outline().title(div().text_sm().child(title))
+/// A titled card of the side column.
+pub(super) fn card(id: impl Into<ElementId>, title: &'static str) -> Card {
+    Card::new().id(id).title(title)
 }
 
 /// "Open on YouTube ↗": the video's page on YouTube, a link everywhere it is

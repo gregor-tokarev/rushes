@@ -27,9 +27,8 @@ use videocrm_pipeline::{MediaInfo, probe_media};
 
 use super::format;
 use super::icons::media_icon;
-use super::panel::section_header;
 use crate::state::AppState;
-use crate::ui::EmptyState;
+use crate::ui::{EmptyState, SectionHeader};
 
 /// How often the folder is listed again, to pick up takes added outside the app.
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -355,7 +354,7 @@ impl FootageCard {
         }
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> Div {
+    fn render_header(&self, cx: &mut Context<Self>) -> SectionHeader {
         let durations: Vec<f64> =
             self.takes.iter().filter_map(|take| take.info.as_ref()).map(|info| info.duration_secs).collect();
         let summary = match self.takes.len() {
@@ -369,24 +368,25 @@ impl FootageCard {
                 }
             }
         };
-        let actions = [
-            Button::new("footage-open-folder")
-                .ghost()
-                .small()
-                .icon(IconName::FolderOpen)
-                .label("Open folder")
-                .on_click(cx.listener(|this, _, _, cx| this.open_folder(cx)))
-                .into_any_element(),
-            Button::new("footage-add")
-                .outline()
-                .small()
-                .icon(IconName::Plus)
-                .label("Add footage…")
-                .disabled(self.import.is_some())
-                .on_click(cx.listener(|this, _, _, cx| this.add_footage(cx)))
-                .into_any_element(),
-        ];
-        section_header("Footage", summary, actions, cx)
+        SectionHeader::new("Footage")
+            .description(summary)
+            .action(
+                Button::new("footage-open-folder")
+                    .ghost()
+                    .small()
+                    .icon(IconName::FolderOpen)
+                    .label("Open folder")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_folder(cx))),
+            )
+            .action(
+                Button::new("footage-add")
+                    .outline()
+                    .small()
+                    .icon(IconName::Plus)
+                    .label("Add footage…")
+                    .disabled(self.import.is_some())
+                    .on_click(cx.listener(|this, _, _, cx| this.add_footage(cx))),
+            )
     }
 
     fn render_list(&self, cx: &App) -> Div {

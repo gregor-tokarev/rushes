@@ -513,7 +513,7 @@ impl PropertiesPanel {
             .child(
                 Button::new("open-media-folder")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .icon(IconName::FolderOpen)
                     .label("Open folder")
                     .on_click(cx.listener(|this, _, _, cx| this.open_media_folder(cx))),
