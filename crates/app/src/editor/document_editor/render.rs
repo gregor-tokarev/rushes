@@ -581,10 +581,11 @@ impl DocumentEditor {
             MouseButton::Left,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 let rendered = layout.index_for_position(event.position).unwrap_or_else(|closest| closest);
+                cx.stop_propagation();
+                // Links open on click and leave the block in reading mode.
                 if link_ranges.iter().any(|range| range.contains(&rendered)) {
                     return;
                 }
-                cx.stop_propagation();
                 let offset = rich.source_offset(rendered);
                 this.click_text(id, offset, window, cx);
             }),

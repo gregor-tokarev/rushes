@@ -8,7 +8,7 @@ use std::sync::Arc;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, ClipboardItem, ElementId, Entity, TestAppContext, Window,
-    WindowBounds, WindowOptions, px, size,
+    WindowBounds, WindowOptions, point, px, size,
 };
 use videocrm::editor::{DocumentEditor, DocumentEditorEvent};
 use videocrm_core::{Block, BlockId, BlockKind, Document, DocumentId, DocumentKind, VideoId};
@@ -510,4 +510,17 @@ fn the_block_menu_opens_from_the_keyboard(cx: &mut TestAppContext) {
     let texts: Vec<_> = f.blocks(cx).into_iter().map(|block| block.text).collect();
     assert_eq!(texts, ["second", "first"]);
     assert!(!f.is_visible(cx, "popup-menu".into()));
+}
+
+#[gpui_kit::test]
+fn clicking_a_link_opens_it_without_editing(cx: &mut TestAppContext) {
+    let link = paragraph("[docs](https://example.com/docs) for details");
+    let f = Fixture::new(cx, vec![link.clone()]);
+    f.step(cx, |window, cx| window.click_at(part(link.id, "text"), point(px(4.), px(8.)), cx));
+    assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/docs"));
+    assert_eq!(f.focused(cx), None);
+
+    // Elsewhere in the text, a click starts editing.
+    f.step(cx, |window, cx| window.click_at(part(link.id, "text"), point(px(200.), px(8.)), cx));
+    assert_eq!(f.focused(cx), Some(link.id));
 }
