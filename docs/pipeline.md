@@ -109,6 +109,10 @@ is true when all pass. Tools are looked up on the agent's `PATH` (`config.env` f
   logged or returned.
 - **Python**: the skill's `.venv`, else `uv`, else `python3` (dependencies unverified).
 
+An app started from a desktop launcher (Finder, a `.desktop` file) often gets a minimal
+`PATH` without `~/.local/bin` or `/opt/homebrew/bin`. Set `command` to the agent's full
+path and put a complete `PATH` in `AgentConfig::env`; the agent's shell inherits it.
+
 ## Configuration
 
 `AgentConfig` fields: `command` (default `claude`, a name on `PATH` or a path), `model`,
