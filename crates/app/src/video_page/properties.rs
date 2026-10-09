@@ -8,8 +8,6 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::calendar::{Calendar, CalendarEvent, CalendarState, Date};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
-use gpui_kit::component::form::{Field, Form};
 use gpui_kit::component::input::{Backspace, Input, InputEvent, InputState};
 use gpui_kit::component::link::Link;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -24,13 +22,13 @@ use gpui_kit::{
 };
 use videocrm_core::input::normalize_link;
 use videocrm_core::{
-    Column, PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, TagColor, Video, VideoFormat, VideoId,
+    Column, PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, Video, VideoFormat, VideoId,
     VideoStatus, ViewKind,
 };
 
 use crate::database::Chip;
 use crate::database::colors::{format_color, free_tag_color, tag_colors};
-use crate::database::{format, query};
+use crate::database::{PropertyEditor, PropertyEditorMode, format, kind_icon, multi_select_list, query, select_menu};
 use crate::state::{AppEvent, AppState};
 
 /// Retained editors of one video's properties. Values are written through
@@ -599,22 +597,11 @@ impl PropertiesPanel {
                         None => this.child(empty_value(cx)),
                     })
                     .dropdown_menu(move |menu, _, _| {
-                        let menu = options_menu(
-                            menu.check_side(Side::Right),
-                            &options,
-                            |option| current.as_deref() == Some(option.id.as_str()),
-                            {
-                                let panel = panel.clone();
-                                move |option: &SelectOption, cx: &mut App| {
-                                    let value = PropertyValue::Select(Some(option.id.clone()));
-                                    _ = panel.update(cx, |panel, cx| panel.set_value(id, Some(value), cx));
-                                }
-                            },
-                        );
                         let panel = panel.clone();
-                        menu.separator().item(PopupMenuItem::new("Clear").on_click(move |_, _, cx| {
-                            _ = panel.update(cx, |panel, cx| panel.set_value(id, None, cx));
-                        }))
+                        select_menu(menu, &options, current.as_deref(), move |value, cx| {
+                            let value = value.map(|option| PropertyValue::Select(Some(option)));
+                            _ = panel.update(cx, |panel, cx| panel.set_value(id, value, cx));
+                        })
                     })
                     .into_any_element()
             }
@@ -624,9 +611,7 @@ impl PropertiesPanel {
                     _ => Vec::new(),
                 };
                 let chips: Vec<&SelectOption> = options.iter().filter(|option| selected.contains(&option.id)).collect();
-                let panel = cx.weak_entity();
-                let options = options.clone();
-                Button::new(SharedString::from(format!("property-multi-{id}")))
+                let trigger = Button::new(SharedString::from(format!("property-multi-{id}")))
                     .ghost()
                     .small()
                     .accessibility_label(property.name.clone())
@@ -640,50 +625,71 @@ impl PropertiesPanel {
                                     .children(chips.iter().map(|option| Chip::new(option.name.clone(), option.color))),
                             )
                         }
-                    })
-                    .dropdown_menu(move |menu, _, _| {
-                        let selected = selected.clone();
-                        options_menu(menu.check_side(Side::Right), &options, |option| selected.contains(&option.id), {
-                            let panel = panel.clone();
-                            let selected = selected.clone();
-                            move |option: &SelectOption, cx: &mut App| {
-                                let mut ids = selected.clone();
-                                match ids.iter().position(|known| *known == option.id) {
-                                    Some(ix) => {
-                                        ids.remove(ix);
-                                    }
-                                    None => ids.push(option.id.clone()),
-                                }
-                                let value = (!ids.is_empty()).then_some(PropertyValue::MultiSelect(ids));
-                                _ = panel.update(cx, |panel, cx| panel.set_value(id, value, cx));
-                            }
-                        })
+                    });
+                let panel = cx.weak_entity();
+                let options = options.clone();
+                // Like the table's cell: the list stays open while options are ticked.
+                Popover::new(SharedString::from(format!("property-multi-popover-{id}")))
+                    .trigger(trigger)
+                    .content(move |_, _, cx| {
+                        let (panel, selected) = (panel.clone(), selected.clone());
+                        multi_select_list(
+                            &options,
+                            &selected,
+                            move |option, cx| {
+                                _ = panel.update(cx, |panel, cx| panel.toggle_option(id, option, cx));
+                            },
+                            cx,
+                        )
                     })
                     .into_any_element()
             }
         }
     }
 
+    /// Ticks or unticks `option` of a multi-select property.
+    fn toggle_option(&mut self, id: PropertyId, option: &str, cx: &mut Context<Self>) {
+        let Some(video) = self.video(cx) else { return };
+        let mut ids = match video.properties.get(&id) {
+            Some(PropertyValue::MultiSelect(ids)) => ids.clone(),
+            _ => Vec::new(),
+        };
+        match ids.iter().position(|known| known == option) {
+            Some(ix) => {
+                ids.remove(ix);
+            }
+            None => ids.push(option.to_owned()),
+        }
+        let value = (!ids.is_empty()).then_some(PropertyValue::MultiSelect(ids));
+        self.set_value(id, value, cx);
+    }
+
+    /// The database's New property dialog; the property also shows as a column
+    /// in the database's tables, as one added there does.
     fn open_add_property(&self, window: &mut Window, cx: &mut Context<Self>) {
         let position = self.state.read(cx).properties().iter().map(|property| property.position + 1).max().unwrap_or(0);
-        let form = cx.new(|cx| AddPropertyForm::new(position, window, cx));
-        let name = form.read(cx).name.clone();
-        let width = window.rem_size() * 26.;
-        window.open_dialog(cx, move |dialog, _, _| {
-            let form = form.clone();
-            dialog
-                .title("New property")
-                .width(width)
-                .child(form.clone())
-                .footer(
-                    DialogFooter::new()
-                        .child(DialogClose::new().child(Button::new("add-property-cancel").outline().label("Cancel")))
-                        .child(DialogAction::new().child(Button::new("add-property-create").primary().label("Create"))),
-                )
-                .on_ok(move |_, _, cx| form.update(cx, |form, cx| form.submit(cx)))
-        });
-        name.update(cx, |input, cx| input.focus(window, cx));
+        let editor = cx.new(|cx| PropertyEditor::new(None, PropertyEditorMode::Create, position, window, cx));
+        PropertyEditor::open(editor, |property, cx| add_property_to_tables(property, cx), window, cx);
     }
+}
+
+/// Adds `property` and shows it in every table view.
+fn add_property_to_tables(property: PropertyDef, cx: &mut App) {
+    AppState::global(cx).update(cx, |state, cx| {
+        state.insert_property(property.clone(), cx);
+        let properties = state.properties().to_vec();
+        let tables: Vec<_> = state.views().iter().filter(|view| view.kind == ViewKind::Table).cloned().collect();
+        for mut view in tables {
+            let mut columns = query::resolve_columns(&view, &properties);
+            for layout in &mut columns {
+                if layout.column == Column::Custom(property.id) {
+                    layout.visible = true;
+                }
+            }
+            view.columns = columns;
+            state.save_view(view, cx);
+        }
+    });
 }
 
 /// Status, format, publish date, tags, media folder and YouTube.
@@ -724,27 +730,6 @@ fn open_link(url: &str, window: &mut Window, cx: &mut App) {
 
 fn empty_value(cx: &App) -> impl IntoElement {
     div().text_sm().text_color(cx.theme().muted_foreground).child("Empty")
-}
-
-fn options_menu(
-    menu: gpui_kit::component::menu::PopupMenu,
-    options: &[SelectOption],
-    is_checked: impl Fn(&SelectOption) -> bool,
-    on_pick: impl Fn(&SelectOption, &mut App) + Clone + 'static,
-) -> gpui_kit::component::menu::PopupMenu {
-    if options.is_empty() {
-        return menu.label("No options yet. Add them from the column menu in the database.");
-    }
-    options.iter().fold(menu, |menu, option| {
-        let chip = (option.name.clone(), option.color);
-        let picked = option.clone();
-        let on_pick = on_pick.clone();
-        menu.item(
-            PopupMenuItem::element(move |_, _| Chip::new(chip.0.clone(), chip.1))
-                .checked(is_checked(option))
-                .on_click(move |_, _, cx| on_pick(&picked, cx)),
-        )
-    })
 }
 
 impl Render for PropertiesPanel {
@@ -815,165 +800,5 @@ impl Render for PropertiesPanel {
                     ),
             )
             .into_any_element()
-    }
-}
-
-/// Icon for a custom property, matching the database's column headers.
-fn kind_icon(kind: &PropertyKind) -> IconName {
-    match kind {
-        PropertyKind::Text => IconName::TextAlignStart,
-        PropertyKind::Number => IconName::Hash,
-        PropertyKind::Select { .. } => IconName::CircleChevronDown,
-        PropertyKind::MultiSelect { .. } => IconName::List,
-        PropertyKind::Date => IconName::Calendar,
-        PropertyKind::Checkbox => IconName::SquareCheck,
-        PropertyKind::Url => IconName::Link,
-    }
-}
-
-/// Property types offered for a new property, in menu order.
-const KINDS: [(&str, IconName); 7] = [
-    ("Text", IconName::TextAlignStart),
-    ("Number", IconName::Hash),
-    ("Select", IconName::CircleChevronDown),
-    ("Multi-select", IconName::List),
-    ("Date", IconName::Calendar),
-    ("Checkbox", IconName::SquareCheck),
-    ("URL", IconName::Link),
-];
-
-/// The New property dialog's form: name, type and, for select types, options.
-struct AddPropertyForm {
-    name: Entity<InputState>,
-    options: Entity<InputState>,
-    kind: usize,
-    position: i32,
-    error: Option<SharedString>,
-}
-
-impl AddPropertyForm {
-    fn new(position: i32, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self {
-            name: cx.new(|cx| InputState::new(window, cx).placeholder("Property name")),
-            options: cx.new(|cx| InputState::new(window, cx).placeholder("Sponsor, Collab, Evergreen")),
-            kind: 0,
-            position,
-            error: None,
-        }
-    }
-
-    fn kind(&self, cx: &App) -> PropertyKind {
-        let options = || -> Vec<SelectOption> {
-            self.options
-                .read(cx)
-                .value()
-                .split(',')
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .enumerate()
-                .map(|(ix, name)| SelectOption {
-                    id: PropertyId::new().to_string(),
-                    name: name.to_string(),
-                    // Gray is left for the default; neighbours differ.
-                    color: TagColor::ALL[1 + ix % (TagColor::ALL.len() - 1)],
-                })
-                .collect()
-        };
-        match self.kind {
-            1 => PropertyKind::Number,
-            2 => PropertyKind::Select { options: options() },
-            3 => PropertyKind::MultiSelect { options: options() },
-            4 => PropertyKind::Date,
-            5 => PropertyKind::Checkbox,
-            6 => PropertyKind::Url,
-            _ => PropertyKind::Text,
-        }
-    }
-
-    fn has_options(&self) -> bool {
-        matches!(self.kind, 2 | 3)
-    }
-
-    /// Adds the property. Returns whether the dialog may close.
-    fn submit(&mut self, cx: &mut Context<Self>) -> bool {
-        let name = self.name.read(cx).value().trim().to_string();
-        if name.is_empty() {
-            self.error = Some("Give the property a name.".into());
-            cx.notify();
-            return false;
-        }
-        let property = PropertyDef { id: PropertyId::new(), name, kind: self.kind(cx), position: self.position };
-        AppState::global(cx).update(cx, |state, cx| {
-            state.insert_property(property.clone(), cx);
-            // Added from a video, the property also shows as a column in the
-            // database's tables, as one added there does.
-            let properties = state.properties().to_vec();
-            let tables: Vec<_> = state.views().iter().filter(|view| view.kind == ViewKind::Table).cloned().collect();
-            for mut view in tables {
-                let mut columns = query::resolve_columns(&view, &properties);
-                for layout in &mut columns {
-                    if layout.column == Column::Custom(property.id) {
-                        layout.visible = true;
-                    }
-                }
-                view.columns = columns;
-                state.save_view(view, cx);
-            }
-        });
-        true
-    }
-}
-
-impl Render for AddPropertyForm {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let form = cx.weak_entity();
-        let current = self.kind;
-        let (label, icon) = KINDS[current];
-        v_flex()
-            .gap_3()
-            .child(
-                Form::new()
-                    .child(Field::new().label("Name").child(Input::new(&self.name).id("add-property-name")))
-                    .child(
-                        Field::new().label("Type").child(
-                            Button::new("add-property-kind")
-                                .outline()
-                                .w_full()
-                                .accessibility_label(label)
-                                .child(h_flex().gap_2().child(Icon::new(icon).small()).child(label))
-                                .dropdown_caret(true)
-                                .dropdown_menu(move |menu, _, _| {
-                                    KINDS.iter().enumerate().fold(
-                                        menu.check_side(Side::Right),
-                                        |menu, (ix, (label, icon))| {
-                                            let form = form.clone();
-                                            menu.item(
-                                                PopupMenuItem::new(*label)
-                                                    .icon(Icon::new(*icon))
-                                                    .checked(ix == current)
-                                                    .on_click(move |_, _, cx| {
-                                                        _ = form.update(cx, |form, cx| {
-                                                            form.kind = ix;
-                                                            cx.notify();
-                                                        });
-                                                    }),
-                                            )
-                                        },
-                                    )
-                                }),
-                        ),
-                    )
-                    .when(self.has_options(), |this| {
-                        this.child(
-                            Field::new()
-                                .label("Options")
-                                .description("Separate options with commas.")
-                                .child(Input::new(&self.options).id("add-property-options")),
-                        )
-                    }),
-            )
-            .when_some(self.error.clone(), |this, error| {
-                this.child(div().text_sm().text_color(cx.theme().danger).child(error))
-            })
     }
 }

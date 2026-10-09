@@ -10,14 +10,14 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Subscription, WeakEntity, Window, div,
+    Render, SharedString, Styled as _, Subscription, Window, div,
 };
 use videocrm_core::{PropertyDef, PropertyId, PropertyKind, SelectOption, TagColor};
 
 use super::colors::tag_colors;
 use super::elements::Chip;
 use super::icons::kind_icon;
-use super::panel::{DatabasePanel, TEXT_ENTRY_CONTEXT};
+use super::panel::TEXT_ENTRY_CONTEXT;
 use crate::ui::dialog::form_footer;
 
 /// What the property dialog edits.
@@ -97,8 +97,15 @@ impl PropertyEditor {
         Self { mode, existing, position, name, kind, options, new_option, error: None, _subscriptions: subscriptions }
     }
 
-    /// Opens `editor` in a dialog; committing hands the property to `panel`.
-    pub fn open(editor: Entity<Self>, panel: WeakEntity<DatabasePanel>, window: &mut Window, cx: &mut App) {
+    /// Opens `editor` in a dialog; committing hands the property to `save`.
+    /// The database and the video page both add and edit properties here.
+    pub fn open(
+        editor: Entity<Self>,
+        save: impl Fn(PropertyDef, &mut App) + 'static,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let save = std::rc::Rc::new(save);
         let mode = editor.read(cx).mode;
         let (title, commit) = match mode {
             PropertyEditorMode::Create => ("New property", "Create"),
@@ -108,7 +115,7 @@ impl PropertyEditor {
         let name = editor.read(cx).name.clone();
         window.open_dialog(cx, move |dialog, window, _| {
             let editor = editor.clone();
-            let panel = panel.clone();
+            let save = save.clone();
             dialog
                 .title(title)
                 .width(window.rem_size() * 28.)
@@ -116,7 +123,7 @@ impl PropertyEditor {
                 .footer(form_footer("property-cancel", "property-commit", commit))
                 .on_ok(move |_, _, cx| match editor.read(cx).build(cx) {
                     Ok(def) => {
-                        _ = panel.update(cx, |panel, cx| panel.save_property(def, cx));
+                        save(def, cx);
                         true
                     }
                     Err(error) => {

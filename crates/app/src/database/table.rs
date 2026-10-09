@@ -30,7 +30,10 @@ use videocrm_core::{
 };
 
 use super::colors::{format_color, free_tag_color, run_status_color, youtube_color};
-use super::elements::{CellButton, Chip, attempt_hint, cell_slot, chip_line, empty_value, muted_icon, static_cell};
+use super::elements::{
+    CellButton, Chip, attempt_hint, cell_slot, chip_line, empty_value, multi_select_list, muted_icon, select_menu,
+    static_cell,
+};
 use super::format;
 use super::icons::column_icon;
 use super::panel::{CELL_EDITOR_CONTEXT, CellRef, DatabasePanel, TEXT_ENTRY_CONTEXT};
@@ -472,28 +475,11 @@ impl VideoTable {
                         None => this.child(empty_value(cx)),
                     })
                     .dropdown_menu(move |menu, _, _| {
-                        let set = |value: Option<String>| {
-                            let panel = panel.clone();
-                            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                                let value = PropertyValue::Select(value.clone());
-                                _ = panel
-                                    .update(cx, |panel, cx| panel.set_property_value(id, property, Some(value), cx));
-                            }
-                        };
-                        let menu = options.iter().fold(menu, |menu, option| {
-                            let (name, color) = (option.name.clone(), option.color);
-                            menu.item(
-                                PopupMenuItem::element(move |_, _| Chip::new(name.clone(), color))
-                                    .checked(selected.as_ref() == Some(&option.id))
-                                    .on_click(set(Some(option.id.clone()))),
-                            )
-                        });
-                        menu.when(options.is_empty(), |menu| menu.label("No options yet")).when(
-                            selected.is_some(),
-                            |menu| {
-                                menu.separator().item(PopupMenuItem::new("Clear").icon(IconName::X).on_click(set(None)))
-                            },
-                        )
+                        let panel = panel.clone();
+                        select_menu(menu, &options, selected.as_deref(), move |value, cx| {
+                            let value = PropertyValue::Select(value);
+                            _ = panel.update(cx, |panel, cx| panel.set_property_value(id, property, Some(value), cx));
+                        })
                     })
                     .into_any_element()
             }
@@ -515,25 +501,15 @@ impl VideoTable {
                 Popover::new(element_id(&format!("multi-popover-{}", property), id))
                     .trigger(trigger)
                     .content(move |_, _, cx| {
-                        v_flex()
-                            .gap_1()
-                            .min_w_48()
-                            .children(options.iter().map(|option| {
-                                let panel = panel.clone();
-                                let option_id = option.id.clone();
-                                // The chip is the checkbox's label, so the
-                                // whole option row toggles it.
-                                Checkbox::new(SharedString::from(format!("option-{}", option.id)))
-                                    .accessibility_label(option.name.clone())
-                                    .checked(selected.contains(&option.id))
-                                    .on_click(move |_, _, cx| {
-                                        _ = panel.update(cx, |panel, cx| {
-                                            panel.toggle_multi_option(id, property, &option_id, cx)
-                                        });
-                                    })
-                                    .child(h_flex().child(Chip::new(option.name.clone(), option.color)))
-                            }))
-                            .when(options.is_empty(), |this| this.child(muted_text("No options yet", cx)))
+                        let panel = panel.clone();
+                        multi_select_list(
+                            &options,
+                            &selected,
+                            move |option, cx| {
+                                _ = panel.update(cx, |panel, cx| panel.toggle_multi_option(id, property, option, cx));
+                            },
+                            cx,
+                        )
                     })
                     .into_any_element()
             }

@@ -20,8 +20,8 @@ use videocrm::video_page::{PathPurpose, VideoPage};
 use videocrm_core::settings::AppSettings;
 use videocrm_core::templates::TemplateKind;
 use videocrm_core::{
-    BlockId, Column, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, Store, VideoId,
-    ViewKind,
+    BlockId, Column, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, Store,
+    TagColor, VideoId, ViewKind,
 };
 
 struct Fixture {
@@ -345,8 +345,9 @@ fn a_property_added_on_the_page_shows_in_the_tables(cx: &mut TestAppContext) {
 
     app.click(cx, "add-property");
     assert!(app.has_dialog(cx));
+    // The database's dialog: the same form adds a property from either place.
     app.type_text(cx, "Sponsor");
-    app.click(cx, "add-property-create");
+    app.click(cx, "property-commit");
     assert!(!app.has_dialog(cx));
 
     let (property, tables) = cx.read(|cx| {
@@ -360,6 +361,29 @@ fn a_property_added_on_the_page_shows_in_the_tables(cx: &mut TestAppContext) {
         let layout = view.columns.iter().find(|layout| layout.column == Column::Custom(property));
         assert!(layout.is_some_and(|layout| layout.visible), "shown in “{}”", view.name);
     }
+}
+
+#[gpui_kit::test]
+fn a_multi_select_on_the_page_stays_open_while_options_are_ticked(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    let option = |id: &str, name: &str| SelectOption { id: id.into(), name: name.into(), color: TagColor::Blue };
+    let platforms = add_property(
+        &app,
+        cx,
+        "Platforms",
+        PropertyKind::MultiSelect { options: vec![option("yt", "YouTube"), option("tt", "TikTok")] },
+    );
+    app.open_video(cx, id, VideoTab::Script);
+
+    // As in the table's cell: one opening, several options.
+    app.click(cx, ElementId::Name(format!("property-multi-{platforms}").into()));
+    app.click(cx, "option-yt");
+    app.click(cx, "option-tt");
+    assert_eq!(
+        stored_property(&app, cx, id, platforms),
+        Some(PropertyValue::MultiSelect(vec!["yt".into(), "tt".into()]))
+    );
 }
 
 #[gpui_kit::test]

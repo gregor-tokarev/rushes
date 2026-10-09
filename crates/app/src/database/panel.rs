@@ -718,7 +718,15 @@ impl DatabasePanel {
         }
         let position = self.properties.iter().map(|def| def.position + 1).max().unwrap_or(0);
         let editor = cx.new(|cx| PropertyEditor::new(existing, mode, position, window, cx));
-        PropertyEditor::open(editor, cx.weak_entity(), window, cx);
+        let panel = cx.weak_entity();
+        PropertyEditor::open(
+            editor,
+            move |def, cx| {
+                _ = panel.update(cx, |panel, cx| panel.save_property(def, cx));
+            },
+            window,
+            cx,
+        );
     }
 
     /// Adds a new property, shown in the active view, or replaces an existing one.

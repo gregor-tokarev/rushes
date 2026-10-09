@@ -1,17 +1,18 @@
 //! Small presentation elements shared by the table and the board.
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::menu::DropdownMenu;
+use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Icon, Selectable, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Selectable, Side, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Div, ElementId, InteractiveElement, Interactivity, IntoElement, ParentElement, RenderOnce, Role,
     SharedString, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, TestSupportExt as _, Window, div,
     rems,
 };
-use videocrm_core::TagColor;
+use videocrm_core::{SelectOption, TagColor};
 
 use super::colors::tag_colors;
 
@@ -190,4 +191,62 @@ pub fn empty_value(cx: &App) -> Div {
 /// A small icon in the muted foreground, for labels and metadata.
 pub fn muted_icon(icon: IconName, cx: &App) -> Icon {
     Icon::new(icon).xsmall().text_color(cx.theme().muted_foreground)
+}
+
+/// The menu of a select value, the same in table cells and on the video page:
+/// one item per option, the current one ticked, and Clear once a value is set.
+pub(crate) fn select_menu(
+    menu: PopupMenu,
+    options: &[SelectOption],
+    current: Option<&str>,
+    set: impl Fn(Option<String>, &mut App) + Clone + 'static,
+) -> PopupMenu {
+    if options.is_empty() {
+        return menu.label("No options yet. Add them with Edit options… in the column’s menu.");
+    }
+    let menu = options.iter().fold(menu.check_side(Side::Right), |menu, option| {
+        let (name, color, id) = (option.name.clone(), option.color, option.id.clone());
+        let set = set.clone();
+        menu.item(
+            PopupMenuItem::element(move |_, _| Chip::new(name.clone(), color))
+                .checked(current == Some(option.id.as_str()))
+                .on_click(move |_, _, cx| set(Some(id.clone()), cx)),
+        )
+    });
+    match current {
+        Some(_) => {
+            menu.separator().item(PopupMenuItem::new("Clear").icon(IconName::X).on_click(move |_, _, cx| set(None, cx)))
+        }
+        None => menu,
+    }
+}
+
+/// The checklist of a multi-select value, the same in table cells and on the
+/// video page: a popover that stays open while options are ticked.
+pub(crate) fn multi_select_list(
+    options: &[SelectOption],
+    selected: &[String],
+    toggle: impl Fn(&str, &mut App) + Clone + 'static,
+    cx: &App,
+) -> Div {
+    v_flex()
+        .gap_1()
+        .min_w_48()
+        .children(options.iter().map(|option| {
+            let (toggle, option_id) = (toggle.clone(), option.id.clone());
+            // The chip is the checkbox's label, so the whole option row toggles it.
+            Checkbox::new(SharedString::from(format!("option-{}", option.id)))
+                .accessibility_label(option.name.clone())
+                .checked(selected.contains(&option.id))
+                .on_click(move |_, _, cx| toggle(&option_id, cx))
+                .child(h_flex().child(Chip::new(option.name.clone(), option.color)))
+        }))
+        .when(options.is_empty(), |this| {
+            this.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("No options yet. Add them with Edit options… in the column’s menu."),
+            )
+        })
 }
