@@ -26,6 +26,7 @@ use videocrm_pipeline::{MediaInfo, probe_media};
 
 use super::format;
 use super::icons::media_icon;
+use super::panel::section_header;
 use crate::state::AppState;
 
 /// How often the folder is listed again, to pick up takes added outside the app.
@@ -66,7 +67,10 @@ pub(crate) struct FootageCard {
     /// ffprobe results by path, valid while the file's modification time matches.
     probes: HashMap<PathBuf, (Option<DateTime<Utc>>, Option<MediaInfo>)>,
     import: Option<Import>,
+    /// What went wrong adding footage.
     error: Option<SharedString>,
+    /// Why the folder can't be read; cleared once it can.
+    list_error: Option<SharedString>,
     /// A listing (and the probes it started) is in flight.
     refreshing: bool,
     refresh_task: Option<Task<()>>,
@@ -93,6 +97,7 @@ impl FootageCard {
             probes: HashMap::new(),
             import: None,
             error: None,
+            list_error: None,
             refreshing: false,
             refresh_task: None,
             _poll: poll,
@@ -108,6 +113,11 @@ impl FootageCard {
 
     pub(crate) fn is_loaded(&self) -> bool {
         self.loaded
+    }
+
+    /// Files are being copied in; the folder holds partial takes until they finish.
+    pub(crate) fn is_importing(&self) -> bool {
+        self.import.is_some()
     }
 
     fn footage_dir(&self, cx: &App) -> Option<PathBuf> {
@@ -127,9 +137,14 @@ impl FootageCard {
         self.refresh_task = Some(cx.spawn(async move |this, cx| {
             let listed = cx.background_spawn(async move { media::list_footage(&dir) }).await;
             let Ok(to_probe) = this.update(cx, |this, cx| match listed {
-                Ok(files) => this.set_files(files, cx),
+                Ok(files) => {
+                    if this.list_error.take().is_some() {
+                        cx.notify();
+                    }
+                    this.set_files(files, cx)
+                }
                 Err(error) => {
-                    this.error = Some(error.to_string().into());
+                    this.list_error = Some(error.to_string().into());
                     cx.notify();
                     Vec::new()
                 }
@@ -298,7 +313,6 @@ impl FootageCard {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme();
         let durations: Vec<f64> =
             self.takes.iter().filter_map(|take| take.info.as_ref()).map(|info| info.duration_secs).collect();
         let summary = match self.takes.len() {
@@ -312,33 +326,24 @@ impl FootageCard {
                 }
             }
         };
-        h_flex()
-            .gap_3()
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
-                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Footage"))
-                    .child(div().text_sm().text_color(theme.muted_foreground).child(summary)),
-            )
-            .child(
-                Button::new("footage-open-folder")
-                    .ghost()
-                    .small()
-                    .icon(IconName::FolderOpen)
-                    .label("Open folder")
-                    .on_click(cx.listener(|this, _, _, cx| this.open_folder(cx))),
-            )
-            .child(
-                Button::new("footage-add")
-                    .outline()
-                    .small()
-                    .icon(IconName::Plus)
-                    .label("Add footage…")
-                    .disabled(self.import.is_some())
-                    .on_click(cx.listener(|this, _, _, cx| this.add_footage(cx))),
-            )
+        let actions = [
+            Button::new("footage-open-folder")
+                .ghost()
+                .small()
+                .icon(IconName::FolderOpen)
+                .label("Open folder")
+                .on_click(cx.listener(|this, _, _, cx| this.open_folder(cx)))
+                .into_any_element(),
+            Button::new("footage-add")
+                .outline()
+                .small()
+                .icon(IconName::Plus)
+                .label("Add footage…")
+                .disabled(self.import.is_some())
+                .on_click(cx.listener(|this, _, _, cx| this.add_footage(cx)))
+                .into_any_element(),
+        ];
+        section_header("Footage", summary, actions, cx)
     }
 
     fn render_list(&self, cx: &App) -> Div {
@@ -448,9 +453,12 @@ impl Render for FootageCard {
                     .when_some(self.import.as_ref(), |this, import| this.child(self.render_import(import, cx)))
                     .child(body),
             )
-            .when_some(self.error.clone(), |this, error| {
-                this.child(div().text_sm().text_color(theme.danger).child(error))
-            })
+            .children(
+                self.list_error
+                    .iter()
+                    .chain(&self.error)
+                    .map(|error| div().text_sm().text_color(theme.danger).child(error.clone())),
+            )
     }
 }
 

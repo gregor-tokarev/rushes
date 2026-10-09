@@ -126,6 +126,12 @@ impl AiSettings {
         }
         subscriptions
             .push(cx.subscribe(&extra_instructions, |this, _, event: &InputEvent, cx| this.on_text_event(event, cx)));
+        // Leaving the settings before the pause ends must not lose what was typed.
+        subscriptions.push(cx.on_release(|this, cx| {
+            if this.save_task.is_some() {
+                this.write_text(cx);
+            }
+        }));
 
         Self {
             state,
@@ -156,19 +162,27 @@ impl AiSettings {
 
     /// Saves every text field now.
     fn save_text(&mut self, cx: &mut Context<Self>) {
+        self.write_text(cx);
+        cx.notify();
+    }
+
+    fn write_text(&mut self, cx: &mut App) {
         self.save_task = None;
         let agent_command = self.agent_command.read(cx).value().trim().to_string();
         let skill_dir = self.skill_dir.read(cx).value().trim().to_string();
         let extra_instructions = self.extra_instructions.read(cx).value().to_string();
         let target_length = self.target_length.read(cx).value().trim().to_string();
         let model = self.model_value(cx);
-        self.update(cx, move |pipeline| {
-            pipeline.agent_command =
-                if agent_command.is_empty() { DEFAULT_AGENT_COMMAND.to_owned() } else { agent_command };
-            pipeline.skill_dir = (!skill_dir.is_empty()).then(|| PathBuf::from(skill_dir));
-            pipeline.extra_instructions = extra_instructions;
-            pipeline.default_preferences.target_length = target_length;
-            pipeline.model = model;
+        self.state.update(cx, |state, cx| {
+            state.update_settings(cx, |settings| {
+                let pipeline = &mut settings.pipeline;
+                pipeline.agent_command =
+                    if agent_command.is_empty() { DEFAULT_AGENT_COMMAND.to_owned() } else { agent_command };
+                pipeline.skill_dir = (!skill_dir.is_empty()).then(|| PathBuf::from(skill_dir));
+                pipeline.extra_instructions = extra_instructions;
+                pipeline.default_preferences.target_length = target_length;
+                pipeline.model = model;
+            })
         });
     }
 
@@ -333,78 +347,69 @@ impl Render for AiSettings {
         let theme = cx.theme();
         let heading = |title: &'static str| div().text_base().font_weight(FontWeight::SEMIBOLD).child(title);
 
+        let skill_dir = h_flex()
+            .gap_2()
+            .child(div().flex_1().child(Input::new(&self.skill_dir).id("ai-settings-skill-dir")))
+            .child(
+                Button::new("ai-settings-choose-skill")
+                    .outline()
+                    .icon(IconName::FolderOpen)
+                    .label("Choose…")
+                    .on_click(cx.listener(|this, _, _, cx| this.choose_skill_dir(cx))),
+            );
+        let agent = Form::new()
+            .child(
+                Field::new()
+                    .label("Agent command")
+                    .description("The Claude Code CLI: a command on PATH or the full path to it.")
+                    .child(Input::new(&self.agent_command).id("ai-settings-agent-command")),
+            )
+            .child(Field::new().label("Model").child(model))
+            .child(
+                Field::new()
+                    .label("video-use skill folder")
+                    .description("The folder with video-use's SKILL.md. Empty looks in ~/.claude/skills/video-use.")
+                    .child(skill_dir),
+            );
+
+        let review = Switch::new("ai-settings-auto-approve").label("Skip by default").checked(auto_approve).on_change(
+            cx.listener(|this, checked: &bool, _, cx| {
+                let checked = *checked;
+                this.update(cx, |pipeline| pipeline.auto_approve = checked)
+            }),
+        );
+        let edits = Form::new()
+            .child(
+                Field::new()
+                    .label("Standing instructions")
+                    .description("Added to every edit brief: house style, intro and outro rules, branding.")
+                    .child(Textarea::new(&self.extra_instructions)),
+            )
+            .child(
+                Field::new()
+                    .label("Strategy review")
+                    .description("Off: the agent proposes a strategy and waits for your approval before it renders.")
+                    .child(review),
+            )
+            .child(
+                Field::new()
+                    .label("Default edit preferences")
+                    .description("Where every new edit brief starts.")
+                    .child(preferences),
+            );
+
+        let requirements = v_flex().gap_1().child(heading("Requirements")).child(
+            div()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("AI edits run video-use inside Claude Code on this computer. The key and the tools stay local."),
+        );
+
         v_flex()
             .w_full()
             .gap_10()
-            .child(
-                v_flex().gap_4().child(heading("Agent")).child(
-                    Form::new()
-                        .child(
-                            Field::new()
-                                .label("Agent command")
-                                .description("The Claude Code CLI: a command on PATH or the full path to it.")
-                                .child(Input::new(&self.agent_command).id("ai-settings-agent-command")),
-                        )
-                        .child(Field::new().label("Model").child(model))
-                        .child(
-                            Field::new()
-                                .label("video-use skill folder")
-                                .description(
-                                    "The folder with video-use's SKILL.md. Empty looks in ~/.claude/skills/video-use.",
-                                )
-                                .child(
-                                    h_flex().gap_2().child(div().flex_1().child(Input::new(&self.skill_dir).id("ai-settings-skill-dir"))).child(
-                                        Button::new("ai-settings-choose-skill")
-                                            .outline()
-                                            .icon(IconName::FolderOpen)
-                                            .label("Choose…")
-                                            .on_click(cx.listener(|this, _, _, cx| this.choose_skill_dir(cx))),
-                                    ),
-                                ),
-                        ),
-                ),
-            )
-            .child(
-                v_flex().gap_4().child(heading("Edits")).child(
-                    Form::new()
-                        .child(
-                            Field::new()
-                                .label("Standing instructions")
-                                .description("Added to every edit brief: house style, intro and outro rules, branding.")
-                                .child(Textarea::new(&self.extra_instructions)),
-                        )
-                        .child(
-                            Field::new().label("Strategy review").description(
-                                "Off: the agent proposes a strategy and waits for your approval before it renders.",
-                            ).child(
-                                Switch::new("ai-settings-auto-approve")
-                                    .label("Skip by default")
-                                    .checked(auto_approve)
-                                    .on_change(cx.listener(|this, checked: &bool, _, cx| {
-                                        let checked = *checked;
-                                        this.update(cx, |pipeline| pipeline.auto_approve = checked)
-                                    })),
-                            ),
-                        )
-                        .child(
-                            Field::new()
-                                .label("Default edit preferences")
-                                .description("Where every new edit brief starts.")
-                                .child(preferences),
-                        ),
-                ),
-            )
-            .child(
-                v_flex()
-                    .gap_4()
-                    .child(
-                        v_flex().gap_1().child(heading("Requirements")).child(
-                            div().text_sm().text_color(theme.muted_foreground).child(
-                                "AI edits run video-use inside Claude Code on this computer. The key and the tools stay local.",
-                            ),
-                        ),
-                    )
-                    .child(self.doctor.clone()),
-            )
+            .child(v_flex().gap_4().child(heading("Agent")).child(agent))
+            .child(v_flex().gap_4().child(heading("Edits")).child(edits))
+            .child(v_flex().gap_4().child(requirements).child(self.doctor.clone()))
     }
 }

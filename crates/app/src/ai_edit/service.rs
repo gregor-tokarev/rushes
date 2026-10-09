@@ -19,6 +19,7 @@ use videocrm_pipeline::{
     run_phase,
 };
 
+use super::brief::BriefDraft;
 use super::timeline::{LogEvent, PhaseKind, PhaseStarted, TimelineEntry};
 use crate::state::{AppEvent, AppState};
 
@@ -128,6 +129,8 @@ pub struct PipelineService {
     agent_env: Vec<(String, String)>,
     /// A run another view asked to show; taken by the panel of its video.
     revealed: Option<RunId>,
+    /// Brief forms of videos whose panel is closed, until it opens again.
+    drafts: HashMap<VideoId, BriefDraft>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -164,6 +167,7 @@ impl PipelineService {
                 checked: None,
                 agent_env: Vec::new(),
                 revealed: None,
+                drafts: HashMap::new(),
                 _subscriptions: subscriptions,
             };
             if let Err(error) = service.recover_interrupted(cx) {
@@ -242,6 +246,16 @@ impl PipelineService {
         let id = self.revealed.filter(|id| self.run(*id).is_some_and(|run| run.video_id == video_id))?;
         self.revealed = None;
         Some(id)
+    }
+
+    /// The brief form a closed panel of `video_id` left behind.
+    pub(crate) fn draft(&self, video_id: VideoId) -> Option<&BriefDraft> {
+        self.drafts.get(&video_id)
+    }
+
+    /// Keeps the brief form of a panel that closes, so navigating away loses nothing.
+    pub(crate) fn keep_draft(&mut self, video_id: VideoId, draft: BriefDraft) {
+        self.drafts.insert(video_id, draft);
     }
 
     /// Extra environment for the agent and every tool it runs, such as a complete
@@ -618,6 +632,7 @@ impl PipelineService {
     /// stops their agents.
     fn forget_deleted_videos(&mut self, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
+        self.drafts.retain(|video_id, _| state.video(*video_id).is_some());
         let deleted: Vec<RunId> =
             self.runs.iter().filter(|run| state.video(run.video_id).is_none()).map(|run| run.id).collect();
         if deleted.is_empty() {
