@@ -17,7 +17,8 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Div, Entity, EventEmitter, ExternalPaths, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Task, Window, div,
+    IntoElement, ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Task, TestSupportExt as _,
+    Window, div,
 };
 use videocrm_core::VideoId;
 use videocrm_core::media::{self, MediaFile, MediaKind};
@@ -436,6 +437,7 @@ impl Render for FootageCard {
             .child(
                 v_flex()
                     .id("footage-drop")
+                    .test_support()
                     .rounded(theme.radius_lg)
                     .border_1()
                     .border_color(theme.border)

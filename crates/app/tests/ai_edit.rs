@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, ElementId, Entity, Render, TestAppContext, Window,
-    WindowBounds, WindowOptions, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, ElementId, Entity, ExternalPaths, FileDropEvent,
+    PlatformInput, Render, TestAppContext, Window, WindowBounds, WindowOptions, px, size,
 };
 use tempfile::TempDir;
 use videocrm::ai_edit::{
@@ -670,4 +670,30 @@ fn settings_save_toggles_at_once_and_text_after_a_pause(cx: &mut TestAppContext)
     wait_until(cx, "the new check", |cx| !service.read(cx).is_checking());
     let doctor = cx.read(|cx| service.read(cx).doctor().cloned()).expect("doctor");
     assert!(!doctor.agent.ok, "the new agent command was checked: {:?}", doctor.agent);
+}
+
+#[gpui_kit::test]
+fn takes_dropped_on_the_footage_card_are_copied_in(cx: &mut TestAppContext) {
+    let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
+    let card = fx.root.path().join("sd-card");
+    fs::create_dir_all(&card).unwrap();
+    let take = card.join("take9.mp4");
+    fs::write(&take, vec![0u8; 3 * 1024 * 1024]).unwrap();
+    let notes = card.join("notes.txt");
+    fs::write(&notes, "not footage").unwrap();
+    let video = fx.video;
+    let window = open(cx, move |window, cx| AiEditPanel::new(video, window, cx));
+    wait_for_window(cx, window, "the footage card", |window, _| shows(window, "footage-drop"));
+
+    cx.update_window(window, |_, window, cx| {
+        let position = window.find("footage-drop").bounds().center();
+        let paths = ExternalPaths(vec![take.clone(), notes.clone()].into());
+        window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Entered { position, paths }), cx);
+        window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Submit { position }), cx);
+    })
+    .unwrap();
+    let copied = fx.footage.join("take9.mp4");
+    wait_until(cx, "the copied take", |_| fs::metadata(&copied).is_ok_and(|meta| meta.len() == 3 * 1024 * 1024));
+    assert!(take.is_file(), "the source is copied, not moved");
+    assert!(!fx.footage.join("notes.txt").exists(), "only media files are imported");
 }
