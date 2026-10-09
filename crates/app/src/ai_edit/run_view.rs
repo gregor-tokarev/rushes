@@ -9,15 +9,17 @@ use chrono::Utc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::stepper::{Stepper, StepperItem};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Div, ElementId, Entity, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, ScrollHandle, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px, rems,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Div, ElementId, Entity, FollowMode, FontWeight,
+    InteractiveElement as _, IntoElement, ListAlignment, ListSizingBehavior, ListState, ParentElement as _, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, TestSupportExt as _, Window, div,
+    list, px, rems,
 };
 use videocrm_core::{PipelineRun, RunId, RunStatus};
 use videocrm_pipeline::{MediaInfo, probe_media};
@@ -29,8 +31,8 @@ use super::timeline::{LogEvent, PhaseKind, TimelineItem, fold_timeline};
 use crate::route::VideoTab;
 use crate::state::AppState;
 
-/// Distance from the end within which scrolling down resumes following new events.
-const FOLLOW_SLACK: f32 = 48.;
+/// Height of the activity box once the log outgrows it.
+const TIMELINE_HEIGHT: f32 = 30.;
 
 /// What the feedback box is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,10 +64,10 @@ pub(crate) struct RunView {
     items: Vec<TimelineItem>,
     /// Log length `items` was folded from.
     folded_len: usize,
-    scroll: ScrollHandle,
-    /// Keep the newest events in view, from the start of a phase until the creator
-    /// scrolls up (also once the phase ended); scrolling back to the end resumes it.
-    follow: bool,
+    /// Lays out only the rows in view: a long edit logs thousands of events. While
+    /// it follows the tail, the newest rows stay in view until the creator scrolls up;
+    /// scrolling back to the end resumes following.
+    rows: ListState,
     output: Option<OutputFacts>,
     output_task: Option<Task<()>>,
     action_error: Option<SharedString>,
@@ -79,7 +81,9 @@ impl RunView {
         let subscription = cx.observe(&service, |this, _, cx| this.sync(cx));
         Self {
             notes: cx.new(|cx| {
-                TextareaState::new(window, cx).auto_grow(2, 8).placeholder("Optional, e.g. keep the pause before the punchline")
+                TextareaState::new(window, cx)
+                    .auto_grow(2, 8)
+                    .placeholder("Optional, e.g. keep the pause before the punchline")
             }),
             feedback: cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 10)),
             service,
@@ -89,8 +93,7 @@ impl RunView {
             expanded: HashSet::new(),
             items: Vec::new(),
             folded_len: 0,
-            scroll: ScrollHandle::new(),
-            follow: false,
+            rows: ListState::new(0, ListAlignment::Top, rems(TIMELINE_HEIGHT).to_pixels(window.rem_size())),
             output: None,
             output_task: None,
             action_error: None,
@@ -117,11 +120,14 @@ impl RunView {
         self.action_error = None;
         self.notes.update(cx, |notes, cx| notes.set_value("", window, cx));
         // A finished run reads from the start; a live one follows its newest events.
-        self.scroll = ScrollHandle::new();
+        self.rows.reset(0);
+        self.rows.set_follow_mode(FollowMode::Normal);
         if let Some(id) = run_id {
             self.service.update(cx, |service, cx| service.load_timeline(id, cx));
         }
-        self.follow = self.live(cx).is_some();
+        if self.live(cx).is_some() {
+            self.rows.set_follow_mode(FollowMode::Tail);
+        }
         self.sync(cx);
     }
 
@@ -140,13 +146,14 @@ impl RunView {
         let timeline_len = self.service.read(cx).timeline(id).len();
         let live = self.live(cx).is_some();
         if timeline_len != self.folded_len {
-            self.items = fold_timeline(self.service.read(cx).timeline(id));
+            let items = fold_timeline(self.service.read(cx).timeline(id));
+            self.set_items(items);
             self.folded_len = timeline_len;
         }
 
         if live && self.ticker.is_none() {
             // A phase just started: show what the agent does next.
-            self.follow = true;
+            self.rows.set_follow_mode(FollowMode::Tail);
             self.ticker = Some(cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(Duration::from_secs(1)).await;
@@ -172,6 +179,22 @@ impl RunView {
             self.probe_output(path, cx);
         }
         cx.notify();
+    }
+
+    /// Takes newly folded rows. Rows usually only get appended; a tool result changes
+    /// its call's row, so rows from the first difference on are measured again.
+    fn set_items(&mut self, items: Vec<TimelineItem>) {
+        let (old, new) = (self.items.len(), items.len());
+        let same = self.items.iter().zip(&items).take_while(|(a, b)| a == b).count();
+        if new < old {
+            self.rows.reset(new);
+        } else {
+            if same < old {
+                self.rows.remeasure_items(same..old);
+            }
+            self.rows.splice(old..old, new - old);
+        }
+        self.items = items;
     }
 
     fn probe_output(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -250,19 +273,12 @@ impl RunView {
         });
     }
 
-    /// Wheel input on the timeline: up stops following new events, down to the end resumes.
-    fn on_timeline_scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window) {
-        if event.delta.pixel_delta(window.line_height()).y > px(0.) {
-            self.follow = false;
-        } else {
-            let max = self.scroll.max_offset().y;
-            self.follow = self.scroll.offset().y <= -max + px(FOLLOW_SLACK);
-        }
-    }
-
     fn toggle_row(&mut self, seq: u32, cx: &mut Context<Self>) {
         if !self.expanded.remove(&seq) {
             self.expanded.insert(seq);
+        }
+        if let Some(ix) = self.items.iter().position(|item| item.seq() == seq) {
+            self.rows.remeasure_items(ix..ix + 1);
         }
         cx.notify();
     }
@@ -574,10 +590,39 @@ impl RunView {
         )
     }
 
-    fn render_timeline(&self, run: &PipelineRun, live: bool, cx: &mut Context<Self>) -> Div {
-        let rows: Vec<AnyElement> = self.items.iter().map(|item| self.render_item(run.id, item, cx)).collect();
+    fn render_timeline(&self, live: bool, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme();
         let count = self.items.len();
+        let body = if self.items.is_empty() {
+            div().px_4().py_5().text_sm().text_color(theme.muted_foreground).child(if live {
+                "Waiting for the agent…"
+            } else {
+                "No activity recorded."
+            })
+        } else {
+            let rows = list(
+                self.rows.clone(),
+                cx.processor(|this: &mut Self, ix: usize, _, cx| match (this.run_id, this.items.get(ix)) {
+                    (Some(run_id), Some(item)) => this.render_item(run_id, item, cx),
+                    _ => div().into_any_element(),
+                }),
+            )
+            .with_sizing_behavior(ListSizingBehavior::Infer)
+            .w_full()
+            .max_h(rems(TIMELINE_HEIGHT))
+            .py_2();
+            let log = self.rows.clone();
+            div()
+                .relative()
+                // The page scrolls too. While the log overflows its box, the wheel moves the log alone.
+                .on_scroll_wheel(move |_, _, cx| {
+                    if log.max_offset_for_scrollbar().y > px(0.) {
+                        cx.stop_propagation();
+                    }
+                })
+                .child(rows)
+                .child(Scrollbar::vertical(&self.rows))
+        };
         v_flex()
             .gap_2()
             .child(
@@ -588,33 +633,7 @@ impl RunView {
                         this.child(div().text_sm().text_color(theme.muted_foreground).child(count.to_string()))
                     }),
             )
-            .child(
-                div()
-                    .id(element_id("timeline", run.id))
-                    .max_h(rems(30.))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .on_scroll_wheel(
-                        cx.listener(|this, event: &ScrollWheelEvent, window, _| this.on_timeline_scroll(event, window)),
-                    )
-                    .rounded(theme.radius_lg)
-                    .border_1()
-                    .border_color(theme.border)
-                    .child(
-                        v_flex()
-                            .py_2()
-                            .when(rows.is_empty(), |this| {
-                                this.child(
-                                    div().px_4().py_3().text_sm().text_color(theme.muted_foreground).child(if live {
-                                        "Waiting for the agent…"
-                                    } else {
-                                        "No activity recorded."
-                                    }),
-                                )
-                            })
-                            .children(rows),
-                    ),
-            )
+            .child(div().rounded(theme.radius_lg).border_1().border_color(theme.border).overflow_hidden().child(body))
     }
 
     fn render_item(&self, run_id: RunId, item: &TimelineItem, cx: &mut Context<Self>) -> AnyElement {
@@ -625,7 +644,7 @@ impl RunView {
             (theme.muted_foreground, theme.danger, theme.success, theme.border, theme.muted, theme.radius);
         let mono_font = theme.mono_font_family.clone();
         let row_id = element_id(&format!("timeline-{seq}"), run_id);
-        match item {
+        let element = match item {
             TimelineItem::Phase { phase, text, .. } => {
                 let label = match phase {
                     PhaseKind::Plan => "Planning started",
@@ -636,6 +655,7 @@ impl RunView {
                 };
                 v_flex()
                     .id(row_id)
+                    .w_full()
                     .gap_2()
                     .px_4()
                     .pt_3()
@@ -650,16 +670,10 @@ impl RunView {
                     .when_some(text.clone(), |this, text| {
                         this.child(div().mx_8().px_3().py_2().rounded(radius).bg(muted_bg).text_sm().child(text))
                     })
-                    .into_any_element()
             }
-            TimelineItem::Message { text, .. } => row(row_id, Icon::new(IconName::Sparkles).text_color(muted))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(markdown(element_id(&format!("message-{seq}"), run_id), text.clone())),
-                )
-                .into_any_element(),
+            TimelineItem::Message { text, .. } => row(row_id, Icon::new(IconName::Sparkles).text_color(muted)).child(
+                div().flex_1().min_w_0().child(markdown(element_id(&format!("message-{seq}"), run_id), text.clone())),
+            ),
             TimelineItem::Thinking { text, .. } => {
                 let content = v_flex()
                     .flex_1()
@@ -668,7 +682,7 @@ impl RunView {
                     .child(div().text_sm().text_color(muted).child("Thinking"))
                     .when(expanded, |this| this.child(div().text_sm().text_color(muted).child(text.clone())));
                 let base = row(row_id, Icon::new(IconName::Brain).text_color(muted)).child(content);
-                expandable(base, seq, expanded, cx).into_any_element()
+                expandable(base, seq, expanded, cx)
             }
             TimelineItem::Tool { name, summary, output, .. } => {
                 let failed = output.as_ref().is_some_and(|output| output.is_error);
@@ -701,25 +715,17 @@ impl RunView {
                             )
                             .children(details),
                     );
-                if item.is_expandable() {
-                    expandable(base, seq, expanded, cx).into_any_element()
-                } else {
-                    base.child(disclosure_lane()).into_any_element()
-                }
+                if item.is_expandable() { expandable(base, seq, expanded, cx) } else { base.child(disclosure_lane()) }
             }
             TimelineItem::Problem { title, detail, .. } => {
-                row(row_id, Icon::new(IconName::ShieldAlert).text_color(danger))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_0p5()
-                            .child(
-                                div().text_sm().font_weight(FontWeight::MEDIUM).text_color(danger).child(title.clone()),
-                            )
-                            .when(!detail.is_empty(), |this| this.child(div().text_sm().child(detail.clone()))),
-                    )
-                    .into_any_element()
+                row(row_id, Icon::new(IconName::ShieldAlert).text_color(danger)).child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(danger).child(title.clone()))
+                        .when(!detail.is_empty(), |this| this.child(div().text_sm().child(detail.clone()))),
+                )
             }
             TimelineItem::Finished { cost_usd, duration_ms, .. } => {
                 let mut facts = vec!["Agent finished".to_owned()];
@@ -731,7 +737,6 @@ impl RunView {
                 }
                 row(row_id, Icon::new(IconName::CircleCheck).text_color(success))
                     .child(div().text_sm().text_color(muted).child(facts.join(" · ")))
-                    .into_any_element()
             }
             TimelineItem::Background { lines, .. } => {
                 let label = if lines.len() == 1 {
@@ -748,9 +753,10 @@ impl RunView {
                         .child(div().text_sm().text_color(muted).child(label))
                         .children(details),
                 );
-                expandable(base, seq, expanded, cx).into_any_element()
+                expandable(base, seq, expanded, cx)
             }
-        }
+        };
+        element.test_support().into_any_element()
     }
 }
 
@@ -760,11 +766,6 @@ impl Render for RunView {
             return div();
         };
         let live = self.live(cx);
-        if self.follow {
-            // Rows such as Markdown messages settle their height a frame late, so the
-            // end is re-applied every frame rather than once per event.
-            self.scroll.scroll_to_bottom();
-        }
         let stepper = self.render_stepper(&run, cx).into_any_element();
         let state_card = match (live, run.status) {
             (Some(live), _) => Some(self.render_live(live, cx)),
@@ -773,7 +774,7 @@ impl Render for RunView {
             (None, RunStatus::Failed | RunStatus::Cancelled) => Some(self.render_failure(&run, window, cx)),
             (None, _) => None,
         };
-        let timeline = self.render_timeline(&run, live.is_some(), cx);
+        let timeline = self.render_timeline(live.is_some(), cx);
         let error = self.action_error.clone();
         let danger = cx.theme().danger;
 
@@ -805,6 +806,7 @@ fn card_title(icon: IconName, title: &'static str, description: &'static str, cx
 fn row(id: ElementId, icon: Icon) -> gpui_kit::Stateful<Div> {
     h_flex()
         .id(id)
+        .w_full()
         .items_start()
         .gap_3()
         .px_4()

@@ -359,7 +359,8 @@ impl PipelineService {
         if !matches!(run.status, RunStatus::Failed | RunStatus::Cancelled) {
             return Err(RunError::NotAvailable(run.status));
         }
-        let (phase, text) = self.last_started(id, cx).map_or((PhaseKind::Plan, None), |started| (started.phase, started.text));
+        let (phase, text) =
+            self.last_started(id, cx).map_or((PhaseKind::Plan, None), |started| (started.phase, started.text));
         self.continue_run(id, phase, text, cx)
     }
 

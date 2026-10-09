@@ -650,17 +650,28 @@ fn open_host(
     .expect("open test window")
 }
 
-/// Replaces (or with `None`, closes) the hosted view.
-fn host(
+/// Closes the hosted view, as navigating away does.
+fn close(cx: &mut TestAppContext, host: &Entity<Host>) {
+    cx.update(|cx| {
+        host.update(cx, |host, cx| {
+            host.view = None;
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+}
+
+/// Hosts a new view, as navigating to a page does.
+fn show(
     cx: &mut TestAppContext,
     window: AnyWindowHandle,
     host: &Entity<Host>,
-    build: Option<Box<dyn FnOnce(&mut Window, &mut App) -> AnyView>>,
+    build: impl FnOnce(&mut Window, &mut App) -> AnyView,
 ) {
     cx.update_window(window, |_, window, cx| {
-        let view = build.map(|build| build(window, cx));
+        let view = build(window, cx);
         host.update(cx, |host, cx| {
-            host.view = view;
+            host.view = Some(view);
             cx.notify();
         });
     })
@@ -811,6 +822,16 @@ fn a_pipelines_row_opens_its_run(cx: &mut TestAppContext) {
     let row = format!("pipeline-run-{id}");
     wait_for_window(cx, window, "the run row", |window, _| shows(window, &row));
 
+    // The keyboard reaches the rows like buttons: Tab (the root's `focus_next`), then Enter.
+    cx.update_window(window, |_, window, cx| {
+        window.focus_next(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    assert_eq!(route(cx, &fx), Route::Video { id: fx.video, tab: VideoTab::Footage });
+    cx.update(|cx| fx.service.update(cx, |service, _| service.take_revealed(fx.video)));
+
+    cx.update(|cx| fx.state.update(cx, |state, cx| state.navigate(Route::Pipelines, cx)));
     click(cx, window, ElementId::Name(row.into()));
     assert_eq!(route(cx, &fx), Route::Video { id: fx.video, tab: VideoTab::Footage });
     let revealed = cx.update(|cx| fx.service.update(cx, |service, _| service.take_revealed(fx.video)));
@@ -885,7 +906,7 @@ fn text_typed_right_before_leaving_the_settings_is_saved(cx: &mut TestAppContext
     .unwrap();
     cx.run_until_parked();
 
-    host(cx, window, &settings, None);
+    close(cx, &settings);
     let pipeline = cx.read(|cx| fx.state.read(cx).settings().pipeline.clone());
     assert_eq!(pipeline.agent_command, "/opt/claude/bin/claude");
 }
@@ -897,9 +918,8 @@ fn the_brief_form_survives_leaving_the_video(cx: &mut TestAppContext) {
     }
     let fx = Fixture::new(cx, &[]);
     let video = fx.video;
-    let panel = move |window: &mut Window, cx: &mut App| -> AnyView {
-        cx.new(|cx| AiEditPanel::new(video, window, cx)).into()
-    };
+    let panel =
+        move |window: &mut Window, cx: &mut App| -> AnyView { cx.new(|cx| AiEditPanel::new(video, window, cx)).into() };
     let (window, page) = open_host(cx, panel);
     let service = fx.service.clone();
     wait_until(cx, "requirement check", |cx| service.read(cx).doctor().is_some_and(|doctor| doctor.ready()));
@@ -908,8 +928,8 @@ fn the_brief_form_survives_leaving_the_video(cx: &mut TestAppContext) {
     click(cx, window, "brief-auto-approve");
 
     // Away to another page and back.
-    host(cx, window, &page, None);
-    host(cx, window, &page, Some(Box::new(panel)));
+    close(cx, &page);
+    show(cx, window, &page, panel);
     wait_for_window(cx, window, "the composer", |window, _| shows(window, "ai-edit-start"));
     click(cx, window, "ai-edit-start");
     let id = latest_run(cx, &fx).expect("the panel started a run");
@@ -917,4 +937,48 @@ fn the_brief_form_survives_leaving_the_video(cx: &mut TestAppContext) {
     assert!(run.brief.contains("- Burn subtitles into the render."), "{}", run.brief);
     assert_eq!(run.status, RunStatus::Rendering, "the strategy review stays skipped");
     fx.wait_for_status(cx, id, RunStatus::Succeeded);
+}
+
+#[gpui_kit::test]
+fn a_long_activity_log_lays_out_only_the_rows_in_view(cx: &mut TestAppContext) {
+    let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
+    let now = Utc::now();
+    let run = PipelineRun {
+        id: RunId::new(),
+        video_id: fx.video,
+        status: RunStatus::Succeeded,
+        brief: String::new(),
+        footage_dir: fx.footage.clone(),
+        session_id: Some("s".into()),
+        summary: Some("Rendered.".into()),
+        output: None,
+        error: None,
+        cost_usd: None,
+        created_at: now,
+        updated_at: now,
+    };
+    cx.read(|cx| {
+        let store = fx.state.read(cx).store();
+        let mut store = store.lock().unwrap();
+        store.insert_run(&run).unwrap();
+        for ix in 0..1000 {
+            let event = if ix % 2 == 0 {
+                AgentEvent::ToolUse {
+                    id: format!("t{ix}"),
+                    name: "Bash".into(),
+                    summary: format!("ffmpeg -i take{ix}.mp4"),
+                }
+            } else {
+                AgentEvent::ToolResult { tool_use_id: format!("t{}", ix - 1), is_error: false, summary: "ok".into() }
+            };
+            store.append_run_event(run.id, &LogEvent::Agent(event).to_payload()).unwrap();
+        }
+    });
+    // A fresh service reads the run the store now holds.
+    cx.update(|cx| PipelineService::init(fx.state.clone(), cx));
+    let video = fx.video;
+    let window = open(cx, move |window, cx| AiEditPanel::new(video, window, cx));
+    let (first, last) = (format!("timeline-1-{}", run.id), format!("timeline-999-{}", run.id));
+    wait_for_window(cx, window, "the first activity rows", |window, _| shows(window, &first));
+    assert!(!cx.update_window(window, |_, window, _| shows(window, &last)).unwrap(), "rows far below are not laid out");
 }

@@ -10,8 +10,8 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Div, Entity, FontWeight, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Subscription, Window, div,
+    AnyElement, App, AppContext as _, Context, Div, Entity, FontWeight, IntoElement, ParentElement as _, Render,
+    SharedString, Styled as _, Subscription, Window, div,
 };
 use videocrm_core::settings::EditPreferences;
 use videocrm_core::{DocumentKind, PipelineRun, RunId, RunStatus, VideoId};

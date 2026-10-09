@@ -67,7 +67,10 @@ pub(crate) struct FootageCard {
     /// ffprobe results by path, valid while the file's modification time matches.
     probes: HashMap<PathBuf, (Option<DateTime<Utc>>, Option<MediaInfo>)>,
     import: Option<Import>,
+    /// What went wrong adding footage.
     error: Option<SharedString>,
+    /// Why the folder can't be read; cleared once it can.
+    list_error: Option<SharedString>,
     /// A listing (and the probes it started) is in flight.
     refreshing: bool,
     refresh_task: Option<Task<()>>,
@@ -94,6 +97,7 @@ impl FootageCard {
             probes: HashMap::new(),
             import: None,
             error: None,
+            list_error: None,
             refreshing: false,
             refresh_task: None,
             _poll: poll,
@@ -133,9 +137,14 @@ impl FootageCard {
         self.refresh_task = Some(cx.spawn(async move |this, cx| {
             let listed = cx.background_spawn(async move { media::list_footage(&dir) }).await;
             let Ok(to_probe) = this.update(cx, |this, cx| match listed {
-                Ok(files) => this.set_files(files, cx),
+                Ok(files) => {
+                    if this.list_error.take().is_some() {
+                        cx.notify();
+                    }
+                    this.set_files(files, cx)
+                }
                 Err(error) => {
-                    this.error = Some(error.to_string().into());
+                    this.list_error = Some(error.to_string().into());
                     cx.notify();
                     Vec::new()
                 }
@@ -444,9 +453,12 @@ impl Render for FootageCard {
                     .when_some(self.import.as_ref(), |this, import| this.child(self.render_import(import, cx)))
                     .child(body),
             )
-            .when_some(self.error.clone(), |this, error| {
-                this.child(div().text_sm().text_color(theme.danger).child(error))
-            })
+            .children(
+                self.list_error
+                    .iter()
+                    .chain(&self.error)
+                    .map(|error| div().text_sm().text_color(theme.danger).child(error.clone())),
+            )
     }
 }
 
