@@ -263,6 +263,11 @@ impl DatabasePanel {
         if self.views.iter().any(|known| known.id == view) && self.active_view != Some(view) {
             self.active_view = Some(view);
             self.sort_picker = None;
+            // A view picked from the overflow menu, or just added, may sit
+            // outside the scrolled tab strip.
+            if let Some(ix) = self.active_index() {
+                self.view_tabs_scroll.scroll_to_item(ix);
+            }
             self.cancel_editing(window, cx);
             self.refresh(cx);
         }

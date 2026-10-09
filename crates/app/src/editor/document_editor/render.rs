@@ -228,15 +228,19 @@ impl Render for DocumentEditor {
             .child(
                 v_flex()
                     .w_full()
+                    .flex_1()
                     .max_w(Rems(TEXT_WIDTH.0 + 2. * GUTTER.0))
                     .children(rows)
                     .on_children_prepainted(record)
                     .child(
+                        // The empty area below the last block, generous so a
+                        // short or empty document is easy to click into.
                         div()
                             .id("document-end")
                             .test_support()
                             .w_full()
-                            .min_h(rems(6.))
+                            .flex_1()
+                            .min_h(rems(10.))
                             .cursor_text()
                             .on_mouse_down(
                                 MouseButton::Left,

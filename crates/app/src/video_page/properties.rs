@@ -399,8 +399,10 @@ impl PropertiesPanel {
         match &property.kind {
             PropertyKind::Text | PropertyKind::Number | PropertyKind::Url => {
                 let Some((input, _)) = self.inputs.get(&id) else { return div().into_any_element() };
+                // Same rule as the database's URL cells: a bare address opens as
+                // https://, and only web and mail links are handed to the OS.
                 let url = match value {
-                    Some(PropertyValue::Url(url)) if !url.trim().is_empty() => Some(url.clone()),
+                    Some(PropertyValue::Url(url)) => videocrm_core::input::normalize_link(url),
                     _ => None,
                 };
                 h_flex()
