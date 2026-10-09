@@ -168,9 +168,11 @@ client in Google Cloud (free) and pastes it into VideoCRM. It takes about ten mi
   needs the YouTube API Services audit and quota extension form.
 - **Unverified projects upload private.** Videos uploaded through API projects created
   after 28 July 2020 that have not passed YouTube's API compliance audit are locked to
-  private, whatever privacy you choose. To publish them, the project must pass the audit
-  (<https://support.google.com/youtube/contact/yt_api_form>). Until then, use VideoCRM to
-  upload and finish publishing in YouTube Studio.
+  private, whatever privacy you choose, and the lock cannot be lifted in YouTube Studio
+  or appealed. Only uploads made after the project passes the audit
+  (<https://support.google.com/youtube/contact/yt_api_form>) keep their privacy setting.
+  Until then, treat VideoCRM uploads as private drafts and upload the public version
+  through YouTube Studio.
 - **Weekly reconnect while in Testing.** Google expires refresh tokens of "Testing"
   projects with an external audience after 7 days. VideoCRM then asks you to connect again.
   Publishing the app (Audience → **Publish app**) removes the 7-day limit; the unverified
