@@ -7513,7 +7513,11 @@ name = "videocrm"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures",
  "gpui-kit",
+ "serde",
+ "serde_json",
+ "tempfile",
  "videocrm-core",
  "videocrm-pipeline",
  "videocrm-youtube",

@@ -1,36 +1,15 @@
 //! AI edit pipelines (video-use through a coding agent). Owned by the ai-edit workstream.
 
+mod brief;
+mod service;
+mod timeline;
+
 use gpui_kit::*;
 use videocrm_core::VideoId;
 
-use crate::state::AppState;
-
-/// App-wide pipeline runner: starts phases on background threads, persists runs
-/// and events, survives navigation, stops agents on quit.
-pub struct PipelineService {
-    state: Entity<AppState>,
-}
-
-struct GlobalPipelineService(Entity<PipelineService>);
-
-impl Global for GlobalPipelineService {}
-
-impl PipelineService {
-    /// Creates the service and registers it globally. Call once at startup, after
-    /// `AppState::set_global`.
-    pub fn init(state: Entity<AppState>, cx: &mut App) {
-        let service = cx.new(|_| PipelineService { state });
-        cx.set_global(GlobalPipelineService(service));
-    }
-
-    pub fn global(cx: &App) -> Entity<PipelineService> {
-        cx.global::<GlobalPipelineService>().0.clone()
-    }
-
-    pub fn state(&self) -> &Entity<AppState> {
-        &self.state
-    }
-}
+pub use brief::{COLOR_GRADES, color_grade_label, default_brief, with_preferences};
+pub use service::{INTERRUPTED, LivePhase, PipelineService, RunError, split_failure};
+pub use timeline::{LogEvent, PhaseKind, PhaseStarted, TimelineEntry, TimelineItem, ToolOutput, fold_timeline};
 
 /// The "Footage & AI edit" tab of a video page.
 pub struct AiEditPanel {
