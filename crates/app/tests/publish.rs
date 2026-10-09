@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::Utc;
-use gpui_kit::{AppContext as _, TestAppContext};
+use gpui_kit::TestAppContext;
 use publish_support::{Emulators, Workspace, wait_until};
 use serde_json::json;
 use videocrm::publish::{

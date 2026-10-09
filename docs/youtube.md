@@ -226,9 +226,10 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   to the video and to YouTube Studio, and the form says that its changes apply to the next
   upload. There is no "update on YouTube": `videos.update` needs the broader `youtube`
   scope, which VideoCRM does not ask for.
-- While the worker retries a passing failure, the Upload card, the Uploads page and the
-  sidebar badge say so ("YouTube isn't responding · Retrying (2 of 5)…", or "Can't reach
-  YouTube" when offline) until the upload gets further than before. A failure reads as a
+- While the worker retries a passing failure, the Upload card and the Uploads page say so
+  ("YouTube isn't responding · Retrying (2 of 5)…", or "Can't reach YouTube" when offline)
+  and the sidebar badge reads "Retrying the upload…", until the upload gets further than
+  before. A failure reads as a
   plain sentence (`describe_error`; the technical error goes to stderr) and stays
   resumable when YouTube had opened a session.
 - Deleting a video cancels its running upload (the delete confirmations say so, through
@@ -278,9 +279,9 @@ VIDEOCRM_DATA_DIR=$(mktemp -d) cargo run -p videocrm --example publish_demo [-- 
 ```
 
 `publish_demo` mounts the Publish tab, the Uploads page, the YouTube settings and the badge
-on a sample workspace (emulator backend by default). Without a browser, use **Copy link**
-and finish the consent with any HTTP client: fetch the link, submit the account's form
-(`email` field) and follow the redirect to `127.0.0.1`.
+on a sample workspace (the emulator backend, unless a Google client is set up there).
+Without a browser, use **Copy link** and finish the consent with any HTTP client: fetch
+the link, submit the account's form (`email` field) and follow the redirect to `127.0.0.1`.
 
 ### App tests
 
@@ -293,8 +294,10 @@ cargo test -p videocrm --test publish_ui    # the views in headless windows, cli
 `tests/publish.rs` covers sign-in (consent posted like a browser), restart, disconnect,
 cancelling a sign-in, an upload verified byte for byte through `/_emulator/uploads`, a
 scheduled upload, cancel and resume, validation, interrupted-job recovery and backend
-switches. `tests/publish_ui.rs` drives the form, chapters, Uploads page, settings and badge,
-plus connect-and-upload from the Publish tab. Both start their own emulators and skip with
+switches, and deleting a video while it uploads. `tests/publish_ui.rs` drives the form,
+chapters, Uploads page, settings and badge, connect-and-upload from the Publish tab, the
+retry state during an outage, the done card, an expired sign-in, file drops, and a stopped
+emulator failing fast. Both start their own emulators and skip with
 a notice without Node.
 
 ## Connecting a real YouTube account
