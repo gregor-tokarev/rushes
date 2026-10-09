@@ -313,7 +313,8 @@ fn interrupted_uploads_become_resumable_failures_at_startup(cx: &mut TestAppCont
 
 #[gpui_kit::test]
 fn switching_the_backend_signs_out(cx: &mut TestAppContext) {
-    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let emulator = YoutubeBackend::Emulator { google_url: String::new(), youtube_url: String::new() };
+    let workspace = Workspace::open(cx, emulator);
     let config = workspace.service.read_with(cx, |s, _| s.config().ok().cloned()).unwrap();
     let account = Account {
         email: "creator@example.com".into(),

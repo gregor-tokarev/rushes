@@ -82,12 +82,11 @@ impl fmt::Debug for YoutubeBackend {
     }
 }
 
+/// The creator's own YouTube account, once they add their OAuth client. The emulators
+/// are a developer option (`VIDEOCRM_GOOGLE_URL` / `VIDEOCRM_YOUTUBE_URL` override this).
 impl Default for YoutubeBackend {
     fn default() -> Self {
-        YoutubeBackend::Emulator {
-            google_url: DEFAULT_EMULATOR_GOOGLE_URL.to_string(),
-            youtube_url: DEFAULT_EMULATOR_YOUTUBE_URL.to_string(),
-        }
+        YoutubeBackend::Google { client_id: String::new(), client_secret: String::new() }
     }
 }
 
@@ -180,15 +179,9 @@ mod tests {
     }
 
     #[test]
-    fn defaults_point_at_emulators_and_claude() {
+    fn defaults_point_at_google_and_claude() {
         let settings = AppSettings::default();
-        assert_eq!(
-            settings.youtube,
-            YoutubeBackend::Emulator {
-                google_url: "http://127.0.0.1:4002".into(),
-                youtube_url: "http://127.0.0.1:4020".into(),
-            }
-        );
+        assert_eq!(settings.youtube, YoutubeBackend::Google { client_id: String::new(), client_secret: String::new() });
         assert_eq!(settings.pipeline.agent_command, "claude");
         assert!(settings.pipeline.default_preferences.remove_fillers);
         assert_eq!(settings.theme, ThemeMode::System);

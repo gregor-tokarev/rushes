@@ -285,8 +285,23 @@ impl RenderOnce for ConnectionPanel {
                     Button::new("cancel")
                         .label("Cancel")
                         .small()
-                        .ghost()
+                        .outline()
                         .on_click(move |_, _, cx| service.update(cx, |service, cx| service.cancel(cx)))
+                };
+                let google = service.config().is_ok_and(|config| config.is_google());
+                // Before the browser opens, the sign-in is checked: emulators up, client known.
+                let (title, help) = match &authorize_url {
+                    None => ("Getting ready to sign in…", None),
+                    Some(_) => (
+                        "Finish signing in with your browser",
+                        Some(if google {
+                            "If no browser opened, copy the sign-in link and open it in a browser on this computer. \
+                             If Google shows “Error 401: invalid_client”, the client ID or secret is wrong: cancel \
+                             and copy them again."
+                        } else {
+                            "If no browser opened, copy the sign-in link and open it in a browser on this computer."
+                        }),
+                    ),
                 };
                 v_flex()
                     .gap_3()
@@ -299,16 +314,8 @@ impl RenderOnce for ConnectionPanel {
                                 v_flex()
                                     .min_w_0()
                                     .gap_0p5()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child("Finish signing in in your browser"),
-                                    )
-                                    .child(help_text(
-                                        "If no browser opened, copy the sign-in link and open it in a browser on this computer.",
-                                        cx,
-                                    )),
+                                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
+                                    .when_some(help, |this, help| this.child(help_text(help, cx))),
                             ),
                     )
                     .child(

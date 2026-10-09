@@ -282,36 +282,56 @@ fn the_uploads_page_offers_what_each_job_allows(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn youtube_settings_choose_the_backend_and_save_the_oauth_client(cx: &mut TestAppContext) {
+fn youtube_settings_start_with_the_google_client_and_hide_the_emulator(cx: &mut TestAppContext) {
+    // A fresh install: the creator's own YouTube account, not the developer emulator.
     let workspace = Workspace::open(cx, YoutubeBackend::default());
     let (handle, _settings) = open(cx, |window, cx| cx.new(|cx| YoutubeSettings::new(window, cx)));
     let backend = |cx: &mut TestAppContext| workspace.state.read_with(cx, |state, _| state.settings().youtube.clone());
-
-    window(cx, handle, |window, cx| {
-        window.render_frame(cx);
-        assert_eq!(window.within("youtube-backend").find(1usize).checked(), Some(true));
-        assert!(window.find("youtube-google-url").visible());
-        window.within("youtube-backend").click(0usize, cx);
-    });
+    let problem = |cx: &mut TestAppContext| {
+        workspace.service.read_with(cx, |service, _| service.config().err().map(|problem| problem.to_string()))
+    };
     assert_eq!(backend(cx), YoutubeBackend::Google { client_id: String::new(), client_secret: String::new() });
-    assert!(workspace.service.read_with(cx, |service, _| service.config().is_err()), "no client yet");
 
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
+        // The setup steps unfold and link to the console pages; the fields come next,
+        // Connect after them.
+        assert!(window.try_find("google-step-2").is_none_or(|step| !step.visible()));
+        window.click("youtube-setup-steps", cx);
+        window.click("google-step-2", cx);
+        let fields = window.find("youtube-client-secret").bounds();
+        assert!(window.within("youtube-connection").find("connect").bounds().top() > fields.bottom());
+        // The emulator is a folded developer option.
+        assert!(window.try_find("youtube-use-emulator").is_none_or(|switch| !switch.visible()));
         assert!(window.try_find("youtube-google-url").is_none());
-        // Connect keeps its place but is disabled (an enabled one would fail to connect).
+        // Disabled until the client is filled in (an enabled one would fail to connect).
         window.within("youtube-connection").click("connect", cx);
     });
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://console.cloud.google.com/apis/library/youtube.googleapis.com")
+    );
     assert_eq!(workspace.service.read_with(cx, |service, _| service.connection().clone()), Connection::Disconnected);
+    assert_eq!(problem(cx).as_deref(), Some("Add the client ID and client secret of your Google OAuth client."));
 
+    // The secret pasted into both fields is caught before any browser opens.
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         window.click("youtube-client-id", cx);
-        window.input("1234-abc.apps.googleusercontent.com", cx);
+        window.input("GOCSPX-secret", cx);
         window.click("youtube-client-secret", cx);
         window.input("GOCSPX-secret", cx);
         // The secret is masked, so its value is not exposed either.
         assert_eq!(window.find("youtube-client-secret").value(), None);
+    });
+    settle(cx);
+    assert!(problem(cx).is_some_and(|problem| problem.contains("isn't a Google OAuth client ID")));
+
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("youtube-client-id", cx);
+        window.press("secondary-a", cx);
+        window.input("1234-abc.apps.googleusercontent.com", cx);
     });
     settle(cx);
     assert_eq!(
@@ -325,6 +345,26 @@ fn youtube_settings_choose_the_backend_and_save_the_oauth_client(cx: &mut TestAp
     assert!(
         config.is_some_and(|config| config.is_google() && config.client_id == "1234-abc.apps.googleusercontent.com")
     );
+    // Connect can be clicked now: what Google will show comes with it.
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        let connect = window.within("youtube-connection").find("connect").bounds();
+        assert!(window.find("youtube-expectations").bounds().top() > connect.bottom());
+    });
+
+    // Developers unfold the emulator option and switch to it.
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("youtube-developer", cx);
+        window.click("youtube-use-emulator", cx);
+    });
+    assert_eq!(backend(cx), YoutubeBackend::Emulator { google_url: String::new(), youtube_url: String::new() });
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("youtube-google-url").visible());
+        assert!(window.try_find("youtube-client-id").is_none());
+        assert!(window.try_find("youtube-expectations").is_none());
+    });
 }
 
 #[gpui_kit::test]
@@ -438,4 +478,26 @@ fn an_outage_shows_the_retry_on_the_upload_card(cx: &mut TestAppContext) {
             .read_with(cx, |s, _| s.latest_job(video_id).filter(|job| job.status == UploadStatus::Cancelled).cloned())
     });
     assert!(service.read_with(cx, |s, _| s.retry(job.id).is_none() && s.is_resumable(&job)));
+}
+
+#[gpui_kit::test]
+fn connecting_to_stopped_emulators_fails_without_opening_the_browser(cx: &mut TestAppContext) {
+    // Nothing listens on the discard port.
+    let stopped =
+        YoutubeBackend::Emulator { google_url: "http://127.0.0.1:9".into(), youtube_url: "http://127.0.0.1:9".into() };
+    let workspace = Workspace::open(cx, stopped);
+    let (handle, _settings) = open(cx, |window, cx| cx.new(|cx| YoutubeSettings::new(window, cx)));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.within("youtube-connection").click("connect", cx);
+    });
+    let service = workspace.service.clone();
+    let message =
+        wait_until(cx, "the failed sign-in", |cx| match service.read_with(cx, |s, _| s.connection().clone()) {
+            Connection::Failed(message) => Some(message.to_string()),
+            Connection::Connecting { authorize_url: Some(url) } => panic!("the browser opened {url}"),
+            _ => None,
+        });
+    assert_eq!(message, "Neither emulator is answering. Start them with scripts/emulators.sh.");
+    assert_eq!(cx.opened_url(), None);
 }

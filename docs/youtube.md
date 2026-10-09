@@ -22,7 +22,9 @@ foreground:
 | YouTube | `http://127.0.0.1:4020` | Custom emulator (`emulators/youtube.ts`): channels, resumable video uploads, videos, thumbnails, uploads playlist |
 
 Ports come from `GOOGLE_EMULATOR_PORT` and `YOUTUBE_EMULATOR_PORT`. Point the app at the
-emulators with the "Emulator" YouTube backend in settings, or with environment variables:
+emulators with **Settings → YouTube → Developer: local emulator** (a switch, folded away by
+default; a fresh install connects to Google), or with environment variables, which win over
+the settings:
 
 ```bash
 VIDEOCRM_GOOGLE_URL=http://127.0.0.1:4002 VIDEOCRM_YOUTUBE_URL=http://127.0.0.1:4020 cargo run
@@ -99,7 +101,12 @@ without running.
 
 All calls block; run them on a background thread and stream progress back to the UI.
 
-1. `begin_authorization(&config)` binds `127.0.0.1:<random port>` (it refuses a Google
+1. Optionally `check_client(&config)` first: it posts a made-up authorization code to the
+   token endpoint, so an unknown client ID or a wrong secret fails with
+   `Error::is_invalid_client()` before any browser opens (a known client gets
+   `invalid_grant`, which counts as fine), and an unreachable server with
+   `Error::is_network()`.
+   `begin_authorization(&config)` binds `127.0.0.1:<random port>` (it refuses a Google
    config without client secret); open `pending.authorize_url()` in the browser;
    `pending.wait(timeout, &cancel)` serves the redirect, shows a "You're signed in" page
    and returns `Credentials`. Requests without this sign-in's `state` get an error page
@@ -150,16 +157,30 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
 
 ### Connection
 
-- The backend comes from `AppSettings.youtube` through `publish::backend_config`: Google
-  needs both client fields; the emulator falls back to the default URLs for empty fields;
-  `VIDEOCRM_GOOGLE_URL` / `VIDEOCRM_YOUTUBE_URL` override both (the settings section says
-  so). The service re-reads it on `AppEvent::SettingsChanged`; a different backend signs
+- The backend comes from `AppSettings.youtube` through `publish::backend_config`. The
+  default is Google with empty client fields; Google needs both fields and a client ID
+  ending in `.apps.googleusercontent.com` (otherwise Connect stays disabled and says why);
+  the emulator falls back to the default URLs for empty fields; `VIDEOCRM_GOOGLE_URL` /
+  `VIDEOCRM_YOUTUBE_URL` override both (the settings section says so).
+- The settings section (Settings → YouTube and onboarding step 3) reads top to bottom: the
+  OAuth client (setup steps with console links, folded; client ID and secret), the
+  connection with Connect, and what Google will show once Connect is usable (unverified-app
+  warning, permission boxes, 7-day reconnect in Testing, private uploads until the audit).
+  The emulator is a switch under the folded **Developer: local emulator**; turning it on
+  puts the emulator addresses where the client fields were. Signed in, the section shows
+  the account first. The service re-reads it on `AppEvent::SettingsChanged`; a different backend signs
   out, because tokens belong to the backend that issued them (`Account::backend`).
 - `connection()` is `Disconnected | Connecting { authorize_url } | Connected(Account) |
   Failed(message)`; the service emits `YoutubeEvent::ConnectionChanged` and notifies on
-  every change. `connect` runs `begin_authorization` and the wait on a `youtube-sign-in`
-  thread, opens the consent page with `cx.open_url` and exposes the URL for **Copy link**;
-  `cancel` sets the wait's cancel flag.
+  every change. `connect` runs the sign-in on a `youtube-sign-in` thread. Before the
+  browser opens it checks that the sign-in can work: for the emulators both must answer
+  (the same probe as **Check**), and `check_client` must accept the OAuth client. Either
+  failure ends the sign-in at once with a sentence saying what to fix ("Google doesn't
+  recognise this client ID and secret…", "Can't reach Google…", "Neither emulator is
+  answering…"). Then `begin_authorization` and the wait (up to 5 minutes) run, the consent
+  page opens with `cx.open_url` and its URL is exposed for **Copy link**; `cancel` sets the
+  wait's cancel flag. While waiting, the panel says to finish in the browser and, for
+  Google, that "Error 401: invalid_client" there means a wrong client ID or secret.
 - The sign-in thread only produces the client and account. The service saves the login
   when it accepts the result, so a cancelled or superseded sign-in leaves no file behind.
   Refreshed tokens go to the file only while that sign-in lasts: a request still running
@@ -281,8 +302,9 @@ client in Google Cloud (free) and pastes it into VideoCRM. It takes about ten mi
    **Desktop app**, name it "VideoCRM desktop" and click **Create**. Copy the **Client ID**
    and **Client secret** (or download the JSON) right away: the console may not show the
    secret again.
-7. **Connect in VideoCRM.** Open **Settings → YouTube**, choose **YouTube account
-   (Google)**, paste the client ID and client secret, and click **Connect**. Your browser
+7. **Connect in VideoCRM.** Open **Settings → YouTube**, paste the client ID and client
+   secret, and click **Connect**. VideoCRM first checks the client with Google: a typo in
+   either value is reported right away. Your browser
    opens Google's sign-in page (if it does not, for example on a remote machine, use
    **Copy link** and open the link in a browser on the same computer):
    - Pick the test-user account.
