@@ -306,11 +306,12 @@ impl RunView {
 
     fn render_stepper(&self, run: &PipelineRun, cx: &App) -> impl IntoElement {
         let rendering_step = self.last_phase(cx).is_some_and(PhaseKind::renders);
+        // A discarded strategy is still there to review.
+        let restorable = run.status == RunStatus::Cancelled && self.service.read(cx).can_restore(run.id);
         let step = match run.status {
             RunStatus::Queued | RunStatus::Planning => 0,
             RunStatus::AwaitingApproval => 1,
-            // A discarded strategy is still there to review.
-            RunStatus::Cancelled if self.service.read(cx).can_restore(run.id) => 1,
+            RunStatus::Cancelled if restorable => 1,
             RunStatus::Rendering => 2,
             RunStatus::Succeeded => 4,
             RunStatus::Failed | RunStatus::Cancelled => {
@@ -321,14 +322,27 @@ impl RunView {
                 }
             }
         };
-        Stepper::new("run-stepper").small().selected_index(step).items(
-            [
-                (IconName::Search, "Plan"),
-                (IconName::FileText, "Review strategy"),
-                (IconName::Film, "Render"),
-                (IconName::CircleCheck, "Done"),
-            ]
-            .map(|(icon, label)| StepperItem::new().icon(icon).child(div().text_sm().child(label))),
+        // The step a run stopped at says so: its icon and its label, not only a colour.
+        let stopped = match run.status {
+            RunStatus::Failed => Some((IconName::CircleX, "failed", cx.theme().danger)),
+            RunStatus::Cancelled if !restorable => {
+                Some((IconName::CircleSlash, "stopped", cx.theme().muted_foreground))
+            }
+            _ => None,
+        };
+        let steps = [
+            (IconName::Search, "Plan"),
+            (IconName::FileText, "Review strategy"),
+            (IconName::Film, "Render"),
+            (IconName::CircleCheck, "Done"),
+        ];
+        Stepper::new("run-stepper").small().text_center(true).selected_index(step).items(
+            steps.into_iter().enumerate().map(|(ix, (icon, label))| match stopped {
+                Some((icon, state, color)) if ix == step => StepperItem::new().icon(Icon::new(icon)).child(
+                    div().id("run-stopped-step").test_support().text_color(color).child(format!("{label} {state}")),
+                ),
+                _ => StepperItem::new().icon(icon).child(label),
+            }),
         )
     }
 

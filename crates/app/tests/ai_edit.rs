@@ -535,6 +535,20 @@ fn a_failing_agent_fails_the_run_with_its_stderr(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_failed_edit_marks_the_step_it_stopped_at(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[("FAKE_AGENT_MODE", "fail")]);
+    let video = fx.video;
+    let window = open(cx, move |window, cx| AiEditPanel::new(video, window, cx));
+    let id = fx.start(cx, false);
+    fx.wait_for_status(cx, id, RunStatus::Failed);
+    // Not only the card below: the stepper itself shows the step failed.
+    wait_for_window(cx, window, "the failed step", |window, _| shows(window, "run-stopped-step"));
+}
+
+#[gpui_kit::test]
 fn an_agent_command_that_is_not_claude_code_is_named_as_the_cause(cx: &mut TestAppContext) {
     if !tools_available() {
         return;
@@ -1016,6 +1030,8 @@ fn a_running_edit_can_be_cancelled_and_retried(cx: &mut TestAppContext) {
     fx.wait_for_status(cx, id, RunStatus::Cancelled);
     wait_for_window(cx, window, "the cancelled card", |window, _| shows(window, "run-retry"));
     assert!(cx.update_window(window, |_, window, _| shows(window, "run-continue")).unwrap(), "a session to resume");
+    let stopped = cx.update_window(window, |_, window, _| shows(window, "run-stopped-step")).unwrap();
+    assert!(stopped, "the stepper marks where the edit stopped");
 
     click(cx, window, "run-retry");
     assert_eq!(fx.run(cx, id).status, RunStatus::Planning);
