@@ -146,6 +146,28 @@ fn a_pending_form_edit_keeps_the_final_cut_ai_edit_chose(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+fn long_blocking_reasons_wrap_inside_the_upload_card(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |video| {
+        video.publish.title = format!("<{}>", "Desk setup ".repeat(10));
+        video.publish.description = "é".repeat(2672);
+        video.publish.tags = (0..60).map(|ix| format!("desk tag {ix}")).collect();
+        video.publish.publish_at = Some(Utc::now() - chrono::TimeDelta::days(1));
+    });
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let reasons = panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx));
+    assert!(reasons.len() >= 6, "{reasons:?}");
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        let list = window.find("upload-blockers").bounds();
+        for ix in 0..reasons.len() {
+            let reason = window.find(("upload-blocker", ix)).bounds();
+            assert!(reason.right() <= list.right(), "reason {ix} runs past the card: {reason:?} vs {list:?}");
+        }
+    });
+}
+
+#[gpui_kit::test]
 fn a_chosen_file_counts_as_missing_only_once_it_is_known_to_be(cx: &mut TestAppContext) {
     let workspace = Workspace::open(cx, YoutubeBackend::default());
     let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
@@ -532,4 +554,34 @@ fn connecting_to_stopped_emulators_fails_without_opening_the_browser(cx: &mut Te
         });
     assert_eq!(message, "Neither emulator is answering. Start them with scripts/emulators.sh.");
     assert_eq!(cx.opened_url(), None);
+}
+
+#[gpui_kit::test]
+fn a_file_found_missing_at_upload_shows_on_the_file_card(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let file = publish_support::video_file(workspace.dir.path(), "huge-take.mp4");
+    let video_id = workspace.create_video(cx, "Keychron Q1 Max review", |video| {
+        video.publish.file = Some(file.clone());
+    });
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    cx.run_until_parked();
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), []);
+    // Renamed in the file manager after the tab read it.
+    std::fs::rename(&file, workspace.dir.path().join("renamed.mp4")).unwrap();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("upload-to-youtube", cx);
+        assert_eq!(window.notifications(cx).len(), 1);
+        window.clear_notifications(cx);
+    });
+    cx.run_until_parked();
+    // The card and the reasons under the button catch up instead of offering the upload again.
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), [BlockingReason::FileMissing]);
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("upload-blockers").visible());
+    });
+    assert!(workspace.service.read_with(cx, |s, _| s.jobs().is_empty()));
 }

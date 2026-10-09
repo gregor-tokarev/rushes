@@ -21,7 +21,7 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::time_field::TimePrecision;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IndexPath, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IndexPath, Side, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -42,7 +42,7 @@ use super::rules::{
 use super::service::YoutubeService;
 use super::transfer::{format_bytes, format_duration, format_eta, format_speed};
 use super::ui::{ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, status_line};
-use super::upload::ProcessingOutcome;
+use super::upload::{ProcessingOutcome, UploadError};
 use crate::state::{AppEvent, AppState};
 
 /// Form edits are saved this long after the last keystroke.
@@ -588,6 +588,7 @@ impl PublishPanel {
         let video_id = self.video_id;
         let started = self.service.update(cx, |service, cx| service.start_upload(video_id, cx));
         if let Err(error) = started {
+            self.on_upload_refused(&error, cx);
             window.push_notification(Notification::error(error.to_string()).title("Couldn't start the upload"), cx);
         }
     }
@@ -596,7 +597,16 @@ impl PublishPanel {
         let id = job.id;
         let resumed = self.service.update(cx, |service, cx| service.resume_upload(id, cx));
         if let Err(error) = resumed {
+            self.on_upload_refused(&error, cx);
             window.push_notification(Notification::error(error.to_string()).title("Couldn't resume the upload"), cx);
+        }
+    }
+
+    /// A file found missing when the upload starts is read again, so the file card and
+    /// the reasons under the button say so too.
+    fn on_upload_refused(&mut self, error: &UploadError, cx: &mut Context<Self>) {
+        if matches!(error, UploadError::Blocked(reasons) if reasons.contains(&BlockingReason::FileMissing)) {
+            self.refresh_file(cx);
         }
     }
 
@@ -884,7 +894,7 @@ impl PublishPanel {
                             .when_some(youtube_url.clone(), |this, url| this.child(open_link(url)))
                             .child(
                                 Button::new("upload-again")
-                                    .label("Upload again")
+                                    .label("Upload again…")
                                     .small()
                                     .outline()
                                     .disabled(!reasons.is_empty())
@@ -1008,7 +1018,8 @@ impl PublishPanel {
             .outline()
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
+                // The film icons take the left side; the chosen file is ticked on the right.
+                let mut menu = menu.check_side(Side::Right);
                 for (ix, choice) in choices.iter().enumerate() {
                     if ix == 0 || choices[ix - 1].source != choice.source {
                         menu = menu.label(choice.source);
@@ -1186,14 +1197,15 @@ fn render_blockers(reasons: &[BlockingReason], cx: &App) -> impl IntoElement {
     v_flex()
         .id("upload-blockers")
         .gap_1()
-        .children(reasons.iter().map(|reason| {
+        .children(reasons.iter().enumerate().map(|(ix, reason)| {
             h_flex()
                 .gap_2()
                 .items_start()
                 .text_sm()
                 .text_color(muted)
                 .child(div().pt_0p5().child(Icon::new(IconName::Circle).xsmall()))
-                .child(reason.to_string())
+                // Wraps inside the narrow side column instead of running past the card.
+                .child(div().id(("upload-blocker", ix)).flex_1().min_w_0().child(reason.to_string()).test_support())
         }))
         // Tests check that the reasons are on screen.
         .test_support()
