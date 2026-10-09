@@ -6,7 +6,7 @@ use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Side, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -252,23 +252,26 @@ impl PropertyEditor {
             .dropdown_caret(true)
             .disabled(self.existing.is_some())
             .dropdown_menu(move |menu, _, _| {
-                KINDS.iter().fold(menu, |menu, kind| {
-                    let kind = kind();
-                    let editor = editor.clone();
-                    let chosen = kind.clone();
-                    menu.item(
-                        PopupMenuItem::new(kind.label())
-                            .icon(kind_icon(&kind))
-                            .checked(kind.label() == current)
-                            .on_click(move |_, _, cx| {
-                                let kind = chosen.clone();
-                                _ = editor.update(cx, |editor, cx| {
-                                    editor.kind = kind;
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                })
+                // Each item has an icon, so the check goes on the trailing side.
+                KINDS
+                    .iter()
+                    .fold(menu.check_side(Side::Right), |menu, kind| {
+                        let kind = kind();
+                        let editor = editor.clone();
+                        let chosen = kind.clone();
+                        menu.item(
+                            PopupMenuItem::new(kind.label())
+                                .icon(kind_icon(&kind))
+                                .checked(kind.label() == current)
+                                .on_click(move |_, _, cx| {
+                                    let kind = chosen.clone();
+                                    _ = editor.update(cx, |editor, cx| {
+                                        editor.kind = kind;
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    })
             })
     }
 

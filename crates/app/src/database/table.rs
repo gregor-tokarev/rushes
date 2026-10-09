@@ -580,7 +580,7 @@ impl VideoTable {
         .when(align_right, |this| this.justify_end())
         .map(|this| {
             if text.is_empty() {
-                this.child(div())
+                this.child(empty_value(cx))
             } else {
                 this.child(div().min_w_0().truncate().child(text))
             }

@@ -48,20 +48,28 @@ pub(crate) const TEXT_ENTRY_CONTEXT: &str = "VideoDatabaseTextEntry";
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum DatabaseEvent {
+    /// Show the video's page.
     OpenVideo(VideoId),
     /// Create a video, in the given status when created from a board column.
+    /// The panel shows it once the owner hands it back through `set_data`.
     CreateVideo {
         status: Option<VideoStatus>,
     },
+    /// The whole video after an edit, with `updated_at` stamped.
     UpdateVideo(Video),
+    /// Already confirmed by the user.
     DeleteVideos(Vec<VideoId>),
+    /// The owner makes the copy and hands it back through `set_data`.
     DuplicateVideo(VideoId),
     CreateProperty(PropertyDef),
     UpdateProperty(PropertyDef),
+    /// Already confirmed; the panel has dropped the property's values.
     DeleteProperty(PropertyId),
+    /// Columns, widths, sorts, filters or the name of a view changed.
     SaveView(DatabaseView),
     CreateView(DatabaseView),
     DeleteView(ViewId),
+    /// The user switched views; not sent for `set_active_view`.
     ActiveViewChanged(ViewId),
 }
 
@@ -804,7 +812,8 @@ impl DatabasePanel {
         }
     }
 
-    /// Scrolls the table horizontally until `column` is in view.
+    /// Scrolls the table horizontally until `column` and the column after it
+    /// are in view; after the last column that is the add-property column.
     fn reveal_column(&mut self, column: Column, cx: &mut Context<Self>) {
         let Some(view) = self.active_view() else {
             return;
@@ -812,7 +821,7 @@ impl DatabasePanel {
         let columns = visible_columns(view, &self.properties);
         if let Some(ix) = columns.iter().position(|layout| layout.column == column) {
             self.table
-                .update(cx, |table, cx| table.scroll_to_col(ix, cx));
+                .update(cx, |table, cx| table.scroll_to_col(ix + 1, cx));
         }
     }
 
