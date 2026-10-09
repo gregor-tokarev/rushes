@@ -41,8 +41,9 @@ memory and resets when the emulators stop.
 
 ### Emulator behaviour
 
-- Every YouTube request needs `Authorization: Bearer <token>`; the token is checked
-  against the Google emulator's userinfo endpoint (cached for 5 s). Errors use Google's
+- Every YouTube API request needs `Authorization: Bearer <token>`; the token is checked
+  against the Google emulator's userinfo endpoint (cached for 5 s). As on Google, PUTs to
+  an upload session URL need no token: the session URL itself is the credential. Errors use Google's
   shape: `{"error": {"code", "message", "errors": [{"reason", "domain", ...}], "status"}}`.
 - Uploads follow the resumable protocol: `POST /upload/youtube/v3/videos?uploadType=resumable`
   returns the session URL in `Location`; `PUT` chunks with `Content-Range`, `308` +
