@@ -20,7 +20,7 @@ use videocrm::publish::{
 };
 use videocrm::route::Route;
 use videocrm_core::settings::YoutubeBackend;
-use videocrm_core::{Block, BlockKind, DocumentKind, Privacy, UploadId, UploadJob, UploadStatus, VideoId};
+use videocrm_core::{Block, BlockKind, DocumentKind, Privacy, UploadId, UploadJob, UploadStatus, VideoId, YoutubeLink};
 
 /// Longer than the views' save delay.
 const SAVED: Duration = Duration::from_secs(1);
@@ -109,6 +109,82 @@ fn the_publish_form_saves_metadata_and_explains_what_blocks_the_upload(cx: &mut 
     settle(cx);
     let publish = workspace.video(cx, video_id).publish;
     assert_eq!((publish.privacy, publish.publish_at), (Privacy::Public, None));
+}
+
+#[gpui_kit::test]
+fn a_chosen_file_counts_as_missing_only_once_it_is_known_to_be(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |video| video.publish.file = Some(file.clone()));
+    let (_handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let reasons = |cx: &mut TestAppContext| panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx));
+    // The file details are still being read: no "no longer exists" in the meantime.
+    assert_eq!(reasons(cx), [BlockingReason::NotConnected]);
+    cx.run_until_parked();
+    assert_eq!(reasons(cx), [BlockingReason::NotConnected]);
+
+    // Chosen elsewhere, and gone from the disk.
+    workspace.state.update(cx, |state, cx| {
+        let mut video = state.video(video_id).unwrap().clone();
+        video.publish.file = Some(workspace.dir.path().join("deleted.mp4"));
+        state.update_video(video, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(reasons(cx), [BlockingReason::NotConnected, BlockingReason::FileMissing]);
+}
+
+#[gpui_kit::test]
+fn a_finished_upload_says_why_it_cannot_go_up_again(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let youtube_id = "dQw4w9WgXcQ";
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |video| {
+        video.youtube = Some(YoutubeLink {
+            video_id: youtube_id.into(),
+            url: format!("https://www.youtube.com/watch?v={youtube_id}"),
+            channel_id: "UC1".into(),
+            privacy: Privacy::Public,
+            uploaded_at: Utc::now(),
+        });
+    });
+    let done = UploadJob {
+        id: UploadId::new(),
+        video_id,
+        file: workspace.dir.path().join("final.mp4"),
+        status: UploadStatus::Done { video_id: youtube_id.into() },
+        session_url: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    workspace.insert_jobs(cx, &[&done]);
+    workspace.restart(cx);
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("open-on-youtube").visible());
+        // Not connected and no file: "Upload again" is disabled (an enabled one would ask
+        // to confirm a second copy), and the reasons are listed.
+        window.click("upload-again", cx);
+        assert!(!window.has_active_dialog(cx));
+        assert!(window.find("upload-blockers").visible());
+    });
+}
+
+#[gpui_kit::test]
+fn quitting_saves_the_last_form_edits(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |_| {});
+    let store = workspace.state.read_with(cx, |state, _| state.store());
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("publish-title", cx);
+        window.input("Desk tour", cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(workspace.video(cx, video_id).publish.title, "", "still within the save delay");
+    cx.quit();
+    let saved = store.lock().unwrap().get_video(video_id).unwrap().unwrap();
+    assert_eq!(saved.publish.title, "Desk tour");
 }
 
 #[gpui_kit::test]
@@ -278,9 +354,12 @@ fn connects_and_uploads_from_the_publish_tab(cx: &mut TestAppContext) {
     });
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
-        // No browser on this machine: the link can be copied instead.
+        // No browser on this machine: the link can be copied instead, and copying says so.
         window.within("publish-connection").click("copy-link", cx);
+        assert_eq!(window.notifications(cx).len(), 1);
+        window.clear_notifications(cx);
     });
+    settle(cx);
     assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some(url.as_str()));
     publish_support::consent_in_browser(&url, "creator@example.com");
     wait_until(cx, "the connection", |cx| service.read_with(cx, |s, _| s.is_connected().then_some(())));

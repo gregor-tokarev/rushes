@@ -177,8 +177,12 @@ impl PublishPanel {
                     this.refresh_file(cx);
                 }
             }),
-            // Leaving the page must not lose the last edits.
+            // Leaving the page or quitting must not lose the last edits.
             cx.on_release(|this, cx| this.save_pending(cx)),
+            cx.on_app_quit(|this, cx| {
+                this.save_pending(cx);
+                async {}
+            }),
         ];
 
         let mut panel = Self {
@@ -215,7 +219,12 @@ impl PublishPanel {
     /// What stops the upload, as the form currently reads.
     pub fn blocking_reasons(&self, cx: &App) -> Vec<BlockingReason> {
         let Some(video) = self.draft_video(cx) else { return Vec::new() };
-        let file_exists = self.file.as_ref().is_some_and(|file| file.size.is_some());
+        // Until the chosen file has been looked at it counts as present; starting the
+        // upload checks it again.
+        let file_exists = match (&self.draft.file, &self.file) {
+            (Some(path), Some(details)) if &details.path == path => details.size.is_some(),
+            _ => true,
+        };
         rules::blocking_reasons(&video, self.service.read(cx).is_connected(), file_exists, Utc::now())
     }
 
@@ -674,7 +683,8 @@ impl PublishPanel {
         )
     }
 
-    fn render_upload(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_upload(&self, cx: &mut Context<Self>) -> AnyElement {
+        let reasons = self.blocking_reasons(cx);
         let service = self.service.read(cx);
         let job = service.latest_job(self.video_id).cloned();
         let theme = cx.theme();
@@ -793,10 +803,11 @@ impl PublishPanel {
                                     .label("Upload again")
                                     .small()
                                     .outline()
-                                    .disabled(!self.blocking_reasons(cx).is_empty())
+                                    .disabled(!reasons.is_empty())
                                     .on_click(cx.listener(|this, _, window, cx| this.start_upload(window, cx))),
                             ),
                     )
+                    .when(!reasons.is_empty(), |this| this.child(render_blockers(&reasons, cx)))
                     .into_any_element()
             }
             Some(job) if service.is_resumable(job) => {
@@ -839,11 +850,20 @@ impl PublishPanel {
                                     .label("Start over")
                                     .small()
                                     .ghost()
-                                    .disabled(!self.blocking_reasons(cx).is_empty())
+                                    .disabled(!reasons.is_empty())
                                     .on_click(cx.listener(|this, _, window, cx| this.start_upload(window, cx))),
                             ),
                     )
-                    .when(!service.is_connected(), |this| this.child(help_text("Connect the account to resume.", cx)))
+                    .map(|this| {
+                        if !service.is_connected() {
+                            this.child(help_text("Connect the account to resume.", cx))
+                        } else if reasons.is_empty() {
+                            this
+                        } else {
+                            // Resume only needs the account; starting over needs the whole form.
+                            this.child(render_blockers(&reasons, cx))
+                        }
+                    })
                     .into_any_element()
             }
             failed => {
@@ -862,7 +882,7 @@ impl PublishPanel {
                             cx,
                         ))
                     })
-                    .child(self.render_upload_button(window, cx))
+                    .child(self.render_upload_button(reasons, cx))
                     .when_some(youtube_url, |this, url| this.child(open_link(url)))
                     .into_any_element()
             }
@@ -870,8 +890,7 @@ impl PublishPanel {
         card("publish-upload", "Upload").child(body).into_any_element()
     }
 
-    fn render_upload_button(&self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let reasons = self.blocking_reasons(cx);
+    fn render_upload_button(&self, reasons: Vec<BlockingReason>, cx: &mut Context<Self>) -> impl IntoElement {
         let summary = self.draft_video(cx).map(|video| upload_summary(&video));
         v_flex()
             .gap_3()
@@ -888,15 +907,7 @@ impl PublishPanel {
                 if reasons.is_empty() {
                     this.when_some(summary, |this, summary| this.child(help_text(summary, cx)))
                 } else {
-                    this.child(v_flex().id("upload-blockers").gap_1().children(reasons.iter().map(|reason| {
-                        h_flex()
-                            .gap_2()
-                            .items_start()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(div().pt_0p5().child(Icon::new(IconName::Circle).xsmall()))
-                            .child(reason.to_string())
-                    })))
+                    this.child(render_blockers(&reasons, cx))
                 }
             })
     }
@@ -1060,7 +1071,7 @@ impl PublishPanel {
 }
 
 impl Render for PublishPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let form = v_flex()
             .flex_1()
             .min_w(rems(20.))
@@ -1073,7 +1084,7 @@ impl Render for PublishPanel {
             .flex_shrink_0()
             .gap_6()
             // The cards that clear the upload's blocking reasons follow it.
-            .child(self.render_upload(window, cx))
+            .child(self.render_upload(cx))
             .child(
                 card("publish-account", "YouTube account")
                     .child(ConnectionPanel::new("publish-connection", self.service.clone())),
@@ -1083,6 +1094,25 @@ impl Render for PublishPanel {
         // The video page owns scrolling and the page inset.
         h_flex().id("publish-panel").w_full().items_start().gap_8().child(form).child(side)
     }
+}
+
+/// What stops the upload, one line each, so a disabled upload button never goes unexplained.
+fn render_blockers(reasons: &[BlockingReason], cx: &App) -> impl IntoElement {
+    let muted = cx.theme().muted_foreground;
+    v_flex()
+        .id("upload-blockers")
+        .gap_1()
+        .children(reasons.iter().map(|reason| {
+            h_flex()
+                .gap_2()
+                .items_start()
+                .text_sm()
+                .text_color(muted)
+                .child(div().pt_0p5().child(Icon::new(IconName::Circle).xsmall()))
+                .child(reason.to_string())
+        }))
+        // Tests check that the reasons are on screen.
+        .test_support()
 }
 
 /// "Uploads as unlisted." / "Publishes Fri, 10 Oct at 09:00."
