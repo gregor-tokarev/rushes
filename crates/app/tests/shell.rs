@@ -714,15 +714,15 @@ fn the_account_badge_opens_the_youtube_settings(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, true, &[]);
     app.click(cx, "account-badge");
     assert_eq!(app.route(cx), Route::Settings { section: SettingsSection::Youtube });
-    assert!(app.has(cx, "check-emulators"));
+    assert!(app.has(cx, "youtube-client-id"));
 
     // The sidebar's Settings opens General; the badge switches back to YouTube.
     app.click(cx, "sidebar-footer-0");
     assert_eq!(app.route(cx), Route::Settings { section: SettingsSection::General });
-    assert!(!app.has(cx, "check-emulators"));
+    assert!(!app.has(cx, "youtube-client-id"));
     assert!(app.has(cx, "settings-media-root"));
     app.click(cx, "account-badge");
-    assert!(app.has(cx, "check-emulators"));
+    assert!(app.has(cx, "youtube-client-id"));
 
     // Back returns to the section that was open.
     app.press(cx, "alt-left");
