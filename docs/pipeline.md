@@ -107,15 +107,19 @@ nothing. Parsing never fails a run.
 ### Errors
 
 `PipelineError`: `AgentNotFound`, `SkillNotFound`, `FootageNotFound` (checked before
-spawning), `Spawn`, `Cancelled`, `AgentFailed { message, stderr_tail, session_id }` (non-zero
-exit or no result event; the session id allows a retry with `--resume`), `Io`.
+spawning), `Spawn`, `Cancelled`, `AgentFailed { message, stderr_tail, session_id, no_result }`
+(non-zero exit or no result event; the session id allows a retry with `--resume`;
+`no_result` when the agent never reported a result, which usually means the command is not
+Claude Code or could not start), `Io`.
 
 ## Requirements
 
-`doctor(&config, skill_dir)` reports each with a human-readable detail; `Doctor::ready()`
-is true when all pass. Tools are looked up on the agent's `PATH` (`config.env` first).
+`doctor(&config, skill_dir)` reports each with a plain-text detail for people (version and
+path, or what is missing); `Doctor::ready()` is true when all pass. Tools are looked up on
+the agent's `PATH` (`config.env` first).
 
-- **Agent**: Claude Code CLI (`claude --version`), logged in.
+- **Agent**: Claude Code CLI; `--version` must print `Claude Code` (any other program
+  answers `--version` too, but cannot run an edit). Login is not checked.
 - **Skill**: `SKILL.md` in the configured folder, default `~/.claude/skills/video-use`
   (symlinks resolved; the resolved folder is returned as `Doctor::skill_dir`).
 - **ffmpeg** and **ffprobe** on `PATH`.

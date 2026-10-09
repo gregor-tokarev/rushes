@@ -535,6 +535,32 @@ fn a_failing_agent_fails_the_run_with_its_stderr(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn an_agent_command_that_is_not_claude_code_is_named_as_the_cause(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let silent = fx.root.path().join("not-claude");
+    fs::write(&silent, "#!/bin/sh\necho 'true (GNU coreutils) 9.7'\n").unwrap();
+    fs::set_permissions(&silent, fs::Permissions::from_mode(0o755)).unwrap();
+    cx.update(|cx| {
+        fx.state.update(cx, |state, cx| {
+            state.update_settings(cx, |settings| settings.pipeline.agent_command = silent.display().to_string())
+        })
+    });
+    let service = fx.service.clone();
+    wait_until(cx, "the requirement check", |cx| !service.read(cx).is_checking());
+    let doctor = cx.read(|cx| service.read(cx).doctor().cloned()).expect("doctor");
+    assert!(!doctor.agent.ok && doctor.agent.detail.contains("is not Claude Code"), "{:?}", doctor.agent);
+
+    let id = fx.start(cx, false);
+    let failed = fx.wait_for_status(cx, id, RunStatus::Failed);
+    let error = failed.error.expect("error");
+    assert!(error.starts_with("The agent stopped without reporting a result"), "{error}");
+    assert!(error.ends_with("Check the agent command in Settings > AI editing."), "{error}");
+}
+
+#[gpui_kit::test]
 fn startup_marks_interrupted_runs_failed_and_they_can_continue(cx: &mut TestAppContext) {
     if !tools_available() {
         return;

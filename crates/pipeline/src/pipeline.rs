@@ -108,20 +108,22 @@ pub fn run_phase(
     let (status, run) = run_agent(config, &program, &invocation, on_event, cancel)?;
 
     let session_id = run.session_id.or(resume);
-    let failed = |message: String| PipelineError::AgentFailed {
+    let failed = |message: String, no_result: bool| PipelineError::AgentFailed {
         message,
         stderr_tail: run.stderr_tail.clone(),
         session_id: session_id.clone(),
+        no_result,
     };
     let Some(AgentEvent::Result { is_error, result_text, cost_usd, .. }) = run.result else {
-        return Err(failed(format!("the agent stopped without reporting a result ({status})")));
+        return Err(failed(format!("the agent stopped without reporting a result ({status})"), true));
     };
     if !status.success() {
-        return Err(failed(if is_error && !result_text.is_empty() {
+        let message = if is_error && !result_text.is_empty() {
             result_text
         } else {
             format!("the agent stopped unexpectedly ({status})")
-        }));
+        };
+        return Err(failed(message, false));
     }
 
     let summary_text = if result_text.trim().is_empty() { run.last_text.unwrap_or_default() } else { result_text };

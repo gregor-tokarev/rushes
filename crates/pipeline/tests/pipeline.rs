@@ -226,13 +226,30 @@ fn agent_failure_reports_stderr() {
     let ws = Workspace::new(1);
     let config = fake_agent(&[("FAKE_AGENT_MODE", "fail")]);
     let (result, events) = run(&config, &ws.context(None), Phase::Plan { brief: String::new() });
-    let Err(PipelineError::AgentFailed { message, stderr_tail, session_id }) = result else {
+    let Err(PipelineError::AgentFailed { message, stderr_tail, session_id, no_result }) = result else {
         panic!("expected AgentFailed, got {result:?}");
     };
     assert_eq!(message, "API Error: simulated failure");
+    assert!(!no_result, "the agent reported its error");
     assert_eq!(stderr_tail, ["fake-agent: simulated failure", "Error: ELEVENLABS_API_KEY rejected (401)"]);
     assert!(session_id.is_some(), "the session can still be resumed");
     assert!(events.contains(&AgentEvent::Stderr { line: "fake-agent: simulated failure".to_owned() }));
+}
+
+/// A command that is not Claude Code (`/bin/true`) exits without a word.
+#[test]
+fn an_agent_that_reports_nothing_fails_without_a_result() {
+    let ws = Workspace::new(0);
+    let silent = ws.skill_real.with_file_name("silent-agent");
+    fs::write(&silent, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&silent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let config = AgentConfig { command: silent, ..AgentConfig::default() };
+    let (result, _) = run(&config, &ws.context(None), Phase::Plan { brief: String::new() });
+    let Err(PipelineError::AgentFailed { message, no_result, .. }) = result else {
+        panic!("expected AgentFailed, got {result:?}");
+    };
+    assert!(no_result);
+    assert!(message.starts_with("the agent stopped without reporting a result"), "{message}");
 }
 
 #[test]

@@ -73,11 +73,11 @@ fn everything_installed_is_ready() {
     let report = doctor(&machine.config(), Some(&link));
 
     assert!(report.ready(), "{report:#?}");
-    assert_eq!(report.agent.detail, format!("{} (9.9.9 (Claude Code))", machine.bin.join("claude").display()));
+    assert_eq!(report.agent.detail, format!("Claude Code 9.9.9 · {}", machine.bin.join("claude").display()));
     assert_eq!(report.skill.detail, real.display().to_string());
     assert_eq!(report.skill_dir.as_deref(), Some(real.as_path()));
-    assert!(report.ffmpeg.detail.ends_with("(ffmpeg version 9.9-fake Copyright)"));
-    assert!(report.ffprobe.detail.starts_with(&machine.bin.join("ffprobe").display().to_string()));
+    assert_eq!(report.ffmpeg.detail, format!("ffmpeg 9.9 · {}", machine.bin.join("ffmpeg").display()));
+    assert_eq!(report.ffprobe.detail, format!("ffprobe 9.9 · {}", machine.bin.join("ffprobe").display()));
     assert_eq!(report.elevenlabs.detail, format!("ELEVENLABS_API_KEY is set in {}", real.join(".env").display()));
     assert!(report.python.detail.starts_with("video-use virtualenv"));
     assert!(!format!("{report:?}").contains(SECRET), "the key must never leave the .env file");
@@ -99,9 +99,12 @@ fn nothing_installed_is_not_ready() {
     ] {
         assert!(!check.ok, "{name} should fail: {check:?}");
     }
-    assert!(report.agent.detail.contains("`claude` not found"));
+    assert_eq!(report.agent.detail, "claude not found");
     assert!(report.skill.detail.contains("missing-skill/SKILL.md not found"));
-    assert!(report.ffmpeg.detail.contains("install ffmpeg"));
+    assert_eq!(report.ffmpeg.detail, "ffmpeg not found on PATH");
+    for check in [&report.agent, &report.skill, &report.ffmpeg, &report.elevenlabs, &report.python] {
+        assert!(!check.detail.contains('`'), "details are plain text: {}", check.detail);
+    }
     assert_eq!(report.skill_dir, None);
 }
 
@@ -182,9 +185,23 @@ fn key_from_the_environment_and_python_fallbacks() {
 #[test]
 fn agent_command_can_be_a_path() {
     let machine = Machine::new().with_tools();
-    let custom = machine.stub("my-agent", "echo 'custom 1.0'");
+    let custom = machine.stub("my-claude", "echo '2.1.0 (Claude Code)'");
     let config = AgentConfig { command: custom.clone(), ..machine.config() };
     let report = doctor(&config, Some(Path::new("/nonexistent")));
     assert!(report.agent.ok);
-    assert_eq!(report.agent.detail, format!("{} (custom 1.0)", custom.display()));
+    assert_eq!(report.agent.detail, format!("Claude Code 2.1.0 · {}", custom.display()));
+}
+
+/// Any program answers `--version`; only Claude Code can run an edit.
+#[test]
+fn an_agent_that_is_not_claude_code_is_refused() {
+    let machine = Machine::new().with_tools();
+    let other = machine.stub("true", "echo 'true (GNU coreutils) 9.7'");
+    let config = AgentConfig { command: other.clone(), ..machine.config() };
+    let report = doctor(&config, Some(Path::new("/nonexistent")));
+    assert!(!report.agent.ok);
+    assert_eq!(
+        report.agent.detail,
+        format!("{} is not Claude Code: --version printed \"true (GNU coreutils) 9.7\"", other.display())
+    );
 }

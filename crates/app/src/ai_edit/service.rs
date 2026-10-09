@@ -527,15 +527,20 @@ impl PipelineService {
                 self.after_status_change(cx);
                 return;
             }
-            Err(PipelineError::AgentFailed { message, stderr_tail, session_id }) => {
+            Err(PipelineError::AgentFailed { message, stderr_tail, session_id, no_result }) => {
                 if let Some(session_id) = session_id {
                     self.update_run(id, cx, |run| run.session_id = Some(session_id));
+                }
+                let mut message = sentence(&message);
+                if no_result {
+                    // Most likely not Claude Code, or one that can't start.
+                    message.push_str(" Check the agent command in Settings > AI editing.");
                 }
                 self.finish(id, Err(failure_text(&message, &stderr_tail)), cx);
                 return;
             }
             Err(error) => {
-                self.finish(id, Err(error.to_string()), cx);
+                self.finish(id, Err(sentence(&error.to_string())), cx);
                 return;
             }
         };
@@ -839,6 +844,17 @@ fn revision_brief(brief: &str, feedback: &str) -> String {
     )
 }
 
+/// A pipeline message as a sentence: capitalised, ending in a full stop.
+fn sentence(message: &str) -> String {
+    let message = message.trim();
+    let mut chars = message.chars();
+    let mut text: String = chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default();
+    if !text.is_empty() && !text.ends_with(['.', '!', '?']) {
+        text.push('.');
+    }
+    text
+}
+
 /// The text stored in [`PipelineRun::error`] for a failed agent.
 fn failure_text(message: &str, stderr_tail: &[String]) -> String {
     if stderr_tail.is_empty() {
@@ -865,6 +881,16 @@ mod tests {
         let text = failure_text("agent failed: API Error", &["line 1".into(), "line 2".into()]);
         assert_eq!(split_failure(&text), ("agent failed: API Error", Some("line 1\nline 2")));
         assert_eq!(split_failure(&failure_text("cancelled", &[])), ("cancelled", None));
+    }
+
+    #[test]
+    fn pipeline_messages_read_as_sentences() {
+        assert_eq!(
+            sentence("the agent stopped without reporting a result (exit status: 0)"),
+            "The agent stopped without reporting a result (exit status: 0)."
+        );
+        assert_eq!(sentence("API Error: overloaded."), "API Error: overloaded.");
+        assert_eq!(sentence(""), "");
     }
 
     #[test]

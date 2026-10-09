@@ -26,6 +26,9 @@ pub enum PipelineError {
         stderr_tail: Vec<String>,
         /// Session to resume for a retry, when the agent got far enough to open one.
         session_id: Option<String>,
+        /// The agent exited without reporting a result: it crashed or was killed, or the
+        /// command is not Claude Code at all.
+        no_result: bool,
     },
     #[error(transparent)]
     Io(#[from] io::Error),
