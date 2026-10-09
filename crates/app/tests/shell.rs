@@ -728,3 +728,35 @@ fn the_account_badge_opens_the_youtube_settings(cx: &mut TestAppContext) {
     app.press(cx, "alt-left");
     assert!(app.has(cx, "settings-media-root"));
 }
+
+#[gpui_kit::test]
+fn folder_errors_explain_themselves_and_lead_to_the_settings(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    // A media folder inside a file can never be created.
+    let file = app._media.path().join("notes.txt");
+    std::fs::write(&file, "").expect("write file");
+    let state = app.state.clone();
+    let media_root = file.join("VideoCRM");
+    app.step(cx, move |_, cx| {
+        state.update(cx, |state, cx| state.update_settings(cx, |settings| settings.media_root = Some(media_root)))
+    });
+
+    let id = create_video(&app, cx, "Folder error", TemplateKind::Blank);
+    app.step(cx, |_, _| {});
+    assert_eq!(cx.read(|cx| app.state.read(cx).video(id).and_then(|video| video.folder.clone())), None);
+    let notifications =
+        cx.update_window(app.window, |_, window, cx| window.notifications(cx).len()).expect("window is open");
+    assert_eq!(notifications, 1);
+
+    // Asking again replaces the notification instead of stacking another.
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| {
+        state.update(cx, |state, cx| state.ensure_video_folder(id, cx));
+    });
+    let notifications =
+        cx.update_window(app.window, |_, window, cx| window.notifications(cx).len()).expect("window is open");
+    assert_eq!(notifications, 1);
+
+    app.click(cx, "problem-remedy");
+    assert_eq!(app.route(cx), Route::Settings { section: SettingsSection::General });
+}

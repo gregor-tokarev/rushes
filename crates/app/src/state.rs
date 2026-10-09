@@ -5,6 +5,8 @@
 //! (pipelines, uploads) write to the [`Store`] directly through [`AppState::store`]
 //! and then call [`AppState::reload`] on the foreground thread.
 
+mod problem;
+
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use gpui_kit::*;
@@ -17,6 +19,8 @@ use videocrm_core::{
 
 use crate::route::{Route, SettingsSection, VideoTab};
 
+pub use problem::{Problem, Remedy};
+
 const RECENT_LIMIT: usize = 8;
 
 /// Shared handle to the database. `Store` is `Send` but not `Sync`.
@@ -28,8 +32,10 @@ pub enum AppEvent {
     DataChanged,
     RouteChanged,
     SettingsChanged,
-    /// A user-facing error the shell should surface as a notification.
+    /// A user-facing error message the shell should surface as a notification.
     Error(SharedString),
+    /// A user-facing error with a title and possibly a remedy, surfaced as a notification.
+    Problem(Problem),
 }
 
 pub struct AppState {
@@ -115,21 +121,23 @@ impl AppState {
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         match self.load() {
             Ok(()) => cx.emit(AppEvent::DataChanged),
-            Err(error) => self.report(error, cx),
+            Err(error) => self.report_problem(Problem::store("Couldn’t load your videos", &error), cx),
         }
         cx.notify();
     }
 
-    fn report(&self, error: impl std::fmt::Display, cx: &mut Context<Self>) {
-        cx.emit(AppEvent::Error(error.to_string().into()));
-    }
-
-    /// Surfaces a user-facing error as [`AppEvent::Error`].
+    /// Surfaces a user-facing error message as [`AppEvent::Error`].
     pub fn report_error(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
         cx.emit(AppEvent::Error(message.into()));
     }
 
-    /// Runs a write against the store, then reloads. Errors become [`AppEvent::Error`].
+    /// Surfaces a problem as [`AppEvent::Problem`]. Build it with [`Problem::store`]
+    /// or [`Problem::media`] to turn a library error into readable copy.
+    pub fn report_problem(&mut self, problem: Problem, cx: &mut Context<Self>) {
+        cx.emit(AppEvent::Problem(problem));
+    }
+
+    /// Runs a write against the store, then reloads. Errors become [`AppEvent::Problem`].
     fn write<T>(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Store) -> Result<T, StoreError>) -> Option<T> {
         let result = f(&mut self.lock());
         match result {
@@ -138,7 +146,7 @@ impl AppState {
                 Some(value)
             }
             Err(error) => {
-                self.report(error, cx);
+                self.report_problem(Problem::store("Couldn’t save your changes", &error), cx);
                 None
             }
         }
@@ -163,7 +171,7 @@ impl AppState {
                 cx.emit(AppEvent::SettingsChanged);
                 cx.notify();
             }
-            Err(error) => self.report(error, cx),
+            Err(error) => self.report_problem(Problem::store("Couldn’t save the settings", &error), cx),
         }
     }
 
@@ -185,10 +193,12 @@ impl AppState {
     pub fn create_video(&mut self, new: NewVideo, cx: &mut Context<Self>) -> Option<VideoId> {
         let media_root = self.settings.resolved_media_root();
         let mut store = self.lock();
+        let mut folder_error = None;
         let created = store.create_video(new).and_then(|(mut video, _documents)| {
             // A missing folder is not fatal: footage import creates it later.
-            if media::ensure_video_folder(&media_root, &mut video).is_ok() {
-                store.update_video(&mut video)?;
+            match media::ensure_video_folder(&media_root, &mut video) {
+                Ok(_) => store.update_video(&mut video)?,
+                Err(error) => folder_error = Some(error),
             }
             Ok(video.id)
         });
@@ -196,10 +206,13 @@ impl AppState {
         match created {
             Ok(id) => {
                 self.reload(cx);
+                if let Some(error) = folder_error {
+                    self.report_problem(Problem::media(&media_root, &error), cx);
+                }
                 Some(id)
             }
             Err(error) => {
-                self.report(error, cx);
+                self.report_problem(Problem::store("Couldn’t create the video", &error), cx);
                 None
             }
         }
@@ -229,13 +242,14 @@ impl AppState {
         {
             return Some(folder);
         }
-        match media::ensure_video_folder(&self.settings.resolved_media_root(), &mut video) {
+        let media_root = self.settings.resolved_media_root();
+        match media::ensure_video_folder(&media_root, &mut video) {
             Ok(folder) => {
                 self.update_video(video, cx);
                 Some(folder)
             }
             Err(error) => {
-                self.report(error, cx);
+                self.report_problem(Problem::media(&media_root, &error), cx);
                 None
             }
         }
@@ -309,7 +323,7 @@ impl AppState {
                 self.write(cx, |store| store.create_document(video_id, kind, title))
             }
             Err(error) => {
-                self.report(error, cx);
+                self.report_problem(Problem::store("Couldn’t open the document", &error), cx);
                 None
             }
         }

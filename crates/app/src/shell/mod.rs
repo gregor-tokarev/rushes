@@ -11,8 +11,9 @@ mod theme;
 mod title_bar;
 
 use chrono::{Local, NaiveDate};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{ActiveTheme as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
@@ -27,7 +28,7 @@ use crate::onboarding::Onboarding;
 use crate::publish::{AccountBadge, UploadsPage};
 use crate::route::{Route, SettingsSection, VideoTab};
 use crate::settings_page::SettingsPage;
-use crate::state::{AppEvent, AppState};
+use crate::state::{AppEvent, AppState, Problem, Remedy};
 use crate::video_page::VideoPage;
 use crate::wizard;
 
@@ -236,6 +237,7 @@ impl Workspace {
             AppEvent::Error(message) => {
                 window.push_notification(Notification::error(message.clone()), cx);
             }
+            AppEvent::Problem(problem) => window.push_notification(problem_notification(problem), cx),
         }
     }
 
@@ -388,6 +390,24 @@ impl Workspace {
             .child(div().flex_1().min_h_0().child(self.database.clone()))
             .into_any_element()
     }
+}
+
+/// An error notification for `problem`, with a button for its remedy. The
+/// same problem raised again replaces the one shown instead of stacking.
+fn problem_notification(problem: &Problem) -> Notification {
+    let notification = Notification::error(problem.message().clone())
+        .title(problem.title().clone())
+        .id1::<Problem>(problem.title().clone());
+    let Some(remedy) = problem.remedy() else { return notification };
+    notification.action(move |_, _, cx| {
+        Button::new("problem-remedy").small().label(remedy.label()).on_click(cx.listener(
+            move |notification, _, window, cx| {
+                notification.dismiss(window, cx);
+                let Remedy::OpenSettings(section) = remedy;
+                AppState::global(cx).update(cx, |state, cx| state.open_settings(section, cx));
+            },
+        ))
+    })
 }
 
 /// One line under the database title: what is in production and what ships next.
