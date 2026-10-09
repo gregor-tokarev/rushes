@@ -144,10 +144,10 @@ impl PipelineService {
     pub fn init(state: Entity<AppState>, cx: &mut App) {
         let service = cx.new(|cx| {
             let subscriptions = vec![
-                cx.subscribe(&state, |this: &mut Self, _, event: &AppEvent, cx| {
-                    if *event == AppEvent::SettingsChanged {
-                        this.on_settings_changed(cx);
-                    }
+                cx.subscribe(&state, |this: &mut Self, _, event: &AppEvent, cx| match event {
+                    AppEvent::SettingsChanged => this.on_settings_changed(cx),
+                    AppEvent::DataChanged => this.forget_deleted_videos(cx),
+                    _ => {}
                 }),
                 cx.on_app_quit(|this: &mut Self, _| {
                     this.stop_all();
@@ -326,7 +326,13 @@ impl PipelineService {
         }
         let phase = match run.status {
             RunStatus::AwaitingApproval => PhaseKind::Revise,
-            RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled => PhaseKind::Feedback,
+            RunStatus::Succeeded => PhaseKind::Feedback,
+            // Nothing is rendered before the creator approved a strategy, so an edit
+            // that stopped while planning goes on planning.
+            RunStatus::Failed | RunStatus::Cancelled => match self.last_phase(id, cx) {
+                Some(phase) if !phase.renders() => PhaseKind::Revise,
+                _ => PhaseKind::Feedback,
+            },
             status => return Err(RunError::NotAvailable(status)),
         };
         self.continue_run(id, phase, Some(message.trim().to_owned()), cx)
@@ -339,13 +345,22 @@ impl PipelineService {
         if !matches!(run.status, RunStatus::Failed | RunStatus::Cancelled) {
             return Err(RunError::NotAvailable(run.status));
         }
+        let (phase, text) =
+            self.last_started(id, cx).map_or((PhaseKind::Plan, None), |started| (started.phase, started.text));
+        self.continue_run(id, phase, text, cx)
+    }
+
+    /// The marker of the phase the run started last, from its event log.
+    fn last_started(&mut self, id: RunId, cx: &mut Context<Self>) -> Option<PhaseStarted> {
         self.load_timeline(id, cx);
-        let last = self.timeline(id).iter().rev().find_map(|entry| match &entry.event {
+        self.timeline(id).iter().rev().find_map(|entry| match &entry.event {
             LogEvent::Phase(started) => Some(started.clone()),
             LogEvent::Agent(_) => None,
-        });
-        let (phase, text) = last.map_or((PhaseKind::Plan, None), |started| (started.phase, started.text));
-        self.continue_run(id, phase, text, cx)
+        })
+    }
+
+    fn last_phase(&mut self, id: RunId, cx: &mut Context<Self>) -> Option<PhaseKind> {
+        self.last_started(id, cx).map(|started| started.phase)
     }
 
     /// Stops the agent of a working run, or discards a strategy awaiting approval.
@@ -444,6 +459,10 @@ impl PipelineService {
     }
 
     fn on_agent_event(&mut self, id: RunId, event: AgentEvent, cx: &mut Context<Self>) {
+        if self.run(id).is_none() {
+            // The video was deleted, and the run with it; its agent is being stopped.
+            return;
+        }
         match &event {
             AgentEvent::Init { session_id, .. } if !session_id.is_empty() => {
                 let session_id = session_id.clone();
@@ -482,21 +501,23 @@ impl PipelineService {
             }
         };
 
-        let summary = Some(outcome.summary_text.trim().to_owned()).filter(|summary| !summary.is_empty());
+        let text = Some(outcome.summary_text.trim().to_owned()).filter(|text| !text.is_empty());
         self.update_run(id, cx, |run| {
             if outcome.session_id.is_some() {
                 run.session_id = outcome.session_id.clone();
             }
-            if summary.is_some() {
-                run.summary = summary.clone();
+            // An error message must not replace the strategy or the last render's summary.
+            if text.is_some() && !outcome.is_error {
+                run.summary = text.clone();
             }
         });
         let result = if outcome.is_error {
-            Err(summary.unwrap_or_else(|| "The agent reported an error.".to_owned()))
+            Err(text.unwrap_or_else(|| "The agent reported an error.".to_owned()))
         } else if !phase.renders() {
             Ok(None)
         } else {
-            match outcome.final_cut {
+            // A final cut left over from an earlier render or edit is not this phase's result.
+            match outcome.final_cut.filter(|_| outcome.rendered) {
                 Some(final_cut) => Ok(Some(final_cut)),
                 None => Err("The agent finished without rendering edit/final.mp4.".to_owned()),
             }
@@ -593,6 +614,26 @@ impl PipelineService {
         })
     }
 
+    /// Drops the runs of deleted videos (the store deletes them with their video) and
+    /// stops their agents.
+    fn forget_deleted_videos(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let deleted: Vec<RunId> =
+            self.runs.iter().filter(|run| state.video(run.video_id).is_none()).map(|run| run.id).collect();
+        if deleted.is_empty() {
+            return;
+        }
+        for id in &deleted {
+            if let Some(live) = self.live.get_mut(id) {
+                live.cancel.store(true, Ordering::SeqCst);
+                live.phase.cancelling = true;
+            }
+            self.timelines.remove(id);
+        }
+        self.runs.retain(|run| !deleted.contains(&run.id));
+        cx.notify();
+    }
+
     /// Cancels every working agent and waits until their process groups are gone, so
     /// no agent keeps running (and spending) after the app quits.
     fn stop_all(&mut self) {
@@ -680,13 +721,13 @@ fn has_footage(dir: &Path) -> bool {
         .is_ok_and(|files| files.iter().any(|file| matches!(file.kind, MediaKind::Video | MediaKind::Audio)))
 }
 
-/// Plan prompt for reworking a proposed strategy: the creator's feedback on top of
-/// the original brief.
+/// Plan prompt for reworking a proposed strategy, or for planning on after an
+/// interruption: the creator's feedback on top of the original brief.
 fn revision_brief(brief: &str, feedback: &str) -> String {
     format!(
-        "You proposed an edit strategy in this session (also in ./edit/project.md). The creator \
-         reviewed it and asks for these changes:\n\n{}\n\nRevise the strategy accordingly. The \
-         original brief was:\n\n{}",
+        "You were planning this edit in this session; any strategy you proposed so far is also in \
+         ./edit/project.md. The creator asks for these changes:\n\n{}\n\nRevise the strategy \
+         accordingly. The original brief was:\n\n{}",
         feedback.trim(),
         brief.trim()
     )
