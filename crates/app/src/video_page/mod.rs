@@ -39,6 +39,8 @@ pub use properties::PropertiesPanel;
 const COLUMN_INSET: Rems = Rems(3.5);
 /// The editor's text width plus both gutters.
 const COLUMN_MAX_WIDTH: Rems = Rems(46. + 2. * COLUMN_INSET.0);
+/// Narrower windows leave the script rail out so the script keeps its width.
+const RAIL_MIN_WINDOW_WIDTH: Rems = Rems(72.);
 
 pub struct VideoPage {
     state: Entity<AppState>,
@@ -433,10 +435,11 @@ fn display_title(title: &str) -> &str {
 }
 
 impl Render for VideoPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(video) = self.video(cx).cloned() else { return self.render_missing(cx) };
         let column = || v_flex().w_full().max_w(COLUMN_MAX_WIDTH).px(COLUMN_INSET);
-        let show_rail = self.tab == VideoTab::Script && self.script.is_some();
+        let wide = window.viewport_size().width >= RAIL_MIN_WINDOW_WIDTH.to_pixels(window.rem_size());
+        let show_rail = wide && self.tab == VideoTab::Script && self.script.is_some();
 
         h_flex()
             .size_full()

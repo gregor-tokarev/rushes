@@ -10,7 +10,7 @@ use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem, Sett
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::{
     App, AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
-    SharedString, Styled as _, Subscription, WeakEntity, Window, div,
+    SharedString, Styled as _, Subscription, WeakEntity, Window, div, rems,
 };
 use videocrm_core::media::default_media_root;
 use videocrm_core::settings::{ThemeMode, data_dir};
@@ -175,7 +175,7 @@ impl SettingsPage {
                                         ),
                                     ),
                             )
-                            .child(div().text_sm().text_color(cx.theme().muted_foreground).child(
+                            .child(div().max_w(rems(40.)).text_sm().text_color(cx.theme().muted_foreground).child(
                                 "Plan videos in a Notion-like database, write scripts in rich documents, edit footage \
                              with AI and upload to YouTube, all on your own computer.",
                             ))
