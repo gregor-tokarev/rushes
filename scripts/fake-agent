@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+"""Stand-in for `claude -p --output-format stream-json` in VideoCRM pipeline tests.
+
+Accepts the flags videocrm-pipeline passes to the real agent and prints stream-json
+events shaped like real Claude Code output (crates/pipeline/tests/fixtures). It does
+not call any model; it imitates a video-use session:
+
+- planning prompt: writes edit/project.md and replies with a strategy;
+- render / revision / single-pass prompts: renders edit/final.mp4 and
+  edit/preview.mp4 with ffmpeg from the footage in the working directory (or a
+  synthetic clip when there is none) and replies with a summary.
+
+Environment:
+  FAKE_AGENT_MODE=fail     emit an error result, write to stderr, exit 1
+  FAKE_AGENT_DELAY_MS=N    sleep N ms (in a child `sleep` process) between events
+  FAKE_AGENT_IGNORE_TERM=1 ignore SIGTERM (exercises the SIGKILL fallback)
+  FAKE_AGENT_PID_FILE=path append "<pid>" of this process and of each delay child
+  FAKE_AGENT_ARGV_FILE=path write the received argv as JSON
+"""
+
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+import uuid
+
+MEDIA_EXTENSIONS = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
+TOOLS = ["Task", "Bash", "Edit", "Glob", "Grep", "Read", "Skill", "TodoWrite", "Write"]
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(prog="fake-agent", add_help=False)
+    parser.add_argument("-p", "--print", action="store_true")
+    parser.add_argument("-v", "--version", action="store_true")
+    parser.add_argument("--output-format")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("-r", "--resume")
+    parser.add_argument("--model")
+    parser.add_argument("--permission-mode")
+    parser.add_argument("--allowedTools", "--allowed-tools", dest="allowed_tools")
+    parser.add_argument("--add-dir", dest="add_dirs", action="append", default=[])
+    parser.add_argument("--append-system-prompt")
+    parser.add_argument("--max-turns", type=int)
+    parser.add_argument("prompt", nargs="?")
+    args, _unknown = parser.parse_known_args(argv)
+    return args
+
+
+class Session:
+    def __init__(self, args):
+        self.args = args
+        self.session_id = args.resume or str(uuid.uuid4())
+        self.delay = int(os.environ.get("FAKE_AGENT_DELAY_MS", "0")) / 1000.0
+        self.pid_file = os.environ.get("FAKE_AGENT_PID_FILE")
+        self.started = time.monotonic()
+        self.turns = 0
+        self.tool_counter = 0
+
+    def emit(self, event):
+        event.setdefault("session_id", self.session_id)
+        event.setdefault("uuid", str(uuid.uuid4()))
+        sys.stdout.write(json.dumps(event, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
+        self.pause()
+
+    def pause(self):
+        if self.delay <= 0:
+            return
+        # A child process, like the ffmpeg/python children of a real session, so
+        # cancellation has a grandchild to clean up.
+        child = subprocess.Popen(["sleep", str(self.delay)])
+        self.record_pid(child.pid)
+        child.wait()
+
+    def record_pid(self, pid):
+        if self.pid_file:
+            with open(self.pid_file, "a") as f:
+                f.write(f"{pid}\n")
+
+    def message(self, role, content, **extra):
+        message = {"role": role, "content": content}
+        if role == "assistant":
+            self.turns += 1
+            message.update(
+                {
+                    "model": self.args.model or "claude-fake-1",
+                    "id": f"msg_fake_{self.turns}",
+                    "type": "message",
+                    "stop_reason": None,
+                }
+            )
+        self.emit({"type": role, "message": message, "parent_tool_use_id": None, **extra})
+
+    def init(self):
+        self.emit(
+            {
+                "type": "system",
+                "subtype": "init",
+                "cwd": os.getcwd(),
+                "tools": TOOLS,
+                "mcp_servers": [],
+                "model": self.args.model or "claude-fake-1",
+                "permissionMode": self.args.permission_mode or "default",
+                "slash_commands": ["video-use"],
+                "apiKeySource": "none",
+                "claude_code_version": "0.0.0-fake",
+                "output_style": "default",
+                "agents": ["general-purpose"],
+                "skills": ["video-use"],
+                "plugins": [],
+            }
+        )
+
+    def text(self, text):
+        self.message("assistant", [{"type": "text", "text": text}])
+
+    def tool(self, name, tool_input, output, is_error=False):
+        self.tool_counter += 1
+        tool_id = f"toolu_fake_{self.tool_counter:02d}"
+        self.message(
+            "assistant",
+            [{"type": "tool_use", "id": tool_id, "name": name, "input": tool_input}],
+        )
+        result = {"type": "tool_result", "tool_use_id": tool_id, "content": output}
+        if is_error:
+            result["is_error"] = True
+        self.message("user", [result])
+
+    def result(self, text, is_error=False):
+        self.emit(
+            {
+                "type": "result",
+                "subtype": "error_during_execution" if is_error else "success",
+                "is_error": is_error,
+                "duration_ms": int((time.monotonic() - self.started) * 1000),
+                "duration_api_ms": 0,
+                "num_turns": self.turns,
+                "result": text,
+                "stop_reason": "end_turn",
+                "total_cost_usd": 0.0123,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+                "permission_denials": [],
+                "terminal_reason": "completed",
+            }
+        )
+
+
+def skill_dir(args):
+    return args.add_dirs[0] if args.add_dirs else os.path.expanduser("~/.claude/skills/video-use")
+
+
+def footage_files():
+    return sorted(
+        name
+        for name in os.listdir(".")
+        if os.path.isfile(name) and os.path.splitext(name)[1].lower() in MEDIA_EXTENSIONS
+    )
+
+
+def run_ffmpeg(args):
+    """Runs ffmpeg; returns None on success, else the error text."""
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError:
+        return "ffmpeg not found on PATH"
+    return None if proc.returncode == 0 else (proc.stderr.strip() or "ffmpeg failed")
+
+
+def render(final_path, preview_path):
+    """Concatenates the footage into final.mp4 (synthetic clip when that fails)."""
+    files = footage_files()
+    error = "no footage"
+    if files:
+        inputs = []
+        for name in files:
+            inputs += ["-i", name]
+        chains = "".join(
+            f"[{i}:v]scale=640:360,setsar=1,fps=25[v{i}];[{i}:a]aresample=48000[a{i}];"
+            for i in range(len(files))
+        )
+        pairs = "".join(f"[v{i}][a{i}]" for i in range(len(files)))
+        graph = f"{chains}{pairs}concat=n={len(files)}:v=1:a=1[v][a]"
+        error = run_ffmpeg(
+            [*inputs, "-filter_complex", graph, "-map", "[v]", "-map", "[a]",
+             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", final_path]
+        )
+    if error:
+        error = run_ffmpeg(
+            ["-f", "lavfi", "-i", "testsrc=duration=3:size=640x360:rate=25",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-shortest", final_path]
+        )
+    if error:
+        return error
+    return run_ffmpeg(
+        ["-i", final_path, "-vf", "scale=320:-2", "-c:v", "libx264", "-preset", "ultrafast",
+         "-pix_fmt", "yuv420p", "-c:a", "aac", preview_path]
+    )
+
+
+def phase_of(prompt):
+    if "(planning phase)" in prompt:
+        return "plan"
+    if "(render phase)" in prompt:
+        return "approve"
+    if "(revision phase)" in prompt:
+        return "feedback"
+    if "(single pass" in prompt:
+        return "auto"
+    return "other"
+
+
+STRATEGY = """**Strategy**
+
+- **Shape:** {count} take(s) of talking head, cut into one continuous piece: hook, main point, call to action.
+- **Takes:** keep the cleanest delivery of each beat; drop false starts and the restart in the middle.
+- **Cuts:** remove filler words and silences over 400 ms, 50 ms padding at every cut.
+- **Grade:** neutral punch. **Subtitles:** natural sentences, bottom third.
+- **Length:** about {length} seconds.
+
+Open question: should the call to action include an end card?"""
+
+
+def plan(session, skill):
+    files = footage_files()
+    session.tool("Skill", {"skill": "video-use"}, "Launching skill: video-use")
+    session.tool(
+        "Bash",
+        {"command": "ffprobe -v error -show_entries format=duration -of csv=p=0 *.mp4",
+         "description": "Probe source durations"},
+        "\n".join("3.000000" for _ in files) or "(no files)",
+    )
+    os.makedirs("edit/transcripts", exist_ok=True)
+    session.tool(
+        "Bash",
+        {"command": f"python {skill}/helpers/transcribe_batch.py .",
+         "description": "Transcribe all takes"},
+        f"transcribed {len(files)} file(s) -> edit/transcripts/",
+    )
+    session.tool(
+        "Bash",
+        {"command": f"python {skill}/helpers/pack_transcripts.py --edit-dir edit"},
+        "wrote edit/takes_packed.md",
+    )
+    strategy = STRATEGY.format(count=len(files), length=max(3, 3 * len(files)))
+    with open("edit/project.md", "a") as f:
+        f.write(f"## Session 1 — {time.strftime('%Y-%m-%d')}\n\n{strategy}\n\n")
+    session.tool("Write", {"file_path": os.path.abspath("edit/project.md"), "content": strategy},
+                 f"File created successfully at: {os.path.abspath('edit/project.md')}")
+    session.text(strategy)
+    session.result(strategy)
+
+
+def produce(session, skill, phase):
+    os.makedirs("edit", exist_ok=True)
+    if phase == "auto":
+        session.tool("Skill", {"skill": "video-use"}, "Launching skill: video-use")
+    session.text("Rendering the approved cut." if phase != "feedback" else "Applying the feedback.")
+    session.tool(
+        "Write",
+        {"file_path": os.path.abspath("edit/edl.json"), "content": "{\"version\": 1}"},
+        f"File created successfully at: {os.path.abspath('edit/edl.json')}",
+    )
+    error = render("edit/final.mp4", "edit/preview.mp4")
+    session.tool(
+        "Bash",
+        {"command": f"python {skill}/helpers/render.py edit/edl.json -o edit/final.mp4",
+         "description": "Render the final cut"},
+        error or "rendered edit/final.mp4 and edit/preview.mp4",
+        is_error=error is not None,
+    )
+    if error:
+        session.result(f"Render failed: {error}", is_error=True)
+        return 1
+    session.tool(
+        "Bash",
+        {"command": "ffprobe -v error -show_entries format=duration -of csv=p=0 edit/final.mp4"},
+        "3.000000",
+    )
+    summary = ("Revised cut rendered to edit/final.mp4 with your feedback applied."
+               if phase == "feedback"
+               else "Rendered edit/final.mp4 (preview in edit/preview.mp4). Self-eval passed: "
+                    "no pops or jumps at the cuts.")
+    with open("edit/project.md", "a") as f:
+        f.write(f"## Render — {time.strftime('%Y-%m-%d')}\n\n{summary}\n\n")
+    session.text(summary)
+    session.result(summary)
+    return 0
+
+
+def main():
+    args = parse_args(sys.argv[1:])
+    if args.version:
+        print("0.0.0-fake (Claude Code)")
+        return 0
+    if os.environ.get("FAKE_AGENT_IGNORE_TERM") == "1":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if os.environ.get("FAKE_AGENT_ARGV_FILE"):
+        with open(os.environ["FAKE_AGENT_ARGV_FILE"], "w") as f:
+            json.dump(sys.argv[1:], f)
+    if not args.print or not args.prompt:
+        print("fake-agent: expected -p <prompt>", file=sys.stderr)
+        return 2
+
+    session = Session(args)
+    session.record_pid(os.getpid())
+    session.init()
+
+    if os.environ.get("FAKE_AGENT_MODE") == "fail":
+        session.text("Checking the footage.")
+        print("fake-agent: simulated failure", file=sys.stderr)
+        print("Error: ELEVENLABS_API_KEY rejected (401)", file=sys.stderr)
+        session.result("API Error: simulated failure", is_error=True)
+        return 1
+
+    phase = phase_of(args.prompt)
+    skill = skill_dir(args)
+    if phase == "plan":
+        plan(session, skill)
+        return 0
+    if phase in ("approve", "feedback", "auto"):
+        return produce(session, skill, phase)
+    session.text("ok")
+    session.result("ok")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
