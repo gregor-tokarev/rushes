@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use chrono::Utc;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, ThemeStyled as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, Div, ElementId, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    AnyElement, App, Context, Div, ElementId, Entity, FontWeight, InteractiveElement as _, IntoElement, KeyDownEvent,
     ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
     TestSupportExt as _, Window, div,
 };
@@ -64,7 +64,7 @@ impl PipelinesPage {
         self.state.update(cx, |state, cx| state.open_video(video_id, VideoTab::Footage, cx));
     }
 
-    fn render_row(&self, run: &PipelineRun, last: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&self, run: &PipelineRun, last: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let state = self.state.read(cx);
         let video = state.video(run.video_id);
         let title = video.map_or("Deleted video".to_owned(), |video| {
@@ -76,14 +76,28 @@ impl PipelinesPage {
         let end = if live { now } else { run.updated_at };
         let duration = (end - run.created_at).to_std().unwrap_or_default();
         let run = run.clone();
+        let row_id = ElementId::Name(format!("pipeline-run-{}", run.id).into());
+        // Rows are reachable with Tab and open with Enter or Space, like buttons.
+        let focus =
+            window.use_keyed_state(row_id.clone(), cx, |_, cx| cx.focus_handle().tab_stop(true)).read(cx).clone();
+        let focused = focus.is_focused(window);
+        let key_run = run.clone();
         let theme = cx.theme();
         let hover = theme.muted.opacity(0.6);
 
         h_flex()
-            .id(ElementId::Name(format!("pipeline-run-{}", run.id).into()))
+            .id(row_id)
             .role(Role::Button)
             .aria_label(format!("{title}, {}", run.status.label()))
             .test_support()
+            .track_focus(&focus)
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    this.open(&key_run, cx);
+                }
+            }))
+            .when(focused, |this| this.focus_ring_style(window, cx))
             .gap_4()
             .px_3()
             .py_2p5()
@@ -156,7 +170,7 @@ impl PipelinesPage {
 }
 
 impl Render for PipelinesPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let runs: Vec<PipelineRun> = self.service.read(cx).runs().to_vec();
         let working = runs.iter().filter(|run| run.status.is_active()).count();
         let waiting = runs.iter().filter(|run| run.status == RunStatus::AwaitingApproval).count();
@@ -171,7 +185,7 @@ impl Render for PipelinesPage {
             summary.push(format!("{waiting} waiting for approval"));
         }
         let rows: Vec<AnyElement> =
-            runs.iter().enumerate().map(|(ix, run)| self.render_row(run, ix + 1 == runs.len(), cx)).collect();
+            runs.iter().enumerate().map(|(ix, run)| self.render_row(run, ix + 1 == runs.len(), window, cx)).collect();
         let empty = runs.is_empty().then(|| self.render_empty(cx));
         let theme = cx.theme();
         let column = |label: &'static str| div().flex_shrink_0().child(label);
