@@ -124,6 +124,8 @@ pub struct Workspace {
     account: Entity<AccountBadge>,
     palette: Entity<CommandPalette>,
     sidebar_collapsed: bool,
+    /// The page the main area showed after the last route change.
+    shown: Option<Page>,
     /// The theme mode last applied, so unrelated settings changes leave the theme alone.
     theme_mode: ThemeMode,
     focus_handle: FocusHandle,
@@ -148,6 +150,9 @@ impl Workspace {
             }),
             cx.on_app_quit(|this, cx| {
                 this.flush_pending_saves(cx);
+                if let Some(settings) = &this.settings {
+                    settings.update(cx, |settings, cx| settings.commit_before_quit(cx));
+                }
                 async {}
             }),
             // When the focused element goes away (a page left, a dialog closed
@@ -169,6 +174,7 @@ impl Workspace {
             account,
             palette,
             sidebar_collapsed: false,
+            shown: None,
             theme_mode,
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
@@ -266,6 +272,14 @@ impl Workspace {
         if !matches!(route, Route::Video { .. }) {
             self.flush_pending_saves(cx);
         }
+        let page = Page::of(&route);
+        if self.shown == Some(Page::Settings)
+            && page != Page::Settings
+            && let Some(settings) = &self.settings
+        {
+            settings.update(cx, |settings, cx| settings.commit_pending(window, cx));
+        }
+        self.shown = Some(page);
         match route {
             Route::Database { view } => {
                 if let Some(view) = self.shown_view(view, cx) {

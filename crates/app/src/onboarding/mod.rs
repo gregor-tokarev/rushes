@@ -2,24 +2,20 @@
 //! editing, and how to start. Embeds `publish::YoutubeSettings` and
 //! `ai_edit::DoctorChecklist`.
 
-use std::path::PathBuf;
-
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::stepper::{Stepper, StepperItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    PathPromptOptions, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _,
-    TestSupportExt as _, Window, div, rems,
+    AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div, rems,
 };
-use videocrm_core::media::default_media_root;
 
 use crate::ai_edit::DoctorChecklist;
 use crate::publish::YoutubeSettings;
+use crate::settings_page::{Commit, MediaFolderField};
 use crate::shell::elements::ChoiceCard;
 use crate::state::AppState;
 use crate::wizard;
@@ -73,7 +69,9 @@ pub enum StartChoice {
 pub struct Onboarding {
     state: Entity<AppState>,
     step: Step,
-    media_root: Entity<InputState>,
+    media_folder: Entity<MediaFolderField>,
+    /// The media folder is being checked before the next step shows.
+    checking: bool,
     youtube: Option<Entity<YoutubeSettings>>,
     doctor: Option<Entity<DoctorChecklist>>,
     choice: StartChoice,
@@ -82,17 +80,11 @@ pub struct Onboarding {
 
 impl Onboarding {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let state = AppState::global(cx);
-        let root = state.read(cx).settings().resolved_media_root();
-        let media_root = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(default_media_root().display().to_string())
-                .default_value(root.display().to_string())
-        });
         Self {
-            state,
+            state: AppState::global(cx),
             step: Step::Welcome,
-            media_root,
+            media_folder: cx.new(|cx| MediaFolderField::new("onboarding-media-root", window, cx)),
+            checking: false,
             youtube: None,
             doctor: None,
             choice: StartChoice::default(),
@@ -114,8 +106,26 @@ impl Onboarding {
     }
 
     pub fn next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.checking {
+            return;
+        }
         if self.step == Step::MediaFolder {
-            self.save_media_root(cx);
+            // The folder is created and checked now, so the first video can't fail on it.
+            let saved = self.media_folder.update(cx, |field, cx| field.commit(Commit::Keep, true, window, cx));
+            self.checking = true;
+            cx.notify();
+            cx.spawn_in(window, async move |this, cx| {
+                let saved = saved.await;
+                _ = this.update_in(cx, |this, window, cx| {
+                    this.checking = false;
+                    if saved && this.step == Step::MediaFolder {
+                        this.show(Step::Youtube, window, cx);
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
         }
         match Step::ALL.get(self.step.index() + 1) {
             Some(step) => self.show(*step, window, cx),
@@ -142,40 +152,6 @@ impl Onboarding {
         }
         self.scroll.set_offset(Default::default());
         cx.notify();
-    }
-
-    /// Stores the media root; the platform default stays unset so it follows the platform.
-    fn save_media_root(&mut self, cx: &mut Context<Self>) {
-        let text = self.media_root.read(cx).value().trim().to_string();
-        let root = (!text.is_empty()).then(|| PathBuf::from(text)).filter(|root| *root != default_media_root());
-        self.state.update(cx, |state, cx| state.update_settings(cx, |settings| settings.media_root = root));
-    }
-
-    fn choose_media_root(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Choose".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let chosen = match paths.await {
-                Ok(Ok(Some(paths))) => paths.into_iter().next(),
-                Ok(Ok(None)) | Err(_) => None,
-                Ok(Err(error)) => {
-                    eprintln!("videocrm: folder picker failed: {error}");
-                    let message = "Couldn’t open the folder picker. Type the path instead.";
-                    _ = this.update(cx, |this, cx| this.state.update(cx, |state, cx| state.report_error(message, cx)));
-                    None
-                }
-            };
-            if let Some(path) = chosen {
-                _ = this.update_in(cx, |this, window, cx| {
-                    this.media_root.update(cx, |input, cx| input.set_value(path.display().to_string(), window, cx));
-                });
-            }
-        })
-        .detach();
     }
 
     /// Completes onboarding and starts the workspace the chosen way.
@@ -246,17 +222,7 @@ impl Onboarding {
             Step::MediaFolder => v_flex()
                 .gap_2()
                 .child(div().text_sm().font_medium().child("Media folder"))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(Input::new(&self.media_root).id("onboarding-media-root").flex_1())
-                        .child(
-                            Button::new("choose-media-root")
-                                .outline()
-                                .label("Choose…")
-                                .on_click(cx.listener(|this, _, window, cx| this.choose_media_root(window, cx))),
-                        ),
-                )
+                .child(self.media_folder.clone())
                 .child(
                     div()
                         .text_xs()
@@ -401,6 +367,7 @@ impl Render for Onboarding {
                     .child(
                         Button::new("onboarding-next")
                             .primary()
+                            .loading(self.checking)
                             .label(if last { "Get started" } else { "Continue" })
                             .on_click(cx.listener(|this, _, window, cx| this.next(window, cx))),
                     ),

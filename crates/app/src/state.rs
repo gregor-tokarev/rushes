@@ -19,6 +19,7 @@ use videocrm_core::{
 
 use crate::route::{Route, SettingsSection, VideoTab};
 
+pub(crate) use problem::folder_error_reason;
 pub use problem::{Problem, Remedy};
 
 const RECENT_LIMIT: usize = 8;

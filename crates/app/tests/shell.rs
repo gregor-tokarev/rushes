@@ -760,3 +760,127 @@ fn folder_errors_explain_themselves_and_lead_to_the_settings(cx: &mut TestAppCon
     app.click(cx, "problem-remedy");
     assert_eq!(app.route(cx), Route::Settings { section: SettingsSection::General });
 }
+
+/// Element id of the inline error under a media folder field.
+fn media_folder_error(field: &'static str) -> ElementId {
+    ElementId::NamedChild(Arc::new(field.into()), "error".into())
+}
+
+impl Fixture {
+    fn media_root(&self, cx: &mut TestAppContext) -> Option<std::path::PathBuf> {
+        cx.read(|cx| self.state.read(cx).settings().media_root.clone())
+    }
+
+    fn field_value(&self, cx: &mut TestAppContext, id: &'static str) -> Option<String> {
+        cx.update_window(self.window, |_, window, _| window.find(id).value().map(str::to_string))
+            .expect("window is open")
+    }
+
+    fn label_of(&self, cx: &mut TestAppContext, id: ElementId) -> Option<String> {
+        cx.update_window(self.window, |_, window, _| {
+            window.try_find(id).and_then(|found| found.label().map(str::to_string))
+        })
+        .expect("window is open")
+    }
+
+    fn replace_text(&self, cx: &mut TestAppContext, id: &'static str, text: &str) {
+        self.click(cx, id);
+        self.press(cx, "ctrl-a");
+        self.type_text(cx, text);
+    }
+}
+
+#[gpui_kit::test]
+fn the_media_folder_saves_only_folders_it_can_use(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    let before = app.media_root(cx);
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+
+    // A relative path would land under whatever folder the app was started from.
+    app.replace_text(cx, "settings-media-root", "Videos");
+    app.press(cx, "enter");
+    assert_eq!(app.media_root(cx), before);
+    let error = app.label_of(cx, media_folder_error("settings-media-root"));
+    assert_eq!(error.as_deref(), Some("Use a full path, like ~/Videos/VideoCRM or /home/you/Videos."));
+
+    // A folder that can't be created is turned down before it is saved.
+    let file = app._media.path().join("notes.txt");
+    std::fs::write(&file, "").expect("write file");
+    app.replace_text(cx, "settings-media-root", &file.join("VideoCRM").display().to_string());
+    app.press(cx, "enter");
+    assert_eq!(app.media_root(cx), before);
+    let error = app.label_of(cx, media_folder_error("settings-media-root")).unwrap_or_default();
+    assert!(error.ends_with("is a file, not a folder. Choose another folder."), "{error}");
+
+    // A usable folder is created and saved; typing cleared the error.
+    let footage = app._media.path().join("Footage");
+    app.replace_text(cx, "settings-media-root", &format!("  {}  ", footage.display()));
+    assert_eq!(app.label_of(cx, media_folder_error("settings-media-root")), None);
+    app.press(cx, "enter");
+    assert_eq!(app.media_root(cx), Some(footage.clone()));
+    assert!(footage.is_dir());
+    assert_eq!(app.field_value(cx, "settings-media-root"), Some(footage.display().to_string()));
+
+    // New videos go where the field says.
+    let id = create_video(&app, cx, "Launch day", TemplateKind::Blank);
+    let folder = cx.read(|cx| app.state.read(cx).video(id).and_then(|video| video.folder.clone()));
+    assert!(folder.is_some_and(|folder| folder.starts_with(&footage)));
+}
+
+#[gpui_kit::test]
+fn leaving_the_settings_saves_the_media_folder(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+
+    // Neither Enter nor a blur: the sidebar takes the creator elsewhere.
+    let footage = app._media.path().join("Left behind");
+    app.replace_text(cx, "settings-media-root", &footage.display().to_string());
+    app.click(cx, "sidebar-footer-0");
+    app.navigate(cx, Route::default());
+    assert_eq!(app.media_root(cx), Some(footage.clone()));
+
+    // A folder that can't be used is put back, and a notification says so.
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+    app.replace_text(cx, "settings-media-root", "relative/folder");
+    app.navigate(cx, Route::Pipelines);
+    assert_eq!(app.media_root(cx), Some(footage.clone()));
+    let notifications =
+        cx.update_window(app.window, |_, window, cx| window.notifications(cx).len()).expect("window is open");
+    assert_eq!(notifications, 1);
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+    assert_eq!(app.field_value(cx, "settings-media-root"), Some(footage.display().to_string()));
+    assert_eq!(app.label_of(cx, media_folder_error("settings-media-root")), None);
+}
+
+#[gpui_kit::test]
+fn tabbing_out_of_the_media_folder_saves_it(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    // Focus changes reach the field only while its window is active.
+    app.step(cx, |window, _| window.activate_window());
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+    let footage = app._media.path().join("Tabbed");
+    app.replace_text(cx, "settings-media-root", &footage.display().to_string());
+    app.press(cx, "tab");
+    assert_eq!(app.media_root(cx), Some(footage));
+}
+
+#[gpui_kit::test]
+fn onboarding_checks_the_media_folder_before_going_on(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, false, &[]);
+    let onboarding = cx.read(|cx| app.workspace.read(cx).onboarding().cloned().expect("onboarding"));
+    let step = |cx: &mut TestAppContext| cx.read(|cx| onboarding.read(cx).step());
+    app.click(cx, "onboarding-next");
+    assert_eq!(step(cx), Step::MediaFolder);
+
+    app.replace_text(cx, "onboarding-media-root", "Videos");
+    app.click(cx, "onboarding-next");
+    assert_eq!(step(cx), Step::MediaFolder);
+    assert!(app.label_of(cx, media_folder_error("onboarding-media-root")).is_some());
+
+    let footage = app._media.path().join("First run");
+    app.replace_text(cx, "onboarding-media-root", &footage.display().to_string());
+    app.click(cx, "onboarding-next");
+    assert_eq!(step(cx), Step::Youtube);
+    assert_eq!(app.media_root(cx), Some(footage.clone()));
+    assert!(footage.is_dir());
+}
