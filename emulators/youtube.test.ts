@@ -255,6 +255,10 @@ test("validates upload metadata and Content-Range", async () => {
 
     const unknown = await youtube.request("/upload/youtube/v3/videos?uploadType=resumable&upload_id=nope", { method: "PUT", body: "x" });
     assert.equal(unknown.status, 404);
+
+    // Tags are measured in characters, like the Rust client does.
+    const emojiTags = await startSession(youtube, 10, { snippet: { title: "ok", tags: ["🎬".repeat(250), "🎥".repeat(249)] } });
+    assert.equal(emojiTags.status, 200);
   });
 });
 
@@ -387,6 +391,12 @@ test("injected faults and quota exhaustion", async () => {
       const data = randomBytes(768 * KIB);
       const init = await startSession(youtube, data.length);
       const session = local(init.headers.get("location")!);
+
+      const invalidFault = await youtube.request("/_emulator/faults", {
+        method: "POST",
+        body: JSON.stringify({ path: "/upload/youtube/v3/videos", status: 503, times: 0 }),
+      });
+      assert.equal(invalidFault.status, 400);
 
       const fault = await youtube.request("/_emulator/faults", {
         method: "POST",

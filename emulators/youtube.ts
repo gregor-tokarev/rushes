@@ -6,7 +6,7 @@
 // only their size and SHA-256 are recorded.
 
 import { createHash, randomBytes } from "node:crypto";
-import { createReadStream, mkdtempSync, rmSync } from "node:fs";
+import { createReadStream, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { open, readFile, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -319,7 +319,7 @@ function validateTags(value: unknown): string[] {
   if (!Array.isArray(value) || value.some((tag) => typeof tag !== "string" || hasAngleBrackets(tag))) throw invalid;
   const tags = value as string[];
   // YouTube counts the comma separators and the quotes around tags containing spaces.
-  const length = tags.reduce((sum, tag) => sum + tag.length + (tag.includes(" ") ? 2 : 0), Math.max(0, tags.length - 1));
+  const length = tags.reduce((sum, tag) => sum + [...tag].length + (tag.includes(" ") ? 2 : 0), Math.max(0, tags.length - 1));
   if (length > 500) throw invalid;
   return tags;
 }
@@ -554,7 +554,10 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
         } catch {
           throw new YoutubeError(503, "backendError", `Cannot reach the Google emulator at ${googleUrl} to validate the access token.`);
         }
-        const body: unknown = response.ok ? await response.json() : null;
+        const body: unknown = response.ok ? await response.json().catch(() => undefined) : null;
+        if (body === undefined) {
+          throw new YoutubeError(503, "backendError", `The Google emulator at ${googleUrl} returned an invalid userinfo response.`);
+        }
         const user = isRecord(body) && typeof body.email === "string" ? (body as unknown as GoogleUser) : null;
         for (const [key, entry] of tokenCache) if (entry.expires <= now) tokenCache.delete(key);
         tokenCache.set(token, { user, expires: now + authCacheMs });
@@ -918,6 +921,12 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
               if (!video) throw videoNotFound();
               return c.json(renderVideo(video, session.parts, owner, Date.now()), 200);
             }
+            // Spooled bytes do not survive a restart or a restored snapshot.
+            if (!existsSync(sessionFile(session.id))) {
+              await discardBody(c);
+              delete state.sessions[session.id];
+              throw new YoutubeError(404, "notFound", "The upload session does not exist or has expired.", { location: "upload_id" });
+            }
 
             const range = parseContentRange(c.req.header("Content-Range"));
             if (range.kind !== "whole" && range.total !== null && range.total !== session.total) {
@@ -1091,9 +1100,10 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
         const video = state.videos[c.req.param("id")];
         const size = THUMBNAIL_FILES[c.req.param("file")];
         if (!video || !size) return c.body(null, 404);
-        if (video.thumbnail) {
-          const bytes = await readFile(thumbnailFile(video.id));
-          return c.body(new Uint8Array(bytes), 200, { "Content-Type": video.thumbnail.contentType });
+        // The image file is gone after a restart or restored snapshot; fall back to the placeholder.
+        const custom = video.thumbnail && (await readFile(thumbnailFile(video.id)).catch(() => null));
+        if (video.thumbnail && custom) {
+          return c.body(new Uint8Array(custom), 200, { "Content-Type": video.thumbnail.contentType });
         }
         return c.body(new Uint8Array(placeholderPng(size[0], size[1], [0x3f, 0x3f, 0x46])), 200, { "Content-Type": "image/png" });
       });
@@ -1184,10 +1194,12 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
           const status = typeof body.status === "number" ? body.status : null;
           const persistBytes = typeof body.persistBytes === "number" ? body.persistBytes : null;
           if ((status === null) === (persistBytes === null)) throw badRequest("invalid", "Set exactly one of status or persistBytes.");
+          const times = body.times ?? 1;
+          if (typeof times !== "number" || !Number.isInteger(times) || times < 1) throw badRequest("invalid", "times must be a positive integer.");
           state.faults.push({
             method: typeof body.method === "string" ? body.method.toUpperCase() : null,
             path: body.path,
-            remaining: typeof body.times === "number" ? body.times : 1,
+            remaining: times,
             status,
             reason: typeof body.reason === "string" ? body.reason : null,
             message: typeof body.message === "string" ? body.message : null,
