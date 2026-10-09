@@ -14,3 +14,4 @@ videocrm-youtube = { path = "../youtube" }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+tempfile = "3"

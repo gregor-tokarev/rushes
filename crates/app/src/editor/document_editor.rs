@@ -231,6 +231,12 @@ impl DocumentEditor {
         }
     }
 
+    /// Puts the caret at the start of block `id` and scrolls it into view;
+    /// a divider is selected instead. Used to jump to an outline heading.
+    pub fn focus_block_start(&mut self, id: BlockId, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_block(id, Caret::Start, window, cx);
+    }
+
     /// Focuses a trailing empty paragraph, adding one unless the document
     /// already ends with it. Used for clicks below the last block.
     fn focus_end(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -42,6 +42,8 @@ pub struct AppState {
     back: Vec<Route>,
     forward: Vec<Route>,
     recent: Vec<VideoId>,
+    /// A just-created video whose script takes keyboard focus when its page opens.
+    script_focus: Option<VideoId>,
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -66,6 +68,7 @@ impl AppState {
             back: Vec::new(),
             forward: Vec::new(),
             recent: Vec::new(),
+            script_focus: None,
         };
         state.load()?;
         Ok(state)
@@ -81,7 +84,9 @@ impl AppState {
     }
 
     /// The database handle, for background work. Lock it briefly; never hold the
-    /// guard across `await` points or long operations.
+    /// guard across `await` points or long operations. Change video rows through
+    /// [`AppState::update_video`] on the foreground instead: pages save whole rows
+    /// from the cache, so a direct write is lost if an edit lands before the reload.
     pub fn store(&self) -> SharedStore {
         self.store.clone()
     }
@@ -117,6 +122,11 @@ impl AppState {
 
     fn report(&self, error: impl std::fmt::Display, cx: &mut Context<Self>) {
         cx.emit(AppEvent::Error(error.to_string().into()));
+    }
+
+    /// Surfaces a user-facing error as [`AppEvent::Error`].
+    pub fn report_error(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        cx.emit(AppEvent::Error(message.into()));
     }
 
     /// Runs a write against the store, then reloads. Errors become [`AppEvent::Error`].
@@ -214,10 +224,10 @@ impl AppState {
     /// Ensures the video has a media folder and returns it.
     pub fn ensure_video_folder(&mut self, id: VideoId, cx: &mut Context<Self>) -> Option<std::path::PathBuf> {
         let mut video = self.video(id)?.clone();
-        if let Some(folder) = video.folder.clone() {
-            if folder.is_dir() {
-                return Some(folder);
-            }
+        if let Some(folder) = video.folder.clone()
+            && folder.is_dir()
+        {
+            return Some(folder);
         }
         match media::ensure_video_folder(&self.settings.resolved_media_root(), &mut video) {
             Ok(folder) => {
@@ -278,6 +288,33 @@ impl AppState {
         self.write(cx, |store| store.create_document(video_id, kind, title));
     }
 
+    /// The video's first document of `kind`, created when it has none.
+    pub fn ensure_document(
+        &mut self,
+        video_id: VideoId,
+        kind: DocumentKind,
+        cx: &mut Context<Self>,
+    ) -> Option<Document> {
+        let existing = self.lock().list_documents(video_id).map(|documents| {
+            documents.into_iter().filter(|document| document.kind == kind).min_by_key(|document| document.position)
+        });
+        match existing {
+            Ok(Some(document)) => Some(document),
+            Ok(None) => {
+                let title = match kind {
+                    DocumentKind::Script => "Script",
+                    DocumentKind::Notes => "Notes",
+                    DocumentKind::Custom => "Untitled",
+                };
+                self.write(cx, |store| store.create_document(video_id, kind, title))
+            }
+            Err(error) => {
+                self.report(error, cx);
+                None
+            }
+        }
+    }
+
     /// Persists a document. Script edits change derived row stats, so rows reload.
     pub fn save_document(&mut self, mut document: Document, cx: &mut Context<Self>) {
         self.write(cx, |store| store.save_document(&mut document));
@@ -301,6 +338,22 @@ impl AppState {
 
     pub fn open_video(&mut self, id: VideoId, tab: VideoTab, cx: &mut Context<Self>) {
         self.navigate(Route::Video { id, tab }, cx);
+    }
+
+    /// Opens a video that was just created on its Script tab, with the caret in
+    /// the first block.
+    pub fn open_new_video(&mut self, id: VideoId, cx: &mut Context<Self>) {
+        self.script_focus = Some(id);
+        self.open_video(id, VideoTab::Script, cx);
+    }
+
+    /// Whether the script of `id` should take focus when shown; asking clears the request.
+    pub fn take_script_focus(&mut self, id: VideoId) -> bool {
+        let requested = self.script_focus == Some(id);
+        if requested {
+            self.script_focus = None;
+        }
+        requested
     }
 
     pub fn can_go_back(&self) -> bool {
