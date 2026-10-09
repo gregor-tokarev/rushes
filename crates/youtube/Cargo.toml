@@ -1,0 +1,20 @@
+[package]
+name = "videocrm-youtube"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+getrandom = { version = "0.3", features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+ureq = { version = "3", features = ["json"] }
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
