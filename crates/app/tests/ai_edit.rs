@@ -23,8 +23,8 @@ use gpui_kit::{
 };
 use tempfile::TempDir;
 use videocrm::ai_edit::{
-    AiEditPanel, AiSettings, INTERRUPTED, LogEvent, MarkerKind, PhaseKind, PhaseStarted, PipelineService,
-    PipelinesPage, RunError, RunMarker, TimelineEntry, split_failure,
+    AiEditPanel, AiSettings, INTERRUPTED, LogEvent, PhaseKind, PhaseStarted, PipelineService, PipelinesPage, RunError,
+    RunMarker, TimelineEntry, split_failure,
 };
 use videocrm::route::{Route, VideoTab};
 use videocrm::state::{AppEvent, AppState};

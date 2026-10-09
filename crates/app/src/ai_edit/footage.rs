@@ -679,7 +679,6 @@ mod tests {
         let (window, card) = cx
             .update(|cx| gpui_kit::open_window(options, cx, |_, cx| cx.new(|cx| FootageCard::new(video, cx))))
             .unwrap();
-        let window: gpui_kit::AnyWindowHandle = window.into();
         let footage = cx.read(|cx| card.read(cx).footage_dir(cx)).expect("footage folder");
         cx.run_until_parked();
         assert!(cx.read(|cx| card.read(cx).is_loaded()));

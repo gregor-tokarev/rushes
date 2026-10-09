@@ -548,7 +548,6 @@ mod tests {
         let (window, settings) = cx
             .update(|cx| gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| AiSettings::new(window, cx))))
             .unwrap();
-        let window: gpui_kit::AnyWindowHandle = window.into();
         let status = ElementId::Name("ai-settings-skill-dir-chooser-failed".into());
 
         cx.update_window(window, |_, window, cx| {
