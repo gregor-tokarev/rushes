@@ -11,8 +11,8 @@ use gpui_kit::component::input::{
 };
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::{
-    App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
-    Point, SharedString, Subscription, Window,
+    App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Point,
+    SharedString, Subscription, Window,
 };
 use videocrm_core::{Block, BlockId, BlockKind, Document};
 
@@ -238,7 +238,12 @@ impl DocumentEditor {
 
     /// The input of a text block, created on first use and synchronized
     /// with the block's text and kind.
-    fn input(&mut self, id: BlockId, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<TextareaState>> {
+    fn input(
+        &mut self,
+        id: BlockId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<TextareaState>> {
         let block = &self.document.blocks[self.index(id)?];
         let placeholder = render::placeholder(block.kind);
         if let Some(input) = self.inputs.get(&id) {
@@ -369,13 +374,10 @@ impl DocumentEditor {
             }
             return;
         }
-        let typed_slash = block.kind != BlockKind::Code
-            && text.len() == previous.len() + 1
-            && cursor > 0
-            && text.as_bytes()[cursor - 1] == b'/'
-            && text[..cursor - 1].chars().next_back().is_none_or(char::is_whitespace);
-        if typed_slash {
-            self.slash = Some(SlashMenu { block: block.id, start: cursor - 1, query: String::new(), selected: 0 });
+        if block.kind != BlockKind::Code
+            && let Some(start) = slash::typed_slash(previous, text, cursor)
+        {
+            self.slash = Some(SlashMenu { block: block.id, start, query: String::new(), selected: 0 });
         }
     }
 
@@ -459,7 +461,8 @@ impl DocumentEditor {
         let Some((ix, input)) = self.editing(window, cx) else { return };
         if self.slash_is_open(ix) {
             cx.stop_propagation();
-            let chosen = self.slash.as_ref().and_then(|menu| menu.items().get(menu.selected).map(|ty| ty.kind));
+            let chosen =
+                self.slash.as_ref().and_then(|menu| menu.items().get(menu.selected).map(|ty| ty.kind));
             match chosen {
                 Some(kind) => self.choose_slash_item(kind, window, cx),
                 None => self.slash = None,
@@ -743,7 +746,12 @@ impl DocumentEditor {
         }
     }
 
-    fn insert_below_selected(&mut self, _: &InsertParagraphBelow, window: &mut Window, cx: &mut Context<Self>) {
+    fn insert_below_selected(
+        &mut self,
+        _: &InsertParagraphBelow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(ix) = self.selected.and_then(|id| self.index(id)) {
             self.insert_after(ix, Block::paragraph(""), window, cx);
         }
@@ -757,7 +765,13 @@ impl DocumentEditor {
 
     // Block commands, shared by the block menu, the gutter and the keyboard.
 
-    fn insert_after(&mut self, ix: usize, block: Block, window: &mut Window, cx: &mut Context<Self>) -> BlockId {
+    fn insert_after(
+        &mut self,
+        ix: usize,
+        block: Block,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> BlockId {
         let id = block.id;
         self.document.blocks.insert(ix + 1, block);
         self.focus_block(id, Caret::Start, window, cx);
@@ -790,7 +804,8 @@ impl DocumentEditor {
 
     fn move_block_by(&mut self, id: BlockId, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.index(id) else { return };
-        let Some(target) = ix.checked_add_signed(delta).filter(|target| *target < self.document.blocks.len()) else {
+        let Some(target) = ix.checked_add_signed(delta).filter(|target| *target < self.document.blocks.len())
+        else {
             return;
         };
         let before = if delta > 0 { target + 1 } else { target };
@@ -830,7 +845,13 @@ impl DocumentEditor {
         self.changed(cx);
     }
 
-    fn open_block_menu(&mut self, id: BlockId, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_block_menu(
+        &mut self,
+        id: BlockId,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(ix) = self.index(id) else { return };
         let editor = cx.entity().downgrade();
         let target = render::MenuTarget {
@@ -888,7 +909,9 @@ fn on_edge_line(input: &Entity<TextareaState>, edge: Edge, cx: &App) -> bool {
     };
     let laid_out = (state.range_to_bounds(&(cursor..cursor)), state.range_to_bounds(&(reference..reference)));
     match (laid_out, state.line_height()) {
-        ((Some(caret), Some(reference)), Some(line_height)) => (caret.top() - reference.top()).abs() < line_height / 2.,
+        ((Some(caret), Some(reference)), Some(line_height)) => {
+            (caret.top() - reference.top()).abs() < line_height / 2.
+        }
         _ => {
             let text = state.value();
             match edge {

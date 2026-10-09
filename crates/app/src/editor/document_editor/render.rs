@@ -3,18 +3,18 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::base::input::Textarea;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, Side, Sizable as _, ThemeStyled as _, h_flex, v_flex};
-use gpui_kit::assets::IconName;
 use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, DragMoveEvent, ElementId, FontStyle, FontWeight,
-    HighlightStyle, InteractiveElement as _, InteractiveText, IntoElement, MouseButton, MouseDownEvent,
-    ParentElement as _, Render, Rems, SharedString, StatefulInteractiveElement as _, StrikethroughStyle,
-    Styled as _, StyledText, TestSupportExt as _, UnderlineStyle, WeakEntity, Window, anchored, deferred,
-    div, prelude::FluentBuilder as _, px, rems,
+    Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, DragMoveEvent, ElementId, FontStyle,
+    FontWeight, HighlightStyle, InteractiveElement as _, InteractiveText, IntoElement, MouseButton,
+    MouseDownEvent, ParentElement as _, Rems, Render, SharedString, StatefulInteractiveElement as _,
+    StrikethroughStyle, Styled as _, StyledText, TestSupportExt as _, UnderlineStyle, WeakEntity, Window,
+    anchored, deferred, div, prelude::FluentBuilder as _, px, rems,
 };
 use videocrm_core::{Block, BlockId, BlockKind};
 
@@ -76,16 +76,32 @@ struct Metrics {
 
 impl Metrics {
     fn of(kind: BlockKind) -> Self {
-        let body = Metrics { text_size: Rems(1.), line_height: Rems(1.5), space_above: Rems(0.125), inset: Rems(0.) };
+        let body = Metrics {
+            text_size: Rems(1.),
+            line_height: Rems(1.5),
+            space_above: Rems(0.125),
+            inset: Rems(0.),
+        };
         match kind {
-            BlockKind::Heading1 => Metrics { text_size: Rems(1.875), line_height: Rems(2.375), space_above: Rems(1.5), ..body },
-            BlockKind::Heading2 => Metrics { text_size: Rems(1.5), line_height: Rems(2.), space_above: Rems(1.125), ..body },
-            BlockKind::Heading3 => Metrics { text_size: Rems(1.25), line_height: Rems(1.75), space_above: Rems(0.75), ..body },
-            BlockKind::Code => {
-                Metrics { text_size: Rems(0.875), line_height: Rems(1.375), space_above: Rems(0.5), inset: Rems(1.) }
+            BlockKind::Heading1 => {
+                Metrics { text_size: Rems(1.875), line_height: Rems(2.375), space_above: Rems(1.5), ..body }
             }
+            BlockKind::Heading2 => {
+                Metrics { text_size: Rems(1.5), line_height: Rems(2.), space_above: Rems(1.125), ..body }
+            }
+            BlockKind::Heading3 => {
+                Metrics { text_size: Rems(1.25), line_height: Rems(1.75), space_above: Rems(0.75), ..body }
+            }
+            BlockKind::Code => Metrics {
+                text_size: Rems(0.875),
+                line_height: Rems(1.375),
+                space_above: Rems(0.5),
+                inset: Rems(1.),
+            },
             BlockKind::Callout => Metrics { space_above: Rems(0.375), inset: Rems(0.875), ..body },
-            BlockKind::BRoll | BlockKind::OnScreen => Metrics { space_above: Rems(0.375), inset: Rems(0.5), ..body },
+            BlockKind::BRoll | BlockKind::OnScreen => {
+                Metrics { space_above: Rems(0.375), inset: Rems(0.5), ..body }
+            }
             _ => body,
         }
     }
@@ -141,24 +157,12 @@ impl Render for DocumentEditor {
             .flex_1()
             .items_center()
             .text_color(row.palette.text)
-            .child(
-                v_flex()
-                    .w_full()
-                    .max_w(Rems(TEXT_WIDTH.0 + 2. * GUTTER.0))
-                    .children(rows)
-                    .child(
-                        div()
-                            .id("document-end")
-                            .test_support()
-                            .w_full()
-                            .min_h(rems(6.))
-                            .cursor_text()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _: &MouseDownEvent, window, cx| this.focus_end(window, cx)),
-                            ),
-                    ),
-            )
+            .child(v_flex().w_full().max_w(Rems(TEXT_WIDTH.0 + 2. * GUTTER.0)).children(rows).child(
+                div().id("document-end").test_support().w_full().min_h(rems(6.)).cursor_text().on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, window, cx| this.focus_end(window, cx)),
+                ),
+            ))
             .when_some(self.block_menu.as_ref(), |this, menu| this.child(render_block_menu(menu)))
     }
 }
@@ -176,7 +180,8 @@ impl DocumentEditor {
         let metrics = Metrics::of(block.kind);
         let menu_open = self.block_menu.as_ref().is_some_and(|menu| menu.block == id);
         let highlighted = menu_open || self.selected == Some(id);
-        let drop_after = self.drop_target.filter(|target| row.dragging && target.block == id).map(|target| target.after);
+        let drop_after =
+            self.drop_target.filter(|target| row.dragging && target.block == id).map(|target| target.after);
         let indent = if crate::editor::markdown::is_list(block.kind) { block.indent } else { 0 };
 
         let content = div()
@@ -193,13 +198,17 @@ impl DocumentEditor {
                 self.slash.as_ref().filter(|menu| menu.block == id && row.editing == Some(id)),
                 |this, menu| {
                     let above = self.slash_menu_opens_above(menu, window, cx);
-                    let anchor = div().absolute().left_0().map(|this| if above { this.top_0() } else { this.top_full() });
+                    let anchor = div()
+                        .absolute()
+                        .left_0()
+                        .map(|this| if above { this.top_0() } else { this.top_full() });
                     this.child(anchor.child(self.render_slash_menu(menu, above, cx)))
                 },
             );
 
         h_flex()
             .id(block_element_id(id, "row"))
+            .test_support()
             .group(ROW_GROUP)
             .relative()
             .w_full()
@@ -213,7 +222,8 @@ impl DocumentEditor {
                 if !event.bounds.contains(&event.event.position) {
                     return;
                 }
-                let target = DropTarget { block: id, after: event.event.position.y > event.bounds.center().y };
+                let target =
+                    DropTarget { block: id, after: event.event.position.y > event.bounds.center().y };
                 if this.drop_target != Some(target) {
                     this.drop_target = Some(target);
                     cx.notify();
@@ -238,7 +248,13 @@ impl DocumentEditor {
     }
 
     /// The add button and drag handle, revealed while the row is hovered.
-    fn render_gutter(&self, block: &Block, metrics: Metrics, menu_open: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_gutter(
+        &self,
+        block: &Block,
+        metrics: Metrics,
+        menu_open: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let id = block.id;
         let label: SharedString = match block.text.lines().next().filter(|line| !line.trim().is_empty()) {
             Some(line) => line.chars().take(60).collect::<String>().into(),
@@ -273,7 +289,9 @@ impl DocumentEditor {
                     .xsmall()
                     .icon(Icon::new(IconName::Plus))
                     .tooltip("Add a block below")
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.insert_with_menu(id, window, cx))),
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.insert_with_menu(id, window, cx)
+                    })),
             )
             .child(handle)
     }
@@ -291,7 +309,14 @@ impl DocumentEditor {
         let mono = cx.theme().mono_font_family.clone();
         let text = self.render_text(block, row, cx);
         let marker = |child: AnyElement| {
-            div().flex_none().w(INDENT_STEP).h(metrics.line_height).flex().items_center().justify_center().child(child)
+            div()
+                .flex_none()
+                .w(INDENT_STEP)
+                .h(metrics.line_height)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(child)
         };
         match block.kind {
             BlockKind::Paragraph => text,
@@ -310,9 +335,9 @@ impl DocumentEditor {
                 .into_any_element(),
             BlockKind::Todo => {
                 let id = block.id;
-                let checkbox = Checkbox::new(block_element_id(id, "check"))
-                    .checked(block.checked)
-                    .on_click(cx.listener(move |this, checked: &bool, _, cx| this.set_checked(id, *checked, cx)));
+                let checkbox = Checkbox::new(block_element_id(id, "check")).checked(block.checked).on_click(
+                    cx.listener(move |this, checked: &bool, _, cx| this.set_checked(id, *checked, cx)),
+                );
                 h_flex()
                     .items_start()
                     .child(marker(checkbox.into_any_element()))
@@ -404,7 +429,8 @@ impl DocumentEditor {
         {
             // The invisible copy of the raw text sizes the cell from the first
             // frame; the input's own auto-grow catches up a frame later.
-            let sizer = if block.text.is_empty() { placeholder(block.kind).to_owned() } else { block.text.clone() };
+            let sizer =
+                if block.text.is_empty() { placeholder(block.kind).to_owned() } else { block.text.clone() };
             return cell
                 .grid()
                 .grid_cols(1)
@@ -449,11 +475,13 @@ impl DocumentEditor {
             }
             if span.link.is_some() {
                 style.color = Some(palette.link);
-                style.underline = Some(UnderlineStyle { thickness: px(1.), color: Some(palette.link), wavy: false });
+                style.underline =
+                    Some(UnderlineStyle { thickness: px(1.), color: Some(palette.link), wavy: false });
             }
             if completed {
                 style.color = Some(palette.muted);
-                style.strikethrough = Some(StrikethroughStyle { thickness: px(1.), color: Some(palette.muted) });
+                style.strikethrough =
+                    Some(StrikethroughStyle { thickness: px(1.), color: Some(palette.muted) });
             }
             if style != HighlightStyle::default() {
                 highlights.push((span.range.clone(), style));
@@ -488,7 +516,8 @@ impl DocumentEditor {
     /// Opens the slash menu above its block when the space below, judged
     /// from the input's previous layout, cannot fit it but the space above can.
     fn slash_menu_opens_above(&self, menu: &SlashMenu, window: &Window, cx: &App) -> bool {
-        let Some(bounds) = self.inputs.get(&menu.block).and_then(|input| input.state.read(cx).text_bounds()) else {
+        let Some(bounds) = self.inputs.get(&menu.block).and_then(|input| input.state.read(cx).text_bounds())
+        else {
             return false;
         };
         let rows = menu.items().len().max(1) as f32;
@@ -566,7 +595,14 @@ impl DocumentEditor {
                     .child(div().px_2().py_1().text_xs().text_color(theme.muted_foreground).child(heading))
                     .children(rows)
                     .when(items.is_empty(), |this| {
-                        this.child(div().px_2().py_1p5().text_sm().text_color(theme.muted_foreground).child("No results"))
+                        this.child(
+                            div()
+                                .px_2()
+                                .py_1p5()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("No results"),
+                        )
                     }),
             ),
         )
@@ -629,7 +665,11 @@ pub(super) fn block_menu(
     menu.min_w(window.rem_size() * 14.)
         .submenu_with_icon(Some(Icon::new(IconName::Repeat2)), "Turn into", window, cx, turn_into)
         .separator()
-        .item(PopupMenuItem::new("Duplicate").icon(Icon::new(IconName::Copy)).on_click(command(DocumentEditor::duplicate_block)))
+        .item(
+            PopupMenuItem::new("Duplicate")
+                .icon(Icon::new(IconName::Copy))
+                .on_click(command(DocumentEditor::duplicate_block)),
+        )
         .item(
             PopupMenuItem::new("Move up")
                 .icon(Icon::new(IconName::ArrowUp))
@@ -643,7 +683,11 @@ pub(super) fn block_menu(
                 .on_click(command(|editor, id, window, cx| editor.move_block_by(id, 1, window, cx))),
         )
         .separator()
-        .item(PopupMenuItem::new("Delete").icon(Icon::new(IconName::Trash)).on_click(command(DocumentEditor::delete_block)))
+        .item(
+            PopupMenuItem::new("Delete")
+                .icon(Icon::new(IconName::Trash))
+                .on_click(command(DocumentEditor::delete_block)),
+        )
 }
 
 /// Floating label under the pointer while a block is dragged.

@@ -121,12 +121,30 @@ pub fn filter(query: &str) -> Vec<&'static BlockType> {
     prefix
 }
 
+/// Offset of a `/` the last edit inserted right before the caret at the
+/// start of a word, which opens the slash menu.
+pub fn typed_slash(previous: &str, text: &str, cursor: usize) -> Option<usize> {
+    let slash = cursor.checked_sub(1)?;
+    if text.as_bytes().get(slash) != Some(&b'/')
+        || !text[..slash].chars().next_back().is_none_or(char::is_whitespace)
+    {
+        return None;
+    }
+    let prefix: usize =
+        previous.chars().zip(text.chars()).take_while(|(a, b)| a == b).map(|(c, _)| c.len_utf8()).sum();
+    let suffix: usize = previous[prefix..]
+        .chars()
+        .rev()
+        .zip(text[prefix..].chars().rev())
+        .take_while(|(a, b)| a == b)
+        .map(|(c, _)| c.len_utf8())
+        .sum();
+    (prefix <= slash && slash < text.len() - suffix).then_some(slash)
+}
+
 /// Lowercase alphanumerics only, so `/b-roll`, `/broll` and `/B roll` agree.
 fn normalize(text: &str) -> String {
-    text.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
+    text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
 #[cfg(test)]
@@ -150,6 +168,16 @@ mod tests {
         assert_eq!(kinds("h2"), vec![BlockKind::Heading2]);
         assert_eq!(kinds("overlay"), vec![BlockKind::OnScreen]);
         assert!(kinds("zzz").is_empty());
+    }
+
+    #[test]
+    fn detects_a_slash_typed_at_a_word_start() {
+        assert_eq!(typed_slash("", "/", 1), Some(0));
+        assert_eq!(typed_slash("Intro", "Intro /", 7), Some(6));
+        assert_eq!(typed_slash("a b", "a /b", 3), Some(2));
+        assert_eq!(typed_slash("and", "and/", 4), None, "inside a word");
+        assert_eq!(typed_slash("a /x", "a /", 3), None, "deleting after an old slash");
+        assert_eq!(typed_slash("/", "/x", 2), None);
     }
 
     #[test]

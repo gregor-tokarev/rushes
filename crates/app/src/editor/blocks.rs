@@ -338,7 +338,10 @@ mod tests {
     fn convert_resets_fields_that_no_longer_apply() {
         let mut todo = Block { checked: true, indent: 2, ..block(BlockKind::Todo, "x") };
         convert(&mut todo, BlockKind::Heading1);
-        assert_eq!((todo.kind, todo.checked, todo.indent, todo.text.as_str()), (BlockKind::Heading1, false, 0, "x"));
+        assert_eq!(
+            (todo.kind, todo.checked, todo.indent, todo.text.as_str()),
+            (BlockKind::Heading1, false, 0, "x")
+        );
         convert(&mut todo, BlockKind::Divider);
         assert_eq!(todo.text, "");
     }

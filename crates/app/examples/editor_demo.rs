@@ -59,22 +59,24 @@ impl Render for Demo {
                         .w_full()
                         .pt_16()
                         .child(
-                            v_flex()
-                                .w_full()
-                                .items_center()
-                                .child(
-                                    v_flex()
-                                        .w_full()
-                                        .max_w(gpui_kit::rems(46.))
-                                        .gap_1()
-                                        .child(div().text_3xl().font_weight(gpui_kit::FontWeight::BOLD).child(document.title))
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(theme.muted_foreground)
-                                                .child("Script · Long-form · Scripting"),
-                                        ),
-                                ),
+                            v_flex().w_full().items_center().child(
+                                v_flex()
+                                    .w_full()
+                                    .max_w(gpui_kit::rems(46.))
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_3xl()
+                                            .font_weight(gpui_kit::FontWeight::BOLD)
+                                            .child(document.title),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(theme.muted_foreground)
+                                            .child("Script · Long-form · Scripting"),
+                                    ),
+                            ),
                         )
                         .child(div().h_6())
                         .child(self.editor.clone()),
@@ -131,7 +133,10 @@ fn sample_script() -> Vec<Block> {
         Block { checked: true, ..block(BlockKind::Todo, "Film A-roll") },
         block(BlockKind::Todo, "Capture screen recordings for B-roll"),
         block(BlockKind::Todo, "Design the thumbnail"),
-        block(BlockKind::Code, "claude -p \"edit footage/ with video-use\" \\\n  --output-format stream-json"),
+        block(
+            BlockKind::Code,
+            "claude -p \"edit footage/ with video-use\" \\\n  --output-format stream-json",
+        ),
         block(BlockKind::Heading2, "Outro"),
         block(
             BlockKind::Paragraph,
@@ -144,7 +149,9 @@ fn sample_script() -> Vec<Block> {
 /// A long document for checking that editing stays smooth.
 fn long_document(count: usize) -> Vec<Block> {
     let script = sample_script();
-    (0..count).map(|ix| Block { id: videocrm_core::BlockId::new(), ..script[ix % script.len()].clone() }).collect()
+    (0..count)
+        .map(|ix| Block { id: videocrm_core::BlockId::new(), ..script[ix % script.len()].clone() })
+        .collect()
 }
 
 fn main() {

@@ -37,9 +37,9 @@ pub fn detect_shortcut(text: &str, cursor: usize) -> Option<Shortcut> {
 
 /// `1. `, `12. `: digits followed by a dot and a space.
 fn is_ordered_marker(typed: &str) -> bool {
-    typed
-        .strip_suffix(". ")
-        .is_some_and(|digits| !digits.is_empty() && digits.len() <= 3 && digits.bytes().all(|b| b.is_ascii_digit()))
+    typed.strip_suffix(". ").is_some_and(|digits| {
+        !digits.is_empty() && digits.len() <= 3 && digits.bytes().all(|b| b.is_ascii_digit())
+    })
 }
 
 /// Splits pasted plain text into blocks, one per non-empty line, recognising
@@ -132,7 +132,8 @@ mod tests {
 
     #[test]
     fn detects_shortcuts_ending_at_the_caret() {
-        let kind = |text: &str, cursor| detect_shortcut(text, cursor).map(|s| (s.kind, s.checked, s.marker_len));
+        let kind =
+            |text: &str, cursor| detect_shortcut(text, cursor).map(|s| (s.kind, s.checked, s.marker_len));
         assert_eq!(kind("# ", 2), Some((BlockKind::Heading1, false, 2)));
         assert_eq!(kind("## Title", 3), Some((BlockKind::Heading2, false, 3)));
         assert_eq!(kind("### ", 4), Some((BlockKind::Heading3, false, 4)));

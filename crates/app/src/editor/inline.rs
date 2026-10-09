@@ -39,10 +39,7 @@ pub struct RichText {
 
 impl RichText {
     pub fn parse(source: &str) -> Self {
-        let mut parser = Parser {
-            source,
-            rich: RichText { source_len: source.len(), ..Self::default() },
-        };
+        let mut parser = Parser { source, rich: RichText { source_len: source.len(), ..Self::default() } };
         parser.parse(0..source.len(), InlineStyle::default(), None);
         parser.rich
     }
@@ -59,9 +56,7 @@ impl RichText {
     /// Rendered ranges of links with their destinations, in reading order.
     /// Adjacent spans of one link are reported separately.
     pub fn links(&self) -> impl Iterator<Item = (Range<usize>, &str)> {
-        self.spans
-            .iter()
-            .filter_map(|span| span.link.as_deref().map(|url| (span.range.clone(), url)))
+        self.spans.iter().filter_map(|span| span.link.as_deref().map(|url| (span.range.clone(), url)))
     }
 
     /// Maps a byte offset in the rendered text to the source text.
@@ -308,7 +303,10 @@ pub fn toggle_marker(text: &str, selection: Range<usize>, marker: Marker) -> (St
     let selected = &text[start..end];
     let inner_before = selected.bytes().take_while(|b| *b == mark_char).count();
     let inner_after = selected.bytes().rev().take_while(|b| *b == mark_char).count();
-    if selected.len() >= 2 * len && inner_before < selected.len() && marker.is_applied(inner_before, inner_after) {
+    if selected.len() >= 2 * len
+        && inner_before < selected.len()
+        && marker.is_applied(inner_before, inner_after)
+    {
         let unwrapped = [&text[..start], &selected[len..selected.len() - len], &text[end..]].concat();
         return (unwrapped, start..end - 2 * len);
     }
@@ -362,10 +360,7 @@ mod tests {
     fn nests_italic_inside_bold_and_triple_stars() {
         let rich = RichText::parse("**x *y* z**");
         assert_eq!(rich.text(), "x y z");
-        assert_eq!(
-            styled(&rich),
-            vec![("x ", BOLD, None), ("y", BOLD_ITALIC, None), (" z", BOLD, None)]
-        );
+        assert_eq!(styled(&rich), vec![("x ", BOLD, None), ("y", BOLD_ITALIC, None), (" z", BOLD, None)]);
 
         let rich = RichText::parse("***both***");
         assert_eq!(rich.text(), "both");
@@ -373,10 +368,7 @@ mod tests {
 
         let rich = RichText::parse("*a **b** c*");
         assert_eq!(rich.text(), "a b c");
-        assert_eq!(
-            styled(&rich),
-            vec![("a ", ITALIC, None), ("b", BOLD_ITALIC, None), (" c", ITALIC, None)]
-        );
+        assert_eq!(styled(&rich), vec![("a ", ITALIC, None), ("b", BOLD_ITALIC, None), (" c", ITALIC, None)]);
     }
 
     #[test]
@@ -405,7 +397,9 @@ mod tests {
 
     #[test]
     fn unmatched_markers_stay_literal() {
-        for source in ["2 * 3 = 6", "**open", "a * b *", "`tick", "[label]", "[label](no url)", "[](x)", "** spaced**"] {
+        for source in
+            ["2 * 3 = 6", "**open", "a * b *", "`tick", "[label]", "[label](no url)", "[](x)", "** spaced**"]
+        {
             let rich = RichText::parse(source);
             assert_eq!(rich.text(), source, "{source}");
             assert_eq!(styled(&rich), vec![(source, PLAIN, None)], "{source}");
