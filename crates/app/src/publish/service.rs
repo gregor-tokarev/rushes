@@ -189,12 +189,17 @@ impl YoutubeService {
         cx.global::<GlobalYoutubeService>().0.clone()
     }
 
+    /// The service, when the app has one (views tested on their own may not).
+    pub fn try_global(cx: &App) -> Option<Entity<YoutubeService>> {
+        cx.try_global::<GlobalYoutubeService>().map(|global| global.0.clone())
+    }
+
     fn new(state: Entity<AppState>, data_dir: PathBuf, cx: &mut Context<Self>) -> Self {
         let (config, env_override) = backend_config(&state.read(cx).settings().youtube);
-        let subscription = cx.subscribe(&state, |this, _, event: &AppEvent, cx| {
-            if *event == AppEvent::SettingsChanged {
-                this.on_settings_changed(cx);
-            }
+        let subscription = cx.subscribe(&state, |this, _, event: &AppEvent, cx| match event {
+            AppEvent::SettingsChanged => this.on_settings_changed(cx),
+            AppEvent::DataChanged => this.forget_deleted_videos(cx),
+            _ => {}
         });
         let mut service = Self {
             state,

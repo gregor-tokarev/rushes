@@ -219,6 +219,10 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   YouTube" when offline) until the upload gets further than before. A failure reads as a
   plain sentence (`describe_error`; the technical error goes to stderr) and stays
   resumable when YouTube had opened a session.
+- Deleting a video cancels its running upload (the delete confirmations say so, through
+  `publish::delete_upload_notice`) and drops its jobs from the service, as the store
+  deletes them with the video. If the last chunk was already on its way and YouTube
+  finishes the upload anyway, a notice links to the video so it can be removed in Studio.
 - `cancel_upload` stops at the next chunk read and keeps the session; `resume_upload`
   continues from the offset YouTube reports. A session the current connection refuses
   (another backend's after a switch, or a file that changed) is dropped, so the job stops

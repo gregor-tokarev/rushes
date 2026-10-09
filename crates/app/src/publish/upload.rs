@@ -107,6 +107,8 @@ pub(super) struct ActiveUpload {
     /// Most bytes sent so far; progress past it after a retry means the retry worked.
     high_water: u64,
     retry: Option<(Retry, u64)>,
+    /// The upload title, for a notice if the video is deleted while it uploads.
+    title: String,
 }
 
 impl ActiveUpload {
@@ -253,6 +255,7 @@ impl YoutubeService {
     ) -> bool {
         let cancel = Arc::new(AtomicBool::new(false));
         let (sender, mut messages) = mpsc::unbounded();
+        let title = self.video_title(id, cx);
         let worker = (client.clone(), cancel.clone());
         let spawned = thread::Builder::new()
             .name("youtube-upload".into())
@@ -263,8 +266,10 @@ impl YoutubeService {
             });
             return false;
         }
-        self.active
-            .insert(id, ActiveUpload { cancel, client, transfer: Transfer::new(total), high_water: 0, retry: None });
+        self.active.insert(
+            id,
+            ActiveUpload { cancel, client, transfer: Transfer::new(total), high_water: 0, retry: None, title },
+        );
         cx.spawn(async move |this, cx| {
             while let Some(message) = messages.next().await {
                 if this.update(cx, |this, cx| this.on_upload_message(id, message, cx)).is_err() {
@@ -312,6 +317,12 @@ impl YoutubeService {
             }
             UploadMessage::Finished(result) => {
                 let Some(upload) = self.active.remove(&id) else { return };
+                if self.job(id).is_none() {
+                    // The video was deleted while it uploaded.
+                    self.on_orphan_finished(upload, result.ok(), cx);
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok(video) => self.on_uploaded(id, video, upload.client, cx),
                     Err(YoutubeError::Cancelled { session_url }) => self.update_job(id, cx, |job| {
@@ -322,6 +333,51 @@ impl YoutubeService {
                 }
             }
         }
+    }
+
+    /// Deleting a video cancels its upload, but the last chunk may already have been
+    /// on its way: then the video is on YouTube, and the creator should know.
+    fn on_orphan_finished(&mut self, upload: ActiveUpload, uploaded: Option<UploadedVideo>, cx: &mut Context<Self>) {
+        let Some(uploaded) = uploaded else { return };
+        let (title, url): (String, SharedString) = (upload.title, uploaded.url.into());
+        push_notification(cx, move || {
+            Notification::warning(
+                "The upload finished before the video was deleted, so it is on your channel. \
+                 Remove it in YouTube Studio if you don't want it there.",
+            )
+            .title(format!("“{title}” reached YouTube"))
+            .action(move |_, _, _| {
+                let url = url.clone();
+                Button::new("open-orphan-on-youtube")
+                    .label("Open on YouTube")
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+            })
+        });
+    }
+
+    /// Stops the uploads of deleted videos and forgets their jobs: the store deleted
+    /// them with the video.
+    pub(super) fn forget_deleted_videos(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let gone: Vec<UploadId> =
+            self.jobs.iter().filter(|job| state.video(job.video_id).is_none()).map(|job| job.id).collect();
+        if gone.is_empty() {
+            return;
+        }
+        for id in &gone {
+            if let Some(upload) = self.active.get(id) {
+                upload.cancel();
+            }
+            self.outcomes.remove(id);
+        }
+        self.jobs.retain(|job| !gone.contains(&job.id));
+        cx.emit(YoutubeEvent::UploadsChanged);
+        cx.notify();
+    }
+
+    /// Whether any of `video_ids` is uploading right now.
+    pub fn is_uploading_any(&self, video_ids: &[VideoId]) -> bool {
+        self.active.keys().any(|id| self.job(*id).is_some_and(|job| video_ids.contains(&job.video_id)))
     }
 
     fn on_upload_failed(&mut self, id: UploadId, error: &YoutubeError, cx: &mut Context<Self>) {
@@ -499,8 +555,11 @@ impl YoutubeService {
     fn update_job(&mut self, id: UploadId, cx: &mut Context<Self>, change: impl FnOnce(&mut UploadJob)) {
         let Some(mut job) = self.job(id).cloned() else { return };
         change(&mut job);
-        if let Err(error) = lock(&self.store(cx)).update_upload(&mut job) {
-            report_error(&self.state, format!("Couldn't save the upload status: {error}"), cx);
+        match lock(&self.store(cx)).update_upload(&mut job) {
+            Ok(()) => {}
+            // The video, and its uploads with it, were deleted meanwhile.
+            Err(StoreError::NotFound { .. }) => {}
+            Err(error) => report_error(&self.state, format!("Couldn't save the upload status: {error}"), cx),
         }
         self.reload_jobs(cx);
     }

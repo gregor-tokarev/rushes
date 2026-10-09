@@ -5,13 +5,18 @@
 
 mod publish_support;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::Utc;
-use gpui_kit::TestAppContext;
+use gpui_kit::{AppContext as _, TestAppContext};
 use publish_support::{Emulators, Workspace, wait_until};
 use serde_json::json;
-use videocrm::publish::{Connection, INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, UploadError};
+use videocrm::publish::{
+    Connection, INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, UploadError, delete_upload_notice,
+};
+use videocrm::state::AppEvent;
 use videocrm_core::settings::YoutubeBackend;
 use videocrm_core::{Privacy, UploadId, UploadJob, UploadStatus, VideoStatus};
 use videocrm_youtube::{Account, CredentialStore, Credentials, SavedLogin};
@@ -353,4 +358,69 @@ fn switching_the_backend_signs_out(cx: &mut TestAppContext) {
 
     service.update(cx, |service, cx| service.connect(cx));
     assert!(matches!(service.read_with(cx, |s, _| s.connection().clone()), Connection::Failed(_)));
+}
+
+#[gpui_kit::test]
+fn deleting_a_video_cancels_its_upload_without_errors(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let errors: Rc<RefCell<Vec<String>>> = Rc::default();
+    let sink = errors.clone();
+    let _subscription = cx.update(|cx| {
+        cx.subscribe(&workspace.state, move |_, event: &AppEvent, _| {
+            if let AppEvent::Error(message) = event {
+                sink.borrow_mut().push(message.to_string());
+            }
+        })
+    });
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Keychron Q1 Max review", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.privacy = Privacy::Private;
+    });
+    let other = workspace.create_video(cx, "Desk setup 2026", |_| {});
+    // Every chunk fails, so the upload is still running when the video goes.
+    emulators.inject_fault(json!({"method": "PUT", "path": "/upload/youtube/v3/videos", "status": 503, "times": 1000}));
+    let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    wait_until(cx, "the upload session", |cx| {
+        service.read_with(cx, |s, _| s.job(upload).and_then(|job| job.session_url.clone()))
+    });
+    // The delete confirmation says what happens to the upload.
+    cx.update(|cx| {
+        assert!(delete_upload_notice(&[video_id], cx).is_some_and(|notice| notice.contains("cancels the upload")));
+        assert_eq!(delete_upload_notice(&[other], cx), None);
+    });
+
+    workspace.state.update(cx, |state, cx| state.delete_videos(&[video_id], cx));
+    cx.run_until_parked();
+    assert!(service.read_with(cx, |s, _| s.is_cancelling(upload)), "deleting the video stops its upload");
+    assert_eq!(service.read_with(cx, |s, _| s.latest_job(video_id).cloned()), None, "the job went with the video");
+    wait_until(cx, "the worker to stop", |cx| service.read_with(cx, |s, _| (!s.is_active(upload)).then_some(())));
+    emulators.clear_faults();
+    assert!(errors.borrow().is_empty(), "{:?}", errors.borrow());
+    assert!(emulators.uploads().is_empty(), "nothing reached YouTube");
+    assert!(workspace.stored_jobs(cx).is_empty());
+}
+
+#[gpui_kit::test]
+fn the_uploads_of_a_deleted_video_leave_the_list(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let video_id = workspace.create_video(cx, "Old upload", |_| {});
+    let done = UploadJob {
+        id: UploadId::new(),
+        video_id,
+        file: workspace.dir.path().join("final.mp4"),
+        status: UploadStatus::Done { video_id: "abc".into() },
+        session_url: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    workspace.insert_jobs(cx, &[&done]);
+    let service = workspace.restart(cx);
+    assert_eq!(service.read_with(cx, |s, _| s.jobs().len()), 1);
+    workspace.state.update(cx, |state, cx| state.delete_videos(&[video_id], cx));
+    cx.run_until_parked();
+    assert!(service.read_with(cx, |s, _| s.jobs().is_empty()), "the Uploads page no longer lists it");
 }

@@ -346,13 +346,18 @@ impl DatabasePanel {
             }
             ids => format!("Delete {} videos?", ids.len()).into(),
         };
+        let consequence = "Scripts, notes and edit history go with it. This can’t be undone.";
+        let description: SharedString = match crate::publish::delete_upload_notice(&ids, cx) {
+            Some(notice) => format!("{notice} {consequence}").into(),
+            None => consequence.into(),
+        };
         let panel = cx.weak_entity();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let panel = panel.clone();
             let ids = ids.clone();
             alert
                 .title(title.clone())
-                .description("Scripts, notes and edit history go with it. This can’t be undone.")
+                .description(description.clone())
                 .confirm()
                 .ok_text("Delete")
                 .ok_variant(ButtonVariant::Danger)
