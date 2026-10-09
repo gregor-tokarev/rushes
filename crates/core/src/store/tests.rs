@@ -3,7 +3,9 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::*;
-use crate::model::{BlockKind, Privacy, PublishSettings, SelectOption, SortDirection, TagColor, YoutubeLink};
+use crate::model::{
+    BlockKind, Privacy, PublishSettings, SelectOption, SortDirection, TagColor, YoutubeLink, YoutubeState,
+};
 use crate::settings::{ThemeMode, YoutubeBackend};
 
 fn store() -> Store {
@@ -293,13 +295,54 @@ fn video_rows_derive_script_stats_and_latest_statuses() {
     assert_eq!(busy_row.script_words, 300);
     assert_eq!(busy_row.script_seconds, 120);
     assert_eq!(busy_row.latest_run, Some(RunStatus::AwaitingApproval));
+    assert!(!busy_row.has_finished_edit);
     assert_eq!(busy_row.latest_upload, Some(UploadStatus::Uploading { sent: 10, total: 100 }));
 
     let idle_row = &rows[1];
     assert_eq!(idle_row.video, idle);
     assert_eq!((idle_row.script_words, idle_row.script_seconds), (0, 0));
     assert_eq!(idle_row.latest_run, None);
+    assert!(!idle_row.has_finished_edit);
     assert_eq!(idle_row.latest_upload, None);
+    assert_eq!((idle_row.edit_status(), idle_row.youtube_state()), (None, None));
+}
+
+#[test]
+fn a_failed_retry_does_not_hide_a_finished_edit_or_a_live_video() {
+    let mut store = store();
+    let mut video = insert(&mut store, "Retried", 0.0);
+    store.insert_run(&run(video.id, RunStatus::Succeeded, 30)).unwrap();
+    store.insert_run(&run(video.id, RunStatus::Failed, 5)).unwrap();
+    store.insert_upload(&upload(video.id, UploadStatus::Done { video_id: "yt1".into() }, 20)).unwrap();
+    store.insert_upload(&upload(video.id, UploadStatus::Cancelled, 2)).unwrap();
+
+    // Not linked to YouTube (e.g. the link was removed): the attempt is all there is.
+    let row = store.list_video_rows().unwrap().remove(0);
+    assert_eq!(row.latest_run, Some(RunStatus::Failed));
+    assert!(row.has_finished_edit);
+    assert_eq!(row.edit_status(), Some(RunStatus::Succeeded));
+    assert_eq!(row.newer_edit_attempt(), Some(RunStatus::Failed));
+    assert_eq!(row.youtube_state(), Some(YoutubeState::Upload(&UploadStatus::Cancelled)));
+    assert_eq!(row.newer_upload_attempt(), None);
+
+    let link = YoutubeLink {
+        video_id: "yt1".into(),
+        url: "https://www.youtube.com/watch?v=yt1".into(),
+        channel_id: "UC1".into(),
+        privacy: Privacy::Public,
+        uploaded_at: Utc::now(),
+    };
+    video.youtube = Some(link.clone());
+    store.update_video(&mut video).unwrap();
+    let row = store.list_video_rows().unwrap().remove(0);
+    assert_eq!(row.youtube_state(), Some(YoutubeState::Live(&link)));
+    assert_eq!(row.newer_upload_attempt(), Some(&UploadStatus::Cancelled));
+
+    // A running edit is the state to show, even after a finished one.
+    store.insert_run(&run(video.id, RunStatus::Rendering, 1)).unwrap();
+    let row = store.list_video_rows().unwrap().remove(0);
+    assert_eq!(row.edit_status(), Some(RunStatus::Rendering));
+    assert_eq!(row.newer_edit_attempt(), None);
 }
 
 #[test]
@@ -696,7 +739,8 @@ fn sample_workspace_is_complete() {
     let rows = store.list_video_rows().unwrap();
     assert_eq!(rows.len(), videos.len() + 1);
     for row in rows.iter().skip(1) {
-        assert!(row.script_words > 20, "{} has a script", row.video.title);
+        // Videos still on a template have only their hook written; guidance is not script.
+        assert!(row.script_words > 5, "{} has a script", row.video.title);
         if row.video.format == VideoFormat::Short {
             assert!(row.script_seconds < 60, "{} fits a Short", row.video.title);
         }

@@ -9,14 +9,14 @@ use std::collections::BTreeMap;
 use chrono::{Duration, NaiveDate, Utc};
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, WindowExt as _, v_flex};
 use gpui_kit::{
-    AppContext as _, Bounds, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render,
-    Styled as _, Subscription, Window, WindowBounds, WindowOptions, div, point, px, size,
+    AppContext as _, Bounds, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render, Styled as _,
+    Subscription, Window, WindowBounds, WindowOptions, div, point, px, size,
 };
 use videocrm::database::{DatabaseEvent, DatabasePanel, WithDatabaseIcons};
 use videocrm_core::{
-    BuiltinField, Column, ColumnLayout, DatabaseView, FilterSpec, PropertyDef, PropertyId,
-    PropertyKind, PropertyValue, RunStatus, SelectOption, TagColor, UploadStatus, Video,
-    VideoFormat, VideoId, VideoRow, VideoStatus, ViewId, ViewKind,
+    BuiltinField, Column, ColumnLayout, DatabaseView, FilterSpec, PropertyDef, PropertyId, PropertyKind, PropertyValue,
+    RunStatus, SelectOption, TagColor, UploadStatus, Video, VideoFormat, VideoId, VideoRow, VideoStatus, ViewId,
+    ViewKind,
 };
 
 struct Demo {
@@ -33,20 +33,12 @@ impl Demo {
         let panel = cx.new(|cx| DatabasePanel::new(window, cx));
         panel.update(cx, |panel, cx| {
             panel.set_data(rows.clone(), properties.clone(), views.clone(), window, cx);
-            if start_on_board
-                && let Some(board) = views.iter().find(|view| view.kind == ViewKind::Board)
-            {
+            if start_on_board && let Some(board) = views.iter().find(|view| view.kind == ViewKind::Board) {
                 panel.set_active_view(board.id, window, cx);
             }
         });
         let subscription = cx.subscribe_in(&panel, window, Self::on_database_event);
-        Self {
-            panel,
-            rows,
-            properties,
-            views,
-            _subscription: subscription,
-        }
+        Self { panel, rows, properties, views, _subscription: subscription }
     }
 
     /// Plays the app shell: persist the change, then hand the data back.
@@ -76,9 +68,7 @@ impl Demo {
                     row.video = video.clone();
                 }
             }
-            DatabaseEvent::DeleteVideos(ids) => {
-                self.rows.retain(|row| !ids.contains(&row.video.id))
-            }
+            DatabaseEvent::DeleteVideos(ids) => self.rows.retain(|row| !ids.contains(&row.video.id)),
             DatabaseEvent::DuplicateVideo(id) => {
                 if let Some(original) = self.rows.iter().find(|row| row.video.id == *id).cloned() {
                     let mut copy = original.video.clone();
@@ -110,22 +100,12 @@ impl Demo {
             DatabaseEvent::CreateView(view) => self.views.push(view.clone()),
             DatabaseEvent::DeleteView(id) => self.views.retain(|view| view.id != *id),
         }
-        let (rows, properties, views) = (
-            self.rows.clone(),
-            self.properties.clone(),
-            self.views.clone(),
-        );
-        panel.update(cx, |panel, cx| {
-            panel.set_data(rows, properties, views, window, cx)
-        });
+        let (rows, properties, views) = (self.rows.clone(), self.properties.clone(), self.views.clone());
+        panel.update(cx, |panel, cx| panel.set_data(rows, properties, views, window, cx));
     }
 
     fn next_position(&self) -> f64 {
-        self.rows
-            .iter()
-            .map(|row| row.video.position)
-            .fold(0.0, f64::max)
-            + 1.0
+        self.rows.iter().map(|row| row.video.position).fold(0.0, f64::max) + 1.0
     }
 }
 
@@ -141,12 +121,7 @@ impl Render for Demo {
                     .pt_6()
                     .pb_2()
                     .gap_1()
-                    .child(
-                        div()
-                            .text_2xl()
-                            .font_weight(FontWeight::BOLD)
-                            .child("🎬 Videos"),
-                    )
+                    .child(div().text_2xl().font_weight(FontWeight::BOLD).child("🎬 Videos"))
                     .child(
                         div()
                             .text_sm()
@@ -163,25 +138,18 @@ fn main() {
     let start_on_board = args.iter().any(|arg| arg == "--board");
     let dark = args.iter().any(|arg| arg == "--dark");
 
-    gpui_kit::application()
-        .with_assets(WithDatabaseIcons(gpui_kit::assets::Assets))
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            if dark {
-                Theme::change(ThemeMode::Dark, None, cx);
-            }
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                    point(px(0.), px(0.)),
-                    size(px(1440.), px(900.)),
-                ))),
-                ..WindowOptions::default()
-            };
-            gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| Demo::new(start_on_board, window, cx))
-            })
+    gpui_kit::application().with_assets(WithDatabaseIcons(gpui_kit::assets::Assets)).run(move |cx| {
+        gpui_kit::init(cx);
+        if dark {
+            Theme::change(ThemeMode::Dark, None, cx);
+        }
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(0.), px(0.)), size(px(1440.), px(900.))))),
+            ..WindowOptions::default()
+        };
+        gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Demo::new(start_on_board, window, cx)))
             .expect("failed to open the demo window");
-        });
+    });
 }
 
 fn row(
@@ -194,17 +162,14 @@ fn row(
         video,
         script_words,
         script_seconds: (script_words as f64 / 150.0 * 60.0).round() as u32,
+        has_finished_edit: latest_run == Some(RunStatus::Succeeded),
         latest_run,
         latest_upload,
     }
 }
 
 fn option(id: &str, name: &str, color: TagColor) -> SelectOption {
-    SelectOption {
-        id: id.into(),
-        name: name.into(),
-        color,
-    }
+    SelectOption { id: id.into(), name: name.into(), color }
 }
 
 /// A dozen videos at every stage, three custom properties and two views.
@@ -234,12 +199,8 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
         },
         position: 1,
     };
-    let thumbnail = PropertyDef {
-        id: PropertyId::new(),
-        name: "Thumbnail".into(),
-        kind: PropertyKind::Checkbox,
-        position: 2,
-    };
+    let thumbnail =
+        PropertyDef { id: PropertyId::new(), name: "Thumbnail".into(), kind: PropertyKind::Checkbox, position: 2 };
 
     let today = chrono::Local::now().date_naive();
     let day = |offset: i64| Some(today + Duration::days(offset));
@@ -305,10 +266,7 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
             tags: &["Coding", "Tools"],
             words: 180,
             run: Some(RunStatus::Succeeded),
-            upload: Some(UploadStatus::Uploading {
-                sent: 61,
-                total: 100,
-            }),
+            upload: Some(UploadStatus::Uploading { sent: 61, total: 100 }),
             priority: Some("high"),
             platforms: &["tiktok", "instagram"],
             thumbnail: true,
@@ -356,9 +314,7 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
             tags: &["Rust", "Shorts"],
             words: 160,
             run: Some(RunStatus::Succeeded),
-            upload: Some(UploadStatus::Done {
-                video_id: "dQw4w9WgXcQ".into(),
-            }),
+            upload: Some(UploadStatus::Done { video_id: "dQw4w9WgXcQ".into() }),
             priority: None,
             platforms: &["tiktok", "instagram", "x"],
             thumbnail: true,
@@ -422,9 +378,7 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
             tags: &["Channel"],
             words: 1500,
             run: Some(RunStatus::Succeeded),
-            upload: Some(UploadStatus::Done {
-                video_id: "a1b2c3d4e5f".into(),
-            }),
+            upload: Some(UploadStatus::Done { video_id: "a1b2c3d4e5f".into() }),
             priority: None,
             platforms: &[],
             thumbnail: true,
@@ -476,8 +430,7 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
             video.publish_date = sample.publish;
             video.tags = sample.tags.iter().map(|tag| tag.to_string()).collect();
             video.position = ix as f64;
-            video.created_at =
-                now - Duration::days(sample.age_days) - Duration::hours(ix as i64 * 3);
+            video.created_at = now - Duration::days(sample.age_days) - Duration::hours(ix as i64 * 3);
             video.updated_at = now - Duration::hours(ix as i64 * 7 + 1);
             let mut properties = BTreeMap::new();
             if let Some(level) = sample.priority {
@@ -486,9 +439,7 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
             if !sample.platforms.is_empty() {
                 properties.insert(
                     platforms.id,
-                    PropertyValue::MultiSelect(
-                        sample.platforms.iter().map(|id| id.to_string()).collect(),
-                    ),
+                    PropertyValue::MultiSelect(sample.platforms.iter().map(|id| id.to_string()).collect()),
                 );
             }
             properties.insert(thumbnail.id, PropertyValue::Checkbox(sample.thumbnail));
@@ -497,11 +448,7 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
         })
         .collect();
 
-    let layout = |column: Column, width: f32, visible: bool| ColumnLayout {
-        column,
-        width,
-        visible,
-    };
+    let layout = |column: Column, width: f32, visible: bool| ColumnLayout { column, width, visible };
     let builtin = |field: BuiltinField| Column::Builtin(field);
     let table = DatabaseView {
         id: ViewId::new(),
@@ -523,10 +470,7 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
             layout(builtin(BuiltinField::CreatedAt), 120.0, false),
         ],
         sorts: Vec::new(),
-        filter: FilterSpec {
-            hide_archived: true,
-            ..FilterSpec::default()
-        },
+        filter: FilterSpec { hide_archived: true, ..FilterSpec::default() },
         position: 0,
     };
     let board = DatabaseView {
@@ -535,16 +479,9 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
         kind: ViewKind::Board,
         columns: Vec::new(),
         sorts: Vec::new(),
-        filter: FilterSpec {
-            hide_archived: true,
-            ..FilterSpec::default()
-        },
+        filter: FilterSpec { hide_archived: true, ..FilterSpec::default() },
         position: 1,
     };
 
-    (
-        rows,
-        vec![priority, platforms, thumbnail],
-        vec![table, board],
-    )
+    (rows, vec![priority, platforms, thumbnail], vec![table, board])
 }

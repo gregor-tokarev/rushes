@@ -4,7 +4,9 @@
 //! copy immediately and reported as [`DatabaseEvent`]s; the owner persists them
 //! and hands the stored state back through [`DatabasePanel::set_data`].
 
+use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use chrono::{NaiveDate, Utc};
 use gpui_kit::assets::IconName;
@@ -15,14 +17,13 @@ use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, Size, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Global,
-    InteractiveElement as _, IntoElement, KeyBinding, NoAction, ParentElement as _, Pixels, Render,
-    ScrollHandle, SharedString, Styled as _, Subscription, Window, actions, div,
+    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Global, InteractiveElement as _,
+    IntoElement, KeyBinding, NoAction, ParentElement as _, Pixels, Render, ScrollHandle, SharedString, Styled as _,
+    Subscription, Task, Window, actions, div,
 };
 use videocrm_core::{
-    BuiltinField, Column, DatabaseView, FilterSpec, PropertyDef, PropertyId, PropertyKind,
-    PropertyValue, SortDirection, SortSpec, Video, VideoId, VideoRow, VideoStatus, ViewId,
-    ViewKind,
+    BuiltinField, Column, DatabaseView, FilterSpec, PropertyDef, PropertyId, PropertyKind, PropertyValue,
+    SortDirection, SortSpec, Video, VideoId, VideoRow, VideoStatus, ViewId, ViewKind,
 };
 
 use super::format;
@@ -30,12 +31,14 @@ use super::property_editor::{PropertyEditor, PropertyEditorMode};
 use super::query::{self, resolve_columns, view_rows, visible_columns};
 use super::table::{CellEditors, EmptyReason, TableModel, VideoTable};
 
-actions!(
-    video_database,
-    [OpenSelected, RenameSelected, DeleteSelected, CancelEdit]
-);
+actions!(video_database, [OpenSelected, RenameSelected, DeleteSelected, CancelEdit]);
 
 const KEY_CONTEXT: &str = "VideoDatabase";
+
+/// How long a click on a title waits before opening the video, so the second
+/// click of a double-click can rename it instead. Just under GPUI's
+/// double-click interval (400 ms) counted from the first click's release.
+pub(crate) const OPEN_AFTER_CLICK: Duration = Duration::from_millis(350);
 
 /// Key context around the inline cell editor, so Escape cancels the edit
 /// before the table takes it to clear the row selection.
@@ -78,6 +81,15 @@ pub enum DatabaseEvent {
     ActiveViewChanged(ViewId),
 }
 
+/// The sort rule the Sort popover is choosing a column for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SortPicker {
+    /// The existing rule at this index.
+    Rule(usize),
+    /// A rule to add.
+    New,
+}
+
 /// One cell of the database: a video and a column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct CellRef {
@@ -100,6 +112,14 @@ pub struct DatabasePanel {
     tags_target: Option<VideoId>,
     /// The view whose tab was right-clicked, for the tab context menu.
     pub(super) menu_view: Option<ViewId>,
+    /// The sort rule whose column the Sort popover is choosing, if any.
+    pub(super) sort_picker: Option<SortPicker>,
+    /// Whether the view tabs overflowed their strip in the last frame, so the
+    /// strip offers a menu of every view.
+    pub(super) view_tabs_overflow: Rc<Cell<bool>>,
+    pub(super) view_tabs_scroll: ScrollHandle,
+    /// A title click waiting out the double-click interval before opening.
+    pending_open: Option<Task<()>>,
     pub(super) table: Entity<TableState<VideoTable>>,
     pub(super) search: Entity<InputState>,
     pub(super) view_name: Entity<InputState>,
@@ -170,28 +190,20 @@ impl DatabasePanel {
                     this.refresh(cx);
                 }
             }),
-            cx.subscribe_in(
-                &editors.cell_input,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                        this.commit_editing(window, cx);
-                    }
-                },
-            ),
+            cx.subscribe_in(&editors.cell_input, window, |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.commit_editing(window, cx);
+                }
+            }),
             cx.subscribe_in(&editors.tag_input, window, Self::on_tag_input_event),
-            cx.subscribe_in(
-                &editors.calendar,
-                window,
-                |this, _, event: &CalendarEvent, window, cx| {
-                    let CalendarEvent::Selected(Date::Single(Some(date))) = event else {
-                        return;
-                    };
-                    if let Some(cell) = this.date_target {
-                        this.set_date(cell, Some(*date), window, cx);
-                    }
-                },
-            ),
+            cx.subscribe_in(&editors.calendar, window, |this, _, event: &CalendarEvent, window, cx| {
+                let CalendarEvent::Selected(Date::Single(Some(date))) = event else {
+                    return;
+                };
+                if let Some(cell) = this.date_target {
+                    this.set_date(cell, Some(*date), window, cx);
+                }
+            }),
         ];
 
         Self {
@@ -205,6 +217,10 @@ impl DatabasePanel {
             date_target: None,
             tags_target: None,
             menu_view: None,
+            sort_picker: None,
+            view_tabs_overflow: Rc::default(),
+            view_tabs_scroll: ScrollHandle::new(),
+            pending_open: None,
             table,
             search,
             view_name,
@@ -231,16 +247,10 @@ impl DatabasePanel {
         self.properties = properties;
         self.properties.sort_by_key(|property| property.position);
         self.views = views;
-        if !self
-            .active_view
-            .is_some_and(|id| self.views.iter().any(|view| view.id == id))
-        {
+        if !self.active_view.is_some_and(|id| self.views.iter().any(|view| view.id == id)) {
             self.active_view = self.views.first().map(|view| view.id);
         }
-        if self
-            .editing
-            .is_some_and(|cell| !self.rows.iter().any(|row| row.video.id == cell.video))
-        {
+        if self.editing.is_some_and(|cell| !self.rows.iter().any(|row| row.video.id == cell.video)) {
             self.editing = None;
         }
         self.date_target = self.date_target.filter(|cell| self.has_video(cell.video));
@@ -252,6 +262,12 @@ impl DatabasePanel {
     pub fn set_active_view(&mut self, view: ViewId, window: &mut Window, cx: &mut Context<Self>) {
         if self.views.iter().any(|known| known.id == view) && self.active_view != Some(view) {
             self.active_view = Some(view);
+            self.sort_picker = None;
+            // A view picked from the overflow menu, or just added, may sit
+            // outside the scrolled tab strip.
+            if let Some(ix) = self.active_index() {
+                self.view_tabs_scroll.scroll_to_item(ix);
+            }
             self.cancel_editing(window, cx);
             self.refresh(cx);
         }
@@ -272,17 +288,11 @@ impl DatabasePanel {
 
     /// The videos the active view shows, in display order.
     pub fn visible_videos(&self) -> Vec<VideoId> {
-        self.shown
-            .iter()
-            .map(|&ix| self.rows[ix].video.id)
-            .collect()
+        self.shown.iter().map(|&ix| self.rows[ix].video.id).collect()
     }
 
     pub fn video(&self, id: VideoId) -> Option<&Video> {
-        self.rows
-            .iter()
-            .map(|row| &row.video)
-            .find(|video| video.id == id)
+        self.rows.iter().map(|row| &row.video).find(|video| video.id == id)
     }
 
     pub fn selected_video(&self) -> Option<VideoId> {
@@ -290,12 +300,7 @@ impl DatabasePanel {
     }
 
     /// Applies `edit` to a video, stamps it as updated and reports it.
-    pub fn update_video(
-        &mut self,
-        id: VideoId,
-        edit: impl FnOnce(&mut Video),
-        cx: &mut Context<Self>,
-    ) {
+    pub fn update_video(&mut self, id: VideoId, edit: impl FnOnce(&mut Video), cx: &mut Context<Self>) {
         let Some(row) = self.rows.iter_mut().find(|row| row.video.id == id) else {
             return;
         };
@@ -315,34 +320,41 @@ impl DatabasePanel {
     }
 
     pub fn open_video(&mut self, id: VideoId, cx: &mut Context<Self>) {
+        self.pending_open = None;
         cx.emit(DatabaseEvent::OpenVideo(id));
+    }
+
+    /// Opens a video once a click on its title can no longer turn into a
+    /// double-click, which renames it instead.
+    pub(crate) fn open_video_after_click(&mut self, id: VideoId, cx: &mut Context<Self>) {
+        self.pending_open = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(OPEN_AFTER_CLICK).await;
+            _ = this.update(cx, |this, cx| this.open_video(id, cx));
+        }));
     }
 
     pub fn create_video(&mut self, status: Option<VideoStatus>, cx: &mut Context<Self>) {
         cx.emit(DatabaseEvent::CreateVideo { status });
     }
 
+    /// Creates a video the active view shows: in the first status its filter
+    /// allows, if it filters by status.
+    pub(crate) fn create_video_in_view(&mut self, cx: &mut Context<Self>) {
+        let status = self
+            .active_view()
+            .and_then(|view| VideoStatus::ALL.into_iter().find(|status| view.filter.statuses.contains(status)));
+        self.create_video(status, cx);
+    }
+
     pub(crate) fn duplicate_video(&mut self, id: VideoId, cx: &mut Context<Self>) {
         cx.emit(DatabaseEvent::DuplicateVideo(id));
     }
 
-    pub(crate) fn confirm_delete_videos(
-        &mut self,
-        ids: Vec<VideoId>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn confirm_delete_videos(&mut self, ids: Vec<VideoId>, window: &mut Window, cx: &mut Context<Self>) {
         let title: SharedString = match ids.as_slice() {
             [id] => {
-                let name = self
-                    .video(*id)
-                    .map(|video| video.title.trim())
-                    .unwrap_or_default();
-                if name.is_empty() {
-                    "Delete this video?".into()
-                } else {
-                    format!("Delete “{name}”?").into()
-                }
+                let name = self.video(*id).map(|video| video.title.trim()).unwrap_or_default();
+                if name.is_empty() { "Delete this video?".into() } else { format!("Delete “{name}”?").into() }
             }
             ids => format!("Delete {} videos?", ids.len()).into(),
         };
@@ -372,15 +384,12 @@ impl DatabasePanel {
         cx.emit(DatabaseEvent::DeleteVideos(ids));
     }
 
-    pub(crate) fn start_editing(
-        &mut self,
-        cell: CellRef,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn start_editing(&mut self, cell: CellRef, window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = self.cell_text(cell) else {
             return;
         };
+        // The second click of a double-click on a title renames, not opens.
+        self.pending_open = None;
         self.editing = Some(cell);
         self.editors.cell_input.update(cx, |input, cx| {
             input.set_value(text, window, cx);
@@ -405,11 +414,7 @@ impl DatabasePanel {
 
         match cell.column {
             Column::Builtin(BuiltinField::Title) => {
-                self.update_video(
-                    cell.video,
-                    |video| video.title = text.trim().to_string(),
-                    cx,
-                );
+                self.update_video(cell.video, |video| video.title = text.trim().to_string(), cx);
             }
             Column::Custom(property) => {
                 let Some(def) = self.properties.iter().find(|def| def.id == property) else {
@@ -443,12 +448,8 @@ impl DatabasePanel {
                 match (&def.kind, value) {
                     (PropertyKind::Text, Some(PropertyValue::Text(text)))
                     | (PropertyKind::Url, Some(PropertyValue::Url(text))) => Some(text.clone()),
-                    (PropertyKind::Number, Some(PropertyValue::Number(number))) => {
-                        Some(number.to_string())
-                    }
-                    (PropertyKind::Text | PropertyKind::Url | PropertyKind::Number, _) => {
-                        Some(String::new())
-                    }
+                    (PropertyKind::Number, Some(PropertyValue::Number(number))) => Some(number.to_string()),
+                    (PropertyKind::Text | PropertyKind::Url | PropertyKind::Number, _) => Some(String::new()),
                     _ => None,
                 }
             }
@@ -497,21 +498,14 @@ impl DatabasePanel {
                     selected.push(option.to_string());
                 }
                 if !selected.is_empty() {
-                    video
-                        .properties
-                        .insert(property, PropertyValue::MultiSelect(selected));
+                    video.properties.insert(property, PropertyValue::MultiSelect(selected));
                 }
             },
             cx,
         );
     }
 
-    pub(crate) fn set_date_target(
-        &mut self,
-        target: Option<CellRef>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn set_date_target(&mut self, target: Option<CellRef>, window: &mut Window, cx: &mut Context<Self>) {
         if self.date_target == target {
             return;
         }
@@ -530,25 +524,14 @@ impl DatabasePanel {
         self.sync_table(cx);
     }
 
-    pub(crate) fn set_date(
-        &mut self,
-        cell: CellRef,
-        date: Option<NaiveDate>,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn set_date(&mut self, cell: CellRef, date: Option<NaiveDate>, _: &mut Window, cx: &mut Context<Self>) {
         self.date_target = None;
         match cell.column {
             Column::Builtin(BuiltinField::PublishDate) => {
                 self.update_video(cell.video, |video| video.publish_date = date, cx);
             }
             Column::Custom(property) => {
-                self.set_property_value(
-                    cell.video,
-                    property,
-                    date.map(|date| PropertyValue::Date(Some(date))),
-                    cx,
-                );
+                self.set_property_value(cell.video, property, date.map(|date| PropertyValue::Date(Some(date))), cx);
             }
             Column::Builtin(_) => {}
         }
@@ -567,19 +550,12 @@ impl DatabasePanel {
         }
     }
 
-    pub(crate) fn set_tags_target(
-        &mut self,
-        target: Option<VideoId>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn set_tags_target(&mut self, target: Option<VideoId>, window: &mut Window, cx: &mut Context<Self>) {
         if self.tags_target == target {
             return;
         }
         self.tags_target = target;
-        self.editors
-            .tag_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.editors.tag_input.update(cx, |input, cx| input.set_value("", window, cx));
         self.sync_table(cx);
     }
 
@@ -591,11 +567,7 @@ impl DatabasePanel {
         self.update_video(
             id,
             |video| {
-                if !video
-                    .tags
-                    .iter()
-                    .any(|known| known.eq_ignore_ascii_case(tag))
-                {
+                if !video.tags.iter().any(|known| known.eq_ignore_ascii_case(tag)) {
                     video.tags.push(tag.to_string());
                 }
             },
@@ -629,21 +601,11 @@ impl DatabasePanel {
         }
     }
 
-    pub(crate) fn sort_by(
-        &mut self,
-        column: Column,
-        direction: SortDirection,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn sort_by(&mut self, column: Column, direction: SortDirection, cx: &mut Context<Self>) {
         self.update_view(|view| view.sorts = vec![SortSpec { column, direction }], cx);
     }
 
-    pub(crate) fn set_column_visible(
-        &mut self,
-        column: Column,
-        visible: bool,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn set_column_visible(&mut self, column: Column, visible: bool, cx: &mut Context<Self>) {
         let properties = self.properties.clone();
         self.update_view(
             |view| {
@@ -660,14 +622,12 @@ impl DatabasePanel {
     /// Empties the search box. The search is never saved, so the view
     /// stays as it is.
     pub(crate) fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search
-            .update(cx, |search, cx| search.set_value("", window, cx));
+        self.search.update(cx, |search, cx| search.set_value("", window, cx));
         self.refresh(cx);
     }
 
     pub(crate) fn clear_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search
-            .update(cx, |search, cx| search.set_value("", window, cx));
+        self.search.update(cx, |search, cx| search.set_value("", window, cx));
         self.update_view(
             |view| {
                 view.filter.statuses.clear();
@@ -681,15 +641,8 @@ impl DatabasePanel {
     }
 
     /// Applies `edit` to the active view and reports it.
-    pub(crate) fn update_view(
-        &mut self,
-        edit: impl FnOnce(&mut DatabaseView),
-        cx: &mut Context<Self>,
-    ) {
-        let Some(view) = self
-            .active_view
-            .and_then(|id| self.views.iter_mut().find(|view| view.id == id))
-        else {
+    pub(crate) fn update_view(&mut self, edit: impl FnOnce(&mut DatabaseView), cx: &mut Context<Self>) {
+        let Some(view) = self.active_view.and_then(|id| self.views.iter_mut().find(|view| view.id == id)) else {
             return;
         };
         let before = view.clone();
@@ -711,45 +664,23 @@ impl DatabasePanel {
         cx.emit(DatabaseEvent::ActiveViewChanged(id));
     }
 
-    pub(crate) fn create_view(
-        &mut self,
-        kind: ViewKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn create_view(&mut self, kind: ViewKind, window: &mut Window, cx: &mut Context<Self>) {
         let base = match kind {
             ViewKind::Table => "Table",
             ViewKind::Board => "Board",
         };
         let name = (1..)
-            .map(|n| {
-                if n == 1 {
-                    base.to_string()
-                } else {
-                    format!("{base} {n}")
-                }
-            })
+            .map(|n| if n == 1 { base.to_string() } else { format!("{base} {n}") })
             .find(|name| !self.views.iter().any(|view| &view.name == name))
             .unwrap_or_else(|| base.to_string());
         let view = DatabaseView {
             id: ViewId::new(),
             name,
             kind,
-            columns: self
-                .active_view()
-                .map(|view| view.columns.clone())
-                .unwrap_or_default(),
+            columns: self.active_view().map(|view| view.columns.clone()).unwrap_or_default(),
             sorts: Vec::new(),
-            filter: FilterSpec {
-                hide_archived: true,
-                ..FilterSpec::default()
-            },
-            position: self
-                .views
-                .iter()
-                .map(|view| view.position + 1)
-                .max()
-                .unwrap_or(0),
+            filter: FilterSpec { hide_archived: true, ..FilterSpec::default() },
+            position: self.views.iter().map(|view| view.position + 1).max().unwrap_or(0),
         };
         let id = view.id;
         self.views.push(view.clone());
@@ -795,17 +726,11 @@ impl DatabasePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let existing =
-            property.and_then(|id| self.properties.iter().find(|def| def.id == id).cloned());
+        let existing = property.and_then(|id| self.properties.iter().find(|def| def.id == id).cloned());
         if property.is_some() && existing.is_none() {
             return;
         }
-        let position = self
-            .properties
-            .iter()
-            .map(|def| def.position + 1)
-            .max()
-            .unwrap_or(0);
+        let position = self.properties.iter().map(|def| def.position + 1).max().unwrap_or(0);
         let editor = cx.new(|cx| PropertyEditor::new(existing, mode, position, window, cx));
         PropertyEditor::open(editor, cx.weak_entity(), window, cx);
     }
@@ -839,17 +764,11 @@ impl DatabasePanel {
         };
         let columns = visible_columns(view, &self.properties);
         if let Some(ix) = columns.iter().position(|layout| layout.column == column) {
-            self.table
-                .update(cx, |table, cx| table.scroll_to_col(ix + 1, cx));
+            self.table.update(cx, |table, cx| table.scroll_to_col(ix + 1, cx));
         }
     }
 
-    pub(crate) fn confirm_delete_property(
-        &mut self,
-        id: PropertyId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn confirm_delete_property(&mut self, id: PropertyId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(def) = self.properties.iter().find(|def| def.id == id) else {
             return;
         };
@@ -893,24 +812,11 @@ impl DatabasePanel {
             return;
         }
         let manual = self.active_view().is_some_and(|view| view.sorts.is_empty());
-        let lane: Vec<&Video> = self
-            .shown
-            .iter()
-            .map(|&ix| &self.rows[ix].video)
-            .filter(|video| video.status == status)
-            .collect();
-        let others: Vec<&Video> = lane
-            .iter()
-            .copied()
-            .filter(|video| video.id != id)
-            .collect();
-        let slot = before
-            .and_then(|before| others.iter().position(|video| video.id == before))
-            .unwrap_or(others.len());
-        let previous = slot
-            .checked_sub(1)
-            .and_then(|ix| others.get(ix))
-            .map(|video| video.position);
+        let lane: Vec<&Video> =
+            self.shown.iter().map(|&ix| &self.rows[ix].video).filter(|video| video.status == status).collect();
+        let others: Vec<&Video> = lane.iter().copied().filter(|video| video.id != id).collect();
+        let slot = before.and_then(|before| others.iter().position(|video| video.id == before)).unwrap_or(others.len());
+        let previous = slot.checked_sub(1).and_then(|ix| others.get(ix)).map(|video| video.position);
         let next = others.get(slot).map(|video| video.position);
 
         let unchanged_slot = lane.iter().position(|video| video.id == id) == Some(slot);
@@ -979,10 +885,7 @@ impl DatabasePanel {
         };
         let mut known_tags: Vec<String> = Vec::new();
         for tag in self.rows.iter().flat_map(|row| &row.video.tags) {
-            if !known_tags
-                .iter()
-                .any(|known| known.eq_ignore_ascii_case(tag))
-            {
+            if !known_tags.iter().any(|known| known.eq_ignore_ascii_case(tag)) {
                 known_tags.push(tag.clone());
             }
         }
@@ -1000,9 +903,7 @@ impl DatabasePanel {
             empty: self.empty_reason(cx),
             now: Utc::now(),
         };
-        let selected_ix = self
-            .selected
-            .and_then(|id| model.rows.iter().position(|row| row.video.id == id));
+        let selected_ix = self.selected.and_then(|id| model.rows.iter().position(|row| row.video.id == id));
         self.table.update(cx, |table, cx| {
             table.delegate_mut().set_model(model);
             table.refresh(cx);
@@ -1035,18 +936,14 @@ impl DatabasePanel {
                 let widths: Vec<(Column, Pixels)> = widths
                     .iter()
                     .enumerate()
-                    .filter_map(|(ix, width)| {
-                        Some((table.read(cx).delegate().column_at(ix)?, *width))
-                    })
+                    .filter_map(|(ix, width)| Some((table.read(cx).delegate().column_at(ix)?, *width)))
                     .collect();
                 let properties = self.properties.clone();
                 self.update_view(
                     |view| {
                         let mut columns = resolve_columns(view, &properties);
                         for (column, width) in widths {
-                            if let Some(layout) =
-                                columns.iter_mut().find(|layout| layout.column == column)
-                            {
+                            if let Some(layout) = columns.iter_mut().find(|layout| layout.column == column) {
                                 layout.width = f32::from(width).round();
                             }
                         }
@@ -1075,31 +972,18 @@ impl DatabasePanel {
         }
     }
 
-    fn on_rename_selected(
-        &mut self,
-        _: &RenameSelected,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_rename_selected(&mut self, _: &RenameSelected, window: &mut Window, cx: &mut Context<Self>) {
         if !self.row_keys_apply(window, cx) {
             cx.propagate();
             return;
         }
         if let Some(id) = self.selected {
-            let cell = CellRef {
-                video: id,
-                column: Column::Builtin(BuiltinField::Title),
-            };
+            let cell = CellRef { video: id, column: Column::Builtin(BuiltinField::Title) };
             self.start_editing(cell, window, cx);
         }
     }
 
-    fn on_delete_selected(
-        &mut self,
-        _: &DeleteSelected,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_delete_selected(&mut self, _: &DeleteSelected, window: &mut Window, cx: &mut Context<Self>) {
         if !self.row_keys_apply(window, cx) {
             cx.propagate();
             return;
@@ -1161,18 +1045,12 @@ impl DatabasePanel {
                                 .label("New video")
                                 .text_color(cx.theme().muted_foreground)
                                 .on_click(move |_, _, cx| {
-                                    _ = panel.update(cx, |panel, cx| panel.create_video(None, cx));
+                                    _ = panel.update(cx, |panel, cx| panel.create_video_in_view(cx));
                                 }),
                         ),
                 )
                 .child(
-                    div()
-                        .flex_shrink_0()
-                        .pt_2()
-                        .px_2()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(count),
+                    div().flex_shrink_0().pt_2().px_2().text_xs().text_color(cx.theme().muted_foreground).child(count),
                 )
             })
     }

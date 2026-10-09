@@ -1,7 +1,7 @@
 //! The board view: one column per status, cards dragged between and within
 //! columns.
 
-use chrono::NaiveDate;
+use chrono::{DateTime, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
@@ -9,15 +9,12 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    TestSupportExt as _, Window, div,
+    AnyElement, AppContext as _, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
 };
 use videocrm_core::{VideoId, VideoRow, VideoStatus};
 
-use super::colors::{
-    format_color, free_tag_color, run_status_color, tag_colors, upload_status_color,
-};
+use super::colors::{format_color, free_tag_color, run_status_color, tag_colors, youtube_color};
 use super::elements::{Chip, muted_icon};
 use super::format;
 use super::panel::DatabasePanel;
@@ -60,11 +57,9 @@ impl DatabasePanel {
         let Some(view) = self.active_view() else {
             return div().into_any_element();
         };
-        let today = format::local_day(chrono::Utc::now());
-        let statuses: Vec<VideoStatus> = VideoStatus::ALL
-            .into_iter()
-            .filter(|status| status_visible(*status, &view.filter))
-            .collect();
+        let now = Utc::now();
+        let statuses: Vec<VideoStatus> =
+            VideoStatus::ALL.into_iter().filter(|status| status_visible(*status, &view.filter)).collect();
 
         div()
             .id("board")
@@ -74,21 +69,12 @@ impl DatabasePanel {
             .overflow_x_scroll()
             .track_scroll(&self.board_scroll)
             .horizontal_scrollbar(&self.board_scroll)
-            .child(
-                h_flex()
-                    .h_full()
-                    .items_stretch()
-                    .gap_3()
-                    .px_4()
-                    .pb_4()
-                    .children(statuses.into_iter().map(|status| {
-                        let cards: Vec<&VideoRow> = self
-                            .shown_rows()
-                            .filter(|row| row.video.status == status)
-                            .collect();
-                        self.render_board_column(status, &cards, today, cx)
-                    })),
-            )
+            .child(h_flex().h_full().items_stretch().gap_3().px_4().pb_4().children(statuses.into_iter().map(
+                |status| {
+                    let cards: Vec<&VideoRow> = self.shown_rows().filter(|row| row.video.status == status).collect();
+                    self.render_board_column(status, &cards, now, cx)
+                },
+            )))
             .into_any_element()
     }
 
@@ -96,7 +82,7 @@ impl DatabasePanel {
         &self,
         status: VideoStatus,
         cards: &[&VideoRow],
-        today: NaiveDate,
+        now: DateTime<Utc>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = tag_colors(status.color(), cx);
@@ -108,9 +94,7 @@ impl DatabasePanel {
                 .accessibility_label(format!("New {} video", status.label().to_lowercase()))
                 .on_click(cx.listener(move |this, _, _, cx| this.create_video(Some(status), cx)))
         };
-        let add_button = new_in_column("board-add", cx)
-            .icon(IconName::Plus)
-            .tooltip("New video");
+        let add_button = new_in_column("board-add", cx).icon(IconName::Plus).tooltip("New video");
         // A child instead of a label, so the content lines up with the cards'
         // leading edge rather than centering in the column.
         let new_button = new_in_column("board-new", cx).w_full().child(
@@ -122,10 +106,7 @@ impl DatabasePanel {
                 .child(Icon::new(IconName::Plus).xsmall())
                 .child("New"),
         );
-        let card_elements: Vec<AnyElement> = cards
-            .iter()
-            .map(|row| self.render_card(row, status, today, cx))
-            .collect();
+        let card_elements: Vec<AnyElement> = cards.iter().map(|row| self.render_card(row, status, now, cx)).collect();
 
         v_flex()
             .id(SharedString::from(format!("board-column-{status_key}")))
@@ -142,12 +123,7 @@ impl DatabasePanel {
                     .px_2()
                     .py_2()
                     .child(Chip::new(status.label(), status.color()).dot(true))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(cards.len().to_string()),
-                    )
+                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(cards.len().to_string()))
                     .child(div().flex_1())
                     .child(add_button),
             )
@@ -158,9 +134,7 @@ impl DatabasePanel {
                     .px_2()
                     .pb_2()
                     .gap_1()
-                    .drag_over::<DraggedCard>(|style, _, _, cx| {
-                        style.bg(cx.theme().drop_target.opacity(0.35))
-                    })
+                    .drag_over::<DraggedCard>(|style, _, _, cx| style.bg(cx.theme().drop_target.opacity(0.35)))
                     .on_drop(cx.listener(move |this, card: &DraggedCard, _, cx| {
                         this.move_card(card.video, status, None, cx);
                     }))
@@ -176,19 +150,16 @@ impl DatabasePanel {
         &self,
         row: &VideoRow,
         status: VideoStatus,
-        today: NaiveDate,
+        now: DateTime<Utc>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let today = format::local_day(now);
         let video = &row.video;
         let id = video.id;
         let title = video.title.trim();
         let dragged = DraggedCard {
             video: id,
-            title: if title.is_empty() {
-                "Untitled".into()
-            } else {
-                title.to_string().into()
-            },
+            title: if title.is_empty() { "Untitled".into() } else { title.to_string().into() },
             icon: video.icon.clone().map(Into::into),
         };
         let panel = cx.weak_entity();
@@ -198,12 +169,7 @@ impl DatabasePanel {
             .text_xs()
             .text_color(cx.theme().muted_foreground)
             .when_some(video.publish_date, |this, date| {
-                this.child(
-                    h_flex()
-                        .gap_1()
-                        .child(muted_icon(IconName::Calendar, cx))
-                        .child(format::date(date, today)),
-                )
+                this.child(h_flex().gap_1().child(muted_icon(IconName::Calendar, cx)).child(format::date(date, today)))
             })
             .when(row.script_words > 0, |this| {
                 this.child(
@@ -214,7 +180,12 @@ impl DatabasePanel {
                 )
             });
         let has_meta = video.publish_date.is_some() || row.script_words > 0;
-        let has_pipeline = row.latest_run.is_some() || row.latest_upload.is_some();
+        // The same derived states as the table: a finished cut and a video on
+        // YouTube are not hidden by a later failed or cancelled attempt.
+        let edit = row.edit_status();
+        let youtube = row.youtube_state();
+        let scheduled = format::is_scheduled(video.publish.publish_at, now);
+        let has_pipeline = edit.is_some() || youtube.is_some();
 
         // The transparent top border is the drop indicator's slot, so showing
         // it does not move the card.
@@ -249,10 +220,9 @@ impl DatabasePanel {
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
                             .child(video_icon(video.icon.as_deref(), cx))
-                            .child(div().min_w_0().line_clamp(2).map(|this| {
+                            .child(div().min_w_0().line_clamp(2).text_ellipsis().map(|this| {
                                 if title.is_empty() {
-                                    this.text_color(cx.theme().muted_foreground)
-                                        .child("Untitled")
+                                    this.text_color(cx.theme().muted_foreground).child("Untitled")
                                 } else {
                                     this.child(title.to_string())
                                 }
@@ -263,12 +233,7 @@ impl DatabasePanel {
                             .flex_wrap()
                             .gap_1()
                             .child(Chip::new(video.format.label(), format_color(video.format)))
-                            .children(
-                                video
-                                    .tags
-                                    .iter()
-                                    .map(|tag| Chip::new(tag.clone(), free_tag_color(tag))),
-                            ),
+                            .children(video.tags.iter().map(|tag| Chip::new(tag.clone(), free_tag_color(tag)))),
                     )
                     .when(has_meta, |this| this.child(meta))
                     .when(has_pipeline, |this| {
@@ -276,20 +241,16 @@ impl DatabasePanel {
                             h_flex()
                                 .flex_wrap()
                                 .gap_1()
-                                .when_some(row.latest_run, |this, run| {
+                                .when_some(edit, |this, run| {
                                     this.child(
-                                        Chip::new(
-                                            format!("Edit: {}", run.label()),
-                                            run_status_color(run),
-                                        )
-                                        .dot(true),
+                                        Chip::new(format!("Edit: {}", run.label()), run_status_color(run)).dot(true),
                                     )
                                 })
-                                .when_some(row.latest_upload.as_ref(), |this, upload| {
+                                .when_some(youtube, |this, state| {
                                     this.child(
                                         Chip::new(
-                                            format::upload(upload),
-                                            upload_status_color(upload),
+                                            format!("YouTube: {}", format::youtube(state, scheduled)),
+                                            youtube_color(state, scheduled),
                                         )
                                         .dot(true),
                                     )

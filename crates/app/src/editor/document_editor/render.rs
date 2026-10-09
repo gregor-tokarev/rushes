@@ -8,14 +8,18 @@ use gpui_kit::base::input::Textarea;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Icon, Side, Sizable as _, ThemeStyled as _, h_flex, v_flex};
-use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, Bounds, ClickEvent, Context, DragMoveEvent, ElementId,
-    FontStyle, FontWeight, HighlightStyle, InteractiveElement as _, InteractiveText, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Rems, Render, SharedString,
-    StatefulInteractiveElement as _, StrikethroughStyle, Styled as _, StyledText, TestSupportExt as _,
-    UnderlineStyle, WeakEntity, Window, anchored, deferred, div, prelude::FluentBuilder as _, px, rems,
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, Side, Sizable as _, ThemeStyled as _, WindowExt as _, h_flex, v_flex,
 };
+use gpui_kit::{
+    Anchor, AnyElement, App, AppContext as _, Bounds, ClickEvent, Context, DragMoveEvent, ElementId, FontStyle,
+    FontWeight, HighlightStyle, InteractiveElement as _, InteractiveText, IntoElement, MouseButton, MouseDownEvent,
+    ParentElement as _, Pixels, Rems, Render, SharedString, StatefulInteractiveElement as _, StrikethroughStyle,
+    Styled as _, StyledText, TestSupportExt as _, UnderlineStyle, WeakEntity, Window, anchored, deferred, div,
+    prelude::FluentBuilder as _, px, rems,
+};
+use videocrm_core::input::normalize_link;
 use videocrm_core::{Block, BlockId, BlockKind};
 
 use super::geometry::{self, RenderedRow};
@@ -45,8 +49,11 @@ fn block_element_id(id: BlockId, part: &'static str) -> ElementId {
     ElementId::NamedChild(Arc::new(ElementId::Uuid(id.0)), part.into())
 }
 
+/// Hint of an empty document: no blocks, or one empty paragraph.
+const EMPTY_DOCUMENT_HINT: &str = "Start writing, or type '/' for commands";
+
 /// Placeholder of an empty block of this kind.
-pub(super) fn placeholder(kind: BlockKind) -> &'static str {
+fn placeholder(kind: BlockKind) -> &'static str {
     match kind {
         BlockKind::Paragraph => "Type '/' for commands",
         BlockKind::Heading1 => "Heading 1",
@@ -63,6 +70,40 @@ pub(super) fn placeholder(kind: BlockKind) -> &'static str {
     }
 }
 
+/// What an empty block shows in place of its text: the template's guidance,
+/// the empty-document hint when it is the document's only paragraph, or the
+/// hint of its kind.
+fn placeholder_text(block: &Block, lone: bool) -> &str {
+    match block.placeholder.as_deref() {
+        Some(guidance) => guidance,
+        None if lone && block.kind == BlockKind::Paragraph => EMPTY_DOCUMENT_HINT,
+        None => placeholder(block.kind),
+    }
+}
+
+/// The placeholder a block's input shows. Template guidance is drawn by the
+/// editor instead, because the input lays its placeholder out on one line and
+/// guidance is often longer than that.
+pub(super) fn input_placeholder(block: &Block, lone: bool) -> SharedString {
+    match block.placeholder {
+        Some(_) => SharedString::default(),
+        None => placeholder_text(block, lone).to_owned().into(),
+    }
+}
+
+/// Opens a link from a document in the browser or mail app. Anything else
+/// (`file:`, `javascript:`, app schemes) is refused with a short notice, so a
+/// pasted or imported document cannot launch local files or programs.
+fn open_link(url: &str, window: &mut Window, cx: &mut App) {
+    match normalize_link(url) {
+        Some(url) => cx.open_url(&url),
+        None => window.push_notification(
+            Notification::warning("Only web and email links open from a document.").title("Link not opened"),
+            cx,
+        ),
+    }
+}
+
 /// Typography and vertical rhythm of a block kind.
 #[derive(Clone, Copy)]
 struct Metrics {
@@ -76,12 +117,7 @@ struct Metrics {
 
 impl Metrics {
     fn of(kind: BlockKind) -> Self {
-        let body = Metrics {
-            text_size: Rems(1.),
-            line_height: Rems(1.5),
-            space_above: Rems(0.125),
-            inset: Rems(0.),
-        };
+        let body = Metrics { text_size: Rems(1.), line_height: Rems(1.5), space_above: Rems(0.125), inset: Rems(0.) };
         match kind {
             BlockKind::Heading1 => {
                 Metrics { text_size: Rems(1.875), line_height: Rems(2.375), space_above: Rems(1.5), ..body }
@@ -92,16 +128,11 @@ impl Metrics {
             BlockKind::Heading3 => {
                 Metrics { text_size: Rems(1.25), line_height: Rems(1.75), space_above: Rems(0.75), ..body }
             }
-            BlockKind::Code => Metrics {
-                text_size: Rems(0.875),
-                line_height: Rems(1.375),
-                space_above: Rems(0.5),
-                inset: Rems(1.),
-            },
-            BlockKind::Callout => Metrics { space_above: Rems(0.375), inset: Rems(0.875), ..body },
-            BlockKind::BRoll | BlockKind::OnScreen => {
-                Metrics { space_above: Rems(0.375), inset: Rems(0.5), ..body }
+            BlockKind::Code => {
+                Metrics { text_size: Rems(0.875), line_height: Rems(1.375), space_above: Rems(0.5), inset: Rems(1.) }
             }
+            BlockKind::Callout => Metrics { space_above: Rems(0.375), inset: Rems(0.875), ..body },
+            BlockKind::BRoll | BlockKind::OnScreen => Metrics { space_above: Rems(0.375), inset: Rems(0.5), ..body },
             _ => body,
         }
     }
@@ -112,6 +143,9 @@ struct RowContext {
     palette: EditorPalette,
     editing: Option<BlockId>,
     dragging: bool,
+    /// The document has a single block, which shows the empty-document hint
+    /// while it is an empty paragraph.
+    lone: bool,
 }
 
 impl Render for DocumentEditor {
@@ -120,6 +154,7 @@ impl Render for DocumentEditor {
             palette: EditorPalette::new(cx),
             editing: self.editing(window, cx).map(|(ix, _)| self.document.blocks[ix].id),
             dragging: cx.has_active_drag(),
+            lone: self.document.blocks.len() == 1,
         };
         let numbers = blocks::numbering(&self.document.blocks);
         // Blocks that must stay interactive even when far from the viewport.
@@ -193,15 +228,19 @@ impl Render for DocumentEditor {
             .child(
                 v_flex()
                     .w_full()
+                    .flex_1()
                     .max_w(Rems(TEXT_WIDTH.0 + 2. * GUTTER.0))
                     .children(rows)
                     .on_children_prepainted(record)
                     .child(
+                        // The empty area below the last block, generous so a
+                        // short or empty document is easy to click into.
                         div()
                             .id("document-end")
                             .test_support()
                             .w_full()
-                            .min_h(rems(6.))
+                            .flex_1()
+                            .min_h(rems(10.))
                             .cursor_text()
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -217,7 +256,7 @@ impl Render for DocumentEditor {
                                         .px(GUTTER)
                                         .line_height(Metrics::of(BlockKind::Paragraph).line_height)
                                         .text_color(row.palette.placeholder)
-                                        .child("Start writing, or type '/' for commands"),
+                                        .child(EMPTY_DOCUMENT_HINT),
                                 )
                             }),
                     ),
@@ -275,17 +314,11 @@ impl DocumentEditor {
                 )
             })
             .child(self.render_content(block, number, metrics, row, cx))
-            .when_some(
-                self.slash.as_ref().filter(|menu| menu.block == id && row.editing == Some(id)),
-                |this, menu| {
-                    let above = self.slash_menu_opens_above(menu, window, cx);
-                    let anchor = div()
-                        .absolute()
-                        .left_0()
-                        .map(|this| if above { this.top_0() } else { this.top_full() });
-                    this.child(anchor.child(self.render_slash_menu(menu, above, cx)))
-                },
-            );
+            .when_some(self.slash.as_ref().filter(|menu| menu.block == id && row.editing == Some(id)), |this, menu| {
+                let above = self.slash_menu_opens_above(menu, window, cx);
+                let anchor = div().absolute().left_0().map(|this| if above { this.top_0() } else { this.top_full() });
+                this.child(anchor.child(self.render_slash_menu(menu, above, cx)))
+            });
 
         h_flex()
             .id(block_element_id(id, "row"))
@@ -303,16 +336,17 @@ impl DocumentEditor {
                 if !event.bounds.contains(&event.event.position) {
                     return;
                 }
-                let target =
-                    DropTarget { block: id, after: event.event.position.y > event.bounds.center().y };
+                let target = DropTarget { block: id, after: event.event.position.y > event.bounds.center().y };
                 if this.drop_target != Some(target) {
                     this.drop_target = Some(target);
                     cx.notify();
                 }
             }))
-            .on_drop(cx.listener(move |this, dragged: &DraggedBlock, window, cx| {
-                this.drop_block(dragged.id, id, window, cx)
-            }))
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedBlock, window, cx| {
+                    this.drop_block(dragged.id, id, window, cx)
+                }),
+            )
             .when_some(drop_after, |this, after| {
                 this.child(
                     div()
@@ -368,9 +402,9 @@ impl DocumentEditor {
                     .xsmall()
                     .icon(Icon::new(IconName::Plus).text_color(palette.muted))
                     .tooltip("Add a block below")
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.insert_with_menu(id, window, cx)
-                    })),
+                    .on_click(
+                        cx.listener(move |this, _: &ClickEvent, window, cx| this.insert_with_menu(id, window, cx)),
+                    ),
             )
             .child(handle)
     }
@@ -388,14 +422,7 @@ impl DocumentEditor {
         let mono = cx.theme().mono_font_family.clone();
         let text = self.render_text(block, row, cx);
         let marker = |child: AnyElement| {
-            div()
-                .flex_none()
-                .w(INDENT_STEP)
-                .h(metrics.line_height)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(child)
+            div().flex_none().w(INDENT_STEP).h(metrics.line_height).flex().items_center().justify_center().child(child)
         };
         match block.kind {
             BlockKind::Paragraph => text,
@@ -414,9 +441,9 @@ impl DocumentEditor {
                 .into_any_element(),
             BlockKind::Todo => {
                 let id = block.id;
-                let checkbox = Checkbox::new(block_element_id(id, "check")).checked(block.checked).on_click(
-                    cx.listener(move |this, checked: &bool, _, cx| this.set_checked(id, *checked, cx)),
-                );
+                let checkbox = Checkbox::new(block_element_id(id, "check"))
+                    .checked(block.checked)
+                    .on_click(cx.listener(move |this, checked: &bool, _, cx| this.set_checked(id, *checked, cx)));
                 h_flex()
                     .items_start()
                     .child(marker(
@@ -429,13 +456,9 @@ impl DocumentEditor {
                     .child(text)
                     .into_any_element()
             }
-            BlockKind::Quote => div()
-                .border_l_3()
-                .border_color(palette.quote_bar)
-                .pl_4()
-                .my_1()
-                .child(text)
-                .into_any_element(),
+            BlockKind::Quote => {
+                div().border_l_3().border_color(palette.quote_bar).pl_4().my_1().child(text).into_any_element()
+            }
             BlockKind::Callout => h_flex()
                 .items_start()
                 .gap_2()
@@ -514,12 +537,27 @@ impl DocumentEditor {
         {
             // The invisible copy of the raw text sizes the cell from the first
             // frame; the input's own auto-grow catches up a frame later.
-            let sizer =
-                if block.text.is_empty() { placeholder(block.kind).to_owned() } else { block.text.clone() };
+            // Template guidance is that copy made visible, wrapped like text.
+            let guidance = block.guidance();
+            let sizer = match guidance {
+                Some(guidance) => guidance.to_owned(),
+                None if block.text.is_empty() => placeholder_text(block, row.lone).to_owned(),
+                None => block.text.clone(),
+            };
             return cell
                 .grid()
                 .grid_cols(1)
-                .child(div().row_start(1).col_start(1).invisible().pr(px(INPUT_WRAP_MARGIN)).child(sizer))
+                .child(
+                    div()
+                        .row_start(1)
+                        .col_start(1)
+                        .pr(px(INPUT_WRAP_MARGIN))
+                        .map(|this| match guidance {
+                            Some(_) => this.text_color(palette.placeholder),
+                            None => this.invisible(),
+                        })
+                        .child(sizer),
+                )
                 .child(div().row_start(1).col_start(1).w_full().child(Textarea::new(&input.state)))
                 .into_any_element();
         }
@@ -527,11 +565,19 @@ impl DocumentEditor {
         let rich = RichText::parse(&block.text);
         let cell = cell.pr(px(INPUT_WRAP_MARGIN)).cursor_text();
         if rich.text().is_empty() {
-            let shows_placeholder = !matches!(block.kind, BlockKind::Paragraph | BlockKind::Divider);
+            // An empty paragraph stays blank unless it carries guidance or is
+            // all the document has, which would otherwise look like nothing.
+            let shows_placeholder = block.placeholder.is_some()
+                || match block.kind {
+                    BlockKind::Paragraph => row.lone,
+                    BlockKind::Divider => false,
+                    _ => true,
+                };
+            let hint = shows_placeholder.then(|| SharedString::from(placeholder_text(block, row.lone).to_owned()));
             return cell
                 .min_h(Metrics::of(block.kind).line_height)
                 .text_color(palette.placeholder)
-                .when(shows_placeholder, |this| this.child(placeholder(block.kind)))
+                .when_some(hint, |this, hint| this.aria_label(hint.clone()).child(hint))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, window, cx| {
@@ -560,13 +606,11 @@ impl DocumentEditor {
             }
             if span.link.is_some() {
                 style.color = Some(palette.link);
-                style.underline =
-                    Some(UnderlineStyle { thickness: px(1.), color: Some(palette.link), wavy: false });
+                style.underline = Some(UnderlineStyle { thickness: px(1.), color: Some(palette.link), wavy: false });
             }
             if completed {
                 style.color = Some(palette.muted);
-                style.strikethrough =
-                    Some(StrikethroughStyle { thickness: px(1.), color: Some(palette.muted) });
+                style.strikethrough = Some(StrikethroughStyle { thickness: px(1.), color: Some(palette.muted) });
             }
             if style != HighlightStyle::default() {
                 highlights.push((span.range.clone(), style));
@@ -575,12 +619,11 @@ impl DocumentEditor {
 
         let (link_ranges, urls): (Vec<Range<usize>>, Vec<String>) =
             rich.links().map(|(range, url)| (range, url.to_owned())).unzip();
-        let styled = StyledText::new(rich.text().to_owned())
-            .with_highlights(highlights)
-            .with_font_family_overrides(mono_ranges);
+        let styled =
+            StyledText::new(rich.text().to_owned()).with_highlights(highlights).with_font_family_overrides(mono_ranges);
         let layout = styled.layout().clone();
         let text = InteractiveText::new(block_element_id(id, "rich"), styled)
-            .on_click(link_ranges.clone(), move |ix, _, cx| cx.open_url(&urls[ix]));
+            .on_click(link_ranges.clone(), move |ix, window, cx| open_link(&urls[ix], window, cx));
 
         cell.on_mouse_down(
             MouseButton::Left,
@@ -602,8 +645,7 @@ impl DocumentEditor {
     /// Opens the slash menu above its block when the space below, judged
     /// from the input's previous layout, cannot fit it but the space above can.
     fn slash_menu_opens_above(&self, menu: &SlashMenu, window: &Window, cx: &App) -> bool {
-        let Some(bounds) = self.inputs.get(&menu.block).and_then(|input| input.state.read(cx).text_bounds())
-        else {
+        let Some(bounds) = self.inputs.get(&menu.block).and_then(|input| input.state.read(cx).text_bounds()) else {
             return false;
         };
         let rows = menu.items().len().max(1) as f32;
@@ -683,12 +725,7 @@ impl DocumentEditor {
                     .children(rows)
                     .when(items.is_empty(), |this| {
                         this.child(
-                            div()
-                                .px_2()
-                                .py_1p5()
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child("No results"),
+                            div().px_2().py_1p5().text_sm().text_color(theme.muted_foreground).child("No results"),
                         )
                     }),
             ),
@@ -738,14 +775,11 @@ pub(super) fn block_menu(
             BLOCK_TYPES.iter().fold(menu.check_side(Side::Right), |menu, ty| {
                 let editor = editor.clone();
                 let kind = ty.kind;
-                menu.item(
-                    PopupMenuItem::new(ty.label())
-                        .icon(Icon::new(ty.icon))
-                        .checked(kind == current)
-                        .on_click(move |_, window, cx| {
-                            editor.update(cx, |editor, cx| editor.turn_into(id, kind, window, cx)).ok();
-                        }),
-                )
+                menu.item(PopupMenuItem::new(ty.label()).icon(Icon::new(ty.icon)).checked(kind == current).on_click(
+                    move |_, window, cx| {
+                        editor.update(cx, |editor, cx| editor.turn_into(id, kind, window, cx)).ok();
+                    },
+                ))
             })
         }
     };

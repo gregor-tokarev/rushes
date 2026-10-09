@@ -1,21 +1,18 @@
 //! Text presentation of cell values: script stats, runtimes, dates and numbers.
 
 use chrono::{DateTime, Datelike as _, Local, NaiveDate, TimeZone, Utc};
-use videocrm_core::UploadStatus;
+use videocrm_core::{UploadStatus, YoutubeState};
 
 /// Numbers at least this large are shown as Rust formats them, without
 /// grouping: past it an `f64` no longer holds every whole number exactly.
 const LARGEST_GROUPED_NUMBER: f64 = 1e15;
 
-/// "1,240 words · 8m 16s", or `None` when the script is empty.
+/// "8m 16s · 1,240 words", or `None` when the script is empty. The runtime
+/// leads: it is the planning number, and a narrow column cuts the end.
 pub fn script_summary(words: usize, seconds: u32) -> Option<String> {
     (words > 0).then(|| {
         let unit = if words == 1 { "word" } else { "words" };
-        format!(
-            "{} {unit} · {}",
-            group_thousands(words as u64),
-            runtime(seconds)
-        )
+        format!("{} · {} {unit}", runtime(seconds), group_thousands(words as u64))
     })
 }
 
@@ -94,34 +91,23 @@ fn timestamp_in<Tz: TimeZone>(at: DateTime<Utc>, now: DateTime<Utc>, zone: &Tz) 
     } else if elapsed.num_hours() < 24 {
         format!("{}h ago", elapsed.num_hours())
     } else {
-        date(
-            at.with_timezone(zone).date_naive(),
-            now.with_timezone(zone).date_naive(),
-        )
+        date(at.with_timezone(zone).date_naive(), now.with_timezone(zone).date_naive())
     }
 }
 
-/// Where a URL property's link button goes: web and mail links as written,
-/// a bare address as `https://`. Other schemes (`file:`, app handlers) get no
-/// link, so a stored value cannot launch a local file or program.
-pub fn link_target(url: &str) -> Option<String> {
-    let url = url.trim();
-    if url.is_empty() {
-        return None;
+/// Whether a video already on YouTube is still waiting for its publish time.
+pub fn is_scheduled(publish_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    publish_at.is_some_and(|at| at > now)
+}
+
+/// The YouTube column: the video's visibility on YouTube ("Scheduled" until
+/// its publish time), or the state of its upload attempt.
+pub fn youtube(state: YoutubeState<'_>, scheduled: bool) -> String {
+    match state {
+        YoutubeState::Live(_) if scheduled => "Scheduled".into(),
+        YoutubeState::Live(link) => link.privacy.label().into(),
+        YoutubeState::Upload(status) => upload(status),
     }
-    let lower = url.to_ascii_lowercase();
-    if ["http://", "https://", "mailto:"]
-        .iter()
-        .any(|scheme| lower.starts_with(scheme))
-    {
-        return Some(url.to_string());
-    }
-    let has_scheme = url.split_once(':').is_some_and(|(scheme, rest)| {
-        rest.starts_with("//")
-            || scheme.eq_ignore_ascii_case("file")
-            || scheme.eq_ignore_ascii_case("javascript")
-    });
-    (!has_scheme).then(|| format!("https://{url}"))
 }
 
 /// Upload state with progress, e.g. "Uploading 42%".
@@ -140,11 +126,8 @@ mod tests {
 
     #[test]
     fn script_summary_reads_like_prose() {
-        assert_eq!(
-            script_summary(1240, 496).as_deref(),
-            Some("1,240 words · 8m 16s")
-        );
-        assert_eq!(script_summary(1, 1).as_deref(), Some("1 word · 1s"));
+        assert_eq!(script_summary(1240, 496).as_deref(), Some("8m 16s · 1,240 words"));
+        assert_eq!(script_summary(1, 1).as_deref(), Some("1s · 1 word"));
         assert_eq!(script_summary(0, 0), None);
     }
 
@@ -176,10 +159,7 @@ mod tests {
         assert_eq!(date(day(10, 10), today), "Tomorrow");
         assert_eq!(date(day(10, 8), today), "Yesterday");
         assert_eq!(date(day(3, 4), today), "Mar 4");
-        assert_eq!(
-            date(NaiveDate::from_ymd_opt(2027, 1, 2).unwrap(), today),
-            "Jan 2, 2027"
-        );
+        assert_eq!(date(NaiveDate::from_ymd_opt(2027, 1, 2).unwrap(), today), "Jan 2, 2027");
     }
 
     #[test]
@@ -189,10 +169,7 @@ mod tests {
         assert_eq!(timestamp(now - chrono::Duration::minutes(5), now), "5m ago");
         assert_eq!(timestamp(now - chrono::Duration::hours(3), now), "3h ago");
         assert_eq!(timestamp(now - chrono::Duration::days(1), now), "Yesterday");
-        assert_eq!(
-            timestamp_in(now - chrono::Duration::days(40), now, &Utc),
-            "Aug 30"
-        );
+        assert_eq!(timestamp_in(now - chrono::Duration::days(40), now, &Utc), "Aug 30");
     }
 
     #[test]
@@ -207,48 +184,28 @@ mod tests {
     }
 
     #[test]
-    fn links_open_only_web_and_mail_addresses() {
-        assert_eq!(
-            link_target(" example.com/watch ").as_deref(),
-            Some("https://example.com/watch")
-        );
-        assert_eq!(
-            link_target("HTTP://Example.com").as_deref(),
-            Some("HTTP://Example.com")
-        );
-        assert_eq!(
-            link_target("mailto:me@example.com").as_deref(),
-            Some("mailto:me@example.com")
-        );
-        assert_eq!(
-            link_target("localhost:3000").as_deref(),
-            Some("https://localhost:3000")
-        );
-        assert_eq!(link_target("file:///etc/passwd"), None);
-        assert_eq!(link_target("file:/home/me/run.desktop"), None);
-        assert_eq!(link_target("javascript:alert(1)"), None);
-        assert_eq!(link_target("vscode://open?file=x"), None);
-        assert_eq!(link_target("   "), None);
+    fn youtube_shows_visibility_once_the_video_is_there() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 9, 12, 0, 0).unwrap();
+        let link = videocrm_core::YoutubeLink {
+            video_id: "abc".into(),
+            url: "https://www.youtube.com/watch?v=abc".into(),
+            channel_id: "UC1".into(),
+            privacy: videocrm_core::Privacy::Unlisted,
+            uploaded_at: now,
+        };
+        let live = YoutubeState::Live(&link);
+        assert_eq!(youtube(live, false), "Unlisted");
+        assert_eq!(youtube(live, true), "Scheduled");
+        assert!(is_scheduled(Some(now + chrono::Duration::days(1)), now));
+        assert!(!is_scheduled(Some(now - chrono::Duration::days(1)), now));
+        assert!(!is_scheduled(None, now));
+        assert_eq!(youtube(YoutubeState::Upload(&UploadStatus::Cancelled), false), "Cancelled");
     }
 
     #[test]
     fn uploads_show_progress() {
-        assert_eq!(
-            upload(&UploadStatus::Uploading {
-                sent: 42,
-                total: 100
-            }),
-            "Uploading 42%"
-        );
-        assert_eq!(
-            upload(&UploadStatus::Uploading { sent: 0, total: 0 }),
-            "Uploading"
-        );
-        assert_eq!(
-            upload(&UploadStatus::Done {
-                video_id: "abc".into()
-            }),
-            "Uploaded"
-        );
+        assert_eq!(upload(&UploadStatus::Uploading { sent: 42, total: 100 }), "Uploading 42%");
+        assert_eq!(upload(&UploadStatus::Uploading { sent: 0, total: 0 }), "Uploading");
+        assert_eq!(upload(&UploadStatus::Done { video_id: "abc".into() }), "Uploaded");
     }
 }
