@@ -17,8 +17,8 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, Side, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Subscription, TestSupportExt as _, Window, div,
+    AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, TestSupportExt as _, Window, div,
 };
 use videocrm_core::{
     PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, TagColor, Video, VideoFormat, VideoId,
@@ -148,7 +148,8 @@ impl PropertiesPanel {
                             }
                         }
                         None => {
-                            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Empty").default_value(text));
+                            let input =
+                                cx.new(|cx| InputState::new(window, cx).placeholder("Empty").default_value(text));
                             let id = property.id;
                             let subscription =
                                 cx.subscribe_in(&input, window, move |this, input, event: &InputEvent, _, cx| {
@@ -180,12 +181,11 @@ impl PropertiesPanel {
                                 picker
                             });
                             let id = property.id;
-                            let subscription =
-                                cx.subscribe(&picker, move |this, _, event: &DatePickerEvent, cx| {
-                                    let DatePickerEvent::Change(DateTime::Single(date)) = event else { return };
-                                    let date = date.map(|date| date.date());
-                                    this.set_value(id, date.map(|date| PropertyValue::Date(Some(date))), cx);
-                                });
+                            let subscription = cx.subscribe(&picker, move |this, _, event: &DatePickerEvent, cx| {
+                                let DatePickerEvent::Change(DateTime::Single(date)) = event else { return };
+                                let date = date.map(|date| date.date());
+                                this.set_value(id, date.map(|date| PropertyValue::Date(Some(date))), cx);
+                            });
                             self.editor_subscriptions.insert(property.id, subscription);
                             self.dates.insert(property.id, picker);
                         }
@@ -194,8 +194,7 @@ impl PropertiesPanel {
                 _ => {}
             }
         }
-        self.editor_subscriptions
-            .retain(|id, _| self.inputs.contains_key(id) || self.dates.contains_key(id));
+        self.editor_subscriptions.retain(|id, _| self.inputs.contains_key(id) || self.dates.contains_key(id));
         cx.notify();
     }
 
@@ -212,8 +211,7 @@ impl PropertiesPanel {
     }
 
     fn commit_text(&mut self, id: PropertyId, text: String, cx: &mut Context<Self>) {
-        let Some(property) = self.state.read(cx).properties().iter().find(|property| property.id == id).cloned()
-        else {
+        let Some(property) = self.state.read(cx).properties().iter().find(|property| property.id == id).cloned() else {
             return;
         };
         let text = text.trim().to_string();
@@ -331,17 +329,14 @@ impl PropertiesPanel {
             .py_1()
             .children(video.tags.iter().map(|tag| {
                 let name = tag.clone();
-                h_flex()
-                    .gap_0p5()
-                    .child(Chip::new(tag.clone(), free_tag_color(tag)))
-                    .child(
-                        Button::new(SharedString::from(format!("remove-tag-{tag}")))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::X)
-                            .accessibility_label(format!("Remove tag {tag}"))
-                            .on_click(cx.listener(move |this, _, _, cx| this.remove_tag(&name, cx))),
-                    )
+                h_flex().gap_0p5().child(Chip::new(tag.clone(), free_tag_color(tag))).child(
+                    Button::new(SharedString::from(format!("remove-tag-{tag}")))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::X)
+                        .accessibility_label(format!("Remove tag {tag}"))
+                        .on_click(cx.listener(move |this, _, _, cx| this.remove_tag(&name, cx))),
+                )
             }))
             .child(Input::new(&self.tag_input).id("property-tags-input").appearance(false).xsmall().w_32())
     }
@@ -353,18 +348,12 @@ impl PropertiesPanel {
             .min_w_0()
             .gap_2()
             .pl_2()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(match &folder {
-                        Some(folder) => folder.display().to_string(),
-                        None => "Created when you open it".to_string(),
-                    }),
-            )
+            .child(div().flex_1().min_w_0().truncate().text_sm().text_color(cx.theme().muted_foreground).child(
+                match &folder {
+                    Some(folder) => folder.display().to_string(),
+                    None => "Created when you open it".to_string(),
+                },
+            ))
             .child(
                 Button::new("open-media-folder")
                     .ghost()
@@ -384,12 +373,9 @@ impl PropertiesPanel {
                 .child(Link::new("youtube-link").href(link.url.clone()).child(link.url.clone()))
                 .child(div().text_color(cx.theme().muted_foreground).child(link.privacy.label()))
                 .into_any_element(),
-            None => div()
-                .px_2()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("Not uploaded")
-                .into_any_element(),
+            None => {
+                div().px_2().text_sm().text_color(cx.theme().muted_foreground).child("Not uploaded").into_any_element()
+            }
         }
     }
 
@@ -430,13 +416,11 @@ impl PropertiesPanel {
                 let checked = matches!(value, Some(PropertyValue::Checkbox(true)));
                 div()
                     .px_2()
-                    .child(
-                        Checkbox::new(SharedString::from(format!("property-check-{id}")))
-                            .checked(checked)
-                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                                this.set_value(id, Some(PropertyValue::Checkbox(*checked)), cx);
-                            })),
-                    )
+                    .child(Checkbox::new(SharedString::from(format!("property-check-{id}"))).checked(checked).on_click(
+                        cx.listener(move |this, checked: &bool, _, cx| {
+                            this.set_value(id, Some(PropertyValue::Checkbox(*checked)), cx);
+                        }),
+                    ))
                     .into_any_element()
             }
             PropertyKind::Date => match self.dates.get(&id) {
@@ -463,15 +447,18 @@ impl PropertiesPanel {
                         None => this.child(empty_value(cx)),
                     })
                     .dropdown_menu(move |menu, _, _| {
-                        let menu = options_menu(menu.check_side(Side::Right), &options, |option| {
-                            current.as_deref() == Some(option.id.as_str())
-                        }, {
-                            let panel = panel.clone();
-                            move |option: &SelectOption, cx: &mut App| {
-                                let value = PropertyValue::Select(Some(option.id.clone()));
-                                _ = panel.update(cx, |panel, cx| panel.set_value(id, Some(value), cx));
-                            }
-                        });
+                        let menu = options_menu(
+                            menu.check_side(Side::Right),
+                            &options,
+                            |option| current.as_deref() == Some(option.id.as_str()),
+                            {
+                                let panel = panel.clone();
+                                move |option: &SelectOption, cx: &mut App| {
+                                    let value = PropertyValue::Select(Some(option.id.clone()));
+                                    _ = panel.update(cx, |panel, cx| panel.set_value(id, Some(value), cx));
+                                }
+                            },
+                        );
                         let panel = panel.clone();
                         menu.separator().item(PopupMenuItem::new("Clear").on_click(move |_, _, cx| {
                             _ = panel.update(cx, |panel, cx| panel.set_value(id, None, cx));
@@ -484,8 +471,7 @@ impl PropertiesPanel {
                     Some(PropertyValue::MultiSelect(ids)) => ids.clone(),
                     _ => Vec::new(),
                 };
-                let chips: Vec<&SelectOption> =
-                    options.iter().filter(|option| selected.contains(&option.id)).collect();
+                let chips: Vec<&SelectOption> = options.iter().filter(|option| selected.contains(&option.id)).collect();
                 let panel = cx.weak_entity();
                 let options = options.clone();
                 Button::new(SharedString::from(format!("property-multi-{id}")))
@@ -540,9 +526,7 @@ impl PropertiesPanel {
                 .footer(
                     DialogFooter::new()
                         .child(DialogClose::new().child(Button::new("add-property-cancel").outline().label("Cancel")))
-                        .child(
-                            DialogAction::new().child(Button::new("add-property-create").primary().label("Create")),
-                        ),
+                        .child(DialogAction::new().child(Button::new("add-property-create").primary().label("Create"))),
                 )
                 .on_ok(move |_, _, cx| form.update(cx, |form, cx| form.submit(cx)))
         });
@@ -617,9 +601,9 @@ impl Render for PropertiesPanel {
         let tags = self.render_tags(&video, cx).into_any_element();
         let folder = self.render_media_folder(&video, cx).into_any_element();
         let youtube = self.render_youtube(&video, cx);
-        let publish_date = div().w_56().child(
-            DatePicker::new(&self.publish_date).appearance(false).small().cleanable(true).placeholder("Empty"),
-        );
+        let publish_date = div()
+            .w_56()
+            .child(DatePicker::new(&self.publish_date).appearance(false).small().cleanable(true).placeholder("Empty"));
 
         v_flex()
             .id("properties")

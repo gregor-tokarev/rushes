@@ -14,13 +14,14 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, Icon, Selectable as _, Sizable as _, Size, StyledExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, Selectable as _, Sizable as _, Size, StyledExt as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, Focusable as _, FontWeight,
-    InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Rems, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    TestSupportExt as _, Window, div, rems,
+    InteractiveElement as _, IntoElement, ParentElement as _, Rems, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _, Window, div, rems,
 };
 use videocrm_core::{DocumentKind, Video, VideoId};
 
@@ -333,7 +334,9 @@ impl VideoPage {
             .accessibility_label("Page actions")
             .tooltip("Page actions")
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                let item = |label: &'static str, icon: IconName, run: fn(&mut VideoPage, &mut Window, &mut Context<VideoPage>)| {
+                let item = |label: &'static str,
+                            icon: IconName,
+                            run: fn(&mut VideoPage, &mut Window, &mut Context<VideoPage>)| {
                     let page = page.clone();
                     PopupMenuItem::new(label).icon(Icon::new(icon)).on_click(move |_, window, cx| {
                         _ = page.update(cx, |page, cx| run(page, window, cx));
@@ -370,11 +373,7 @@ impl VideoPage {
                     ),
             )
             .child(
-                Input::new(&self.hook)
-                    .id("page-hook")
-                    .appearance(false)
-                    .px_0()
-                    .text_color(cx.theme().muted_foreground),
+                Input::new(&self.hook).id("page-hook").appearance(false).px_0().text_color(cx.theme().muted_foreground),
             )
     }
 
@@ -418,9 +417,13 @@ impl VideoPage {
                     "This video isn’t here anymore",
                     "It may have been deleted. Your other videos are in the database.",
                 )
-                .child(Button::new("back-to-videos").outline().small().label("Back to videos").on_click(
-                    move |_, _, cx| state.update(cx, |state, cx| state.navigate(Route::default(), cx)),
-                )),
+                .child(
+                    Button::new("back-to-videos")
+                        .outline()
+                        .small()
+                        .label("Back to videos")
+                        .on_click(move |_, _, cx| state.update(cx, |state, cx| state.navigate(Route::default(), cx))),
+                ),
             )
             .bg(cx.theme().background)
             .into_any_element()
@@ -465,15 +468,7 @@ impl Render for VideoPage {
                     .vertical_scrollbar(&self.scroll),
             )
             .when_some(self.rail.clone().filter(|_| show_rail), |this, rail| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .w_64()
-                        .h_full()
-                        .border_l_1()
-                        .border_color(cx.theme().border)
-                        .child(rail),
-                )
+                this.child(div().flex_none().w_64().h_full().border_l_1().border_color(cx.theme().border).child(rail))
             })
             .into_any_element()
     }

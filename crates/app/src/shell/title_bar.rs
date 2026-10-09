@@ -4,7 +4,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::breadcrumb::{Breadcrumb, BreadcrumbItem};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::sidebar::SidebarToggleButton;
-use gpui_kit::component::{ActiveTheme as _, StyledExt as _, Disableable as _, Sizable as _, TitleBar, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, TitleBar, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, SharedString, Styled as _,

@@ -324,10 +324,21 @@ fn command_group(group: Group) -> CommandGroup {
                         .flex_1()
                         .min_w_0()
                         .gap_2()
-                        .child(div().flex_none().size_4().flex().items_center().justify_center().text_xs().child(emoji.clone()))
+                        .child(
+                            div()
+                                .flex_none()
+                                .size_4()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_xs()
+                                .child(emoji.clone()),
+                        )
                         .child(div().flex_1().min_w_0().truncate().child(label.clone()))
                         .children(
-                            detail.clone().map(|detail| div().text_xs().text_color(cx.theme().muted_foreground).child(detail)),
+                            detail
+                                .clone()
+                                .map(|detail| div().text_xs().text_color(cx.theme().muted_foreground).child(detail)),
                         )
                 })
             }

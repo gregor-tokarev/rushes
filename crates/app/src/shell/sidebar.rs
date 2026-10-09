@@ -6,11 +6,11 @@ use gpui_kit::component::button::Button;
 use gpui_kit::component::sidebar::{
     Sidebar, SidebarCollapsible, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem,
 };
-use gpui_kit::component::{ActiveTheme as _, StyledExt as _, Collapsible, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Collapsible, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Role,
-    SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
+    AnyElement, App, Context, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Role, SharedString,
+    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
 };
 use videocrm_core::{UploadStatus, VideoId, ViewKind};
 
@@ -26,7 +26,7 @@ pub(crate) const DEFAULT_VIDEO_ICON: &str = "🎬";
 /// menus, labelled groups and the recent-pages list share this enum.
 #[derive(Clone)]
 enum Section {
-    Menu(SidebarMenu),
+    Menu(Box<SidebarMenu>),
     Group(SidebarGroup<SidebarMenu>),
     Pages(PageList),
 }
@@ -42,7 +42,7 @@ impl Collapsible for Section {
 
     fn collapsed(self, collapsed: bool) -> Self {
         match self {
-            Section::Menu(menu) => Section::Menu(menu.collapsed(collapsed)),
+            Section::Menu(menu) => Section::Menu(Box::new(menu.collapsed(collapsed))),
             Section::Group(group) => Section::Group(group.collapsed(collapsed)),
             Section::Pages(list) => Section::Pages(PageList { collapsed, ..list }),
         }
@@ -103,7 +103,9 @@ impl PageList {
                     .text_sm()
                     .when(!page.active, |this| this.hover(move |this| this.bg(hover_bg).text_color(hover_fg)))
                     .when(page.active, |this| this.font_medium().bg(active_bg).text_color(hover_fg))
-                    .child(div().flex_none().size_4().flex().items_center().justify_center().text_xs().child(page.emoji))
+                    .child(
+                        div().flex_none().size_4().flex().items_center().justify_center().text_xs().child(page.emoji),
+                    )
                     .child(div().flex_1().min_w_0().truncate().child(page.title))
                     .on_click(move |_, _, cx| {
                         state.update(cx, |state, cx| state.open_video(id, VideoTab::Script, cx));
@@ -215,10 +217,11 @@ impl Workspace {
             .collapsible(SidebarCollapsible::Offcanvas)
             .collapsed(self.sidebar_collapsed)
             .header(self.render_sidebar_header(window, cx))
-            .child(Section::Menu(top))
+            .child(Section::Menu(Box::new(top)))
             .child(Section::Group(SidebarGroup::new("Videos").child(SidebarMenu::new().children(view_items))));
         if !recent.is_empty() {
-            sidebar = sidebar.child(Section::Pages(PageList { label: "Recent".into(), pages: recent, collapsed: false }));
+            sidebar =
+                sidebar.child(Section::Pages(PageList { label: "Recent".into(), pages: recent, collapsed: false }));
         }
         sidebar.footer(self.render_sidebar_footer(route == Route::Settings, window, cx))
     }

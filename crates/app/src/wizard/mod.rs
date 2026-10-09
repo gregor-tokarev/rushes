@@ -9,7 +9,7 @@ use gpui_kit::component::form::{Field, Form};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, StyledExt as _, Icon, Side, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Side, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
@@ -226,7 +226,9 @@ impl Render for NewVideoForm {
             .gap_4()
             .child(
                 Form::new()
-                    .child(Field::new().label("Title").required(true).child(Input::new(&self.title).id("new-video-title")))
+                    .child(
+                        Field::new().label("Title").required(true).child(Input::new(&self.title).id("new-video-title")),
+                    )
                     .child(Field::new().label("Hook").child(Input::new(&self.hook).id("new-video-hook")))
                     .child(
                         Field::new().label_indent(false).child(

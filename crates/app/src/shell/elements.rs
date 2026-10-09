@@ -3,14 +3,16 @@
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::empty::{Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle};
-use gpui_kit::component::{ActiveTheme as _, StyledExt as _, Icon, Sizable as _, ThemeStyled as _, h_flex, v_flex};
+use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, ThemeStyled as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Action, AnyElement, App, ClickEvent, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, Rems, Role,
-    SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
+    Action, AnyElement, App, ClickEvent, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
+    RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
 };
+
+type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 /// An empty state: icon, title and one sentence on what to do next.
 pub(crate) fn empty_state(
@@ -40,7 +42,7 @@ pub(crate) struct RowButton {
     label: SharedString,
     indent: Rems,
     muted: bool,
-    on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
+    on_click: Option<ClickHandler>,
 }
 
 impl RowButton {
@@ -73,7 +75,8 @@ impl RowButton {
 
 impl RenderOnce for RowButton {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let focus = window.use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle().tab_stop(true)).read(cx).clone();
+        let focus =
+            window.use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle().tab_stop(true)).read(cx).clone();
         let focused = focus.is_focused(window);
         let hover = cx.theme().secondary_hover;
         let active = cx.theme().secondary_active;
@@ -99,7 +102,9 @@ impl RenderOnce for RowButton {
                 this.child(Icon::new(icon).small().text_color(cx.theme().muted_foreground))
             })
             .child(div().flex_1().min_w_0().truncate().child(self.label))
-            .when_some(self.on_click, |this, on_click| this.on_click(move |event, window, cx| on_click(event, window, cx)))
+            .when_some(self.on_click, |this, on_click| {
+                this.on_click(move |event, window, cx| on_click(event, window, cx))
+            })
     }
 }
 
@@ -112,7 +117,7 @@ pub(crate) struct ChoiceCard {
     title: SharedString,
     description: SharedString,
     selected: bool,
-    on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
+    on_click: Option<ClickHandler>,
 }
 
 impl ChoiceCard {
@@ -145,7 +150,8 @@ impl ChoiceCard {
 
 impl RenderOnce for ChoiceCard {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let focus = window.use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle().tab_stop(true)).read(cx).clone();
+        let focus =
+            window.use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle().tab_stop(true)).read(cx).clone();
         let focused = focus.is_focused(window);
         let theme = cx.theme();
         let (hover, border, selected_border, selected_bg) = (theme.muted, theme.border, theme.primary, theme.accent);
@@ -166,7 +172,9 @@ impl RenderOnce for ChoiceCard {
             .when(focused, |this| this.focus_ring_style(window, cx))
             .child(h_flex().gap_2().child(self.leading).child(div().text_sm().font_medium().child(self.title)))
             .child(div().text_xs().text_color(cx.theme().muted_foreground).child(self.description))
-            .when_some(self.on_click, |this, on_click| this.on_click(move |event, window, cx| on_click(event, window, cx)))
+            .when_some(self.on_click, |this, on_click| {
+                this.on_click(move |event, window, cx| on_click(event, window, cx))
+            })
     }
 }
 

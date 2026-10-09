@@ -10,9 +10,9 @@ use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, WindowExt as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AppContext as _, ClipboardItem, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions,
-    Render, Rems, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
-    div,
+    AppContext as _, ClipboardItem, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    ParentElement as _, PathPromptOptions, Rems, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, Window, div,
 };
 use videocrm_core::document::{
     DEFAULT_WPM, OutlineItem, estimated_runtime_secs, format_runtime, from_markdown, outline, spoken_word_count,
@@ -247,19 +247,21 @@ impl DocumentTab {
             let (append_blocks, replace_blocks) = (blocks.clone(), replace_blocks.clone());
             dialog
                 .title(title.clone())
-                .child(
-                    "Append adds it after the last block. Replace removes the current text, which can’t be undone.",
-                )
+                .child("Append adds it after the last block. Replace removes the current text, which can’t be undone.")
                 .footer(
                     DialogFooter::new()
                         .child(DialogClose::new().child(Button::new("import-cancel").outline().label("Cancel")))
-                        .child(Button::new("import-replace").outline().with_variant(ButtonVariant::Danger).label("Replace").on_click(
-                            move |_, window, cx| {
-                                let blocks = replace_blocks.clone();
-                                _ = replace_tab.update(cx, |tab, cx| tab.apply_import(blocks, true, window, cx));
-                                window.close_dialog(cx);
-                            },
-                        ))
+                        .child(
+                            Button::new("import-replace")
+                                .outline()
+                                .with_variant(ButtonVariant::Danger)
+                                .label("Replace")
+                                .on_click(move |_, window, cx| {
+                                    let blocks = replace_blocks.clone();
+                                    _ = replace_tab.update(cx, |tab, cx| tab.apply_import(blocks, true, window, cx));
+                                    window.close_dialog(cx);
+                                }),
+                        )
                         .child(DialogAction::new().child(Button::new("import-append").primary().label("Append"))),
                 )
                 .on_ok(move |_, window, cx| {
@@ -277,10 +279,8 @@ impl DocumentTab {
         if replace {
             document.blocks = blocks;
         } else {
-            let trailing_empty = document
-                .blocks
-                .last()
-                .is_some_and(|block| block.kind == BlockKind::Paragraph && block.text.is_empty());
+            let trailing_empty =
+                document.blocks.last().is_some_and(|block| block.kind == BlockKind::Paragraph && block.text.is_empty());
             if trailing_empty {
                 document.blocks.pop();
             }
@@ -329,7 +329,9 @@ fn file_name(path: &Path) -> String {
 
 /// Replaces characters that are not allowed in file names.
 fn sanitize_file_name(name: &str) -> String {
-    name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '-' } else { c }).collect()
+    name.chars()
+        .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '-' } else { c })
+        .collect()
 }
 
 impl Render for DocumentTab {
@@ -345,9 +347,13 @@ impl Render for DocumentTab {
                         "This document couldn’t be opened",
                         "The database didn’t return it. Try again, or restart VideoCRM if it keeps happening.",
                     )
-                    .child(Button::new("document-retry").outline().small().label("Try again").on_click(cx.listener(
-                        |this, _, window, cx| this.load(window, cx),
-                    ))),
+                    .child(
+                        Button::new("document-retry")
+                            .outline()
+                            .small()
+                            .label("Try again")
+                            .on_click(cx.listener(|this, _, window, cx| this.load(window, cx))),
+                    ),
                 )
                 .into_any_element(),
         }
@@ -378,17 +384,26 @@ impl Render for ScriptRail {
         };
         let tab = self.tab.clone();
         let top_level = stats.outline.iter().map(|item| item.level).min().unwrap_or(1);
-        let outline: Vec<RowButton> = stats.outline.into_iter().map(|item| {
-            let tab = tab.clone();
-            let id = item.block_id;
-            RowButton::new(SharedString::from(format!("outline-{id}")), item.text)
-                .indent(Rems(0.75 * f32::from(item.level - top_level)))
-                .muted(item.level > top_level)
-                .on_click(move |_, window, cx| tab.update(cx, |tab, cx| tab.focus_block(id, window, cx)))
-        }).collect();
-        let action = |id: &'static str, icon: IconName, label: &'static str, run: fn(&mut DocumentTab, &mut Window, &mut Context<DocumentTab>)| {
+        let outline: Vec<RowButton> = stats
+            .outline
+            .into_iter()
+            .map(|item| {
+                let tab = tab.clone();
+                let id = item.block_id;
+                RowButton::new(SharedString::from(format!("outline-{id}")), item.text)
+                    .indent(Rems(0.75 * f32::from(item.level - top_level)))
+                    .muted(item.level > top_level)
+                    .on_click(move |_, window, cx| tab.update(cx, |tab, cx| tab.focus_block(id, window, cx)))
+            })
+            .collect();
+        let action = |id: &'static str,
+                      icon: IconName,
+                      label: &'static str,
+                      run: fn(&mut DocumentTab, &mut Window, &mut Context<DocumentTab>)| {
             let tab = self.tab.clone();
-            RowButton::new(id, label).icon(icon).on_click(move |_, window, cx| tab.update(cx, |tab, cx| run(tab, window, cx)))
+            RowButton::new(id, label)
+                .icon(icon)
+                .on_click(move |_, window, cx| tab.update(cx, |tab, cx| run(tab, window, cx)))
         };
 
         v_flex()
@@ -419,23 +434,18 @@ impl Render for ScriptRail {
                             .child(format!("Runtime at {DEFAULT_WPM} words per minute.")),
                     ),
             )
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().pb_1().child(section_label("Outline", cx)))
-                    .map(|this| {
-                        if outline.is_empty() {
-                            this.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Headings in the script show up here."),
-                            )
-                        } else {
-                            this.children(outline)
-                        }
-                    }),
-            )
+            .child(v_flex().gap_1().child(div().pb_1().child(section_label("Outline", cx))).map(|this| {
+                if outline.is_empty() {
+                    this.child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Headings in the script show up here."),
+                    )
+                } else {
+                    this.children(outline)
+                }
+            }))
             .child(
                 v_flex()
                     .gap_1()
@@ -446,8 +456,18 @@ impl Render for ScriptRail {
                         "Copy teleprompter text",
                         DocumentTab::copy_teleprompter_text,
                     ))
-                    .child(action("export-markdown", IconName::FileDown, "Export Markdown…", DocumentTab::export_markdown))
-                    .child(action("import-markdown", IconName::FileUp, "Import Markdown…", DocumentTab::import_markdown)),
+                    .child(action(
+                        "export-markdown",
+                        IconName::FileDown,
+                        "Export Markdown…",
+                        DocumentTab::export_markdown,
+                    ))
+                    .child(action(
+                        "import-markdown",
+                        IconName::FileUp,
+                        "Import Markdown…",
+                        DocumentTab::import_markdown,
+                    )),
             )
     }
 }

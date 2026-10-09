@@ -7,10 +7,10 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
-use gpui_kit::component::{ActiveTheme as _, StyledExt as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _, PathPromptOptions, Render, SharedString,
-    Styled as _, Subscription, WeakEntity, Window, div,
+    App, AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
+    SharedString, Styled as _, Subscription, WeakEntity, Window, div,
 };
 use videocrm_core::media::default_media_root;
 use videocrm_core::settings::{ThemeMode, data_dir};
@@ -43,7 +43,8 @@ impl SettingsPage {
                 }
             }),
             cx.subscribe_in(&state, window, |this, state, event: &AppEvent, window, cx| {
-                if *event == AppEvent::SettingsChanged && !this.media_root.read(cx).focus_handle(cx).is_focused(window) {
+                if *event == AppEvent::SettingsChanged && !this.media_root.read(cx).focus_handle(cx).is_focused(window)
+                {
                     let root = state.read(cx).settings().resolved_media_root().display().to_string();
                     if this.media_root.read(cx).value() != root {
                         this.media_root.update(cx, |input, cx| input.set_value(root, window, cx));
@@ -106,14 +107,18 @@ impl SettingsPage {
                     SettingItem::new(
                         "Theme",
                         SettingField::dropdown(
-                            ThemeMode::ALL.iter().map(|mode| (theme_key(*mode), SharedString::from(mode.label()))).collect(),
+                            ThemeMode::ALL
+                                .iter()
+                                .map(|mode| (theme_key(*mode), SharedString::from(mode.label())))
+                                .collect(),
                             |cx: &App| theme_key(AppState::global(cx).read(cx).settings().theme),
                             |key: SharedString, cx: &mut App| {
                                 let Some(mode) = ThemeMode::ALL.into_iter().find(|mode| theme_key(*mode) == key) else {
                                     return;
                                 };
-                                AppState::global(cx)
-                                    .update(cx, |state, cx| state.update_settings(cx, |settings| settings.theme = mode));
+                                AppState::global(cx).update(cx, |state, cx| {
+                                    state.update_settings(cx, |settings| settings.theme = mode)
+                                });
                             },
                         ),
                     )
@@ -134,46 +139,49 @@ impl SettingsPage {
                 ),
             ),
             SettingPage::new("AI editing").icon(Icon::new(IconName::WandSparkles)).group(
-                SettingGroup::new()
-                    .item(SettingItem::render(move |_, _, _| ai.clone()).keywords(["agent", "claude", "video-use"])),
+                SettingGroup::new().item(SettingItem::render(move |_, _, _| ai.clone()).keywords([
+                    "agent",
+                    "claude",
+                    "video-use",
+                ])),
             ),
-            SettingPage::new("About").icon(Icon::new(IconName::Info)).group(SettingGroup::new().item(
-                SettingItem::render(|_, _, cx| {
-                    v_flex()
-                        .w_full()
-                        .gap_2()
-                        .child(
-                            h_flex()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .size_10()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(cx.theme().radius_lg)
-                                        .bg(cx.theme().primary)
-                                        .text_color(cx.theme().primary_foreground)
-                                        .child(Icon::new(IconName::Clapperboard)),
-                                )
-                                .child(
-                                    v_flex()
-                                        .child(div().font_semibold().child("VideoCRM"))
-                                        .child(
+            SettingPage::new("About").icon(Icon::new(IconName::Info)).group(
+                SettingGroup::new().item(
+                    SettingItem::render(|_, _, cx| {
+                        v_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(
+                                h_flex()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .size_10()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(cx.theme().radius_lg)
+                                            .bg(cx.theme().primary)
+                                            .text_color(cx.theme().primary_foreground)
+                                            .child(Icon::new(IconName::Clapperboard)),
+                                    )
+                                    .child(
+                                        v_flex().child(div().font_semibold().child("VideoCRM")).child(
                                             div()
                                                 .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
                                                 .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
                                         ),
-                                ),
-                        )
-                        .child(div().text_sm().text_color(cx.theme().muted_foreground).child(
-                            "Plan videos in a Notion-like database, write scripts in rich documents, edit footage \
+                                    ),
+                            )
+                            .child(div().text_sm().text_color(cx.theme().muted_foreground).child(
+                                "Plan videos in a Notion-like database, write scripts in rich documents, edit footage \
                              with AI and upload to YouTube, all on your own computer.",
-                        ))
-                })
-                .keywords(["version"]),
-            )),
+                            ))
+                    })
+                    .keywords(["version"]),
+                ),
+            ),
         ]
     }
 }
@@ -189,11 +197,15 @@ fn media_folder_field(media_root: Entity<InputState>, page: WeakEntity<SettingsP
             .w_96()
             .gap_2()
             .child(Input::new(&media_root).id("settings-media-root").with_size(options.size()).flex_1())
-            .child(Button::new("settings-choose-media-root").outline().with_size(options.size()).label("Choose…").on_click(
-                move |_, window, cx| {
-                    _ = page.update(cx, |page, cx| page.choose_media_root(window, cx));
-                },
-            ))
+            .child(
+                Button::new("settings-choose-media-root")
+                    .outline()
+                    .with_size(options.size())
+                    .label("Choose…")
+                    .on_click(move |_, window, cx| {
+                        _ = page.update(cx, |page, cx| page.choose_media_root(window, cx));
+                    }),
+            )
     })
 }
 

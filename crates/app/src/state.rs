@@ -222,10 +222,10 @@ impl AppState {
     /// Ensures the video has a media folder and returns it.
     pub fn ensure_video_folder(&mut self, id: VideoId, cx: &mut Context<Self>) -> Option<std::path::PathBuf> {
         let mut video = self.video(id)?.clone();
-        if let Some(folder) = video.folder.clone() {
-            if folder.is_dir() {
-                return Some(folder);
-            }
+        if let Some(folder) = video.folder.clone()
+            && folder.is_dir()
+        {
+            return Some(folder);
         }
         match media::ensure_video_folder(&self.settings.resolved_media_root(), &mut video) {
             Ok(folder) => {
@@ -287,7 +287,12 @@ impl AppState {
     }
 
     /// The video's first document of `kind`, created when it has none.
-    pub fn ensure_document(&mut self, video_id: VideoId, kind: DocumentKind, cx: &mut Context<Self>) -> Option<Document> {
+    pub fn ensure_document(
+        &mut self,
+        video_id: VideoId,
+        kind: DocumentKind,
+        cx: &mut Context<Self>,
+    ) -> Option<Document> {
         let existing = self.lock().list_documents(video_id).map(|documents| {
             documents.into_iter().filter(|document| document.kind == kind).min_by_key(|document| document.position)
         });

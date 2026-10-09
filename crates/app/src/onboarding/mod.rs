@@ -9,7 +9,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::stepper::{Stepper, StepperItem};
-use gpui_kit::component::{ActiveTheme as _, StyledExt as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -306,14 +306,12 @@ fn step_copy(step: Step) -> (&'static str, &'static str) {
             "Welcome to VideoCRM",
             "Your production home for YouTube videos, from the first idea to the published upload.",
         ),
-        Step::MediaFolder => (
-            "Where should footage live?",
-            "VideoCRM keeps one folder per video for raw takes and AI edit outputs.",
-        ),
-        Step::Youtube => (
-            "Connect YouTube",
-            "Upload videos and keep their links on each page. You can do this later in Settings.",
-        ),
+        Step::MediaFolder => {
+            ("Where should footage live?", "VideoCRM keeps one folder per video for raw takes and AI edit outputs.")
+        }
+        Step::Youtube => {
+            ("Connect YouTube", "Upload videos and keep their links on each page. You can do this later in Settings.")
+        }
         Step::AiEditing => (
             "Set up AI editing",
             "AI edits run on this computer through Claude Code and video-use. This is optional; everything else works without it.",
@@ -348,7 +346,11 @@ impl Render for Onboarding {
                         .small()
                         .text_center(true)
                         .selected_index(self.step.index())
-                        .items(Step::ALL.iter().map(|step| StepperItem::new().icon(Icon::new(step.icon())).child(step.label())))
+                        .items(
+                            Step::ALL
+                                .iter()
+                                .map(|step| StepperItem::new().icon(Icon::new(step.icon())).child(step.label())),
+                        )
                         .on_click(cx.listener(|this, ix: &usize, window, cx| {
                             // Steps already passed can be revisited; later ones come through Next.
                             if *ix < this.step.index() {
