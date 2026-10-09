@@ -364,34 +364,63 @@ fn run(command: PaletteCommand, workspace: &WeakEntity<Workspace>, window: &mut 
     }
 }
 
+/// Bonus for a character matched at the start of a word.
+const WORD_START: i32 = 8;
+/// Bonus for a character matched right after the previous one.
+const CONSECUTIVE: i32 = 5;
+/// Largest penalty for the characters skipped before a match.
+const MAX_GAP: usize = 10;
+
+/// A placement of the query in the text: its score and where it starts.
+type Placement = (i32, usize);
+
 /// Scores `text` against `query` as a case-insensitive subsequence: matches
 /// at word starts and runs of consecutive characters score higher, gaps
-/// lower. `None` when the query does not match; an empty query matches all.
+/// lower, and the best placement of the query counts. A placement that loses
+/// more to gaps than it gains is the query scattered over unrelated words and
+/// gives `None`. Placements further into the text rank lower. An empty query
+/// matches all.
 fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
     let query: Vec<char> = query.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect();
-    if query.is_empty() {
-        return Some(0);
-    }
+    let Some((first, rest)) = query.split_first() else { return Some(0) };
     let text: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
-    let mut score = 0;
-    let mut next = 0;
-    let mut previous: Option<usize> = None;
-    for wanted in query {
-        let position = (next..text.len()).find(|&ix| text[ix] == wanted)?;
-        let word_start = position == 0 || !text[position - 1].is_alphanumeric();
-        score += 1;
-        if word_start {
-            score += 8;
+    let char_score = |ix: usize| {
+        let word_start = ix == 0 || !text[ix - 1].is_alphanumeric();
+        1 + if word_start { WORD_START } else { 0 }
+    };
+    let gap = |skipped: usize| skipped.min(MAX_GAP) as i32;
+    let better = |a: Option<Placement>, b: Option<Placement>| match (a, b) {
+        (Some(a), Some(b)) => Some(if b.0 > a.0 { b } else { a }),
+        (a, b) => a.or(b),
+    };
+
+    // best[ix]: the best placement of the query so far with its last character at `ix`.
+    let mut best: Vec<Option<Placement>> =
+        (0..text.len()).map(|ix| (text[ix] == *first).then(|| (char_score(ix), ix))).collect();
+    for wanted in rest {
+        let mut next = vec![None; text.len()];
+        // The best placement ending at least MAX_GAP + 1 characters back, where the gap penalty is flat.
+        let mut far: Option<Placement> = None;
+        for ix in 0..text.len() {
+            if ix > MAX_GAP {
+                far = better(far, best[ix - MAX_GAP - 1]);
+            }
+            if text[ix] != *wanted {
+                continue;
+            }
+            let mut previous = far.map(|(score, start)| (score - gap(MAX_GAP), start));
+            let near = ix.saturating_sub(MAX_GAP);
+            for (offset, placement) in best[near..ix].iter().enumerate() {
+                let skipped = ix - near - offset - 1;
+                let step = if skipped == 0 { CONSECUTIVE } else { -gap(skipped) };
+                previous = better(previous, placement.map(|(score, start)| (score + step, start)));
+            }
+            next[ix] = previous.map(|(score, start)| (score + char_score(ix), start));
         }
-        match previous {
-            Some(previous) if previous + 1 == position => score += 5,
-            Some(previous) => score -= (position - previous - 1).min(10) as i32,
-            None => score -= position.min(10) as i32,
-        }
-        previous = Some(position);
-        next = position + 1;
+        best = next;
     }
-    Some(score)
+    let (score, start) = best.into_iter().flatten().reduce(|a, b| if b.0 > a.0 { b } else { a })?;
+    (score >= 0).then(|| score - gap(start))
 }
 
 #[cfg(test)]
@@ -409,5 +438,18 @@ mod tests {
         let consecutive = fuzzy_score("desk", "Desk setup").unwrap();
         let scattered = fuzzy_score("desk", "Do every small kit").unwrap();
         assert!(consecutive > scattered);
+    }
+
+    #[test]
+    fn fuzzy_finds_the_best_placement_and_drops_scattered_matches() {
+        // A greedy left-most match takes the "t" of "Things"; the word "tour" is the placement that counts.
+        assert!(fuzzy_score("tour", "Things to know about the desk tour").is_some_and(|score| score > 0));
+        assert!(fuzzy_score("theme", "Use light theme").unwrap() > 0);
+        // Letters picked from unrelated words are not a match.
+        assert_eq!(fuzzy_score("theme", "Rust Ownership Finally Explained in 10 Minutes"), None);
+        assert_eq!(fuzzy_score("set", "Stop Using print() to Debug Python"), None);
+        // A word start late in the title still matches.
+        assert!(fuzzy_score("p", "Stop Using print()").is_some());
+        assert!(fuzzy_score("rst own", "Rust ownership explained").is_some());
     }
 }

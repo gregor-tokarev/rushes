@@ -17,7 +17,7 @@ use videocrm::route::{Route, VideoTab};
 use videocrm::shell::{self, Page, Workspace};
 use videocrm::state::AppState;
 use videocrm::video_page::SAVE_DELAY;
-use videocrm_core::settings::AppSettings;
+use videocrm_core::settings::{AppSettings, ThemeMode};
 use videocrm_core::templates::TemplateKind;
 use videocrm_core::{
     BlockId, DatabaseView, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, Store,
@@ -400,6 +400,22 @@ fn the_command_palette_jumps_to_a_video(cx: &mut TestAppContext) {
     assert!(!app.has_dialog(cx));
     let rust = app.video_id(cx, "Rust ownership explained");
     assert_eq!(app.route(cx), Route::Video { id: rust, tab: VideoTab::Script });
+}
+
+#[gpui_kit::test]
+fn the_palette_runs_an_action_its_query_names(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Rust Ownership Finally Explained in 10 Minutes"]);
+    let theme = |cx: &mut TestAppContext| cx.read(|cx| app.state.read(cx).settings().theme);
+    assert_eq!(theme(cx), ThemeMode::System);
+
+    // The video holds "theme" only as letters scattered over four words.
+    app.press(cx, "ctrl-k");
+    app.type_text(cx, "theme");
+    app.press(cx, "enter");
+
+    assert!(!app.has_dialog(cx));
+    assert_eq!(app.route(cx), Route::default());
+    assert_ne!(theme(cx), ThemeMode::System);
 }
 
 #[gpui_kit::test]
