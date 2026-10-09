@@ -548,6 +548,9 @@ impl PropertiesPanel {
     }
 }
 
+/// Status, format, publish date, tags, media folder and YouTube.
+const BUILT_IN_ROWS: usize = 6;
+
 /// Kinds edited in a text input.
 fn is_text_like(kind: &PropertyKind) -> bool {
     matches!(kind, PropertyKind::Text | PropertyKind::Number | PropertyKind::Url)
@@ -591,7 +594,7 @@ impl Render for PropertiesPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(video) = self.video(cx).cloned() else { return div().into_any_element() };
         let properties = self.state.read(cx).properties().to_vec();
-        let count = 7 + properties.len();
+        let count = BUILT_IN_ROWS + properties.len();
 
         if self.collapsed {
             return h_flex()

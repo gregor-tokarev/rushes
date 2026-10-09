@@ -495,6 +495,23 @@ fn a_property_keeps_saving_after_its_type_changes_back(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
+fn hidden_properties_show_how_many_there_are(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    let state = app.state.clone();
+    let property = PropertyDef { id: PropertyId::new(), name: "Sponsor".into(), kind: PropertyKind::Text, position: 0 };
+    app.step(cx, move |_, cx| state.update(cx, |state, cx| state.insert_property(property, cx)));
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
+
+    app.click(cx, "hide-properties");
+    let label = cx
+        .update_window(app.window, |_, window, _| window.find("show-properties").label().map(str::to_string))
+        .expect("window is open");
+    // Status, format, publish date, tags, media folder, YouTube and Sponsor.
+    assert_eq!(label.as_deref(), Some("7 properties"));
+}
+
+#[gpui_kit::test]
 fn tabs_of_a_deleted_video_create_nothing(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, true, &["Desk setup tour"]);
     let id = app.video_id(cx, "Desk setup tour");
