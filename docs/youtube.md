@@ -98,21 +98,27 @@ without running.
 
 All calls block; run them on a background thread and stream progress back to the UI.
 
-1. `begin_authorization(&config)` binds `127.0.0.1:<random port>`; open
-   `pending.authorize_url()` in the browser; `pending.wait(timeout, &cancel)` serves the
-   redirect, shows a "You're signed in" page and returns `Credentials`. Check
+1. `begin_authorization(&config)` binds `127.0.0.1:<random port>` (it refuses a Google
+   config without client secret); open `pending.authorize_url()` in the browser;
+   `pending.wait(timeout, &cancel)` serves the redirect, shows a "You're signed in" page
+   and returns `Credentials`. Requests without this sign-in's `state` get an error page
+   and are ignored. Check
    `credentials.has_scope("https://www.googleapis.com/auth/youtube.upload")`: Google lets
    the user untick individual scopes.
 2. `YoutubeClient::new(config, credentials, on_refresh)`: pass an `on_refresh` that calls
-   `CredentialStore::save_credentials`, so refreshed tokens survive restarts. The client
-   refreshes 60 s before expiry and once after a `401`.
+   `CredentialStore::save_credentials` on a clone of the app's one store, so refreshed
+   tokens survive restarts. The client refreshes 60 s before expiry and once after a
+   `401`.
 3. `Account::new(&client.userinfo()?, client.my_channel().ok().as_ref(), client.config())`
    and `CredentialStore::save` persist the login (`credentials.json`, mode 0600).
 4. `upload_video(path, &metadata, &mut progress, &cancel)`: store the `session_url` from
    `UploadProgress::Started`. After a cancel, crash or network failure,
-   `resume_upload(session_url, path, ...)` continues from the bytes YouTube already has.
-   Transient failures (5xx, 408, 429, dropped connections) are retried with exponential
-   backoff from the server's offset. `Error::SessionExpired` means start over.
+   `resume_upload(session_url, path, ...)` continues from the bytes YouTube already has
+   (only for session URLs on the configured upload server). Transient failures (5xx, 408,
+   429, 403 rate limits, dropped or stalled connections) are retried with exponential
+   backoff from the server's offset; the retry budget resets whenever the server confirms
+   new bytes. Cancel takes effect at the next read of the chunk being sent.
+   `Error::SessionExpired` means start over.
 5. `Error::needs_sign_in()` tells when to ask the user to reconnect; `quotaExceeded` and
    `uploadLimitExceeded` errors have user-facing messages.
 
