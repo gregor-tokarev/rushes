@@ -612,3 +612,163 @@ fn keyboard_renames_and_opens_the_selected_row(cx: &mut TestAppContext) {
     db.step(cx, |window, cx| window.press("enter", cx));
     assert_eq!(db.take_events(), vec![DatabaseEvent::OpenVideo(db.desk)]);
 }
+
+#[gpui_kit::test]
+fn escape_cancels_an_inline_edit_at_once(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    db.step(cx, |window, cx| {
+        window.click_at(row_id(db.desk), point(px(190.), px(16.)), cx)
+    });
+    db.step(cx, |window, cx| window.press("f2", cx));
+    db.step(cx, |window, cx| window.input(" tour", cx));
+    assert!(db.with_window(cx, |window, _| window.try_find("cell-input").is_some()));
+
+    // The row is still selected, so the table would take Escape to clear the
+    // selection; the editor gets it first.
+    db.step(cx, |window, cx| window.press("escape", cx));
+    assert!(
+        db.with_window(cx, |window, _| window.try_find("cell-input").is_none()),
+        "one Escape closes the editor"
+    );
+    assert!(db.take_events().is_empty(), "nothing is saved");
+    assert_eq!(
+        cx.read(|cx| db
+            .panel
+            .read(cx)
+            .video(db.desk)
+            .map(|video| video.title.clone())),
+        Some("Desk setup 2026".to_string())
+    );
+    assert_eq!(
+        cx.read(|cx| db.panel.read(cx).selected_video()),
+        Some(db.desk),
+        "the row stays selected"
+    );
+
+    // Keyboard focus is back on the table: Enter opens the row.
+    db.step(cx, |window, cx| window.press("enter", cx));
+    assert_eq!(db.take_events(), vec![DatabaseEvent::OpenVideo(db.desk)]);
+}
+
+#[gpui_kit::test]
+fn row_keys_do_not_reach_through_an_open_cell_menu(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    db.step(cx, |window, cx| {
+        window.click_at(row_id(db.desk), point(px(190.), px(16.)), cx)
+    });
+    db.press_and_release(cx, format!("status-{}", db.desk));
+    assert!(db.with_window(cx, |window, _| window.try_find("popup-menu").is_some()));
+
+    // Backspace and Delete in the status menu do not ask to delete the row.
+    db.step(cx, |window, cx| window.press("backspace", cx));
+    db.step(cx, |window, cx| window.press("delete", cx));
+    assert!(
+        db.with_window(cx, |window, _| window.try_find("ok").is_none()),
+        "no delete confirmation"
+    );
+    assert!(db.take_events().is_empty());
+}
+
+#[gpui_kit::test]
+fn clearing_a_search_without_matches_keeps_the_view(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    db.step(cx, |window, cx| {
+        window.click("database-search", cx);
+        window.input("zzz", cx);
+    });
+    assert!(db.shown_rows(cx).is_empty());
+    assert!(
+        db.with_window(cx, |window, _| window
+            .try_find("empty-clear-filters")
+            .is_none()),
+        "a search with no matches offers to clear the search, not the view's filters"
+    );
+
+    db.step(cx, |window, cx| window.click("empty-clear-search", cx));
+    assert_eq!(db.shown_rows(cx), vec![db.tokyo, db.ownership, db.desk]);
+    assert!(db.take_events().is_empty(), "the saved view is untouched");
+    assert!(cx.read(|cx| {
+        db.panel
+            .read(cx)
+            .active_view()
+            .is_some_and(|view| view.filter.hide_archived)
+    }));
+}
+
+#[gpui_kit::test]
+fn a_typed_option_is_kept_without_pressing_enter(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    db.step(cx, |window, cx| window.click("properties", cx));
+    db.step(cx, |window, cx| window.click("new-property", cx));
+    db.step(cx, |window, cx| {
+        window.click("property-name", cx);
+        window.input("Sponsor", cx);
+    });
+    // Text, Number, Select, …
+    db.press_and_release(cx, "property-kind");
+    db.step(cx, |window, cx| {
+        window.within("popup-menu").click(2usize, cx)
+    });
+    db.step(cx, |window, cx| {
+        window.click("new-option", cx);
+        window.input("NordVPN", cx);
+        window.press("enter", cx);
+    });
+    db.step(cx, |window, cx| window.input("Brilliant", cx));
+    db.step(cx, |window, cx| window.click("property-commit", cx));
+
+    let events = db.take_events();
+    let Some(DatabaseEvent::CreateProperty(property)) = events.first() else {
+        panic!("expected CreateProperty first, got {events:?}");
+    };
+    let names: Vec<&str> = property
+        .kind
+        .options()
+        .iter()
+        .map(|option| option.name.as_str())
+        .collect();
+    assert_eq!(names, ["NordVPN", "Brilliant"]);
+}
+
+#[gpui_kit::test]
+fn resizing_a_column_saves_its_width(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    // The resize handle straddles the right border of the Status header
+    // cell, the table's second column.
+    let (from, to, before) = db.with_window(cx, |window, _| {
+        let status = window.find(("col-header", 1usize)).bounds();
+        let y = status.center().y;
+        (
+            point(status.right() - px(2.), y),
+            point(status.right() + px(58.), y),
+            status.size.width,
+        )
+    });
+    db.step(cx, |window, cx| window.drag(from, to, cx));
+
+    let events = db.take_events();
+    let [DatabaseEvent::SaveView(view)] = events.as_slice() else {
+        panic!("expected one SaveView, got {events:?}");
+    };
+    let status = view
+        .columns
+        .iter()
+        .find(|layout| layout.column == Column::Builtin(BuiltinField::Status))
+        .expect("the view lists the status column");
+    // Dragged 60px from just inside the border: about that much wider than
+    // the default 140.
+    assert!(
+        (190.0..=202.0).contains(&status.width),
+        "expected about 200, got {}",
+        status.width
+    );
+    let after = db.with_window(cx, |window, _| {
+        window.find(("col-header", 1usize)).bounds().size.width
+    });
+    assert!(after > before, "the header is drawn wider");
+}

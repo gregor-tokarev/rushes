@@ -143,6 +143,15 @@ pub fn cell_slot(content: impl IntoElement) -> Div {
         .child(content)
 }
 
+/// Read-only cell content, such as script stats or pipeline chips.
+///
+/// Inset like the content of a [`CellButton`] (its `px_2` less the
+/// `mx_neg_1` every cell trigger gets), so read-only values line up with
+/// editable ones and with the column header.
+pub fn static_cell(content: impl IntoElement) -> Div {
+    h_flex().min_w_0().px_1().child(content)
+}
+
 /// A small count on a toolbar trigger, e.g. the number of active filters.
 pub fn count_badge(count: usize, cx: &App) -> Div {
     h_flex()

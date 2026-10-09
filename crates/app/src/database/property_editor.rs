@@ -179,7 +179,7 @@ impl PropertyEditor {
         if name.is_empty() {
             return Err("Give the property a name.".into());
         }
-        let options: Vec<SelectOption> = self
+        let mut options: Vec<SelectOption> = self
             .options
             .iter()
             .filter_map(|draft| {
@@ -191,6 +191,19 @@ impl PropertyEditor {
                 })
             })
             .collect();
+        // An option typed but not yet added with Enter is still meant.
+        let pending = self.new_option.read(cx).value().trim().to_string();
+        if !pending.is_empty()
+            && !options
+                .iter()
+                .any(|option| option.name.eq_ignore_ascii_case(&pending))
+        {
+            options.push(SelectOption {
+                id: PropertyId::new().to_string(),
+                name: pending,
+                color: option_color(self.options.len()),
+            });
+        }
         let kind = match &self.kind {
             PropertyKind::Select { .. } => PropertyKind::Select { options },
             PropertyKind::MultiSelect { .. } => PropertyKind::MultiSelect { options },
@@ -223,12 +236,9 @@ impl PropertyEditor {
         if exists {
             return;
         }
-        // Rotate through the palette so neighbouring options differ; gray is
-        // left for the default.
-        let color = TagColor::ALL[1 + self.options.len() % (TagColor::ALL.len() - 1)];
         self.options.push(OptionDraft {
             id: PropertyId::new().to_string(),
-            color,
+            color: option_color(self.options.len()),
             name: cx.new(|cx| InputState::new(window, cx).default_value(name)),
         });
         cx.notify();
@@ -280,14 +290,16 @@ impl PropertyEditor {
         v_flex()
             .gap_1p5()
             .child(field_label("Options", cx))
-            .children(self.options.iter().enumerate().map(|(ix, draft)| {
+            .children(self.options.iter().map(|draft| {
                 let dot = tag_colors(draft.color, cx).dot;
+                let (id, current) = (draft.id.clone(), draft.color);
                 let color_editor = editor.clone();
                 let remove_editor = editor.clone();
+                let remove_id = id.clone();
                 h_flex()
                     .gap_1()
                     .child(
-                        Button::new(("option-color", ix))
+                        Button::new(SharedString::from(format!("option-color-{id}")))
                             .ghost()
                             .small()
                             .tooltip("Color")
@@ -295,14 +307,19 @@ impl PropertyEditor {
                             .dropdown_menu(move |menu, _, _| {
                                 TagColor::ALL.into_iter().fold(menu, |menu, color| {
                                     let editor = color_editor.clone();
+                                    let id = id.clone();
                                     menu.item(
                                         PopupMenuItem::element(move |_, _| {
                                             Chip::new(color.label(), color)
                                         })
+                                        .checked(color == current)
                                         .on_click(
                                             move |_, _, cx| {
                                                 _ = editor.update(cx, |editor, cx| {
-                                                    if let Some(draft) = editor.options.get_mut(ix)
+                                                    if let Some(draft) = editor
+                                                        .options
+                                                        .iter_mut()
+                                                        .find(|d| d.id == id)
                                                     {
                                                         draft.color = color;
                                                         cx.notify();
@@ -316,17 +333,15 @@ impl PropertyEditor {
                     )
                     .child(div().flex_1().child(Input::new(&draft.name)))
                     .child(
-                        Button::new(("option-remove", ix))
+                        Button::new(SharedString::from(format!("option-remove-{remove_id}")))
                             .ghost()
                             .small()
                             .icon(IconName::X)
                             .tooltip("Remove option")
                             .on_click(move |_, _, cx| {
                                 _ = remove_editor.update(cx, |editor, cx| {
-                                    if ix < editor.options.len() {
-                                        editor.options.remove(ix);
-                                        cx.notify();
-                                    }
+                                    editor.options.retain(|draft| draft.id != remove_id);
+                                    cx.notify();
                                 });
                             }),
                     )
@@ -373,6 +388,12 @@ impl Render for PropertyEditor {
                 this.child(div().text_sm().text_color(cx.theme().danger).child(error))
             })
     }
+}
+
+/// The color of the option added after `count` others: the palette in turn,
+/// so neighbouring options differ, with gray left for the default.
+fn option_color(count: usize) -> TagColor {
+    TagColor::ALL[1 + count % (TagColor::ALL.len() - 1)]
 }
 
 fn field_label(label: &'static str, cx: &App) -> Div {

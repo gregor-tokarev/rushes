@@ -1,6 +1,7 @@
 //! The board view: one column per status, cards dragged between and within
 //! columns.
 
+use chrono::NaiveDate;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
@@ -53,12 +54,13 @@ impl Render for DraggedCard {
 
 impl DatabasePanel {
     pub(super) fn render_board(&self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.empty_reason() == EmptyReason::NoVideos && self.shown_rows().next().is_none() {
+        if self.empty_reason(cx) == EmptyReason::NoVideos && self.shown_rows().next().is_none() {
             return render_empty_state(EmptyReason::NoVideos, &cx.weak_entity(), cx);
         }
         let Some(view) = self.active_view() else {
             return div().into_any_element();
         };
+        let today = format::local_day(chrono::Utc::now());
         let statuses: Vec<VideoStatus> = VideoStatus::ALL
             .into_iter()
             .filter(|status| status_visible(*status, &view.filter))
@@ -84,7 +86,7 @@ impl DatabasePanel {
                             .shown_rows()
                             .filter(|row| row.video.status == status)
                             .collect();
-                        self.render_board_column(status, &cards, cx)
+                        self.render_board_column(status, &cards, today, cx)
                     })),
             )
             .into_any_element()
@@ -94,6 +96,7 @@ impl DatabasePanel {
         &self,
         status: VideoStatus,
         cards: &[&VideoRow],
+        today: NaiveDate,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = tag_colors(status.color(), cx);
@@ -121,7 +124,7 @@ impl DatabasePanel {
         );
         let card_elements: Vec<AnyElement> = cards
             .iter()
-            .map(|row| self.render_card(row, status, cx))
+            .map(|row| self.render_card(row, status, today, cx))
             .collect();
 
         v_flex()
@@ -173,11 +176,11 @@ impl DatabasePanel {
         &self,
         row: &VideoRow,
         status: VideoStatus,
+        today: NaiveDate,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let video = &row.video;
         let id = video.id;
-        let today = chrono::Utc::now().date_naive();
         let title = video.title.trim();
         let dragged = DraggedCard {
             video: id,

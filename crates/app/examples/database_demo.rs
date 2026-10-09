@@ -241,7 +241,7 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
         position: 2,
     };
 
-    let today = Utc::now().date_naive();
+    let today = chrono::Local::now().date_naive();
     let day = |offset: i64| Some(today + Duration::days(offset));
     let now = Utc::now();
 
