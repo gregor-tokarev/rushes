@@ -285,8 +285,23 @@ impl RenderOnce for ConnectionPanel {
                     Button::new("cancel")
                         .label("Cancel")
                         .small()
-                        .ghost()
+                        .outline()
                         .on_click(move |_, _, cx| service.update(cx, |service, cx| service.cancel(cx)))
+                };
+                let google = service.config().is_ok_and(|config| config.is_google());
+                // Before the browser opens, the sign-in is checked: emulators up, client known.
+                let (title, help) = match &authorize_url {
+                    None => ("Getting ready to sign in…", None),
+                    Some(_) => (
+                        "Finish signing in with your browser",
+                        Some(if google {
+                            "If no browser opened, copy the sign-in link and open it in a browser on this computer. \
+                             If Google shows “Error 401: invalid_client”, the client ID or secret is wrong: cancel \
+                             and copy them again."
+                        } else {
+                            "If no browser opened, copy the sign-in link and open it in a browser on this computer."
+                        }),
+                    ),
                 };
                 v_flex()
                     .gap_3()
@@ -299,16 +314,8 @@ impl RenderOnce for ConnectionPanel {
                                 v_flex()
                                     .min_w_0()
                                     .gap_0p5()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child("Finish signing in in your browser"),
-                                    )
-                                    .child(help_text(
-                                        "If no browser opened, copy the sign-in link and open it in a browser on this computer.",
-                                        cx,
-                                    )),
+                                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
+                                    .when_some(help, |this, help| this.child(help_text(help, cx))),
                             ),
                     )
                     .child(
@@ -333,6 +340,31 @@ impl RenderOnce for ConnectionPanel {
                             })
                             .child(cancel),
                     )
+            }
+            Connection::NeedsSignIn(account) => {
+                let who = match &account.channel_handle {
+                    Some(handle) => format!("{} ({handle})", display_name(&account)),
+                    None => display_name(&account),
+                };
+                let mut detail = format!("Reconnect to keep uploading as {who}.");
+                if service.config().is_ok_and(|config| config.is_google()) {
+                    detail.push_str(" Google ends the sign-ins of apps in Testing after 7 days.");
+                }
+                let action = match (&config_problem, self.manage) {
+                    (Some(_), true) => connect.label("Reconnect").primary().disabled(true),
+                    (Some(_), false) => open_settings,
+                    (None, _) => connect.label("Reconnect").primary(),
+                };
+                v_flex()
+                    .gap_3()
+                    .child(status_line(
+                        IconName::TriangleAlert,
+                        theme.warning,
+                        "Sign in again",
+                        Some(detail.into()),
+                        cx,
+                    ))
+                    .child(h_flex().child(action))
             }
             Connection::Failed(message) => {
                 let action = match (&config_problem, self.manage) {

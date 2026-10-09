@@ -20,7 +20,7 @@ use videocrm::publish::{AccountBadge, PublishPanel, UploadsPage, YoutubeService,
 use videocrm::route::{Route, VideoTab};
 use videocrm::state::AppState;
 use videocrm_core::Store;
-use videocrm_core::settings::{DATA_DIR_ENV, data_dir, database_path};
+use videocrm_core::settings::{DATA_DIR_ENV, YoutubeBackend, data_dir, database_path};
 
 struct Demo {
     state: Entity<AppState>,
@@ -168,6 +168,10 @@ fn main() {
         let mut settings = store.load_settings()?;
         settings.onboarding_completed = true;
         settings.media_root.get_or_insert_with(|| data_dir().join("media"));
+        // The demo talks to the local emulators until a Google client is set up.
+        if settings.youtube == YoutubeBackend::default() {
+            settings.youtube = YoutubeBackend::Emulator { google_url: String::new(), youtube_url: String::new() };
+        }
         store.save_settings(&settings)?;
         if store.list_videos()?.is_empty() {
             store.seed_sample_workspace()?;

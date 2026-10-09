@@ -17,12 +17,12 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, AppContext as _, Context, SharedString};
 use videocrm_core::{Privacy, StoreError, UploadId, UploadJob, UploadStatus, VideoId, VideoStatus, YoutubeLink};
 use videocrm_youtube::{
-    Error as YoutubeError, ProcessingStatus, UploadProgress, UploadStatus as YoutubeUploadStatus, UploadedVideo,
-    VideoInfo, VideoMetadata, YoutubeClient,
+    Error as YoutubeError, ProcessingStatus, RetryCause, UploadProgress, UploadStatus as YoutubeUploadStatus,
+    UploadedVideo, VideoInfo, VideoMetadata, YoutubeClient,
 };
 
 use super::rules::{self, BlockingReason};
-use super::service::{YoutubeEvent, YoutubeService, lock, push_notification, report_error, sentence};
+use super::service::{YoutubeEvent, YoutubeService, describe_error, lock, push_notification, report_error};
 use super::transfer::{PROGRESS_INTERVAL, Throttle, Transfer};
 
 /// Status message of jobs a previous run left mid-transfer with a session to resume.
@@ -74,11 +74,41 @@ pub enum ProcessingOutcome {
     StillProcessing,
 }
 
+/// The worker is waiting to try again after a passing failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Retry {
+    /// 1-based, up to `max_retries`.
+    pub attempt: u32,
+    pub max_retries: u32,
+    pub cause: RetryCause,
+}
+
+impl Retry {
+    /// What went wrong, as a short status title.
+    pub fn headline(&self) -> &'static str {
+        match self.cause {
+            RetryCause::Network => "Can't reach YouTube",
+            RetryCause::Server => "YouTube isn't responding",
+            RetryCause::RateLimited => "YouTube is busy",
+        }
+    }
+
+    /// `Retrying (2 of 5)…`
+    pub fn detail(&self) -> String {
+        format!("Retrying ({} of {})…", self.attempt, self.max_retries)
+    }
+}
+
 /// An upload whose worker thread is running.
 pub(super) struct ActiveUpload {
     cancel: Arc<AtomicBool>,
     client: Arc<YoutubeClient>,
     transfer: Transfer,
+    /// Most bytes sent so far; progress past it after a retry means the retry worked.
+    high_water: u64,
+    retry: Option<(Retry, u64)>,
+    /// The upload title, for a notice if the video is deleted while it uploads.
+    title: String,
 }
 
 impl ActiveUpload {
@@ -95,6 +125,7 @@ enum Request {
 enum UploadMessage {
     Started(String),
     Progress { at: Instant, sent: u64, total: u64 },
+    Retrying(Retry),
     Finished(Result<UploadedVideo, YoutubeError>),
 }
 
@@ -123,12 +154,22 @@ impl YoutubeService {
         self.active.contains_key(&id)
     }
 
+    /// The passing failure a running upload is retrying after, until it gets further.
+    pub fn retry(&self, id: UploadId) -> Option<Retry> {
+        self.active.get(&id).and_then(|upload| upload.retry).map(|(retry, _)| retry)
+    }
+
     pub fn is_cancelling(&self, id: UploadId) -> bool {
         self.active.get(&id).is_some_and(|upload| upload.cancel.load(Ordering::Relaxed))
     }
 
     pub fn active_upload_count(&self) -> usize {
         self.active.len()
+    }
+
+    /// Why the custom thumbnail of a finished upload wasn't set.
+    pub fn thumbnail_problem(&self, id: UploadId) -> Option<&str> {
+        self.thumbnail_problems.get(&id).map(String::as_str)
     }
 
     /// Processing state of a finished upload, while this run of the app follows it.
@@ -219,6 +260,7 @@ impl YoutubeService {
     ) -> bool {
         let cancel = Arc::new(AtomicBool::new(false));
         let (sender, mut messages) = mpsc::unbounded();
+        let title = self.video_title(id, cx);
         let worker = (client.clone(), cancel.clone());
         let spawned = thread::Builder::new()
             .name("youtube-upload".into())
@@ -229,7 +271,10 @@ impl YoutubeService {
             });
             return false;
         }
-        self.active.insert(id, ActiveUpload { cancel, client, transfer: Transfer::new(total) });
+        self.active.insert(
+            id,
+            ActiveUpload { cancel, client, transfer: Transfer::new(total), high_water: 0, retry: None, title },
+        );
         cx.spawn(async move |this, cx| {
             while let Some(message) = messages.next().await {
                 if this.update(cx, |this, cx| this.on_upload_message(id, message, cx)).is_err() {
@@ -246,6 +291,10 @@ impl YoutubeService {
     fn on_upload_message(&mut self, id: UploadId, message: UploadMessage, cx: &mut Context<Self>) {
         match message {
             UploadMessage::Started(session_url) => {
+                if let Some(upload) = self.active.get_mut(&id) {
+                    // The session opened, so whatever was retried before worked.
+                    upload.retry = None;
+                }
                 let (sent, total) = self.transfer(id).map_or((0, 0), |transfer| (transfer.sent(), transfer.total()));
                 self.update_job(id, cx, |job| {
                     job.session_url = Some(session_url);
@@ -257,13 +306,28 @@ impl YoutubeService {
                 let step = |transfer: &Transfer| (transfer.fraction() * PERSISTED_STEPS).floor();
                 let before = step(&upload.transfer);
                 upload.transfer.record(at, sent, total);
+                upload.high_water = upload.high_water.max(sent);
+                if upload.retry.is_some_and(|(_, mark)| sent > mark) {
+                    upload.retry = None;
+                }
                 if step(&upload.transfer) > before && sent < total {
                     self.update_job(id, cx, |job| job.status = UploadStatus::Uploading { sent, total });
                 }
                 cx.notify();
             }
+            UploadMessage::Retrying(retry) => {
+                let Some(upload) = self.active.get_mut(&id) else { return };
+                upload.retry = Some((retry, upload.high_water));
+                cx.notify();
+            }
             UploadMessage::Finished(result) => {
                 let Some(upload) = self.active.remove(&id) else { return };
+                if self.job(id).is_none() {
+                    // The video was deleted while it uploaded.
+                    self.on_orphan_finished(upload, result.ok(), cx);
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok(video) => self.on_uploaded(id, video, upload.client, cx),
                     Err(YoutubeError::Cancelled { session_url }) => self.update_job(id, cx, |job| {
@@ -276,8 +340,54 @@ impl YoutubeService {
         }
     }
 
+    /// Deleting a video cancels its upload, but the last chunk may already have been
+    /// on its way: then the video is on YouTube, and the creator should know.
+    fn on_orphan_finished(&mut self, upload: ActiveUpload, uploaded: Option<UploadedVideo>, cx: &mut Context<Self>) {
+        let Some(uploaded) = uploaded else { return };
+        let (title, url): (String, SharedString) = (upload.title, uploaded.url.into());
+        push_notification(cx, move || {
+            Notification::warning(
+                "The upload finished before the video was deleted, so it is on your channel. \
+                 Remove it in YouTube Studio if you don't want it there.",
+            )
+            .title(format!("“{title}” reached YouTube"))
+            .action(move |_, _, _| {
+                let url = url.clone();
+                Button::new("open-orphan-on-youtube")
+                    .label("Open on YouTube")
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+            })
+        });
+    }
+
+    /// Stops the uploads of deleted videos and forgets their jobs: the store deleted
+    /// them with the video.
+    pub(super) fn forget_deleted_videos(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let gone: Vec<UploadId> =
+            self.jobs.iter().filter(|job| state.video(job.video_id).is_none()).map(|job| job.id).collect();
+        if gone.is_empty() {
+            return;
+        }
+        for id in &gone {
+            if let Some(upload) = self.active.get(id) {
+                upload.cancel();
+            }
+            self.outcomes.remove(id);
+            self.thumbnail_problems.remove(id);
+        }
+        self.jobs.retain(|job| !gone.contains(&job.id));
+        cx.emit(YoutubeEvent::UploadsChanged);
+        cx.notify();
+    }
+
+    /// Whether any of `video_ids` is uploading right now.
+    pub fn is_uploading_any(&self, video_ids: &[VideoId]) -> bool {
+        self.active.keys().any(|id| self.job(*id).is_some_and(|job| video_ids.contains(&job.video_id)))
+    }
+
     fn on_upload_failed(&mut self, id: UploadId, error: &YoutubeError, cx: &mut Context<Self>) {
-        let message = sentence(&error.to_string());
+        let message = describe_error(error);
         // An expired session, or one the current connection refuses to use (another
         // backend's after a switch) or a changed file, can't take the rest of the file.
         let session_unusable = matches!(error, YoutubeError::SessionExpired | YoutubeError::InvalidInput(_));
@@ -360,7 +470,10 @@ impl YoutubeService {
             if let Err(error) = result {
                 this.update(cx, |this, cx| {
                     let title = this.video_title(id, cx);
-                    let message = sentence(&error.to_string());
+                    let message = describe_error(&error);
+                    // The toast goes away; the Upload card and the Uploads page keep the reason.
+                    this.thumbnail_problems.insert(id, message.clone());
+                    cx.notify();
                     push_notification(cx, move || {
                         Notification::warning(message).title(format!("The thumbnail of “{title}” wasn't set"))
                     });
@@ -387,7 +500,13 @@ impl YoutubeService {
                 // Errors are retried at the next poll: processing goes on without the app.
                 let state = cx.background_spawn(async move { client.get_video(&youtube_id) }).await;
                 let Ok(Some(info)) = state else { continue };
-                if let Some(outcome) = processed(&info) {
+                let outcome = processed(&info);
+                this.update(cx, |this, cx| {
+                    this.remote.insert(info.id.clone(), info);
+                    cx.notify();
+                })
+                .ok();
+                if let Some(outcome) = outcome {
                     this.update(cx, |this, cx| this.finish_processing(id, outcome, cx)).ok();
                     return;
                 }
@@ -451,8 +570,11 @@ impl YoutubeService {
     fn update_job(&mut self, id: UploadId, cx: &mut Context<Self>, change: impl FnOnce(&mut UploadJob)) {
         let Some(mut job) = self.job(id).cloned() else { return };
         change(&mut job);
-        if let Err(error) = lock(&self.store(cx)).update_upload(&mut job) {
-            report_error(&self.state, format!("Couldn't save the upload status: {error}"), cx);
+        match lock(&self.store(cx)).update_upload(&mut job) {
+            Ok(()) => {}
+            // The video, and its uploads with it, were deleted meanwhile.
+            Err(StoreError::NotFound { .. }) => {}
+            Err(error) => report_error(&self.state, format!("Couldn't save the upload status: {error}"), cx),
         }
         self.reload_jobs(cx);
     }
@@ -495,6 +617,9 @@ fn transfer_file(
             if sent == total || throttle.ready(at) {
                 send(UploadMessage::Progress { at, sent, total });
             }
+        }
+        UploadProgress::Retrying { attempt, max_retries, cause, .. } => {
+            send(UploadMessage::Retrying(Retry { attempt, max_retries, cause }))
         }
         UploadProgress::Finished => {}
     };

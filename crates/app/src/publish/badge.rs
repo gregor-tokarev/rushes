@@ -34,10 +34,16 @@ impl AccountBadge {
         let service = self.service.read(cx);
         match service.connection() {
             Connection::Connected(account) => {
-                let uploading = service.jobs().iter().filter_map(|job| service.transfer(job.id)).collect::<Vec<_>>();
+                let uploading = service
+                    .jobs()
+                    .iter()
+                    .filter_map(|job| Some((service.transfer(job.id)?, service.retry(job.id))))
+                    .collect::<Vec<_>>();
                 let detail = match uploading.as_slice() {
                     [] => account.channel_handle.clone().unwrap_or_else(|| account.email.clone()),
-                    [transfer] => format!("Uploading · {}%", (transfer.fraction() * 100.0).floor()),
+                    // The sidebar is narrow; the Upload card says what went wrong.
+                    [(_, Some(_))] => "Retrying the upload…".to_owned(),
+                    [(transfer, None)] => format!("Uploading · {}%", (transfer.fraction() * 100.0).floor()),
                     several => format!("Uploading {} videos", several.len()),
                 };
                 (display_name(account), Some(detail))
@@ -45,7 +51,8 @@ impl AccountBadge {
             Connection::Connecting { .. } => {
                 ("Connecting YouTube…".to_owned(), Some("Finish in your browser".to_owned()))
             }
-            Connection::Failed(_) => ("Reconnect YouTube".to_owned(), Some("Sign-in needed".to_owned())),
+            Connection::NeedsSignIn(account) => (display_name(account), Some("Sign in again".to_owned())),
+            Connection::Failed(_) => ("Connect YouTube".to_owned(), Some("Couldn't connect".to_owned())),
             Connection::Disconnected => ("Connect YouTube".to_owned(), None),
         }
     }
@@ -56,7 +63,8 @@ impl AccountBadge {
         // Every state fills the same 2 rem slot, so the label does not move.
         let slot = || div().size_8().flex_shrink_0().flex().items_center().justify_center();
         match service.connection() {
-            Connection::Connected(account) => div()
+            // The dot says whether uploads work: green, or amber until the next sign-in.
+            Connection::Connected(account) | Connection::NeedsSignIn(account) => div()
                 .relative()
                 .flex_shrink_0()
                 .child(
@@ -72,7 +80,7 @@ impl AccountBadge {
                         .rounded_full()
                         .border_2()
                         .border_color(theme.sidebar)
-                        .bg(theme.success),
+                        .bg(if service.is_connected() { theme.success } else { theme.warning }),
                 )
                 .into_any_element(),
             Connection::Connecting { .. } => {

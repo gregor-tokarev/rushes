@@ -22,7 +22,9 @@ foreground:
 | YouTube | `http://127.0.0.1:4020` | Custom emulator (`emulators/youtube.ts`): channels, resumable video uploads, videos, thumbnails, uploads playlist |
 
 Ports come from `GOOGLE_EMULATOR_PORT` and `YOUTUBE_EMULATOR_PORT`. Point the app at the
-emulators with the "Emulator" YouTube backend in settings, or with environment variables:
+emulators with **Settings → YouTube → Developer: local emulator** (a switch, folded away by
+default; a fresh install connects to Google), or with environment variables, which win over
+the settings:
 
 ```bash
 VIDEOCRM_GOOGLE_URL=http://127.0.0.1:4002 VIDEOCRM_YOUTUBE_URL=http://127.0.0.1:4020 cargo run
@@ -99,7 +101,12 @@ without running.
 
 All calls block; run them on a background thread and stream progress back to the UI.
 
-1. `begin_authorization(&config)` binds `127.0.0.1:<random port>` (it refuses a Google
+1. Optionally `check_client(&config)` first: it posts a made-up authorization code to the
+   token endpoint, so an unknown client ID or a wrong secret fails with
+   `Error::is_invalid_client()` before any browser opens (a known client gets
+   `invalid_grant`, which counts as fine), and an unreachable server with
+   `Error::is_network()`.
+   `begin_authorization(&config)` binds `127.0.0.1:<random port>` (it refuses a Google
    config without client secret); open `pending.authorize_url()` in the browser;
    `pending.wait(timeout, &cancel)` serves the redirect, shows a "You're signed in" page
    and returns `Credentials`. Requests without this sign-in's `state` get an error page
@@ -120,13 +127,15 @@ All calls block; run them on a background thread and stream progress back to the
    `resume_upload(session_url, path, ...)` continues from the bytes YouTube already has
    (only for session URLs on the configured upload server). Transient failures (5xx, 408,
    429, 403 rate limits, dropped or stalled connections) are retried with exponential
-   backoff from the server's offset; the retry budget resets whenever the server confirms
-   new bytes. Cancel takes effect at the next read of the chunk being sent.
-   `Error::SessionExpired` means start over.
+   backoff from the server's offset (2, 4, 8, 16 and 32 s by default, about a minute in
+   all); the retry budget resets whenever the server confirms new bytes. Each retry is
+   reported before its wait as `UploadProgress::Retrying { attempt, max_retries, wait,
+   cause }`, where `cause` is `Network`, `Server` or `RateLimited`. Cancel takes effect at
+   the next read of the chunk being sent. `Error::SessionExpired` means start over.
 5. `Error::needs_sign_in()` tells when to ask the user to reconnect (revoked or expired
    grant, or a `403 insufficientPermissions` because a YouTube scope was unticked);
-   `quotaExceeded`, `uploadLimitExceeded` and `insufficientPermissions` errors have
-   user-facing messages.
+   `quotaExceeded`, `uploadLimitExceeded`, `insufficientPermissions`, rate limits and server
+   errors (5xx) have user-facing messages; `Error::is_network()` tells a missing connection.
 
 ## In the app
 
@@ -148,24 +157,41 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
 
 ### Connection
 
-- The backend comes from `AppSettings.youtube` through `publish::backend_config`: Google
-  needs both client fields; the emulator falls back to the default URLs for empty fields;
-  `VIDEOCRM_GOOGLE_URL` / `VIDEOCRM_YOUTUBE_URL` override both (the settings section says
-  so). The service re-reads it on `AppEvent::SettingsChanged`; a different backend signs
+- The backend comes from `AppSettings.youtube` through `publish::backend_config`. The
+  default is Google with empty client fields; Google needs both fields and a client ID
+  ending in `.apps.googleusercontent.com` (otherwise Connect stays disabled and says why);
+  the emulator falls back to the default URLs for empty fields; `VIDEOCRM_GOOGLE_URL` /
+  `VIDEOCRM_YOUTUBE_URL` override both (the settings section says so).
+- The settings section (Settings → YouTube and onboarding step 3) reads top to bottom: the
+  OAuth client (setup steps with console links, folded; client ID and secret), the
+  connection with Connect, and what Google will show once Connect is usable (unverified-app
+  warning, permission boxes, 7-day reconnect in Testing, private uploads until the audit).
+  The emulator is a switch under the folded **Developer: local emulator**; turning it on
+  puts the emulator addresses where the client fields were. Signed in, the section shows
+  the account first. The service re-reads it on `AppEvent::SettingsChanged`; a different backend signs
   out, because tokens belong to the backend that issued them (`Account::backend`).
 - `connection()` is `Disconnected | Connecting { authorize_url } | Connected(Account) |
-  Failed(message)`; the service emits `YoutubeEvent::ConnectionChanged` and notifies on
-  every change. `connect` runs `begin_authorization` and the wait on a `youtube-sign-in`
-  thread, opens the consent page with `cx.open_url` and exposes the URL for **Copy link**;
-  `cancel` sets the wait's cancel flag.
+  NeedsSignIn(Account) | Failed(message)`; the service emits `YoutubeEvent::ConnectionChanged` and notifies on
+  every change. `connect` runs the sign-in on a `youtube-sign-in` thread. Before the
+  browser opens it checks that the sign-in can work: for the emulators both must answer
+  (the same probe as **Check**), and `check_client` must accept the OAuth client. Either
+  failure ends the sign-in at once with a sentence saying what to fix ("Google doesn't
+  recognise this client ID and secret…", "Can't reach Google…", "Neither emulator is
+  answering…"). Then `begin_authorization` and the wait (up to 5 minutes) run, the consent
+  page opens with `cx.open_url` and its URL is exposed for **Copy link**; `cancel` sets the
+  wait's cancel flag. While waiting, the panel says to finish in the browser and, for
+  Google, that "Error 401: invalid_client" there means a wrong client ID or secret.
 - The sign-in thread only produces the client and account. The service saves the login
   when it accepts the result, so a cancelled or superseded sign-in leaves no file behind.
   Refreshed tokens go to the file only while that sign-in lasts: a request still running
   after **Disconnect** cannot write the tokens back.
 - At startup the saved login is restored without network access, then the account is read
   again in the background (it is also re-read after each upload finishes processing) so
-  the subscriber and video counts stay current. Rejected tokens (`needs_sign_in`) turn the
-  connection into `Failed("YouTube needs you to connect the account again.")`.
+  the subscriber and video counts stay current. Rejected tokens (`needs_sign_in`, such as
+  the weekly expiry of apps in Testing) turn the connection into `NeedsSignIn(account)`:
+  the settings, the Publish tab and the sidebar badge keep naming the account ("Sign in
+  again · Reconnect to keep uploading as Demo Creator (@creator)") with a **Reconnect**
+  button, and the badge's dot turns amber.
 - The channel picture is downloaded once per URL into `<data dir>/avatars/` for the
   account card and the sidebar badge; without it the avatar shows initials.
 - `disconnect` cancels running uploads (they stay resumable), removes the credentials file
@@ -189,8 +215,27 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
 - After the bytes arrive the video gets `video.youtube = YoutubeLink { .. }` and its status
   becomes `Scheduled` (with a publish time), `Published` (public or unlisted) or stays as
   it was (private). The custom thumbnail is set next; a failure there is a warning
-  notification, not a failed upload. `get_video` is polled every 5 s for about two minutes
-  to report processing → ready.
+  notification, not a failed upload, and its reason stays on the Upload card and the
+  Uploads page for the rest of the session ("Thumbnail not set"; `403 forbidden` becomes
+  `Error::ThumbnailsNotAllowed`: custom thumbnails need a channel verified at
+  youtube.com/verify). `get_video` is polled every 5 s for about two minutes to report
+  processing → ready.
+- The Upload card of an uploaded video says who can watch it as YouTube reports it
+  (`refresh_youtube_video`, one `videos.list` when the tab opens or connects, and every
+  processing poll): "Private · goes public Mon, 12 Oct at 09:00", "Unlisted", ... It links
+  to the video and to YouTube Studio, and the form says that its changes apply to the next
+  upload. There is no "update on YouTube": `videos.update` needs the broader `youtube`
+  scope, which VideoCRM does not ask for.
+- While the worker retries a passing failure, the Upload card and the Uploads page say so
+  ("YouTube isn't responding · Retrying (2 of 5)…", or "Can't reach YouTube" when offline)
+  and the sidebar badge reads "Retrying the upload…", until the upload gets further than
+  before. A failure reads as a
+  plain sentence (`describe_error`; the technical error goes to stderr) and stays
+  resumable when YouTube had opened a session.
+- Deleting a video cancels its running upload (the delete confirmations say so, through
+  `publish::delete_upload_notice`) and drops its jobs from the service, as the store
+  deletes them with the video. If the last chunk was already on its way and YouTube
+  finishes the upload anyway, a notice links to the video so it can be removed in Studio.
 - `cancel_upload` stops at the next chunk read and keeps the session; `resume_upload`
   continues from the offset YouTube reports. A session the current connection refuses
   (another backend's after a switch, or a file that changed) is dropped, so the job stops
@@ -201,14 +246,18 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
 ### Publish tab
 
 - Form edits are saved into `video.publish` 500 ms after the last change (and when the tab
-  closes or the app quits). Changes made elsewhere, such as "Use for upload" in AI edit, replace the form
-  unless it has unsaved edits.
+  closes or the app quits). Only the fields the form changed are written, so changes made
+  elsewhere meanwhile, such as the final cut AI edit picks or "Use for upload", stay; they
+  show up in the form at once, except in fields with edits of its own waiting.
 - **Insert chapters from script** turns the Script document's Heading 2 blocks into a
   `Chapters:` list with timestamps from the spoken words before each heading
   (`videocrm_core::document`, 150 wpm). YouTube wants the first chapter at 0:00 and none
   shorter than 10 s, so spoken words before the first heading become "Intro" and shorter
   sections give their slot to the next heading. Inserting again replaces the earlier list.
-  The timestamps are estimates; the button says so.
+  The timestamps are estimates; the button says so. YouTube ignores lists of fewer than
+  three chapters and Shorts have none, so the button is disabled then and says why; when
+  the chosen file is shorter than the list (its last chapter needs 10 s before the end),
+  a warning says so.
 - **Schedule** forces private (YouTube makes the video public at the publish time) and
   restores the earlier visibility when turned off.
 - The Upload card lists what blocks an upload in every state, so a disabled **Upload to
@@ -216,7 +265,9 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   missing only once the background check finds it gone.
 - The file menu offers the AI edit outputs (`final.mp4`, then `preview.mp4`), then the
   footage videos, then **Choose file…** (`cx.prompt_for_paths`; on Linux that needs the
-  desktop portal, and its absence is reported). The list refreshes when the window is
+  desktop portal). When no file chooser opens, "Couldn't open the file chooser" asks for
+  the path instead (`~` expands; the file must exist, and be a JPG, PNG, GIF or BMP for the
+  thumbnail). Files can also be dropped on the Video file and Thumbnail cards. The list refreshes when the window is
   activated again. Size, duration and resolution come from `videocrm_pipeline::probe_media`
   on the background executor.
 
@@ -228,9 +279,9 @@ VIDEOCRM_DATA_DIR=$(mktemp -d) cargo run -p videocrm --example publish_demo [-- 
 ```
 
 `publish_demo` mounts the Publish tab, the Uploads page, the YouTube settings and the badge
-on a sample workspace (emulator backend by default). Without a browser, use **Copy link**
-and finish the consent with any HTTP client: fetch the link, submit the account's form
-(`email` field) and follow the redirect to `127.0.0.1`.
+on a sample workspace (the emulator backend, unless a Google client is set up there).
+Without a browser, use **Copy link** and finish the consent with any HTTP client: fetch
+the link, submit the account's form (`email` field) and follow the redirect to `127.0.0.1`.
 
 ### App tests
 
@@ -243,8 +294,10 @@ cargo test -p videocrm --test publish_ui    # the views in headless windows, cli
 `tests/publish.rs` covers sign-in (consent posted like a browser), restart, disconnect,
 cancelling a sign-in, an upload verified byte for byte through `/_emulator/uploads`, a
 scheduled upload, cancel and resume, validation, interrupted-job recovery and backend
-switches. `tests/publish_ui.rs` drives the form, chapters, Uploads page, settings and badge,
-plus connect-and-upload from the Publish tab. Both start their own emulators and skip with
+switches, and deleting a video while it uploads. `tests/publish_ui.rs` drives the form,
+chapters, Uploads page, settings and badge, connect-and-upload from the Publish tab, the
+retry state during an outage, the done card, an expired sign-in, file drops, and a stopped
+emulator failing fast. Both start their own emulators and skip with
 a notice without Node.
 
 ## Connecting a real YouTube account
@@ -274,8 +327,9 @@ client in Google Cloud (free) and pastes it into VideoCRM. It takes about ten mi
    **Desktop app**, name it "VideoCRM desktop" and click **Create**. Copy the **Client ID**
    and **Client secret** (or download the JSON) right away: the console may not show the
    secret again.
-7. **Connect in VideoCRM.** Open **Settings → YouTube**, choose **YouTube account
-   (Google)**, paste the client ID and client secret, and click **Connect**. Your browser
+7. **Connect in VideoCRM.** Open **Settings → YouTube**, paste the client ID and client
+   secret, and click **Connect**. VideoCRM first checks the client with Google: a typo in
+   either value is reported right away. Your browser
    opens Google's sign-in page (if it does not, for example on a remote machine, use
    **Copy link** and open the link in a browser on the same computer):
    - Pick the test-user account.

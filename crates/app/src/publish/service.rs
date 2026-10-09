@@ -2,7 +2,7 @@
 //! a browser sign-in produces credentials, and the credentials file keeps them (with
 //! the account) across restarts. Uploads live in `upload.rs`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,8 +19,8 @@ use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, Shar
 use videocrm_core::settings::{self, YoutubeBackend};
 use videocrm_core::{Store, UploadId, UploadJob};
 use videocrm_youtube::{
-    Account, CredentialStore, Credentials, Error as YoutubeError, SavedLogin, YoutubeClient, YoutubeConfig,
-    begin_authorization,
+    Account, CredentialStore, Credentials, Error as YoutubeError, SavedLogin, VideoInfo, YoutubeClient, YoutubeConfig,
+    begin_authorization, check_client,
 };
 
 use super::upload::{ActiveUpload, ProcessingOutcome};
@@ -29,7 +29,11 @@ use crate::state::{AppEvent, AppState, SharedStore};
 const CREDENTIALS_FILE: &str = "credentials.json";
 const AVATAR_DIR: &str = "avatars";
 /// A browser sign-in left open longer than this is abandoned.
-const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// How long "Check" and the check before an emulator sign-in wait for an answer.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Every Google OAuth client ID ends like this.
+const CLIENT_ID_SUFFIX: &str = ".apps.googleusercontent.com";
 const UPLOAD_SCOPE: &str = "https://www.googleapis.com/auth/youtube.upload";
 const AVATAR_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -43,8 +47,19 @@ pub enum Connection {
         authorize_url: Option<SharedString>,
     },
     Connected(Account),
-    /// The last sign-in failed or the account has to sign in again.
+    /// YouTube no longer accepts the saved sign-in of this account (expired, revoked, or a
+    /// permission unticked): connecting again keeps uploading as it.
+    NeedsSignIn(Account),
+    /// The last sign-in failed.
     Failed(SharedString),
+}
+
+/// What the emulator "Check" found out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EmulatorCheck {
+    Checking,
+    Running,
+    Unreachable(SharedString),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +89,11 @@ pub struct YoutubeService {
     pub(super) jobs: Vec<UploadJob>,
     pub(super) active: HashMap<UploadId, ActiveUpload>,
     pub(super) outcomes: HashMap<UploadId, ProcessingOutcome>,
+    /// Why the custom thumbnail of a finished upload wasn't set, for this run of the app.
+    pub(super) thumbnail_problems: HashMap<UploadId, String>,
+    /// What YouTube last said about uploaded videos, by YouTube video id.
+    pub(super) remote: HashMap<String, VideoInfo>,
+    remote_requests: HashSet<String>,
     _subscription: Subscription,
 }
 
@@ -85,7 +105,23 @@ impl EventEmitter<YoutubeEvent> for YoutubeService {}
 
 enum SignInStep {
     Opened(String),
-    Finished(Box<Result<SignedIn, YoutubeError>>),
+    Finished(Box<Result<SignedIn, SignInError>>),
+}
+
+/// Why a sign-in ended without an account.
+enum SignInError {
+    Cancelled,
+    /// What to tell the creator.
+    Failed(String),
+}
+
+impl SignInError {
+    fn new(error: YoutubeError, config: &YoutubeConfig) -> Self {
+        match error {
+            YoutubeError::Cancelled { .. } => SignInError::Cancelled,
+            error => SignInError::Failed(sign_in_message(&error, config)),
+        }
+    }
 }
 
 /// A finished browser sign-in, not saved yet: the service saves it only if it still
@@ -161,12 +197,17 @@ impl YoutubeService {
         cx.global::<GlobalYoutubeService>().0.clone()
     }
 
+    /// The service, when the app has one (views tested on their own may not).
+    pub fn try_global(cx: &App) -> Option<Entity<YoutubeService>> {
+        cx.try_global::<GlobalYoutubeService>().map(|global| global.0.clone())
+    }
+
     fn new(state: Entity<AppState>, data_dir: PathBuf, cx: &mut Context<Self>) -> Self {
         let (config, env_override) = backend_config(&state.read(cx).settings().youtube);
-        let subscription = cx.subscribe(&state, |this, _, event: &AppEvent, cx| {
-            if *event == AppEvent::SettingsChanged {
-                this.on_settings_changed(cx);
-            }
+        let subscription = cx.subscribe(&state, |this, _, event: &AppEvent, cx| match event {
+            AppEvent::SettingsChanged => this.on_settings_changed(cx),
+            AppEvent::DataChanged => this.forget_deleted_videos(cx),
+            _ => {}
         });
         let mut service = Self {
             state,
@@ -183,6 +224,9 @@ impl YoutubeService {
             jobs: Vec::new(),
             active: HashMap::new(),
             outcomes: HashMap::new(),
+            thumbnail_problems: HashMap::new(),
+            remote: HashMap::new(),
+            remote_requests: HashSet::new(),
             _subscription: subscription,
         };
         service.restore_login(cx);
@@ -327,7 +371,13 @@ impl YoutubeService {
                         credentials: signed_in.client.credentials(),
                         account: Some(signed_in.account.clone()),
                     };
-                    signed_in.tokens.sign_in(&login).map(|()| signed_in)
+                    match signed_in.tokens.sign_in(&login) {
+                        Ok(()) => Ok(signed_in),
+                        Err(error) => Err(SignInError::Failed(format!(
+                            "Couldn't save the YouTube sign-in: {}",
+                            sentence(&error.to_string())
+                        ))),
+                    }
                 });
                 match signed_in {
                     Ok(SignedIn { client, tokens, account }) => {
@@ -336,18 +386,23 @@ impl YoutubeService {
                         self.set_connection(Connection::Connected(account), cx);
                         self.refresh_avatar(cx);
                     }
-                    Err(YoutubeError::Cancelled { .. }) => self.set_connection(Connection::Disconnected, cx),
-                    Err(error) => self.set_connection(Connection::Failed(sentence(&error.to_string()).into()), cx),
+                    Err(SignInError::Cancelled) => self.set_connection(Connection::Disconnected, cx),
+                    Err(SignInError::Failed(message)) => self.set_connection(Connection::Failed(message.into()), cx),
                 }
             }
         }
     }
 
-    /// Asks for a new sign-in after YouTube rejected the stored tokens.
+    /// Asks for a new sign-in after YouTube rejected the stored tokens. The account stays
+    /// on screen, so the creator knows whom to sign in as.
     pub(super) fn require_sign_in(&mut self, cx: &mut Context<Self>) {
         self.client = None;
         self.tokens = None;
-        self.set_connection(Connection::Failed("YouTube needs you to connect the account again.".into()), cx);
+        let connection = match self.connection.clone() {
+            Connection::Connected(account) | Connection::NeedsSignIn(account) => Connection::NeedsSignIn(account),
+            _ => Connection::Failed("YouTube needs you to connect the account again.".into()),
+        };
+        self.set_connection(connection, cx);
     }
 
     fn restore_login(&mut self, cx: &mut Context<Self>) {
@@ -449,31 +504,132 @@ impl YoutubeService {
         .detach();
     }
 
+    /// What YouTube last said about an uploaded video (visibility, schedule, processing).
+    pub fn youtube_video(&self, youtube_id: &str) -> Option<&VideoInfo> {
+        self.remote.get(youtube_id)
+    }
+
+    /// Asks YouTube about an uploaded video in the background (one quota unit), so the
+    /// Publish tab shows what YouTube has rather than what was asked for.
+    pub fn refresh_youtube_video(&mut self, youtube_id: &str, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else { return };
+        if !self.remote_requests.insert(youtube_id.to_owned()) {
+            return;
+        }
+        let youtube_id = youtube_id.to_owned();
+        cx.spawn(async move |this, cx| {
+            let lookup = youtube_id.clone();
+            let info = cx.background_spawn(async move { client.get_video(&lookup) }).await;
+            this.update(cx, |this, cx| {
+                this.remote_requests.remove(&youtube_id);
+                // Offline, the stored link is what the tab shows.
+                if let Ok(Some(info)) = info {
+                    this.remote.insert(youtube_id, info);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(super) fn store(&self, cx: &App) -> SharedStore {
         self.state.read(cx).store()
     }
 }
 
-/// Sign-in worker: consent in the browser, then the account it belongs to.
+/// Sign-in worker: a check that the sign-in can work, consent in the browser, then the
+/// account it belongs to.
 fn sign_in(config: YoutubeConfig, tokens: TokenSink, cancel: &AtomicBool, steps: &mpsc::UnboundedSender<SignInStep>) {
     let result = (|| {
-        let pending = begin_authorization(&config)?;
-        // The receiver is gone only when the app is shutting down.
-        let _ = steps.unbounded_send(SignInStep::Opened(pending.authorize_url().to_owned()));
-        let credentials = pending.wait(SIGN_IN_TIMEOUT, cancel)?;
-        if !credentials.has_scope(UPLOAD_SCOPE) {
-            // Google lets people untick permissions on the consent page.
-            return Err(YoutubeError::Api {
-                status: 403,
-                reason: "insufficientPermissions".to_owned(),
-                message: String::new(),
-            });
+        // Opening the browser on a sign-in that can't work only leaves the creator
+        // waiting: stopped emulators, no connection, or a client Google doesn't know.
+        if let Some((google, youtube)) = emulator_urls(&config)
+            && let EmulatorCheck::Unreachable(problem) = probe_emulators(&google, &youtube)
+        {
+            return Err(SignInError::Failed(problem.to_string()));
         }
-        let client = new_client(config.clone(), credentials, tokens.clone());
-        let account = read_account(&client, &config)?;
-        Ok(SignedIn { client, tokens, account })
+        check_client(&config).map_err(|error| SignInError::new(error, &config))?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(SignInError::Cancelled);
+        }
+        sign_in_with_browser(config.clone(), tokens, cancel, steps).map_err(|error| SignInError::new(error, &config))
     })();
     let _ = steps.unbounded_send(SignInStep::Finished(Box::new(result)));
+}
+
+fn sign_in_with_browser(
+    config: YoutubeConfig,
+    tokens: TokenSink,
+    cancel: &AtomicBool,
+    steps: &mpsc::UnboundedSender<SignInStep>,
+) -> Result<SignedIn, YoutubeError> {
+    let pending = begin_authorization(&config)?;
+    // The receiver is gone only when the app is shutting down.
+    let _ = steps.unbounded_send(SignInStep::Opened(pending.authorize_url().to_owned()));
+    let credentials = pending.wait(SIGN_IN_TIMEOUT, cancel)?;
+    if !credentials.has_scope(UPLOAD_SCOPE) {
+        // Google lets people untick permissions on the consent page.
+        return Err(YoutubeError::Api {
+            status: 403,
+            reason: "insufficientPermissions".to_owned(),
+            message: String::new(),
+        });
+    }
+    let client = new_client(config.clone(), credentials, tokens.clone());
+    let account = read_account(&client, &config)?;
+    Ok(SignedIn { client, tokens, account })
+}
+
+/// Why a sign-in failed, for the creator.
+fn sign_in_message(error: &YoutubeError, config: &YoutubeConfig) -> String {
+    let minutes = SIGN_IN_TIMEOUT.as_secs() / 60;
+    match error {
+        error if error.is_invalid_client() => "Google doesn't recognise this client ID and secret. Copy both \
+            again from Google Cloud › Clients, from a client of type Desktop app."
+            .to_owned(),
+        error if error.is_network() && config.is_google() => {
+            "Can't reach Google. Check your internet connection and try again.".to_owned()
+        }
+        error if error.is_network() => format!("Nothing answers at {}. Is the server running?", config.auth_url),
+        YoutubeError::Timeout => {
+            format!("The sign-in wasn't finished in the browser within {minutes} minutes. Connect again to start over.")
+        }
+        YoutubeError::AccessDenied => {
+            "The sign-in was cancelled in the browser. Connect again and allow access to upload.".to_owned()
+        }
+        error => describe_error(error),
+    }
+}
+
+/// The emulator base URLs of an emulator `config` (see [`YoutubeConfig::emulator`]).
+fn emulator_urls(config: &YoutubeConfig) -> Option<(String, String)> {
+    if config.is_google() {
+        return None;
+    }
+    let google = config.auth_url.strip_suffix("/o/oauth2/v2/auth")?;
+    let youtube = config.api_base.strip_suffix("/youtube/v3")?;
+    Some((google.to_owned(), youtube.to_owned()))
+}
+
+/// `Running`, or which emulator did not answer.
+pub(super) fn probe_emulators(google_url: &str, youtube_url: &str) -> EmulatorCheck {
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(PROBE_TIMEOUT)).build().into();
+    let answers = |url: String| agent.get(&url).call().is_ok();
+    let google = answers(format!("{google_url}/.well-known/openid-configuration"));
+    let youtube = answers(format!("{youtube_url}/_emulator/uploads"));
+    match (google, youtube) {
+        (true, true) => EmulatorCheck::Running,
+        (false, true) => {
+            EmulatorCheck::Unreachable(format!("The Google emulator isn't answering at {google_url}.").into())
+        }
+        (true, false) => {
+            EmulatorCheck::Unreachable(format!("The YouTube emulator isn't answering at {youtube_url}.").into())
+        }
+        (false, false) => {
+            EmulatorCheck::Unreachable("Neither emulator is answering. Start them with scripts/emulators.sh.".into())
+        }
+    }
 }
 
 /// The Google account and its YouTube channel, if it has one.
@@ -503,6 +659,8 @@ pub fn backend_config(backend: &YoutubeBackend) -> (Result<YoutubeConfig, Shared
             let (client_id, client_secret) = (client_id.trim(), client_secret.trim());
             if client_id.is_empty() || client_secret.is_empty() {
                 Err("Add the client ID and client secret of your Google OAuth client.".into())
+            } else if !client_id.ends_with(CLIENT_ID_SUFFIX) || client_id.contains(char::is_whitespace) {
+                Err(format!("This isn't a Google OAuth client ID. Client IDs end with {CLIENT_ID_SUFFIX}.").into())
             } else {
                 Ok(YoutubeConfig::google(client_id, Some(client_secret.to_owned())))
             }
@@ -560,6 +718,18 @@ pub(super) fn push_notification(cx: &mut App, notification: impl FnOnce() -> Not
     }
 }
 
+/// A YouTube error as the creator should read it. The technical detail goes to stderr.
+pub(super) fn describe_error(error: &YoutubeError) -> String {
+    eprintln!("videocrm: youtube: {error}");
+    match error {
+        error if error.is_network() => "Can't reach YouTube. Check your internet connection and try again.".to_owned(),
+        YoutubeError::ThumbnailsNotAllowed => "YouTube allows custom thumbnails only on verified channels. \
+            Verify yours at youtube.com/verify, then set the thumbnail in YouTube Studio."
+            .to_owned(),
+        error => sentence(&error.to_string()),
+    }
+}
+
 /// Library errors read like `network error: ...`; the UI shows sentences.
 pub(super) fn sentence(text: &str) -> String {
     let text = text.trim();
@@ -588,6 +758,13 @@ mod tests {
         }
         assert!(backend_config(&google("", "secret")).0.is_err());
         assert!(backend_config(&google("id", "  ")).0.is_err());
+        // A typo shows before the browser opens: the secret pasted as the ID, a cut-off ID.
+        let problem = backend_config(&google("GOCSPX-abc", "GOCSPX-abc")).0.unwrap_err();
+        assert_eq!(
+            problem.as_ref(),
+            "This isn't a Google OAuth client ID. Client IDs end with .apps.googleusercontent.com."
+        );
+        assert!(backend_config(&google("1234-abc.apps.googleusercontent", "GOCSPX-x")).0.is_err());
         let config = backend_config(&google(" id.apps.googleusercontent.com ", "GOCSPX-x")).0.unwrap();
         assert!(config.is_google());
         assert_eq!(config.client_id, "id.apps.googleusercontent.com");
@@ -623,6 +800,42 @@ mod tests {
         tokens.save_credentials(&credentials("after the sign-out"));
         assert!(tokens.update(&SavedLogin { credentials: credentials("late"), account: None }).is_ok());
         assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn sign_in_failures_say_what_to_fix() {
+        let google = YoutubeConfig::google("1-a.apps.googleusercontent.com", Some("GOCSPX-x".into()));
+        let unknown_client = YoutubeError::OAuth { error: "invalid_client".into(), description: None };
+        assert!(sign_in_message(&unknown_client, &google).starts_with("Google doesn't recognise this client ID"));
+        let offline = YoutubeError::Http(ureq::Error::ConnectionFailed);
+        assert_eq!(
+            sign_in_message(&offline, &google),
+            "Can't reach Google. Check your internet connection and try again."
+        );
+        assert!(sign_in_message(&YoutubeError::Timeout, &google).contains("within 5 minutes"));
+
+        let emulator = YoutubeConfig::emulator("http://127.0.0.1:9", "http://127.0.0.1:10");
+        assert_eq!(emulator_urls(&emulator), Some(("http://127.0.0.1:9".into(), "http://127.0.0.1:10".into())));
+        assert_eq!(emulator_urls(&google), None);
+    }
+
+    #[test]
+    fn probing_reports_which_emulator_is_down() {
+        // Nothing listens on port 9 (discard) of the loopback interface in a test run.
+        let check = probe_emulators("http://127.0.0.1:9", "http://127.0.0.1:9");
+        assert_eq!(
+            check,
+            EmulatorCheck::Unreachable("Neither emulator is answering. Start them with scripts/emulators.sh.".into())
+        );
+    }
+
+    #[test]
+    fn outages_read_as_plain_language() {
+        let offline = YoutubeError::Http(ureq::Error::ConnectionFailed);
+        assert_eq!(describe_error(&offline), "Can't reach YouTube. Check your internet connection and try again.");
+        let outage = YoutubeError::Api { status: 503, reason: "backendError".into(), message: "Backend Error".into() };
+        assert_eq!(describe_error(&outage), "YouTube is having problems right now. Try again in a few minutes.");
+        assert!(describe_error(&YoutubeError::ThumbnailsNotAllowed).contains("youtube.com/verify"));
     }
 
     #[test]

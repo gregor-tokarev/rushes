@@ -11,16 +11,18 @@ use chrono::Utc;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Entity, Render, TestAppContext, Window, WindowBounds, WindowOptions,
-    px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Entity, ExternalPaths, FileDropEvent, PlatformInput, Render,
+    TestAppContext, Window, WindowBounds, WindowOptions, px, size,
 };
 use publish_support::{Emulators, Workspace, wait_until};
+use serde_json::json;
 use videocrm::publish::{
     AccountBadge, BlockingReason, CHAPTERS_HEADING, Connection, PublishPanel, UploadsPage, YoutubeSettings,
 };
 use videocrm::route::Route;
 use videocrm_core::settings::YoutubeBackend;
 use videocrm_core::{Block, BlockKind, DocumentKind, Privacy, UploadId, UploadJob, UploadStatus, VideoId, YoutubeLink};
+use videocrm_youtube::{CredentialStore, RetryCause};
 
 /// Longer than the views' save delay.
 const SAVED: Duration = Duration::from_secs(1);
@@ -112,6 +114,60 @@ fn the_publish_form_saves_metadata_and_explains_what_blocks_the_upload(cx: &mut 
 }
 
 #[gpui_kit::test]
+fn a_pending_form_edit_keeps_the_final_cut_ai_edit_chose(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |_| {});
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    // The creator types the YouTube title ...
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("publish-title", cx);
+        window.input("My title", cx);
+    });
+    cx.run_until_parked();
+    // ... while the AI edit render finishes and picks its final cut, within the save delay.
+    let cut = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    workspace.state.update(cx, |state, cx| {
+        let mut video = state.video(video_id).unwrap().clone();
+        video.publish.file = Some(cut.clone());
+        state.update_video(video, cx);
+    });
+    cx.run_until_parked();
+    // The form shows the new file right away and keeps the typed title.
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), [BlockingReason::NotConnected]);
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("publish-title").value(), Some("My title"));
+    });
+    settle(cx);
+    let publish = workspace.video(cx, video_id).publish;
+    assert_eq!(publish.title, "My title");
+    assert_eq!(publish.file, Some(cut), "the form's save leaves the final cut in place");
+}
+
+#[gpui_kit::test]
+fn long_blocking_reasons_wrap_inside_the_upload_card(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |video| {
+        video.publish.title = format!("<{}>", "Desk setup ".repeat(10));
+        video.publish.description = "é".repeat(2672);
+        video.publish.tags = (0..60).map(|ix| format!("desk tag {ix}")).collect();
+        video.publish.publish_at = Some(Utc::now() - chrono::TimeDelta::days(1));
+    });
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let reasons = panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx));
+    assert!(reasons.len() >= 6, "{reasons:?}");
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        let list = window.find("upload-blockers").bounds();
+        for ix in 0..reasons.len() {
+            let reason = window.find(("upload-blocker", ix)).bounds();
+            assert!(reason.right() <= list.right(), "reason {ix} runs past the card: {reason:?} vs {list:?}");
+        }
+    });
+}
+
+#[gpui_kit::test]
 fn a_chosen_file_counts_as_missing_only_once_it_is_known_to_be(cx: &mut TestAppContext) {
     let workspace = Workspace::open(cx, YoutubeBackend::default());
     let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
@@ -199,19 +255,83 @@ fn chapters_come_from_the_script_headings(cx: &mut TestAppContext) {
             Block::new(BlockKind::Heading2, "Why ownership"),
             Block::paragraph(vec!["word"; 150].join(" ")),
             Block::new(BlockKind::Heading2, "Borrowing"),
+            Block::paragraph(vec!["word"; 150].join(" ")),
+            Block::new(BlockKind::Heading2, "Lifetimes"),
         ];
         state.save_document(script, cx);
     });
     let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
+        assert!(window.find("chapters-estimate").visible());
         window.click("insert-chapters", cx);
     });
     settle(cx);
     assert_eq!(
         workspace.video(cx, video_id).publish.description,
-        format!("One owner, many borrowers.\n\n{CHAPTERS_HEADING}\n0:00 Why ownership\n1:00 Borrowing")
+        format!("One owner, many borrowers.\n\n{CHAPTERS_HEADING}\n0:00 Why ownership\n1:00 Borrowing\n2:00 Lifetimes")
     );
+}
+
+#[gpui_kit::test]
+fn only_chapters_youtube_shows_are_offered(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Stop Using print() to Debug Python", |video| {
+        video.format = videocrm_core::VideoFormat::Short;
+        video.publish.file = Some(file.clone());
+    });
+    let script = |sections: usize, cx: &mut TestAppContext| {
+        workspace.state.update(cx, |state, cx| {
+            let mut script =
+                state.documents(video_id).into_iter().find(|doc| doc.kind == DocumentKind::Script).unwrap();
+            script.blocks = (0..sections)
+                .flat_map(|ix| {
+                    [
+                        Block::new(BlockKind::Heading2, format!("Part {ix}")),
+                        Block::paragraph(vec!["word"; 50].join(" ")),
+                    ]
+                })
+                .collect();
+            state.save_document(script, cx);
+        });
+    };
+    script(3, cx);
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    cx.run_until_parked();
+    let unavailable = |handle: AnyWindowHandle, cx: &mut TestAppContext| {
+        let mut shown = false;
+        window(cx, handle, |window, cx| {
+            window.render_frame(cx);
+            // Disabled: inserting would add a list YouTube ignores.
+            window.click("insert-chapters", cx);
+            shown = window.find("chapters-unavailable").visible();
+        });
+        settle(cx);
+        shown && workspace.video(cx, video_id).publish.description.is_empty()
+    };
+    assert!(unavailable(handle, cx), "Shorts have no chapters");
+
+    workspace.state.update(cx, |state, cx| {
+        let mut video = state.video(video_id).unwrap().clone();
+        video.format = videocrm_core::VideoFormat::LongForm;
+        state.update_video(video, cx);
+    });
+    script(2, cx);
+    assert!(unavailable(handle, cx), "two chapters are too few");
+
+    script(3, cx);
+    cx.run_until_parked();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        // Three 20 s sections end at 0:40; the one-second test clip is far shorter.
+        if videocrm_pipeline::probe_media(&file).is_some() {
+            assert!(window.find("chapters-past-the-end").visible());
+        }
+        window.click("insert-chapters", cx);
+    });
+    settle(cx);
+    assert!(workspace.video(cx, video_id).publish.description.contains("0:40 Part 2"));
 }
 
 #[gpui_kit::test]
@@ -280,36 +400,56 @@ fn the_uploads_page_offers_what_each_job_allows(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn youtube_settings_choose_the_backend_and_save_the_oauth_client(cx: &mut TestAppContext) {
+fn youtube_settings_start_with_the_google_client_and_hide_the_emulator(cx: &mut TestAppContext) {
+    // A fresh install: the creator's own YouTube account, not the developer emulator.
     let workspace = Workspace::open(cx, YoutubeBackend::default());
     let (handle, _settings) = open(cx, |window, cx| cx.new(|cx| YoutubeSettings::new(window, cx)));
     let backend = |cx: &mut TestAppContext| workspace.state.read_with(cx, |state, _| state.settings().youtube.clone());
-
-    window(cx, handle, |window, cx| {
-        window.render_frame(cx);
-        assert_eq!(window.within("youtube-backend").find(1usize).checked(), Some(true));
-        assert!(window.find("youtube-google-url").visible());
-        window.within("youtube-backend").click(0usize, cx);
-    });
+    let problem = |cx: &mut TestAppContext| {
+        workspace.service.read_with(cx, |service, _| service.config().err().map(|problem| problem.to_string()))
+    };
     assert_eq!(backend(cx), YoutubeBackend::Google { client_id: String::new(), client_secret: String::new() });
-    assert!(workspace.service.read_with(cx, |service, _| service.config().is_err()), "no client yet");
 
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
+        // The setup steps unfold and link to the console pages; the fields come next,
+        // Connect after them.
+        assert!(window.try_find("google-step-2").is_none_or(|step| !step.visible()));
+        window.click("youtube-setup-steps", cx);
+        window.click("google-step-2", cx);
+        let fields = window.find("youtube-client-secret").bounds();
+        assert!(window.within("youtube-connection").find("connect").bounds().top() > fields.bottom());
+        // The emulator is a folded developer option.
+        assert!(window.try_find("youtube-use-emulator").is_none_or(|switch| !switch.visible()));
         assert!(window.try_find("youtube-google-url").is_none());
-        // Connect keeps its place but is disabled (an enabled one would fail to connect).
+        // Disabled until the client is filled in (an enabled one would fail to connect).
         window.within("youtube-connection").click("connect", cx);
     });
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://console.cloud.google.com/apis/library/youtube.googleapis.com")
+    );
     assert_eq!(workspace.service.read_with(cx, |service, _| service.connection().clone()), Connection::Disconnected);
+    assert_eq!(problem(cx).as_deref(), Some("Add the client ID and client secret of your Google OAuth client."));
 
+    // The secret pasted into both fields is caught before any browser opens.
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         window.click("youtube-client-id", cx);
-        window.input("1234-abc.apps.googleusercontent.com", cx);
+        window.input("GOCSPX-secret", cx);
         window.click("youtube-client-secret", cx);
         window.input("GOCSPX-secret", cx);
         // The secret is masked, so its value is not exposed either.
         assert_eq!(window.find("youtube-client-secret").value(), None);
+    });
+    settle(cx);
+    assert!(problem(cx).is_some_and(|problem| problem.contains("isn't a Google OAuth client ID")));
+
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("youtube-client-id", cx);
+        window.press("secondary-a", cx);
+        window.input("1234-abc.apps.googleusercontent.com", cx);
     });
     settle(cx);
     assert_eq!(
@@ -323,6 +463,26 @@ fn youtube_settings_choose_the_backend_and_save_the_oauth_client(cx: &mut TestAp
     assert!(
         config.is_some_and(|config| config.is_google() && config.client_id == "1234-abc.apps.googleusercontent.com")
     );
+    // Connect can be clicked now: what Google will show comes with it.
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        let connect = window.within("youtube-connection").find("connect").bounds();
+        assert!(window.find("youtube-expectations").bounds().top() > connect.bottom());
+    });
+
+    // Developers unfold the emulator option and switch to it.
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("youtube-developer", cx);
+        window.click("youtube-use-emulator", cx);
+    });
+    assert_eq!(backend(cx), YoutubeBackend::Emulator { google_url: String::new(), youtube_url: String::new() });
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("youtube-google-url").visible());
+        assert!(window.try_find("youtube-client-id").is_none());
+        assert!(window.try_find("youtube-expectations").is_none());
+    });
 }
 
 #[gpui_kit::test]
@@ -399,4 +559,217 @@ fn connects_and_uploads_from_the_publish_tab(cx: &mut TestAppContext) {
     assert_eq!(link.video_id, youtube_id);
     assert_eq!(cx.opened_url(), Some(link.url));
     assert_eq!(emulators.uploads().len(), 1);
+}
+
+#[gpui_kit::test]
+fn an_outage_shows_the_retry_on_the_upload_card(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Keychron Q1 Max review", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.privacy = Privacy::Private;
+    });
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    cx.run_until_parked();
+    // YouTube answers every chunk with 503 Backend Error.
+    emulators.inject_fault(json!({"method": "PUT", "path": "/upload/youtube/v3/videos", "status": 503, "times": 1000}));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("upload-to-youtube", cx);
+    });
+    let service = workspace.service.clone();
+    let retry = wait_until(cx, "the retry", |cx| {
+        service.read_with(cx, |s, _| s.latest_job(video_id).and_then(|job| s.retry(job.id)))
+    });
+    assert_eq!((retry.attempt, retry.cause), (1, RetryCause::Server));
+    assert_eq!(retry.headline(), "YouTube isn't responding");
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        // The card says what is going on instead of a frozen "Uploading… 100%".
+        assert!(window.find("upload-retrying").visible());
+        window.click("cancel-upload", cx);
+    });
+    let job = wait_until(cx, "the cancellation", |cx| {
+        service
+            .read_with(cx, |s, _| s.latest_job(video_id).filter(|job| job.status == UploadStatus::Cancelled).cloned())
+    });
+    assert!(service.read_with(cx, |s, _| s.retry(job.id).is_none() && s.is_resumable(&job)));
+}
+
+#[gpui_kit::test]
+fn connecting_to_stopped_emulators_fails_without_opening_the_browser(cx: &mut TestAppContext) {
+    // Nothing listens on the discard port.
+    let stopped =
+        YoutubeBackend::Emulator { google_url: "http://127.0.0.1:9".into(), youtube_url: "http://127.0.0.1:9".into() };
+    let workspace = Workspace::open(cx, stopped);
+    let (handle, _settings) = open(cx, |window, cx| cx.new(|cx| YoutubeSettings::new(window, cx)));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.within("youtube-connection").click("connect", cx);
+    });
+    let service = workspace.service.clone();
+    let message =
+        wait_until(cx, "the failed sign-in", |cx| match service.read_with(cx, |s, _| s.connection().clone()) {
+            Connection::Failed(message) => Some(message.to_string()),
+            Connection::Connecting { authorize_url: Some(url) } => panic!("the browser opened {url}"),
+            _ => None,
+        });
+    assert_eq!(message, "Neither emulator is answering. Start them with scripts/emulators.sh.");
+    assert_eq!(cx.opened_url(), None);
+}
+
+#[gpui_kit::test]
+fn a_file_found_missing_at_upload_shows_on_the_file_card(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let file = publish_support::video_file(workspace.dir.path(), "huge-take.mp4");
+    let video_id = workspace.create_video(cx, "Keychron Q1 Max review", |video| {
+        video.publish.file = Some(file.clone());
+    });
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    cx.run_until_parked();
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), []);
+    // Renamed in the file manager after the tab read it.
+    std::fs::rename(&file, workspace.dir.path().join("renamed.mp4")).unwrap();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("upload-to-youtube", cx);
+        assert_eq!(window.notifications(cx).len(), 1);
+        window.clear_notifications(cx);
+    });
+    cx.run_until_parked();
+    // The card and the reasons under the button catch up instead of offering the upload again.
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), [BlockingReason::FileMissing]);
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("upload-blockers").visible());
+    });
+    assert!(workspace.service.read_with(cx, |s, _| s.jobs().is_empty()));
+}
+
+#[gpui_kit::test]
+fn an_expired_sign_in_names_the_account_and_offers_reconnect(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    // Google ends the grant (every 7 days for apps in Testing): the refresh token is gone
+    // and the access token has expired by the next start.
+    let client = workspace.service.read_with(cx, |s, _| s.client()).unwrap();
+    client.revoke().unwrap();
+    let store = CredentialStore::new(workspace.dir.path().join("credentials.json"));
+    let mut login = store.load().unwrap().unwrap();
+    login.credentials.expires_at = Utc::now() - chrono::TimeDelta::hours(1);
+    store.save(&login).unwrap();
+
+    let service = workspace.restart(cx);
+    let account =
+        wait_until(cx, "the rejected sign-in", |cx| match service.read_with(cx, |s, _| s.connection().clone()) {
+            Connection::NeedsSignIn(account) => Some(account),
+            _ => None,
+        });
+    assert_eq!(account.channel_handle.as_deref(), Some("@creator"));
+    assert!(!service.read_with(cx, |s, _| s.is_connected()));
+
+    let (handle, _badge) = open(cx, |window, cx| cx.new(|cx| AccountBadge::new(window, cx)));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("account-badge").label(), Some("Demo Creator, Sign in again. Open YouTube settings"));
+    });
+    let (handle, _settings) = open(cx, |window, cx| cx.new(|cx| YoutubeSettings::new(window, cx)));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.within("youtube-connection").click("connect", cx);
+    });
+    let url = wait_until(cx, "the consent page", |cx| match service.read_with(cx, |s, _| s.connection().clone()) {
+        Connection::Connecting { authorize_url: Some(url) } => Some(url.to_string()),
+        _ => None,
+    });
+    publish_support::consent_in_browser(&url, "creator@example.com");
+    wait_until(cx, "the connection", |cx| service.read_with(cx, |s, _| s.is_connected().then_some(())));
+}
+
+#[gpui_kit::test]
+fn the_done_card_shows_what_youtube_has_and_what_did_not_work(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let thumbnail = publish_support::png_file(workspace.dir.path(), "thumbnail.png");
+    let video_id = workspace.create_video(cx, "Stop Using print() to Debug Python", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.thumbnail = Some(thumbnail);
+        video.publish.privacy = Privacy::Private;
+        video.publish.publish_at = Some(Utc::now() + chrono::TimeDelta::days(2));
+    });
+    // What YouTube answers for channels that aren't phone-verified.
+    emulators.inject_fault(
+        json!({"method": "POST", "path": "/upload/youtube/v3/thumbnails/set", "status": 403, "reason": "forbidden"}),
+    );
+    let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    let youtube_id = wait_until(cx, "the processed upload", |cx| {
+        cx.executor().advance_clock(Duration::from_secs(5));
+        match service.read_with(cx, |s, _| s.job(upload).map(|job| job.status.clone())) {
+            Some(UploadStatus::Done { video_id }) => Some(video_id),
+            Some(UploadStatus::Failed { error }) => panic!("upload failed: {error}"),
+            _ => None,
+        }
+    });
+    let problem = wait_until(cx, "the thumbnail failure", |cx| {
+        service.read_with(cx, |s, _| s.thumbnail_problem(upload).map(str::to_owned))
+    });
+    assert!(problem.contains("verified channels"), "{problem}");
+
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let info = wait_until(cx, "YouTube's view of the video", |cx| {
+        service.read_with(cx, |s, _| s.youtube_video(&youtube_id).cloned())
+    });
+    assert_eq!(info.privacy, videocrm_youtube::Privacy::Private);
+    assert!(info.publish_at.is_some(), "scheduled on YouTube");
+    window(cx, handle, |window, cx| {
+        window.clear_notifications(cx);
+        window.render_frame(cx);
+        // "Private · goes public …", the lasting thumbnail note, and where edits go.
+        assert!(window.find("youtube-visibility").visible());
+        assert!(window.find("thumbnail-not-set").visible());
+        assert!(window.find("publish-next-upload-note").visible());
+    });
+}
+
+/// Drops `paths` from the file manager onto the element `id`.
+fn drop_files(window: &mut Window, id: &'static str, paths: Vec<std::path::PathBuf>, cx: &mut App) {
+    let position = window.find(id).bounds().center();
+    let paths = ExternalPaths(paths.into());
+    window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Entered { position, paths }), cx);
+    window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Submit { position }), cx);
+}
+
+#[gpui_kit::test]
+fn files_dropped_on_the_cards_become_the_video_and_thumbnail(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |_| {});
+    let take = publish_support::video_file(workspace.dir.path(), "take1.mov");
+    let image = publish_support::png_file(workspace.dir.path(), "thumbnail.png");
+    let notes = workspace.dir.path().join("notes.txt");
+    std::fs::write(&notes, "not an image").unwrap();
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    // Without a working file chooser (no desktop portal), dropping is the way in.
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        drop_files(window, "video-file-drop", vec![take.clone()], cx);
+        window.render_frame(cx);
+        drop_files(window, "thumbnail-drop", vec![notes.clone()], cx);
+        // Not an image: refused with a note, nothing is stored.
+        assert_eq!(window.notifications(cx).len(), 1);
+        window.clear_notifications(cx);
+        window.render_frame(cx);
+        drop_files(window, "thumbnail-drop", vec![image.clone()], cx);
+    });
+    settle(cx);
+    let publish = workspace.video(cx, video_id).publish;
+    assert_eq!(publish.file, Some(take));
+    assert_eq!(publish.thumbnail, Some(image));
 }

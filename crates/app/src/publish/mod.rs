@@ -23,8 +23,23 @@ pub use badge::AccountBadge;
 pub use chapters::{CHAPTERS_HEADING, Chapter, chapters, chapters_text, insert_chapters};
 pub use panel::PublishPanel;
 pub use rules::{BlockingReason, CATEGORIES, Category, blocking_reasons, tags_length};
-pub use service::{Connection, YoutubeEvent, YoutubeService, backend_config};
-pub use settings::{EmulatorCheck, YoutubeSettings};
+pub use service::{Connection, EmulatorCheck, YoutubeEvent, YoutubeService, backend_config};
+pub use settings::YoutubeSettings;
 pub use transfer::Transfer;
-pub use upload::{INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, UploadError};
+pub use upload::{INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, Retry, UploadError};
 pub use uploads_page::UploadsPage;
+
+use gpui_kit::App;
+use videocrm_core::VideoId;
+
+/// A sentence for delete confirmations when one of `video_ids` is uploading: deleting
+/// a video cancels its upload. `None` when none is.
+pub fn delete_upload_notice(video_ids: &[VideoId], cx: &App) -> Option<&'static str> {
+    let service = YoutubeService::try_global(cx)?;
+    let uploading = service.read(cx).is_uploading_any(video_ids);
+    uploading.then_some(if video_ids.len() == 1 {
+        "It's uploading to YouTube right now: deleting it cancels the upload."
+    } else {
+        "Some of them are uploading to YouTube right now: deleting them cancels those uploads."
+    })
+}

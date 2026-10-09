@@ -404,11 +404,16 @@ impl VideoPage {
         let Some(video) = self.video(cx) else { return };
         let title: SharedString = format!("Delete “{}”?", display_title(&video.title)).into();
         let (state, id) = (self.state.clone(), self.video_id);
+        let consequence = "Its script, notes and edit history are removed. Files in its media folder stay on disk.";
+        let description: SharedString = match crate::publish::delete_upload_notice(&[id], cx) {
+            Some(notice) => format!("{notice} {consequence}").into(),
+            None => consequence.into(),
+        };
         window.open_alert_dialog(cx, move |alert, _, _| {
             let state = state.clone();
             alert
                 .title(title.clone())
-                .description("Its script, notes and edit history are removed. Files in its media folder stay on disk.")
+                .description(description.clone())
                 .confirm()
                 .ok_text("Delete")
                 .ok_variant(ButtonVariant::Danger)

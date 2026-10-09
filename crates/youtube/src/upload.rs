@@ -15,7 +15,7 @@ use ureq::SendBody;
 use url::Url;
 
 use crate::client::{YoutubeClient, extension};
-use crate::error::{Error, Result, api_error};
+use crate::error::{Error, Result, RetryCause, api_error};
 use crate::http::{self, HttpResponse, bearer, body_text};
 use crate::types::{Privacy, UploadStatus, VideoResource, watch_url};
 
@@ -65,12 +65,9 @@ impl VideoMetadata {
             return invalid("tags cannot contain < or >");
         }
         // YouTube counts separators and the quotes around tags with spaces.
-        let tags_length = self
-            .tags
-            .iter()
-            .map(|tag| tag.chars().count() + if tag.contains(' ') { 2 } else { 0 })
-            .sum::<usize>()
-            + self.tags.len().saturating_sub(1);
+        let tags_length =
+            self.tags.iter().map(|tag| tag.chars().count() + if tag.contains(' ') { 2 } else { 0 }).sum::<usize>()
+                + self.tags.len().saturating_sub(1);
         if tags_length > 500 {
             return invalid("the tags are longer than 500 characters in total");
         }
@@ -146,6 +143,14 @@ pub enum UploadProgress {
         sent: u64,
         total: u64,
     },
+    /// A request failed for a passing reason; attempt `attempt` of `max_retries`
+    /// starts after `wait`. Progress past the earlier high-water mark means it worked.
+    Retrying {
+        attempt: u32,
+        max_retries: u32,
+        wait: Duration,
+        cause: RetryCause,
+    },
     Finished,
 }
 
@@ -171,12 +176,14 @@ pub struct UploadOptions {
 }
 
 impl Default for UploadOptions {
+    /// About a minute of retries (2, 4, 8, 16 and 32 s) before an outage is reported;
+    /// the upload can be resumed after that.
     fn default() -> Self {
         Self {
             chunk_size: DEFAULT_CHUNK_SIZE,
-            max_retries: 8,
-            initial_backoff: Duration::from_secs(1),
-            max_backoff: Duration::from_secs(64),
+            max_retries: 5,
+            initial_backoff: Duration::from_secs(2),
+            max_backoff: Duration::from_secs(32),
         }
     }
 }
@@ -189,9 +196,22 @@ impl UploadOptions {
 
     /// Exponential backoff for the `failures`-th consecutive failure (0-based).
     fn backoff(&self, failures: u32) -> Duration {
-        self.initial_backoff
-            .saturating_mul(2u32.saturating_pow(failures))
-            .min(self.max_backoff)
+        self.initial_backoff.saturating_mul(2u32.saturating_pow(failures)).min(self.max_backoff)
+    }
+
+    /// Reports the retry after the `failures`-th consecutive failure (0-based) and
+    /// waits out its backoff.
+    fn retry(
+        &self,
+        failures: u32,
+        cause: RetryCause,
+        progress: &mut dyn FnMut(UploadProgress),
+        cancel: &AtomicBool,
+        session_url: Option<&str>,
+    ) -> Result<()> {
+        let wait = self.backoff(failures);
+        progress(UploadProgress::Retrying { attempt: failures + 1, max_retries: self.max_retries, wait, cause });
+        backoff_sleep(wait, cancel, session_url)
     }
 }
 
@@ -216,10 +236,8 @@ impl YoutubeClient {
     ) -> Result<UploadedVideo> {
         metadata.validate()?;
         let mut file = VideoFile::open(path)?;
-        let session_url = self.start_session(metadata, &file, cancel)?;
-        progress(UploadProgress::Started {
-            session_url: session_url.clone(),
-        });
+        let session_url = self.start_session(metadata, &file, progress, cancel)?;
+        progress(UploadProgress::Started { session_url: session_url.clone() });
         self.transfer(&session_url, &mut file, Some(0), progress, cancel)
     }
 
@@ -233,9 +251,7 @@ impl YoutubeClient {
     ) -> Result<UploadedVideo> {
         self.check_session_origin(session_url)?;
         let mut file = VideoFile::open(path)?;
-        progress(UploadProgress::Started {
-            session_url: session_url.to_owned(),
-        });
+        progress(UploadProgress::Started { session_url: session_url.to_owned() });
         self.transfer(session_url, &mut file, None, progress, cancel)
     }
 
@@ -243,6 +259,7 @@ impl YoutubeClient {
         &self,
         metadata: &VideoMetadata,
         file: &VideoFile,
+        progress: &mut dyn FnMut(UploadProgress),
         cancel: &AtomicBool,
     ) -> Result<String> {
         let url = format!("{}/videos", self.config.upload_base);
@@ -267,7 +284,7 @@ impl YoutubeClient {
                 .and_then(|response| self.session_location(response));
             match result {
                 Err(error) if error.is_transient() && failures < self.upload.max_retries => {
-                    backoff_sleep(self.upload.backoff(failures), cancel, None)?;
+                    self.upload.retry(failures, error.retry_cause(), progress, cancel, None)?;
                     failures += 1;
                 }
                 result => return result,
@@ -297,18 +314,11 @@ impl YoutubeClient {
             .headers()
             .get("Location")
             .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| {
-                Error::Protocol("upload session response has no Location header".to_owned())
-            })?;
-        let base = Url::parse(&self.config.upload_base).map_err(|e| {
-            Error::InvalidInput(format!(
-                "invalid upload URL {}: {e}",
-                self.config.upload_base
-            ))
-        })?;
-        let session = base
-            .join(location)
-            .map_err(|e| Error::Protocol(format!("invalid upload session URL {location}: {e}")))?;
+            .ok_or_else(|| Error::Protocol("upload session response has no Location header".to_owned()))?;
+        let base = Url::parse(&self.config.upload_base)
+            .map_err(|e| Error::InvalidInput(format!("invalid upload URL {}: {e}", self.config.upload_base)))?;
+        let session =
+            base.join(location).map_err(|e| Error::Protocol(format!("invalid upload session URL {location}: {e}")))?;
         Ok(session.into())
     }
 
@@ -335,11 +345,7 @@ impl YoutubeClient {
                 None => self.query_session(session_url, total),
                 Some(start) => {
                     progress(UploadProgress::Bytes { sent: start, total });
-                    file.read_chunk(
-                        start,
-                        chunk_len(start, total, self.upload.chunk_size),
-                        &mut chunk,
-                    )?;
+                    file.read_chunk(start, chunk_len(start, total, self.upload.chunk_size), &mut chunk)?;
                     self.put_chunk(session_url, &chunk, start, total, progress, cancel)
                 }
             };
@@ -364,7 +370,7 @@ impl YoutubeClient {
                                 "the upload server keeps rejecting data at byte {next}"
                             )));
                         }
-                        backoff_sleep(self.upload.backoff(failures), cancel, Some(session_url))?;
+                        self.upload.retry(failures, RetryCause::Server, progress, cancel, Some(session_url))?;
                         failures += 1;
                     }
                     confirmed = next;
@@ -372,7 +378,7 @@ impl YoutubeClient {
                 }
                 Err(_) if cancel.load(Ordering::Relaxed) => return Err(cancelled(session_url)),
                 Err(error) if error.is_transient() && failures < self.upload.max_retries => {
-                    backoff_sleep(self.upload.backoff(failures), cancel, Some(session_url))?;
+                    self.upload.retry(failures, error.retry_cause(), progress, cancel, Some(session_url))?;
                     failures += 1;
                     offset = None;
                 }
@@ -392,15 +398,8 @@ impl YoutubeClient {
     ) -> Result<Step> {
         let range = content_range(start, chunk.len() as u64, total);
         let response = self.authorized(|token| {
-            let mut body = ProgressReader {
-                chunk,
-                position: 0,
-                reported: 0,
-                start,
-                total,
-                progress: &mut *progress,
-                cancel,
-            };
+            let mut body =
+                ProgressReader { chunk, position: 0, reported: 0, start, total, progress: &mut *progress, cancel };
             self.agent
                 .put(session_url)
                 .config()
@@ -435,9 +434,7 @@ fn backoff_sleep(duration: Duration, cancel: &AtomicBool, session_url: Option<&s
     let deadline = Instant::now().checked_add(duration);
     while deadline.is_none_or(|deadline| Instant::now() < deadline) {
         if cancel.load(Ordering::Relaxed) {
-            return Err(Error::Cancelled {
-                session_url: session_url.map(str::to_owned),
-            });
+            return Err(Error::Cancelled { session_url: session_url.map(str::to_owned) });
         }
         let left = deadline.map_or(CANCEL_POLL, |d| d.saturating_duration_since(Instant::now()));
         thread::sleep(CANCEL_POLL.min(left));
@@ -446,28 +443,19 @@ fn backoff_sleep(duration: Duration, cancel: &AtomicBool, session_url: Option<&s
 }
 
 fn cancelled(session_url: &str) -> Error {
-    Error::Cancelled {
-        session_url: Some(session_url.to_owned()),
-    }
+    Error::Cancelled { session_url: Some(session_url.to_owned()) }
 }
 
 fn upload_step(mut response: HttpResponse) -> Result<Step> {
     match response.status().as_u16() {
         308 => {
-            let range = response
-                .headers()
-                .get("Range")
-                .and_then(|value| value.to_str().ok());
+            let range = response.headers().get("Range").and_then(|value| value.to_str().ok());
             Ok(Step::Offset(persisted_bytes(range)?))
         }
         200 | 201 => {
             let video: VideoResource = http::json(response)?;
-            let snippet = video
-                .snippet
-                .ok_or_else(|| Error::Protocol("uploaded video has no snippet".to_owned()))?;
-            let status = video
-                .status
-                .ok_or_else(|| Error::Protocol("uploaded video has no status".to_owned()))?;
+            let snippet = video.snippet.ok_or_else(|| Error::Protocol("uploaded video has no snippet".to_owned()))?;
+            let status = video.status.ok_or_else(|| Error::Protocol("uploaded video has no status".to_owned()))?;
             Ok(Step::Done(UploadedVideo {
                 url: watch_url(&video.id),
                 id: video.id,
@@ -493,11 +481,7 @@ fn persisted_bytes(range: Option<&str>) -> Result<u64> {
         .strip_prefix("0-")
         .and_then(|end| end.parse::<u64>().ok())
         .map(|end| end + 1)
-        .ok_or_else(|| {
-            Error::Protocol(format!(
-                "unexpected Range header from upload server: {range}"
-            ))
-        })
+        .ok_or_else(|| Error::Protocol(format!("unexpected Range header from upload server: {range}")))
 }
 
 /// Time allowed to send one chunk; a dead connection otherwise blocks in a socket
@@ -537,24 +521,16 @@ impl VideoFile {
     fn open(path: &Path) -> Result<Self> {
         let display = path.display().to_string();
         let file = File::open(path).map_err(|e| Error::io(format!("opening {display}"), e))?;
-        let len = file
-            .metadata()
-            .map_err(|e| Error::io(format!("reading {display}"), e))?
-            .len();
+        let len = file.metadata().map_err(|e| Error::io(format!("reading {display}"), e))?.len();
         if len == 0 {
             return Err(Error::InvalidInput(format!("{display} is empty")));
         }
-        Ok(Self {
-            file,
-            len,
-            content_type: video_content_type(path),
-            path: display,
-        })
+        Ok(Self { file, len, content_type: video_content_type(path), path: display })
     }
 
     fn read_chunk(&mut self, start: u64, len: u64, buffer: &mut Vec<u8>) -> Result<()> {
-        let len = usize::try_from(len)
-            .map_err(|_| Error::InvalidInput("chunk size does not fit in memory".to_owned()))?;
+        let len =
+            usize::try_from(len).map_err(|_| Error::InvalidInput("chunk size does not fit in memory".to_owned()))?;
         buffer.resize(len, 0);
         self.file
             .seek(SeekFrom::Start(start))
@@ -583,14 +559,9 @@ impl Read for ProgressReader<'_> {
         let n = buf.len().min(self.chunk.len() - self.position);
         buf[..n].copy_from_slice(&self.chunk[self.position..self.position + n]);
         self.position += n;
-        if self.position - self.reported >= PROGRESS_STEP
-            || (n > 0 && self.position == self.chunk.len())
-        {
+        if self.position - self.reported >= PROGRESS_STEP || (n > 0 && self.position == self.chunk.len()) {
             self.reported = self.position;
-            (self.progress)(UploadProgress::Bytes {
-                sent: self.start + self.position as u64,
-                total: self.total,
-            });
+            (self.progress)(UploadProgress::Bytes { sent: self.start + self.position as u64, total: self.total });
         }
         Ok(n)
     }
@@ -601,11 +572,7 @@ mod tests {
     use super::*;
 
     fn metadata() -> VideoMetadata {
-        VideoMetadata {
-            title: "A video".into(),
-            privacy: Privacy::Unlisted,
-            ..Default::default()
-        }
+        VideoMetadata { title: "A video".into(), privacy: Privacy::Unlisted, ..Default::default() }
     }
 
     #[test]
@@ -621,31 +588,15 @@ mod tests {
     fn chunk_math() {
         let chunk = 4 * UPLOAD_GRANULARITY;
         assert_eq!(chunk_len(0, 10 * UPLOAD_GRANULARITY, chunk), chunk);
-        assert_eq!(
-            chunk_len(8 * UPLOAD_GRANULARITY, 10 * UPLOAD_GRANULARITY, chunk),
-            2 * UPLOAD_GRANULARITY
-        );
+        assert_eq!(chunk_len(8 * UPLOAD_GRANULARITY, 10 * UPLOAD_GRANULARITY, chunk), 2 * UPLOAD_GRANULARITY);
         assert_eq!(chunk_len(9, 10, chunk), 1);
-        assert_eq!(
-            content_range(0, 262_144, 1_000_000),
-            "bytes 0-262143/1000000"
-        );
-        assert_eq!(
-            content_range(999_999, 1, 1_000_000),
-            "bytes 999999-999999/1000000"
-        );
+        assert_eq!(content_range(0, 262_144, 1_000_000), "bytes 0-262143/1000000");
+        assert_eq!(content_range(999_999, 1, 1_000_000), "bytes 999999-999999/1000000");
     }
 
     #[test]
     fn chunk_size_is_rounded_to_the_granularity() {
-        let options = |chunk_size| {
-            UploadOptions {
-                chunk_size,
-                ..UploadOptions::default()
-            }
-            .normalized()
-            .chunk_size
-        };
+        let options = |chunk_size| UploadOptions { chunk_size, ..UploadOptions::default() }.normalized().chunk_size;
         assert_eq!(options(DEFAULT_CHUNK_SIZE), DEFAULT_CHUNK_SIZE);
         assert_eq!(options(UPLOAD_GRANULARITY * 3 + 17), UPLOAD_GRANULARITY * 3);
         assert_eq!(options(1), UPLOAD_GRANULARITY);
@@ -654,10 +605,29 @@ mod tests {
     #[test]
     fn backoff_doubles_up_to_the_cap() {
         let options = UploadOptions::default();
-        assert_eq!(options.backoff(0), Duration::from_secs(1));
-        assert_eq!(options.backoff(3), Duration::from_secs(8));
-        assert_eq!(options.backoff(10), Duration::from_secs(64));
-        assert_eq!(options.backoff(40), Duration::from_secs(64));
+        assert_eq!(options.backoff(0), Duration::from_secs(2));
+        assert_eq!(options.backoff(3), Duration::from_secs(16));
+        assert_eq!(options.backoff(10), Duration::from_secs(32));
+        assert_eq!(options.backoff(40), Duration::from_secs(32));
+        // All retries together take about a minute.
+        let total: Duration = (0..options.max_retries).map(|n| options.backoff(n)).sum();
+        assert_eq!(total, Duration::from_secs(62));
+    }
+
+    #[test]
+    fn retries_are_reported_before_the_wait() {
+        let options = UploadOptions { initial_backoff: Duration::from_millis(1), ..UploadOptions::default() };
+        let mut events = Vec::new();
+        options.retry(1, RetryCause::Network, &mut |event| events.push(event), &AtomicBool::new(false), None).unwrap();
+        assert_eq!(
+            events,
+            [UploadProgress::Retrying {
+                attempt: 2,
+                max_retries: 5,
+                wait: Duration::from_millis(2),
+                cause: RetryCause::Network
+            }]
+        );
     }
 
     #[test]
@@ -723,10 +693,7 @@ mod tests {
             })
         );
         let minimal = serde_json::to_value(self::metadata().resource()).unwrap();
-        assert_eq!(
-            minimal["snippet"],
-            serde_json::json!({"title": "A video", "description": ""})
-        );
+        assert_eq!(minimal["snippet"], serde_json::json!({"title": "A video", "description": ""}));
     }
 
     #[test]
@@ -748,13 +715,7 @@ mod tests {
         reader.read_to_end(&mut sink).unwrap();
         assert_eq!(sink, chunk);
         let last = PROGRESS_STEP as u64 * 2 + 110;
-        assert_eq!(
-            events.last(),
-            Some(&UploadProgress::Bytes {
-                sent: last,
-                total: 10_000_000
-            })
-        );
+        assert_eq!(events.last(), Some(&UploadProgress::Bytes { sent: last, total: 10_000_000 }));
         assert!(events.len() >= 3);
 
         cancel.store(true, Ordering::Relaxed);
@@ -781,32 +742,17 @@ mod tests {
             id_token: None,
         };
         let client = YoutubeClient::new(config, credentials, |_| {});
-        let resume = |url: &str| {
-            client.resume_upload(
-                url,
-                Path::new("missing.mp4"),
-                &mut |_| {},
-                &AtomicBool::new(false),
-            )
-        };
-        assert!(matches!(
-            resume("https://elsewhere.example/upload?upload_id=x"),
-            Err(Error::InvalidInput(_))
-        ));
+        let resume =
+            |url: &str| client.resume_upload(url, Path::new("missing.mp4"), &mut |_| {}, &AtomicBool::new(false));
+        assert!(matches!(resume("https://elsewhere.example/upload?upload_id=x"), Err(Error::InvalidInput(_))));
         // Same server: passes the check and fails on the missing file instead.
-        assert!(matches!(
-            resume("http://127.0.0.1:2/upload/youtube/v3/videos?upload_id=x"),
-            Err(Error::Io { .. })
-        ));
+        assert!(matches!(resume("http://127.0.0.1:2/upload/youtube/v3/videos?upload_id=x"), Err(Error::Io { .. })));
     }
 
     #[test]
     fn content_types_by_extension() {
         assert_eq!(video_content_type(Path::new("final.MP4")), "video/mp4");
         assert_eq!(video_content_type(Path::new("take.mov")), "video/quicktime");
-        assert_eq!(
-            video_content_type(Path::new("raw")),
-            "application/octet-stream"
-        );
+        assert_eq!(video_content_type(Path::new("raw")), "application/octet-stream");
     }
 }

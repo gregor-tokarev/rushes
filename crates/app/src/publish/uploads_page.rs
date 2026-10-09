@@ -116,6 +116,9 @@ impl UploadsPage {
         let cancelling = service.is_cancelling(job.id);
         let detail: Option<SharedString> = match (&job.status, transfer) {
             _ if cancelling => Some("Stopping…".into()),
+            _ if let Some(retry) = service.retry(job.id) => {
+                Some(format!("{}. {}", retry.headline(), retry.detail()).into())
+            }
             (_, Some(transfer)) if transfer.total() > 0 => {
                 // Most telling first: the cell truncates, and the tooltip has the rest.
                 let mut parts =
@@ -126,6 +129,9 @@ impl UploadsPage {
             }
             (UploadStatus::Failed { error }, None) => Some(error.clone().into()),
             (UploadStatus::Processing { .. }, None) => Some("YouTube is processing the video.".into()),
+            (UploadStatus::Done { .. }, None) if let Some(problem) = service.thumbnail_problem(job.id) => {
+                Some(format!("Thumbnail not set. {problem}").into())
+            }
             (UploadStatus::Done { .. }, None) => match service.processing(job.id) {
                 Some(ProcessingOutcome::Ready) => Some("Processed and ready to watch.".into()),
                 Some(ProcessingOutcome::StillProcessing) => Some("YouTube Studio shows when processing ends.".into()),

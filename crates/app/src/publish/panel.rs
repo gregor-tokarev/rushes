@@ -10,6 +10,7 @@ use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::calendar::Matcher;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState, DateTime as PickerValue};
+use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::link::Link;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -21,28 +22,31 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::time_field::TimePrecision;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IndexPath, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IndexPath, Side, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ObjectFit,
-    ParentElement as _, PathPromptOptions, Rems, Render, SharedString, Styled as _, StyledImage as _, Subscription,
-    Task, Window, div, img, rems,
+    AnyElement, App, AppContext as _, Context, Entity, ExternalPaths, FontWeight, InteractiveElement as _, IntoElement,
+    ObjectFit, ParentElement as _, PathPromptOptions, Rems, Render, SharedString, Styled as _, StyledImage as _,
+    Subscription, Task, Window, div, img, rems,
 };
 use videocrm_core::document::DEFAULT_WPM;
+use videocrm_core::input::{PathInputError, expand_user_path};
 use videocrm_core::media::{self, MediaKind};
-use videocrm_core::{DocumentKind, Privacy, PublishSettings, UploadJob, UploadStatus, Video, VideoId};
+use videocrm_core::{
+    DocumentKind, Privacy, PublishSettings, UploadJob, UploadStatus, Video, VideoFormat, VideoId, VideoStatus,
+};
 use videocrm_pipeline::MediaInfo;
 
-use super::chapters::{chapters, chapters_text, insert_chapters};
+use super::chapters::{MIN_CHAPTERS, chapters, chapters_text, insert_chapters, timestamp};
 use super::rules::{
     self, BlockingReason, CATEGORIES, Category, DESCRIPTION_MAX_BYTES, TAGS_MAX_CHARS, THUMBNAIL_MAX_BYTES,
     TITLE_MAX_CHARS, tags_length,
 };
-use super::service::YoutubeService;
+use super::service::{YoutubeEvent, YoutubeService};
 use super::transfer::{format_bytes, format_duration, format_eta, format_speed};
 use super::ui::{ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, status_line};
-use super::upload::ProcessingOutcome;
+use super::upload::{ProcessingOutcome, UploadError};
 use crate::state::{AppEvent, AppState};
 
 /// Form edits are saved this long after the last keystroke.
@@ -68,6 +72,66 @@ impl SelectItem for CategoryItem {
     }
 }
 
+/// Why there are no chapters to insert.
+const NO_SECTIONS: &str = "Add Heading 2 sections to the script to make chapters.";
+const TOO_FEW_SECTIONS: &str =
+    "YouTube shows chapters only for three or more sections of 10 seconds or longer. The script has fewer.";
+const SHORTS_HAVE_NO_CHAPTERS: &str = "Shorts don't have chapters on YouTube.";
+
+/// Chapters YouTube will show, as description text.
+#[derive(Clone, Debug, PartialEq)]
+struct ChapterList {
+    text: String,
+    /// Start of the last chapter, which the video must outlast by 10 s.
+    last_start: u32,
+}
+
+/// Which file a chooser, a typed path or a drop is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileTarget {
+    Video,
+    Thumbnail,
+}
+
+impl FileTarget {
+    fn placeholder(self) -> &'static str {
+        match self {
+            FileTarget::Video => "~/Videos/VideoCRM/final.mp4",
+            FileTarget::Thumbnail => "~/Pictures/thumbnail.png",
+        }
+    }
+}
+
+/// The path field of the "Couldn't open the file chooser" dialog.
+struct PathPrompt {
+    input: Entity<InputState>,
+    error: Option<SharedString>,
+    target: FileTarget,
+}
+
+impl PathPrompt {
+    /// The file the typed path names, or what is wrong with it.
+    fn path(&self, cx: &App) -> Result<PathBuf, SharedString> {
+        typed_file(&self.input.read(cx).value(), self.target).map_err(SharedString::from)
+    }
+}
+
+impl Render for PathPrompt {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let help = match self.target {
+            FileTarget::Video => "Paste the path of the video instead, or drag the file onto the Video file card.",
+            FileTarget::Thumbnail => "Paste the path of the image instead, or drag the file onto the Thumbnail card.",
+        };
+        v_flex()
+            .gap_2()
+            .child(help_text(help, cx))
+            .child(Input::new(&self.input).id("file-path-input"))
+            .when_some(self.error.clone(), |this, error| {
+                this.child(div().text_sm().text_color(cx.theme().danger).child(error))
+            })
+    }
+}
+
 /// A video file the creator is likely to upload.
 #[derive(Clone, Debug, PartialEq)]
 struct FileChoice {
@@ -84,14 +148,78 @@ struct FileDetails {
     media: Option<MediaInfo>,
 }
 
+/// A part of the publish settings the form edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Field {
+    Title,
+    Description,
+    Tags,
+    Category,
+    /// Privacy and schedule, which change together.
+    Visibility,
+    Audience,
+    File,
+    Thumbnail,
+}
+
+/// The fields the form changed since its last save.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Edited(u8);
+
+impl Edited {
+    fn insert(&mut self, field: Field) {
+        self.0 |= 1 << field as u8;
+    }
+
+    fn contains(self, field: Field) -> bool {
+        self.0 & (1 << field as u8) != 0
+    }
+
+    fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// `stored` with the edited fields taken from `draft`. The others may have changed
+    /// elsewhere meanwhile, such as the file AI edit picks, and keep that change.
+    fn merge(self, stored: &PublishSettings, draft: &PublishSettings) -> PublishSettings {
+        let mut merged = stored.clone();
+        if self.contains(Field::Title) {
+            merged.title.clone_from(&draft.title);
+        }
+        if self.contains(Field::Description) {
+            merged.description.clone_from(&draft.description);
+        }
+        if self.contains(Field::Tags) {
+            merged.tags.clone_from(&draft.tags);
+        }
+        if self.contains(Field::Category) {
+            merged.category_id.clone_from(&draft.category_id);
+        }
+        if self.contains(Field::Visibility) {
+            merged.privacy = draft.privacy;
+            merged.publish_at = draft.publish_at;
+        }
+        if self.contains(Field::Audience) {
+            merged.made_for_kids = draft.made_for_kids;
+        }
+        if self.contains(Field::File) {
+            merged.file.clone_from(&draft.file);
+        }
+        if self.contains(Field::Thumbnail) {
+            merged.thumbnail.clone_from(&draft.thumbnail);
+        }
+        merged
+    }
+}
+
 /// The Publish tab of a video page.
 pub struct PublishPanel {
     video_id: VideoId,
     state: Entity<AppState>,
     service: Entity<YoutubeService>,
-    /// The form's copy of `video.publish`; saved after [`SAVE_DELAY`].
+    /// The form's copy of `video.publish`; its edited fields are saved after [`SAVE_DELAY`].
     draft: PublishSettings,
-    dirty: bool,
+    edited: Edited,
     save_task: Option<Task<()>>,
     title: Entity<InputState>,
     /// The video title, shown while the YouTube title is empty.
@@ -104,8 +232,8 @@ pub struct PublishPanel {
     file: Option<FileDetails>,
     /// Size of the chosen thumbnail, `None` while unknown or missing.
     thumbnail_size: Option<(PathBuf, Option<u64>)>,
-    /// Chapter list from the script, `None` when the script has no Heading 2.
-    chapters: Option<String>,
+    /// Chapter list from the script, or why YouTube wouldn't show one.
+    chapters: Result<ChapterList, &'static str>,
     /// Who could watch before "Schedule" forced private, restored when it is turned off.
     unscheduled_privacy: Option<Privacy>,
     _subscriptions: Vec<Subscription>,
@@ -143,23 +271,28 @@ impl PublishPanel {
         let subscriptions = vec![
             cx.subscribe_in(&state, window, Self::on_app_event),
             cx.observe(&service, |_, _, cx| cx.notify()),
+            cx.subscribe(&service, |this, _, event: &YoutubeEvent, cx| {
+                if *event == YoutubeEvent::ConnectionChanged {
+                    this.refresh_youtube_video(cx);
+                }
+            }),
             cx.subscribe(&title, |this, input, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.draft.title = input.read(cx).value().to_string();
-                    this.schedule_save(cx);
+                    this.schedule_save(Field::Title, cx);
                 }
             }),
             cx.subscribe(&description, |this, input, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.draft.description = input.read(cx).value().to_string();
-                    this.schedule_save(cx);
+                    this.schedule_save(Field::Description, cx);
                 }
             }),
             cx.subscribe_in(&tag_input, window, Self::on_tag_input),
             cx.subscribe(&category, |this, _, event: &SelectEvent<Vec<CategoryItem>>, cx| {
                 let SelectEvent::Confirm(id) = event;
                 this.draft.category_id = id.map(str::to_owned).unwrap_or_default();
-                this.schedule_save(cx);
+                this.schedule_save(Field::Category, cx);
             }),
             cx.subscribe(&schedule, |this, _, event: &DatePickerEvent, cx| {
                 let DatePickerEvent::Change(value) = event;
@@ -167,7 +300,7 @@ impl PublishPanel {
                     && let Some(at) = value.start().and_then(utc_time)
                 {
                     this.draft.publish_at = Some(at);
-                    this.schedule_save(cx);
+                    this.schedule_save(Field::Visibility, cx);
                 }
             }),
             // Coming back from the file manager or another app may bring new files.
@@ -190,7 +323,7 @@ impl PublishPanel {
             state,
             service,
             draft,
-            dirty: false,
+            edited: Edited::default(),
             save_task: None,
             title,
             title_placeholder: video.title.clone(),
@@ -201,7 +334,7 @@ impl PublishPanel {
             choices: Vec::new(),
             file: None,
             thumbnail_size: None,
-            chapters: None,
+            chapters: Err(NO_SECTIONS),
             unscheduled_privacy: None,
             _subscriptions: subscriptions,
         };
@@ -209,7 +342,16 @@ impl PublishPanel {
         panel.refresh_choices(cx);
         panel.refresh_file(cx);
         panel.refresh_thumbnail(cx);
+        panel.refresh_youtube_video(cx);
         panel
+    }
+
+    /// Asks YouTube how the uploaded video stands, for the Upload card.
+    fn refresh_youtube_video(&mut self, cx: &mut Context<Self>) {
+        let Some(link) = self.state.read(cx).video(self.video_id).and_then(|video| video.youtube.clone()) else {
+            return;
+        };
+        self.service.update(cx, |service, cx| service.refresh_youtube_video(&link.video_id, cx));
     }
 
     pub fn video_id(&self) -> VideoId {
@@ -228,22 +370,24 @@ impl PublishPanel {
         rules::blocking_reasons(&video, self.service.read(cx).is_connected(), file_exists, Utc::now())
     }
 
-    /// Saves pending form edits now instead of after the delay.
+    /// Saves pending form edits now instead of after the delay. Only the fields the form
+    /// changed are written, so a file chosen elsewhere meanwhile stays.
     pub fn save_pending(&mut self, cx: &mut App) {
-        if !self.dirty {
+        if self.edited.is_empty() {
             return;
         }
-        self.dirty = false;
+        let edited = std::mem::take(&mut self.edited);
         let Some(mut video) = self.state.read(cx).video(self.video_id).cloned() else { return };
-        if video.publish == self.draft {
+        let publish = edited.merge(&video.publish, &self.draft);
+        if video.publish == publish {
             return;
         }
-        video.publish = self.draft.clone();
+        video.publish = publish;
         self.state.update(cx, |state, cx| state.update_video(video, cx));
     }
 
-    fn schedule_save(&mut self, cx: &mut Context<Self>) {
-        self.dirty = true;
+    fn schedule_save(&mut self, field: Field, cx: &mut Context<Self>) {
+        self.edited.insert(field);
         self.save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SAVE_DELAY).await;
             this.update(cx, |this, cx| this.save_pending(cx)).ok();
@@ -267,10 +411,11 @@ impl PublishPanel {
             self.title_placeholder = video.title.clone();
             self.title.update(cx, |input, cx| input.set_placeholder(video.title.clone(), window, cx));
         }
-        // Changes made elsewhere (such as "Use for upload" in AI edit) win unless the
-        // form has edits of its own waiting.
-        if !self.dirty && video.publish != self.draft {
-            self.adopt(video.publish, window, cx);
+        // Changes made elsewhere (such as "Use for upload" in AI edit) show up, except in
+        // fields with edits of the form's own waiting to be saved.
+        let publish = self.edited.merge(&video.publish, &self.draft);
+        if publish != self.draft {
+            self.adopt(publish, window, cx);
         }
         self.refresh_chapters(cx);
         self.refresh_choices(cx);
@@ -296,9 +441,11 @@ impl PublishPanel {
         if let Some(at) = publish.publish_at {
             self.schedule.update(cx, |picker, cx| picker.set_date_time(local_time(at), window, cx));
         }
+        if (publish.privacy, publish.publish_at) != (self.draft.privacy, self.draft.publish_at) {
+            // The privacy to restore belonged to the replaced settings.
+            self.unscheduled_privacy = None;
+        }
         self.draft = publish;
-        // The privacy to restore belonged to the replaced settings.
-        self.unscheduled_privacy = None;
         if file_changed {
             self.refresh_file(cx);
         }
@@ -312,9 +459,16 @@ impl PublishPanel {
         let documents = self.state.read(cx).documents(self.video_id);
         let script = documents.iter().find(|document| document.kind == DocumentKind::Script);
         let found = script.map(|script| chapters(&script.blocks, DEFAULT_WPM)).unwrap_or_default();
-        let text = (!found.is_empty()).then(|| chapters_text(&found));
-        if text != self.chapters {
-            self.chapters = text;
+        let short = self.state.read(cx).video(self.video_id).is_some_and(|video| video.format == VideoFormat::Short);
+        // YouTube silently drops a list it can't use, so only usable ones are offered.
+        let offer = match found.last() {
+            _ if short => Err(SHORTS_HAVE_NO_CHAPTERS),
+            None => Err(NO_SECTIONS),
+            Some(_) if found.len() < MIN_CHAPTERS => Err(TOO_FEW_SECTIONS),
+            Some(last) => Ok(ChapterList { text: chapters_text(&found), last_start: last.start_secs }),
+        };
+        if offer != self.chapters {
+            self.chapters = offer;
             cx.notify();
         }
     }
@@ -383,21 +537,18 @@ impl PublishPanel {
         self.draft.file = path;
         self.file = None;
         self.refresh_file(cx);
-        self.schedule_save(cx);
+        self.schedule_save(Field::File, cx);
     }
 
     fn set_thumbnail(&mut self, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(path) = &path {
-            let extension = path.extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase);
-            if !extension.is_some_and(|ext| THUMBNAIL_EXTENSIONS.contains(&ext.as_str())) {
-                window.push_notification(Notification::warning("Choose a JPG, PNG, GIF or BMP image."), cx);
-                return;
-            }
+        if path.as_deref().is_some_and(|path| !is_thumbnail_image(path)) {
+            window.push_notification(Notification::warning("Choose a JPG, PNG, GIF or BMP image."), cx);
+            return;
         }
         self.draft.thumbnail = path;
         self.thumbnail_size = None;
         self.refresh_thumbnail(cx);
-        self.schedule_save(cx);
+        self.schedule_save(Field::Thumbnail, cx);
     }
 
     fn choose_file(&mut self, window: &mut Window, cx: &mut Context<Self>, thumbnail: bool) {
@@ -412,11 +563,13 @@ impl PublishPanel {
                 Ok(Ok(paths)) => paths.and_then(|paths| paths.into_iter().next()),
                 // The dialog went away with the window.
                 Err(_) => None,
-                // Linux needs the desktop portal for file dialogs.
+                // Linux needs the desktop portal for file dialogs; without it the path
+                // can still be typed or the file dropped on the card.
                 Ok(Err(error)) => {
-                    this.update_in(cx, |_, window, cx| {
-                        let message = format!("Couldn't open the file dialog: {error}");
-                        window.push_notification(Notification::error(message), cx);
+                    eprintln!("videocrm: file chooser failed: {error}");
+                    this.update_in(cx, |this, window, cx| {
+                        let target = if thumbnail { FileTarget::Thumbnail } else { FileTarget::Video };
+                        this.prompt_for_path(target, window, cx);
                     })
                     .ok();
                     None
@@ -433,6 +586,53 @@ impl PublishPanel {
             .ok();
         })
         .detach();
+    }
+
+    /// Asks for the path of the file in a dialog: what is left when no file chooser opens.
+    fn prompt_for_path(&mut self, target: FileTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(target.placeholder()));
+        let prompt = cx.new(|_| PathPrompt { input: input.clone(), error: None, target });
+        let panel = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, window, _| {
+            let (panel, prompt) = (panel.clone(), prompt.clone());
+            dialog
+                .title("Couldn't open the file chooser")
+                .width(window.rem_size() * 30.)
+                .child(prompt.clone())
+                .footer(
+                    DialogFooter::new()
+                        .child(DialogClose::new().child(Button::new("file-path-cancel").outline().label("Cancel")))
+                        .child(DialogAction::new().child(Button::new("file-path-use").primary().label("Use file"))),
+                )
+                .on_ok(move |_, window, cx| match prompt.read(cx).path(cx) {
+                    Ok(path) => {
+                        panel
+                            .update(cx, |panel, cx| match target {
+                                FileTarget::Video => panel.set_file(Some(path), cx),
+                                FileTarget::Thumbnail => panel.set_thumbnail(Some(path), window, cx),
+                            })
+                            .ok();
+                        true
+                    }
+                    Err(error) => {
+                        prompt.update(cx, |prompt, cx| {
+                            prompt.error = Some(error);
+                            cx.notify();
+                        });
+                        false
+                    }
+                })
+        });
+        input.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// Takes the first dropped file for the video file or the thumbnail.
+    fn on_drop(&mut self, target: FileTarget, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = paths.paths().iter().find(|path| path.is_file()).cloned() else { return };
+        match target {
+            FileTarget::Video => self.set_file(Some(path), cx),
+            FileTarget::Thumbnail => self.set_thumbnail(Some(path), window, cx),
+        }
     }
 
     fn on_tag_input(
@@ -453,18 +653,18 @@ impl PublishPanel {
         let rest = rest.trim_start().to_owned();
         input.update(cx, |input, cx| input.set_value(rest, window, cx));
         if added {
-            self.schedule_save(cx);
+            self.schedule_save(Field::Tags, cx);
         }
     }
 
     fn remove_tag(&mut self, tag: &str, cx: &mut Context<Self>) {
         self.draft.tags.retain(|existing| existing != tag);
-        self.schedule_save(cx);
+        self.schedule_save(Field::Tags, cx);
     }
 
     fn set_privacy(&mut self, privacy: Privacy, cx: &mut Context<Self>) {
         self.draft.privacy = privacy;
-        self.schedule_save(cx);
+        self.schedule_save(Field::Visibility, cx);
     }
 
     fn set_scheduled(&mut self, scheduled: bool, cx: &mut Context<Self>) {
@@ -482,12 +682,12 @@ impl PublishPanel {
                 self.draft.privacy = privacy;
             }
         }
-        self.schedule_save(cx);
+        self.schedule_save(Field::Visibility, cx);
     }
 
     fn insert_chapters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(chapters) = self.chapters.clone() else { return };
-        let description = insert_chapters(&self.draft.description, &chapters);
+        let Ok(chapters) = self.chapters.clone() else { return };
+        let description = insert_chapters(&self.draft.description, &chapters.text);
         // Replacing keeps the change undoable and reports it like typing would.
         self.description.update(cx, |input, cx| input.replace_all(description, window, cx));
     }
@@ -519,6 +719,7 @@ impl PublishPanel {
         let video_id = self.video_id;
         let started = self.service.update(cx, |service, cx| service.start_upload(video_id, cx));
         if let Err(error) = started {
+            self.on_upload_refused(&error, cx);
             window.push_notification(Notification::error(error.to_string()).title("Couldn't start the upload"), cx);
         }
     }
@@ -527,7 +728,16 @@ impl PublishPanel {
         let id = job.id;
         let resumed = self.service.update(cx, |service, cx| service.resume_upload(id, cx));
         if let Err(error) = resumed {
+            self.on_upload_refused(&error, cx);
             window.push_notification(Notification::error(error.to_string()).title("Couldn't resume the upload"), cx);
+        }
+    }
+
+    /// A file found missing when the upload starts is read again, so the file card and
+    /// the reasons under the button say so too.
+    fn on_upload_refused(&mut self, error: &UploadError, cx: &mut Context<Self>) {
+        if matches!(error, UploadError::Blocked(reasons) if reasons.contains(&BlockingReason::FileMissing)) {
+            self.refresh_file(cx);
         }
     }
 
@@ -538,12 +748,49 @@ impl PublishPanel {
             .icon(IconName::ListOrdered)
             .small()
             .outline()
-            .disabled(self.chapters.is_none())
-            .when(self.chapters.is_none(), |this| this.tooltip("Add Heading 2 sections to the script first"))
+            .disabled(self.chapters.is_err())
             .on_click(cx.listener(|this, _, window, cx| this.insert_chapters(window, cx)));
+        // The estimate may run past the end of the chosen file, where YouTube ignores it.
+        let file_secs = self
+            .file
+            .as_ref()
+            .filter(|file| Some(&file.path) == self.draft.file.as_ref())
+            .and_then(|file| file.media.as_ref())
+            .map(|media| media.duration_secs);
+        let past_the_end = match (&self.chapters, file_secs) {
+            (Ok(list), Some(secs)) if f64::from(list.last_start) + 10.0 > secs => Some(format!(
+                "The chosen file is {} long, but these chapters run to {}. YouTube ignores chapters past the end.",
+                format_duration(secs),
+                timestamp(list.last_start)
+            )),
+            _ => None,
+        };
+        let chapters_help = match (&self.chapters, past_the_end) {
+            (Err(reason), _) => help_text(*reason, cx).id("chapters-unavailable"),
+            (Ok(_), Some(warning)) => help_text(warning, cx).text_color(cx.theme().warning).id("chapters-past-the-end"),
+            (Ok(_), None) => {
+                help_text(format!("Timestamps are estimated from the script at {DEFAULT_WPM} words per minute."), cx)
+                    .id("chapters-estimate")
+            }
+        }
+        // Tests check which note is on screen.
+        .test_support();
+        let uploaded = self.state.read(cx).video(self.video_id).is_some_and(|video| video.youtube.is_some());
         v_flex()
             .gap_5()
-            .child(section_heading("Details", cx))
+            .child(v_flex().gap_1().child(section_heading("Details", cx)).when(uploaded, |this| {
+                // The form doesn't reach the uploaded video; saying so avoids edits that go nowhere.
+                this.child(
+                    div()
+                        .id("publish-next-upload-note")
+                        .child(help_text(
+                            "This video is on YouTube. Changes here apply to the next upload; change the \
+                                 uploaded one in YouTube Studio.",
+                            cx,
+                        ))
+                        .test_support(),
+                )
+            }))
             .child(
                 FieldRow::new("Title")
                     .counter(title_len, TITLE_MAX_CHARS)
@@ -555,16 +802,7 @@ impl PublishPanel {
                     .counter(self.draft.description.len(), DESCRIPTION_MAX_BYTES)
                     .control(Textarea::new(&self.description).aria_label("Description")),
             )
-            .child(
-                h_flex().gap_3().child(chapters_button).child(
-                    help_text(
-                        format!("Timestamps are estimated from the script at {DEFAULT_WPM} words per minute."),
-                        cx,
-                    )
-                    .flex_1()
-                    .min_w_0(),
-                ),
-            )
+            .child(h_flex().gap_3().child(chapters_button).child(chapters_help.flex_1().min_w_0()))
             .child(
                 FieldRow::new("Tags")
                     .counter(tags_length(&self.draft.tags), TAGS_MAX_CHARS)
@@ -677,7 +915,7 @@ impl PublishPanel {
                         .selected_index(Some(if self.draft.made_for_kids { 0 } else { 1 }))
                         .on_change(cx.listener(|this, ix: &usize, _, cx| {
                             this.draft.made_for_kids = *ix == 0;
-                            this.schedule_save(cx);
+                            this.schedule_save(Field::Audience, cx);
                         })),
                 ),
         )
@@ -709,11 +947,13 @@ impl PublishPanel {
         let body = match &job {
             Some(job) if service.is_active(job.id) => {
                 let cancelling = service.is_cancelling(job.id);
+                let retry = service.retry(job.id).filter(|_| !cancelling);
                 let transfer = service.transfer(job.id);
                 let fraction = transfer.map_or(0.0, |transfer| transfer.fraction());
                 // Amount and speed on one line, time left on the next: the column is too
                 // narrow for one line, and a wrap in the middle of a figure reads badly.
-                let (amount, eta) = match transfer.filter(|transfer| transfer.total() > 0) {
+                // While retrying, speed and time left mean nothing.
+                let (amount, eta) = match transfer.filter(|transfer| transfer.total() > 0 && retry.is_none()) {
                     Some(transfer) => {
                         let mut amount =
                             format!("{} of {}", format_bytes(transfer.sent()), format_bytes(transfer.total()));
@@ -727,8 +967,20 @@ impl PublishPanel {
                 let id = job.id;
                 v_flex()
                     .gap_2()
-                    .child(
-                        h_flex()
+                    .child(match retry {
+                        Some(retry) => div()
+                            .id("upload-retrying")
+                            .child(status_line(
+                                IconName::TriangleAlert,
+                                theme.warning,
+                                retry.headline(),
+                                Some(retry.detail().into()),
+                                cx,
+                            ))
+                            // Tests check that the retry is on screen.
+                            .test_support()
+                            .into_any_element(),
+                        None => h_flex()
                             .justify_between()
                             .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(if cancelling {
                                 "Stopping…"
@@ -740,8 +992,9 @@ impl PublishPanel {
                                     .text_sm()
                                     .text_color(theme.muted_foreground)
                                     .child(format!("{}%", (fraction * 100.0).floor())),
-                            ),
-                    )
+                            )
+                            .into_any_element(),
+                    })
                     .child(
                         Progress::new("upload-progress").value(fraction * 100.0).accessibility_label("Upload progress"),
                     )
@@ -766,7 +1019,7 @@ impl PublishPanel {
                         (None, "Uploaded", Some("YouTube is processing the video."))
                     }
                     (false, Some(ProcessingOutcome::Ready)) => {
-                        (Some(IconName::CircleCheck), "Uploaded to YouTube", Some("Processed and ready to watch."))
+                        (Some(IconName::CircleCheck), "Uploaded to YouTube", Some("Processed and ready."))
                     }
                     (false, Some(ProcessingOutcome::StillProcessing)) => (
                         Some(IconName::CircleCheck),
@@ -775,6 +1028,25 @@ impl PublishPanel {
                     ),
                     (false, None) => (Some(IconName::CircleCheck), "Uploaded to YouTube", None),
                 };
+                // Who can watch it on YouTube: what YouTube says once asked, else what was sent.
+                let visibility = self.state.read(cx).video(self.video_id).and_then(|video| {
+                    let link = video.youtube.as_ref()?;
+                    Some(match service.youtube_video(&link.video_id) {
+                        Some(info) => visibility_text(rules::core_privacy(info.privacy), info.publish_at),
+                        None => visibility_text(
+                            link.privacy,
+                            video.publish.publish_at.filter(|_| video.status == VideoStatus::Scheduled),
+                        ),
+                    })
+                });
+                let studio_url = self
+                    .state
+                    .read(cx)
+                    .video(self.video_id)
+                    .and_then(|video| video.youtube.as_ref())
+                    .map(|link| format!("https://studio.youtube.com/video/{}/edit", link.video_id));
+                let thumbnail_problem =
+                    service.thumbnail_problem(job.id).map(|problem| SharedString::from(problem.to_owned()));
                 v_flex()
                     .gap_3()
                     .child(
@@ -787,20 +1059,56 @@ impl PublishPanel {
                             }))
                             .child(
                                 v_flex()
+                                    .min_w_0()
                                     .gap_0p5()
                                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(headline))
+                                    .when_some(visibility, |this, visibility| {
+                                        this.child(
+                                            div()
+                                                .id("youtube-visibility")
+                                                .child(help_text(visibility, cx))
+                                                .test_support(),
+                                        )
+                                    })
                                     .when_some(detail, |this, detail| this.child(help_text(detail, cx))),
                             ),
                     )
+                    .when_some(thumbnail_problem, |this, problem| {
+                        this.child(
+                            div()
+                                .id("thumbnail-not-set")
+                                .child(status_line(
+                                    IconName::TriangleAlert,
+                                    theme.warning,
+                                    "Thumbnail not set",
+                                    Some(problem),
+                                    cx,
+                                ))
+                                // Tests check that the note stays on the card.
+                                .test_support(),
+                        )
+                    })
                     .child(
                         h_flex()
                             .flex_wrap()
                             .gap_x_4()
                             .gap_y_2()
                             .when_some(youtube_url.clone(), |this, url| this.child(open_link(url)))
+                            .when_some(studio_url, |this, url| {
+                                this.child(
+                                    div().text_sm().child(
+                                        Link::new("open-in-studio").href(url).child(
+                                            h_flex()
+                                                .gap_1()
+                                                .child("YouTube Studio")
+                                                .child(Icon::new(IconName::ExternalLink).xsmall()),
+                                        ),
+                                    ),
+                                )
+                            })
                             .child(
                                 Button::new("upload-again")
-                                    .label("Upload again")
+                                    .label("Upload again…")
                                     .small()
                                     .outline()
                                     .disabled(!reasons.is_empty())
@@ -924,7 +1232,8 @@ impl PublishPanel {
             .outline()
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
+                // The film icons take the left side; the chosen file is ticked on the right.
+                let mut menu = menu.check_side(Side::Right);
                 for (ix, choice) in choices.iter().enumerate() {
                     if ix == 0 || choices[ix - 1].source != choice.source {
                         menu = menu.label(choice.source);
@@ -991,10 +1300,29 @@ impl PublishPanel {
                     )
                     .into_any_element()
             }
-            None => help_text("Choose the AI edit's final cut, a take from the footage, or any video file.", cx)
-                .into_any_element(),
+            None => help_text(
+                "Choose the AI edit's final cut, a take from the footage, or any video file. You can also drop one here.",
+                cx,
+            )
+            .into_any_element(),
         };
-        card("publish-file", "Video file").child(v_flex().gap_3().child(body).child(h_flex().child(picker)))
+        let (drop_border, drop_fill) = (theme.primary, theme.drop_target);
+        card("publish-file", "Video file").child(
+            v_flex()
+                .id("video-file-drop")
+                .gap_3()
+                .rounded(theme.radius)
+                .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                    style.border_1().border_color(drop_border).bg(drop_fill)
+                })
+                .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                    this.on_drop(FileTarget::Video, paths, window, cx)
+                }))
+                .child(body)
+                .child(h_flex().child(picker))
+                // Tests drop files here.
+                .test_support(),
+        )
     }
 
     fn render_thumbnail(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1017,7 +1345,7 @@ impl PublishPanel {
                 .gap_1()
                 .text_color(theme.muted_foreground)
                 .child(Icon::new(IconName::Image).large())
-                .child(div().text_xs().child("No thumbnail"))
+                .child(div().text_xs().child("Drop an image here"))
                 .into_any_element(),
         };
         let mut notes = vec!["1280 × 720 JPG or PNG, up to 2 MB.".to_owned()];
@@ -1028,11 +1356,13 @@ impl PublishPanel {
             }
             _ => {}
         }
+        let (drop_border, drop_fill) = (theme.primary, theme.drop_target);
         card("publish-thumbnail", "Thumbnail").child(
             v_flex()
                 .gap_3()
                 .child(
                     div()
+                        .id("thumbnail-drop")
                         .w_full()
                         .aspect_ratio(16. / 9.)
                         .rounded(theme.radius)
@@ -1040,7 +1370,13 @@ impl PublishPanel {
                         .border_1()
                         .border_color(theme.border)
                         .bg(theme.muted)
-                        .child(preview),
+                        .drag_over::<ExternalPaths>(move |style, _, _, _| style.border_color(drop_border).bg(drop_fill))
+                        .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                            this.on_drop(FileTarget::Thumbnail, paths, window, cx)
+                        }))
+                        .child(preview)
+                        // Tests drop files here.
+                        .test_support(),
                 )
                 .when_some(current.as_ref(), |this, path| {
                     this.child(div().text_xs().text_color(theme.muted_foreground).truncate().child(file_name(path)))
@@ -1102,17 +1438,26 @@ fn render_blockers(reasons: &[BlockingReason], cx: &App) -> impl IntoElement {
     v_flex()
         .id("upload-blockers")
         .gap_1()
-        .children(reasons.iter().map(|reason| {
+        .children(reasons.iter().enumerate().map(|(ix, reason)| {
             h_flex()
                 .gap_2()
                 .items_start()
                 .text_sm()
                 .text_color(muted)
                 .child(div().pt_0p5().child(Icon::new(IconName::Circle).xsmall()))
-                .child(reason.to_string())
+                // Wraps inside the narrow side column instead of running past the card.
+                .child(div().id(("upload-blocker", ix)).flex_1().min_w_0().child(reason.to_string()).test_support())
         }))
         // Tests check that the reasons are on screen.
         .test_support()
+}
+
+/// `Private · goes public Mon, 12 Oct at 09:00`, or just who can watch.
+fn visibility_text(privacy: Privacy, publish_at: Option<DateTime<Utc>>) -> String {
+    match publish_at.filter(|at| privacy == Privacy::Private && *at > Utc::now()) {
+        Some(at) => format!("Private · goes public {}", at.with_timezone(&Local).format("%a, %-d %b at %H:%M")),
+        None => privacy.label().to_owned(),
+    }
 }
 
 /// "Uploads as unlisted." / "Publishes Fri, 10 Oct at 09:00."
@@ -1155,6 +1500,27 @@ fn file_choices(footage_dir: &Path) -> Vec<FileChoice> {
     choices
 }
 
+/// The existing file a typed path names: `~` expands, relative paths are refused.
+fn typed_file(text: &str, target: FileTarget) -> Result<PathBuf, String> {
+    let path = match expand_user_path(text) {
+        Ok(path) => path,
+        Err(PathInputError::Empty) => return Err("Enter the path of the file.".to_owned()),
+        Err(error) => return Err(error.to_string()),
+    };
+    if !path.is_file() {
+        return Err(format!("There's no file at {}.", path.display()));
+    }
+    if target == FileTarget::Thumbnail && !is_thumbnail_image(&path) {
+        return Err("Choose a JPG, PNG, GIF or BMP image.".to_owned());
+    }
+    Ok(path)
+}
+
+fn is_thumbnail_image(path: &Path) -> bool {
+    let extension = path.extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase);
+    extension.is_some_and(|ext| THUMBNAIL_EXTENSIONS.contains(&ext.as_str()))
+}
+
 /// Adds the comma-separated tags in `text`, skipping duplicates. Returns whether any was new.
 fn add_tags(tags: &mut Vec<String>, text: &str) -> bool {
     let mut added = false;
@@ -1190,6 +1556,53 @@ fn utc_time(local: chrono::NaiveDateTime) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_done_card_says_who_can_watch() {
+        let monday = Utc::now() + TimeDelta::days(2);
+        let scheduled = visibility_text(Privacy::Private, Some(monday));
+        assert!(scheduled.starts_with("Private · goes public "), "{scheduled}");
+        assert_eq!(visibility_text(Privacy::Unlisted, None), "Unlisted");
+        // Once the time has passed, YouTube made it public; until asked, private is all we know.
+        assert_eq!(visibility_text(Privacy::Private, Some(Utc::now() - TimeDelta::days(1))), "Private");
+    }
+
+    #[test]
+    fn saving_keeps_fields_changed_elsewhere() {
+        let draft = PublishSettings { title: "My title".into(), ..PublishSettings::default() };
+        let stored = PublishSettings { file: Some("/media/edit/final.mp4".into()), ..PublishSettings::default() };
+        let mut edited = Edited::default();
+        assert!(edited.is_empty());
+        edited.insert(Field::Title);
+        let merged = edited.merge(&stored, &draft);
+        assert_eq!(merged.title, "My title");
+        assert_eq!(merged.file, stored.file, "the final cut AI edit chose stays");
+        edited.insert(Field::File);
+        assert_eq!(edited.merge(&stored, &draft).file, None, "unless the form changed the file too");
+    }
+
+    #[test]
+    fn typed_paths_must_name_an_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let image = temp.path().join("thumb.PNG");
+        std::fs::write(&image, b"png").unwrap();
+        let typed = |text: &str, target| typed_file(text, target);
+        assert_eq!(typed(&format!("  {}  ", image.display()), FileTarget::Thumbnail), Ok(image.clone()));
+        assert_eq!(typed("", FileTarget::Video), Err("Enter the path of the file.".to_owned()));
+        assert!(typed("thumb.png", FileTarget::Thumbnail).unwrap_err().starts_with("Use a full path"));
+        assert!(
+            typed(&temp.path().join("gone.mp4").display().to_string(), FileTarget::Video)
+                .unwrap_err()
+                .starts_with("There's no file at")
+        );
+        let notes = temp.path().join("notes.txt");
+        std::fs::write(&notes, b"x").unwrap();
+        assert_eq!(
+            typed(&notes.display().to_string(), FileTarget::Thumbnail),
+            Err("Choose a JPG, PNG, GIF or BMP image.".to_owned())
+        );
+        assert!(typed(&notes.display().to_string(), FileTarget::Video).is_ok());
+    }
 
     #[test]
     fn tags_are_added_once_and_trimmed() {
