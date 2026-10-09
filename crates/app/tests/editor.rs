@@ -524,3 +524,13 @@ fn clicking_a_link_opens_it_without_editing(cx: &mut TestAppContext) {
     f.step(cx, |window, cx| window.click_at(part(link.id, "text"), point(px(200.), px(8.)), cx));
     assert_eq!(f.focused(cx), Some(link.id));
 }
+
+#[gpui_kit::test]
+fn clicking_inside_the_edited_block_places_the_caret_there(cx: &mut TestAppContext) {
+    let hello = paragraph("Hello world");
+    let f = Fixture::new(cx, vec![hello.clone()]);
+    f.focus_last(cx);
+    f.step(cx, |window, cx| window.click_at(part(hello.id, "text"), point(px(2.), px(8.)), cx));
+    f.type_text(cx, "X");
+    assert_eq!(f.summary(cx), owned(&[(BlockKind::Paragraph, "XHello world")]));
+}

@@ -264,6 +264,11 @@ impl DocumentEditor {
                 this.on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        // The focused block's input already placed the caret
+                        // (focusing an element prevents the default).
+                        if window.default_prevented() {
+                            return;
+                        }
                         cx.stop_propagation();
                         this.click_text(id, usize::MAX, window, cx);
                     }),
