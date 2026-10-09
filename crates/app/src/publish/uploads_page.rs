@@ -116,6 +116,9 @@ impl UploadsPage {
         let cancelling = service.is_cancelling(job.id);
         let detail: Option<SharedString> = match (&job.status, transfer) {
             _ if cancelling => Some("Stopping…".into()),
+            _ if let Some(retry) = service.retry(job.id) => {
+                Some(format!("{}. {}", retry.headline(), retry.detail()).into())
+            }
             (_, Some(transfer)) if transfer.total() > 0 => {
                 // Most telling first: the cell truncates, and the tooltip has the rest.
                 let mut parts =

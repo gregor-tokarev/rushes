@@ -560,6 +560,18 @@ pub(super) fn push_notification(cx: &mut App, notification: impl FnOnce() -> Not
     }
 }
 
+/// A YouTube error as the creator should read it. The technical detail goes to stderr.
+pub(super) fn describe_error(error: &YoutubeError) -> String {
+    eprintln!("videocrm: youtube: {error}");
+    match error {
+        error if error.is_network() => "Can't reach YouTube. Check your internet connection and try again.".to_owned(),
+        YoutubeError::ThumbnailsNotAllowed => "YouTube allows custom thumbnails only on verified channels. \
+            Verify yours at youtube.com/verify, then set the thumbnail in YouTube Studio."
+            .to_owned(),
+        error => sentence(&error.to_string()),
+    }
+}
+
 /// Library errors read like `network error: ...`; the UI shows sentences.
 pub(super) fn sentence(text: &str) -> String {
     let text = text.trim();
@@ -623,6 +635,15 @@ mod tests {
         tokens.save_credentials(&credentials("after the sign-out"));
         assert!(tokens.update(&SavedLogin { credentials: credentials("late"), account: None }).is_ok());
         assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn outages_read_as_plain_language() {
+        let offline = YoutubeError::Http(ureq::Error::ConnectionFailed);
+        assert_eq!(describe_error(&offline), "Can't reach YouTube. Check your internet connection and try again.");
+        let outage = YoutubeError::Api { status: 503, reason: "backendError".into(), message: "Backend Error".into() };
+        assert_eq!(describe_error(&outage), "YouTube is having problems right now. Try again in a few minutes.");
+        assert!(describe_error(&YoutubeError::ThumbnailsNotAllowed).contains("youtube.com/verify"));
     }
 
     #[test]

@@ -34,10 +34,15 @@ impl AccountBadge {
         let service = self.service.read(cx);
         match service.connection() {
             Connection::Connected(account) => {
-                let uploading = service.jobs().iter().filter_map(|job| service.transfer(job.id)).collect::<Vec<_>>();
+                let uploading = service
+                    .jobs()
+                    .iter()
+                    .filter_map(|job| Some((service.transfer(job.id)?, service.retry(job.id))))
+                    .collect::<Vec<_>>();
                 let detail = match uploading.as_slice() {
                     [] => account.channel_handle.clone().unwrap_or_else(|| account.email.clone()),
-                    [transfer] => format!("Uploading · {}%", (transfer.fraction() * 100.0).floor()),
+                    [(_, Some(retry))] => format!("{} · retrying", retry.headline()),
+                    [(transfer, None)] => format!("Uploading · {}%", (transfer.fraction() * 100.0).floor()),
                     several => format!("Uploading {} videos", several.len()),
                 };
                 (display_name(account), Some(detail))

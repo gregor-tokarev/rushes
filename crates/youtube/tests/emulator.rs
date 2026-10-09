@@ -19,14 +19,15 @@ use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use videocrm_youtube::{
-    Account, CredentialStore, Credentials, Error, Privacy, ProcessingStatus, SavedLogin,
-    UPLOAD_GRANULARITY, UploadOptions, UploadProgress, UploadStatus, VideoMetadata, YoutubeClient,
-    YoutubeConfig, begin_authorization, refresh,
+    Account, CredentialStore, Credentials, Error, Privacy, ProcessingStatus, RetryCause, SavedLogin,
+    UPLOAD_GRANULARITY, UploadOptions, UploadProgress, UploadStatus, VideoMetadata, YoutubeClient, YoutubeConfig,
+    begin_authorization, check_client, refresh,
 };
 
 const PROCESSING_MS: u64 = 1500;
 /// A 1×1 PNG.
-const PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+const PNG_BASE64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
 /// A running emulator pair, stopped on drop.
 struct Emulators {
@@ -41,10 +42,7 @@ impl Emulators {
     fn start() -> Option<Self> {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../emulators");
         if !dir.join("node_modules/emulate").is_dir() {
-            eprintln!(
-                "skipping emulator test: run `npm ci` in {} first",
-                dir.display()
-            );
+            eprintln!("skipping emulator test: run `npm ci` in {} first", dir.display());
             return None;
         }
         if Command::new("node").arg("--version").output().is_err() {
@@ -68,12 +66,7 @@ impl Emulators {
         let log_path = tmp.path().join("emulators.log");
         let log = File::create(&log_path).map_err(|e| e.to_string())?;
         let mut child = Command::new("node")
-            .args([
-                "node_modules/emulate/dist/index.js",
-                "start",
-                "--config",
-                "emulate.config.ts",
-            ])
+            .args(["node_modules/emulate/dist/index.js", "start", "--config", "emulate.config.ts"])
             .current_dir(dir)
             .env("GOOGLE_EMULATOR_PORT", google_port.to_string())
             .env("YOUTUBE_EMULATOR_PORT", youtube_port.to_string())
@@ -87,12 +80,7 @@ impl Emulators {
 
         let google_url = format!("http://127.0.0.1:{google_port}");
         let youtube_url = format!("http://127.0.0.1:{youtube_port}");
-        let ready = |url: String| {
-            plain_agent()
-                .get(&url)
-                .call()
-                .is_ok_and(|r| r.status() == 200)
-        };
+        let ready = |url: String| plain_agent().get(&url).call().is_ok_and(|r| r.status() == 200);
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             if let Ok(Some(status)) = child.try_wait() {
@@ -102,12 +90,7 @@ impl Emulators {
             if ready(format!("{google_url}/.well-known/openid-configuration"))
                 && ready(format!("{youtube_url}/_emulator/uploads"))
             {
-                return Ok(Emulators {
-                    child,
-                    google_url,
-                    youtube_url,
-                    _tmp: tmp,
-                });
+                return Ok(Emulators { child, google_url, youtube_url, _tmp: tmp });
             }
             if Instant::now() > deadline {
                 let _ = child.kill();
@@ -123,19 +106,13 @@ impl Emulators {
     }
 
     fn uploads(&self) -> Vec<Value> {
-        let mut response = plain_agent()
-            .get(&format!("{}/_emulator/uploads", self.youtube_url))
-            .call()
-            .unwrap();
+        let mut response = plain_agent().get(&format!("{}/_emulator/uploads", self.youtube_url)).call().unwrap();
         let body: Value = response.body_mut().read_json().unwrap();
         body["uploads"].as_array().unwrap().clone()
     }
 
     fn inject_fault(&self, fault: Value) {
-        let response = plain_agent()
-            .post(&format!("{}/_emulator/faults", self.youtube_url))
-            .send_json(fault)
-            .unwrap();
+        let response = plain_agent().post(&format!("{}/_emulator/faults", self.youtube_url)).send_json(fault).unwrap();
         assert_eq!(response.status(), 201);
     }
 }
@@ -150,10 +127,7 @@ impl Drop for Emulators {
 fn free_ports() -> (u16, u16) {
     let first = TcpListener::bind("127.0.0.1:0").unwrap();
     let second = TcpListener::bind("127.0.0.1:0").unwrap();
-    (
-        first.local_addr().unwrap().port(),
-        second.local_addr().unwrap().port(),
-    )
+    (first.local_addr().unwrap().port(), second.local_addr().unwrap().port())
 }
 
 fn plain_agent() -> ureq::Agent {
@@ -169,33 +143,18 @@ fn plain_agent() -> ureq::Agent {
 /// submit it, follow the redirect to the app's loopback server. Returns that page.
 fn consent_in_browser(authorize_url: &str, email: &str) -> String {
     let agent = plain_agent();
-    let html = agent
-        .get(authorize_url)
-        .call()
-        .unwrap()
-        .body_mut()
-        .read_to_string()
-        .unwrap();
+    let html = agent.get(authorize_url).call().unwrap().body_mut().read_to_string().unwrap();
     let form = html
         .split("<form")
         .skip(1)
         .map(parse_form)
         .find(|(_, fields)| fields.get("email").map(String::as_str) == Some(email))
         .unwrap_or_else(|| panic!("no consent form for {email}"));
-    let action = url::Url::parse(authorize_url)
-        .unwrap()
-        .join(&form.0)
-        .unwrap();
+    let action = url::Url::parse(authorize_url).unwrap().join(&form.0).unwrap();
     let response = agent.post(action.as_str()).send_form(form.1).unwrap();
     assert_eq!(response.status(), 302);
     let location = response.headers()["location"].to_str().unwrap().to_owned();
-    agent
-        .get(&location)
-        .call()
-        .unwrap()
-        .body_mut()
-        .read_to_string()
-        .unwrap()
+    agent.get(&location).call().unwrap().body_mut().read_to_string().unwrap()
 }
 
 /// `(action, hidden fields)` of one `<form ...>...</form>` fragment.
@@ -216,11 +175,7 @@ fn parse_form(fragment: &str) -> (String, HashMap<String, String>) {
 }
 
 fn unescape(text: &str) -> String {
-    text.replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
+    text.replace("&quot;", "\"").replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 }
 
 fn sign_in(emulators: &Emulators, email: &str) -> (Credentials, String) {
@@ -228,9 +183,7 @@ fn sign_in(emulators: &Emulators, email: &str) -> (Credentials, String) {
     let url = pending.authorize_url().to_owned();
     let email = email.to_owned();
     let browser = thread::spawn(move || consent_in_browser(&url, &email));
-    let credentials = pending
-        .wait(Duration::from_secs(30), &AtomicBool::new(false))
-        .unwrap();
+    let credentials = pending.wait(Duration::from_secs(30), &AtomicBool::new(false)).unwrap();
     (credentials, browser.join().unwrap())
 }
 
@@ -299,10 +252,7 @@ fn signs_in_and_reads_the_channel() {
     assert_eq!(channel.title, "Demo Creator");
     assert_eq!(channel.custom_url.as_deref(), Some("@creator"));
     assert!(channel.id.starts_with("UC"));
-    assert_eq!(
-        channel.uploads_playlist_id,
-        format!("UU{}", &channel.id[2..])
-    );
+    assert_eq!(channel.uploads_playlist_id, format!("UU{}", &channel.id[2..]));
     assert_eq!(channel.video_count, 0);
     assert!(channel.thumbnail_url.is_some());
 
@@ -313,10 +263,7 @@ fn signs_in_and_reads_the_channel() {
     assert_eq!(account.video_count, Some(0));
     let dir = tempfile::tempdir().unwrap();
     let store = CredentialStore::new(dir.path().join("credentials.json"));
-    let login = SavedLogin {
-        credentials,
-        account: Some(account),
-    };
+    let login = SavedLogin { credentials, account: Some(account) };
     store.save(&login).unwrap();
     assert_eq!(store.load().unwrap(), Some(login));
 
@@ -340,12 +287,7 @@ fn uploads_in_chunks_with_progress() {
 
     let mut events = Vec::new();
     let video = client
-        .upload_video(
-            &path,
-            &metadata("Chunked upload"),
-            &mut |event| events.push(event),
-            &AtomicBool::new(false),
-        )
+        .upload_video(&path, &metadata("Chunked upload"), &mut |event| events.push(event), &AtomicBool::new(false))
         .unwrap();
 
     assert!(
@@ -362,10 +304,7 @@ fn uploads_in_chunks_with_progress() {
             _ => None,
         })
         .collect();
-    assert!(
-        sent.windows(2).all(|pair| pair[0] <= pair[1]),
-        "progress went backwards: {sent:?}"
-    );
+    assert!(sent.windows(2).all(|pair| pair[0] <= pair[1]), "progress went backwards: {sent:?}");
     assert_eq!(sent.last(), Some(&total));
     // 13 chunks of 256 KiB, each reported when it starts and when it is sent.
     assert!(sent.len() >= 26, "{sent:?}");
@@ -373,10 +312,7 @@ fn uploads_in_chunks_with_progress() {
     assert_eq!(video.title, "Chunked upload");
     assert_eq!(video.privacy, Privacy::Unlisted);
     assert_eq!(video.upload_status, UploadStatus::Uploaded);
-    assert_eq!(
-        video.url,
-        format!("https://www.youtube.com/watch?v={}", video.id)
-    );
+    assert_eq!(video.url, format!("https://www.youtube.com/watch?v={}", video.id));
     assert_eq!(video.channel_id, client.my_channel().unwrap().id);
 
     let uploads = emulators.uploads();
@@ -385,10 +321,7 @@ fn uploads_in_chunks_with_progress() {
     assert_eq!(uploads[0]["bytes"], total);
     assert_eq!(uploads[0]["sha256"], sha256.as_str());
     assert_eq!(uploads[0]["contentType"], "video/mp4");
-    assert_eq!(
-        uploads[0]["snippet"]["tags"],
-        json!(["rust", "desktop app"])
-    );
+    assert_eq!(uploads[0]["snippet"]["tags"], json!(["rust", "desktop app"]));
     assert_eq!(uploads[0]["snippet"]["categoryId"], "28");
     assert_eq!(uploads[0]["status"]["selfDeclaredMadeForKids"], false);
 }
@@ -411,18 +344,13 @@ fn cancelled_upload_resumes_from_the_server_offset() {
         &metadata("Resumed"),
         &mut |event| match event {
             UploadProgress::Started { session_url } => started = Some(session_url),
-            UploadProgress::Bytes { sent, .. } if sent >= 1024 * 1024 => {
-                cancel.store(true, Ordering::Relaxed)
-            }
+            UploadProgress::Bytes { sent, .. } if sent >= 1024 * 1024 => cancel.store(true, Ordering::Relaxed),
             _ => {}
         },
         &cancel,
     );
     let error = result.unwrap_err();
-    let session_url = error
-        .session_url()
-        .expect("cancel keeps the session")
-        .to_owned();
+    let session_url = error.session_url().expect("cancel keeps the session").to_owned();
     assert!(matches!(error, Error::Cancelled { .. }));
     assert_eq!(Some(&session_url), started.as_ref());
     assert!(emulators.uploads().is_empty());
@@ -441,10 +369,7 @@ fn cancelled_upload_resumes_from_the_server_offset() {
         )
         .unwrap();
     let first_offset = first_offset.unwrap();
-    assert!(
-        first_offset >= 1024 * 1024 - UPLOAD_GRANULARITY && first_offset < total,
-        "resumed at {first_offset}"
-    );
+    assert!(first_offset >= 1024 * 1024 - UPLOAD_GRANULARITY && first_offset < total, "resumed at {first_offset}");
     assert_eq!(first_offset % UPLOAD_GRANULARITY, 0);
 
     let uploads = emulators.uploads();
@@ -454,9 +379,7 @@ fn cancelled_upload_resumes_from_the_server_offset() {
     assert_eq!(uploads[0]["contentType"], "video/quicktime");
 
     // Resuming a finished session just returns the video.
-    let again = client
-        .resume_upload(&session_url, &path, &mut |_| {}, &AtomicBool::new(false))
-        .unwrap();
+    let again = client.resume_upload(&session_url, &path, &mut |_| {}, &AtomicBool::new(false)).unwrap();
     assert_eq!(again.id, video.id);
 }
 
@@ -466,10 +389,8 @@ fn cancel_aborts_a_chunk_in_flight() {
         return;
     };
     let (credentials, _) = sign_in(&emulators, "creator@example.com");
-    let client = client(&emulators, credentials).with_upload_options(UploadOptions {
-        chunk_size: 8 * UPLOAD_GRANULARITY,
-        ..UploadOptions::default()
-    });
+    let client = client(&emulators, credentials)
+        .with_upload_options(UploadOptions { chunk_size: 8 * UPLOAD_GRANULARITY, ..UploadOptions::default() });
     let dir = tempfile::tempdir().unwrap();
     let (path, sha256) = video_file(dir.path(), "long.mp4", 5 * 1024 * 1024);
 
@@ -503,12 +424,21 @@ fn cancel_aborts_a_chunk_in_flight() {
         )
         .unwrap();
     let first_offset = first_offset.unwrap();
-    assert!(
-        first_offset < 8 * UPLOAD_GRANULARITY,
-        "the first chunk was not aborted: {first_offset}"
-    );
+    assert!(first_offset < 8 * UPLOAD_GRANULARITY, "the first chunk was not aborted: {first_offset}");
     assert_eq!(first_offset % UPLOAD_GRANULARITY, 0);
     assert_eq!(emulators.uploads()[0]["sha256"], sha256.as_str());
+}
+
+#[test]
+fn the_client_check_needs_a_reachable_sign_in_server() {
+    let Some(emulators) = Emulators::start() else {
+        return;
+    };
+    // The emulator knows every client: the made-up code is refused, the client is fine.
+    check_client(&emulators.config()).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let nobody = YoutubeConfig::emulator(&format!("http://127.0.0.1:{port}"), &emulators.youtube_url);
+    assert!(check_client(&nobody).unwrap_err().is_network());
 }
 
 #[test]
@@ -521,32 +451,31 @@ fn transient_failures_are_retried_from_the_server_offset() {
     let dir = tempfile::tempdir().unwrap();
     let (path, sha256) = video_file(dir.path(), "final.webm", 2 * 1024 * 1024 + 1);
 
-    emulators.inject_fault(
-        json!({"method": "POST", "path": "/upload/youtube/v3/videos", "status": 503}),
-    );
-    emulators.inject_fault(
-        json!({"method": "PUT", "path": "/upload/youtube/v3/videos", "status": 500, "times": 2}),
-    );
+    emulators.inject_fault(json!({"method": "POST", "path": "/upload/youtube/v3/videos", "status": 503}));
+    emulators.inject_fault(json!({"method": "PUT", "path": "/upload/youtube/v3/videos", "status": 500, "times": 2}));
+    let mut retries = Vec::new();
     let video = client
         .upload_video(
             &path,
             &metadata("Flaky network"),
-            &mut |_| {},
+            &mut |event| {
+                if let UploadProgress::Retrying { attempt, cause, .. } = event {
+                    retries.push((attempt, cause));
+                }
+            },
             &AtomicBool::new(false),
         )
         .unwrap();
+    // Each failure is reported before its backoff, so the app can say what is going on.
+    assert_eq!(retries, [(1, RetryCause::Server), (1, RetryCause::Server), (2, RetryCause::Server)]);
     let uploads = emulators.uploads();
     assert_eq!(uploads[0]["videoId"], video.id.as_str());
     assert_eq!(uploads[0]["sha256"], sha256.as_str());
 
     // The server keeps only part of a chunk: the client continues from its Range.
-    let client = client.with_upload_options(UploadOptions {
-        chunk_size: 4 * UPLOAD_GRANULARITY,
-        ..UploadOptions::default()
-    });
-    emulators.inject_fault(
-        json!({"path": "/upload/youtube/v3/videos", "persistBytes": UPLOAD_GRANULARITY}),
-    );
+    let client =
+        client.with_upload_options(UploadOptions { chunk_size: 4 * UPLOAD_GRANULARITY, ..UploadOptions::default() });
+    emulators.inject_fault(json!({"path": "/upload/youtube/v3/videos", "persistBytes": UPLOAD_GRANULARITY}));
     let mut sent = Vec::new();
     let video = client
         .upload_video(
@@ -560,22 +489,14 @@ fn transient_failures_are_retried_from_the_server_offset() {
             &AtomicBool::new(false),
         )
         .unwrap();
-    assert!(
-        sent.windows(2).any(|pair| pair[1] < pair[0]),
-        "never resumed from the server offset: {sent:?}"
-    );
+    assert!(sent.windows(2).any(|pair| pair[1] < pair[0]), "never resumed from the server offset: {sent:?}");
     assert_eq!(emulators.uploads()[1]["videoId"], video.id.as_str());
     assert_eq!(emulators.uploads()[1]["sha256"], sha256.as_str());
 
-    emulators.inject_fault(json!({"method": "POST", "path": "/upload/youtube/v3/videos", "status": 403, "reason": "quotaExceeded"}));
-    let error = client
-        .upload_video(
-            &path,
-            &metadata("No quota"),
-            &mut |_| {},
-            &AtomicBool::new(false),
-        )
-        .unwrap_err();
+    emulators.inject_fault(
+        json!({"method": "POST", "path": "/upload/youtube/v3/videos", "status": 403, "reason": "quotaExceeded"}),
+    );
+    let error = client.upload_video(&path, &metadata("No quota"), &mut |_| {}, &AtomicBool::new(false)).unwrap_err();
     assert!(matches!(&error, Error::Api { status: 403, reason, .. } if reason == "quotaExceeded"));
     assert!(error.to_string().contains("quota"));
 }
@@ -588,18 +509,10 @@ fn refreshes_expired_and_rejected_tokens() {
     let (credentials, _) = sign_in(&emulators, "creator@example.com");
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(CredentialStore::new(dir.path().join("credentials.json")));
-    store
-        .save(&SavedLogin {
-            credentials: credentials.clone(),
-            account: None,
-        })
-        .unwrap();
+    store.save(&SavedLogin { credentials: credentials.clone(), account: None }).unwrap();
 
     // Expired: refreshed before the request, and persisted through the callback.
-    let expired = Credentials {
-        expires_at: Utc::now() - TimeDelta::minutes(5),
-        ..credentials.clone()
-    };
+    let expired = Credentials { expires_at: Utc::now() - TimeDelta::minutes(5), ..credentials.clone() };
     let refreshes = Arc::new(AtomicUsize::new(0));
     let client = YoutubeClient::new(emulators.config(), expired, {
         let (store, refreshes) = (store.clone(), refreshes.clone());
@@ -618,10 +531,7 @@ fn refreshes_expired_and_rejected_tokens() {
     assert_eq!(store.load().unwrap().unwrap().credentials, fresh);
 
     // Rejected with 401: refreshed once and retried; concurrent callers share one refresh.
-    let rejected = Credentials {
-        access_token: "revoked-token".to_owned(),
-        ..credentials.clone()
-    };
+    let rejected = Credentials { access_token: "revoked-token".to_owned(), ..credentials.clone() };
     let new_tokens = Arc::new(Mutex::new(Vec::new()));
     let client = Arc::new(YoutubeClient::new(emulators.config(), rejected, {
         let new_tokens = new_tokens.clone();
@@ -639,27 +549,15 @@ fn refreshes_expired_and_rejected_tokens() {
     assert_eq!(new_tokens.lock().unwrap().len(), 1);
 
     // No refresh token: the 401 surfaces and asks for a new sign-in.
-    let stranded = Credentials {
-        access_token: "revoked-token".to_owned(),
-        refresh_token: None,
-        ..credentials.clone()
-    };
-    let error = YoutubeClient::new(emulators.config(), stranded, |_| {})
-        .my_channel()
-        .unwrap_err();
-    assert!(
-        matches!(&error, Error::Api { status: 401, reason, .. } if reason == "authError"),
-        "{error:?}"
-    );
+    let stranded = Credentials { access_token: "revoked-token".to_owned(), refresh_token: None, ..credentials.clone() };
+    let error = YoutubeClient::new(emulators.config(), stranded, |_| {}).my_channel().unwrap_err();
+    assert!(matches!(&error, Error::Api { status: 401, reason, .. } if reason == "authError"), "{error:?}");
     assert!(error.needs_sign_in());
 
     // Revoking the grant kills the refresh token.
     client.revoke().unwrap();
     let error = refresh(&emulators.config(), &client.credentials()).unwrap_err();
-    assert!(
-        matches!(&error, Error::OAuth { error, .. } if error == "invalid_grant"),
-        "{error:?}"
-    );
+    assert!(matches!(&error, Error::OAuth { error, .. } if error == "invalid_grant"), "{error:?}");
     assert!(error.needs_sign_in());
 }
 
@@ -676,12 +574,7 @@ fn thumbnails_processing_and_uploads_list() {
     let mut ids = Vec::new();
     for index in 0..52 {
         let video = client
-            .upload_video(
-                &path,
-                &metadata(&format!("Video {index}")),
-                &mut |_| {},
-                &AtomicBool::new(false),
-            )
+            .upload_video(&path, &metadata(&format!("Video {index}")), &mut |_| {}, &AtomicBool::new(false))
             .unwrap();
         ids.push(video.id);
     }
@@ -694,20 +587,16 @@ fn thumbnails_processing_and_uploads_list() {
     let thumbnail_path = dir.path().join("thumbnail.png");
     std::fs::write(&thumbnail_path, &png).unwrap();
     let thumbnail_url = client.set_thumbnail(&newest, &thumbnail_path).unwrap();
-    let served = plain_agent()
-        .get(&thumbnail_url)
-        .call()
-        .unwrap()
-        .body_mut()
-        .read_to_vec()
-        .unwrap();
+    let served = plain_agent().get(&thumbnail_url).call().unwrap().body_mut().read_to_vec().unwrap();
     assert_eq!(served, png);
+    // Channels without phone verification may not set custom thumbnails.
+    emulators.inject_fault(
+        json!({"method": "POST", "path": "/upload/youtube/v3/thumbnails/set", "status": 403, "reason": "forbidden"}),
+    );
+    assert!(matches!(client.set_thumbnail(&newest, &thumbnail_path), Err(Error::ThumbnailsNotAllowed)));
     let not_image = dir.path().join("thumbnail.gif");
     std::fs::write(&not_image, b"GIF89a").unwrap();
-    assert!(matches!(
-        client.set_thumbnail(&newest, &not_image),
-        Err(Error::InvalidInput(_))
-    ));
+    assert!(matches!(client.set_thumbnail(&newest, &not_image), Err(Error::InvalidInput(_))));
 
     let mut info = client.get_video(&newest).unwrap().unwrap();
     assert_eq!(info.title, "Video 51");
@@ -723,20 +612,10 @@ fn thumbnails_processing_and_uploads_list() {
     assert_eq!(client.get_video("doesNotExist").unwrap(), None);
 
     // Two playlist pages (50 + 2), newest first.
-    let listed: Vec<String> = client
-        .list_my_uploads(100)
-        .unwrap()
-        .into_iter()
-        .map(|video| video.id)
-        .collect();
+    let listed: Vec<String> = client.list_my_uploads(100).unwrap().into_iter().map(|video| video.id).collect();
     let mut expected = ids.clone();
     expected.reverse();
     assert_eq!(listed, expected);
-    let latest: Vec<String> = client
-        .list_my_uploads(3)
-        .unwrap()
-        .into_iter()
-        .map(|video| video.id)
-        .collect();
+    let latest: Vec<String> = client.list_my_uploads(3).unwrap().into_iter().map(|video| video.id).collect();
     assert_eq!(latest, expected[..3]);
 }

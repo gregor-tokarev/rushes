@@ -26,5 +26,5 @@ pub use rules::{BlockingReason, CATEGORIES, Category, blocking_reasons, tags_len
 pub use service::{Connection, YoutubeEvent, YoutubeService, backend_config};
 pub use settings::{EmulatorCheck, YoutubeSettings};
 pub use transfer::Transfer;
-pub use upload::{INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, UploadError};
+pub use upload::{INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, Retry, UploadError};
 pub use uploads_page::UploadsPage;

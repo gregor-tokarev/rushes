@@ -15,12 +15,14 @@ use gpui_kit::{
     px, size,
 };
 use publish_support::{Emulators, Workspace, wait_until};
+use serde_json::json;
 use videocrm::publish::{
     AccountBadge, BlockingReason, CHAPTERS_HEADING, Connection, PublishPanel, UploadsPage, YoutubeSettings,
 };
 use videocrm::route::Route;
 use videocrm_core::settings::YoutubeBackend;
 use videocrm_core::{Block, BlockKind, DocumentKind, Privacy, UploadId, UploadJob, UploadStatus, VideoId, YoutubeLink};
+use videocrm_youtube::RetryCause;
 
 /// Longer than the views' save delay.
 const SAVED: Duration = Duration::from_secs(1);
@@ -399,4 +401,41 @@ fn connects_and_uploads_from_the_publish_tab(cx: &mut TestAppContext) {
     assert_eq!(link.video_id, youtube_id);
     assert_eq!(cx.opened_url(), Some(link.url));
     assert_eq!(emulators.uploads().len(), 1);
+}
+
+#[gpui_kit::test]
+fn an_outage_shows_the_retry_on_the_upload_card(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Keychron Q1 Max review", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.privacy = Privacy::Private;
+    });
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    cx.run_until_parked();
+    // YouTube answers every chunk with 503 Backend Error.
+    emulators.inject_fault(json!({"method": "PUT", "path": "/upload/youtube/v3/videos", "status": 503, "times": 1000}));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("upload-to-youtube", cx);
+    });
+    let service = workspace.service.clone();
+    let retry = wait_until(cx, "the retry", |cx| {
+        service.read_with(cx, |s, _| s.latest_job(video_id).and_then(|job| s.retry(job.id)))
+    });
+    assert_eq!((retry.attempt, retry.cause), (1, RetryCause::Server));
+    assert_eq!(retry.headline(), "YouTube isn't responding");
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        // The card says what is going on instead of a frozen "Uploading… 100%".
+        assert!(window.find("upload-retrying").visible());
+        window.click("cancel-upload", cx);
+    });
+    let job = wait_until(cx, "the cancellation", |cx| {
+        service
+            .read_with(cx, |s, _| s.latest_job(video_id).filter(|job| job.status == UploadStatus::Cancelled).cloned())
+    });
+    assert!(service.read_with(cx, |s, _| s.retry(job.id).is_none() && s.is_resumable(&job)));
 }

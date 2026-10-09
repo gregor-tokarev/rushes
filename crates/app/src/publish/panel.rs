@@ -709,11 +709,13 @@ impl PublishPanel {
         let body = match &job {
             Some(job) if service.is_active(job.id) => {
                 let cancelling = service.is_cancelling(job.id);
+                let retry = service.retry(job.id).filter(|_| !cancelling);
                 let transfer = service.transfer(job.id);
                 let fraction = transfer.map_or(0.0, |transfer| transfer.fraction());
                 // Amount and speed on one line, time left on the next: the column is too
                 // narrow for one line, and a wrap in the middle of a figure reads badly.
-                let (amount, eta) = match transfer.filter(|transfer| transfer.total() > 0) {
+                // While retrying, speed and time left mean nothing.
+                let (amount, eta) = match transfer.filter(|transfer| transfer.total() > 0 && retry.is_none()) {
                     Some(transfer) => {
                         let mut amount =
                             format!("{} of {}", format_bytes(transfer.sent()), format_bytes(transfer.total()));
@@ -727,8 +729,20 @@ impl PublishPanel {
                 let id = job.id;
                 v_flex()
                     .gap_2()
-                    .child(
-                        h_flex()
+                    .child(match retry {
+                        Some(retry) => div()
+                            .id("upload-retrying")
+                            .child(status_line(
+                                IconName::TriangleAlert,
+                                theme.warning,
+                                retry.headline(),
+                                Some(retry.detail().into()),
+                                cx,
+                            ))
+                            // Tests check that the retry is on screen.
+                            .test_support()
+                            .into_any_element(),
+                        None => h_flex()
                             .justify_between()
                             .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(if cancelling {
                                 "Stopping…"
@@ -740,8 +754,9 @@ impl PublishPanel {
                                     .text_sm()
                                     .text_color(theme.muted_foreground)
                                     .child(format!("{}%", (fraction * 100.0).floor())),
-                            ),
-                    )
+                            )
+                            .into_any_element(),
+                    })
                     .child(
                         Progress::new("upload-progress").value(fraction * 100.0).accessibility_label("Upload progress"),
                     )

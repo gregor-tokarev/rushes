@@ -24,6 +24,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// send anything; one of them must not hold up the real redirect (or cancel) for long.
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_REQUEST_HEAD: usize = 16 * 1024;
+/// Budget of [`check_client`]: it runs while the creator waits for the browser.
+const CLIENT_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// OAuth tokens for one Google account. `Debug` never prints the tokens.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,15 +42,11 @@ impl Credentials {
     /// True when the access token is expired or expires within `margin`.
     pub fn expires_within(&self, margin: Duration) -> bool {
         let margin = TimeDelta::from_std(margin).unwrap_or(TimeDelta::MAX);
-        Utc::now()
-            .checked_add_signed(margin)
-            .is_none_or(|limit| self.expires_at <= limit)
+        Utc::now().checked_add_signed(margin).is_none_or(|limit| self.expires_at <= limit)
     }
 
     pub fn has_scope(&self, scope: &str) -> bool {
-        self.scope
-            .split_whitespace()
-            .any(|granted| granted == scope)
+        self.scope.split_whitespace().any(|granted| granted == scope)
     }
 }
 
@@ -56,10 +54,7 @@ impl fmt::Debug for Credentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Credentials")
             .field("access_token", &"<redacted>")
-            .field(
-                "refresh_token",
-                &self.refresh_token.as_ref().map(|_| "<redacted>"),
-            )
+            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "<redacted>"))
             .field("expires_at", &self.expires_at)
             .field("scope", &self.scope)
             .field("id_token", &self.id_token.as_ref().map(|_| "<redacted>"))
@@ -79,21 +74,13 @@ struct TokenResponse {
 impl TokenResponse {
     fn into_credentials(self, previous: Option<&Credentials>) -> Credentials {
         // Google issues one-hour tokens; the clamp keeps a bogus value from overflowing.
-        let lifetime =
-            TimeDelta::try_seconds(self.expires_in.clamp(0, 365 * 24 * 3600)).unwrap_or_default();
+        let lifetime = TimeDelta::try_seconds(self.expires_in.clamp(0, 365 * 24 * 3600)).unwrap_or_default();
         Credentials {
             access_token: self.access_token,
-            refresh_token: self
-                .refresh_token
-                .or_else(|| previous.and_then(|p| p.refresh_token.clone())),
+            refresh_token: self.refresh_token.or_else(|| previous.and_then(|p| p.refresh_token.clone())),
             expires_at: Utc::now() + lifetime,
-            scope: self
-                .scope
-                .or_else(|| previous.map(|p| p.scope.clone()))
-                .unwrap_or_default(),
-            id_token: self
-                .id_token
-                .or_else(|| previous.and_then(|p| p.id_token.clone())),
+            scope: self.scope.or_else(|| previous.map(|p| p.scope.clone())).unwrap_or_default(),
+            id_token: self.id_token.or_else(|| previous.and_then(|p| p.id_token.clone())),
         }
     }
 }
@@ -112,9 +99,7 @@ pub struct PendingAuthorization {
 /// Binds the loopback redirect listener and builds the consent URL.
 pub fn begin_authorization(config: &YoutubeConfig) -> Result<PendingAuthorization> {
     if config.client_id.trim().is_empty() {
-        return Err(Error::InvalidInput(
-            "the OAuth client id is empty".to_owned(),
-        ));
+        return Err(Error::InvalidInput("the OAuth client id is empty".to_owned()));
     }
     // Google's token endpoint rejects Desktop clients without their secret, PKCE or not.
     if config.is_google() && config.client_secret.is_none() {
@@ -122,24 +107,13 @@ pub fn begin_authorization(config: &YoutubeConfig) -> Result<PendingAuthorizatio
             "Google also needs the OAuth client secret of the Desktop app client".to_owned(),
         ));
     }
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| Error::io("binding the sign-in redirect port", e))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| Error::io("reading the sign-in redirect port", e))?
-        .port();
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| Error::io("binding the sign-in redirect port", e))?;
+    let port = listener.local_addr().map_err(|e| Error::io("reading the sign-in redirect port", e))?.port();
     let redirect_uri = format!("http://127.0.0.1:{port}");
     let verifier = random_token(48)?;
     let state = random_token(24)?;
     let authorize_url = authorize_url(config, &redirect_uri, &state, &pkce_challenge(&verifier))?;
-    Ok(PendingAuthorization {
-        listener,
-        config: config.clone(),
-        redirect_uri,
-        state,
-        verifier,
-        authorize_url,
-    })
+    Ok(PendingAuthorization { listener, config: config.clone(), redirect_uri, state, verifier, authorize_url })
 }
 
 impl PendingAuthorization {
@@ -156,9 +130,7 @@ impl PendingAuthorization {
     /// requests (favicon, probes) are answered and ignored. Checks `cancel` about
     /// every 50 ms. `Duration::MAX` waits until the redirect or cancel.
     pub fn wait(self, timeout: Duration, cancel: &AtomicBool) -> Result<Credentials> {
-        self.listener
-            .set_nonblocking(true)
-            .map_err(|e| Error::io("configuring the sign-in redirect listener", e))?;
+        self.listener.set_nonblocking(true).map_err(|e| Error::io("configuring the sign-in redirect listener", e))?;
         let deadline = Instant::now().checked_add(timeout);
         let agent = http::agent();
         loop {
@@ -174,37 +146,23 @@ impl PendingAuthorization {
                         return outcome;
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(POLL_INTERVAL)
-                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(POLL_INTERVAL),
                 Err(e) => return Err(Error::io("accepting the sign-in redirect", e)),
             }
         }
     }
 
     /// `None` when the connection was not the redirect of this sign-in.
-    fn handle_connection(
-        &self,
-        agent: &Agent,
-        mut stream: TcpStream,
-    ) -> Option<Result<Credentials>> {
+    fn handle_connection(&self, agent: &Agent, mut stream: TcpStream) -> Option<Result<Credentials>> {
         let target = read_request_target(&stream)?;
         let url = Url::parse(&format!("http://127.0.0.1{target}")).ok()?;
-        let param = |name: &str| {
-            url.query_pairs()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.into_owned())
-        };
+        let param = |name: &str| url.query_pairs().find(|(key, _)| key == name).map(|(_, value)| value.into_owned());
         let (code, error) = (param("code"), param("error"));
         if url.path() != "/" || (code.is_none() && error.is_none()) {
             respond(
                 &mut stream,
                 "404 Not Found",
-                &page(
-                    "Not found",
-                    "This address only completes the VideoCRM sign-in.",
-                    false,
-                ),
+                &page("Not found", "This address only completes the VideoCRM sign-in.", false),
             );
             return None;
         }
@@ -226,45 +184,23 @@ impl PendingAuthorization {
         let outcome = if let Some(error) = error {
             Err(match error.as_str() {
                 "access_denied" => Error::AccessDenied,
-                _ => Error::OAuth {
-                    error,
-                    description: param("error_description"),
-                },
+                _ => Error::OAuth { error, description: param("error_description") },
             })
         } else {
             let code = code.unwrap_or_default();
-            exchange_code(
-                agent,
-                &self.config,
-                &code,
-                &self.redirect_uri,
-                &self.verifier,
-            )
+            exchange_code(agent, &self.config, &code, &self.redirect_uri, &self.verifier)
         };
 
         let body = match &outcome {
-            Ok(_) => page(
-                "You're signed in",
-                "Return to VideoCRM — you can close this tab.",
-                true,
-            ),
-            Err(error) => page(
-                "Sign-in didn't finish",
-                &format!("{error}. Return to VideoCRM and try again."),
-                false,
-            ),
+            Ok(_) => page("You're signed in", "Return to VideoCRM — you can close this tab.", true),
+            Err(error) => page("Sign-in didn't finish", &format!("{error}. Return to VideoCRM and try again."), false),
         };
         respond(&mut stream, "200 OK", &body);
         Some(outcome)
     }
 }
 
-fn authorize_url(
-    config: &YoutubeConfig,
-    redirect_uri: &str,
-    state: &str,
-    challenge: &str,
-) -> Result<String> {
+fn authorize_url(config: &YoutubeConfig, redirect_uri: &str, state: &str, challenge: &str) -> Result<String> {
     let scope = SCOPES.join(" ");
     let url = Url::parse_with_params(
         &config.auth_url,
@@ -281,20 +217,14 @@ fn authorize_url(
             ("include_granted_scopes", "true"),
         ],
     )
-    .map_err(|e| {
-        Error::InvalidInput(format!(
-            "invalid authorization URL {}: {e}",
-            config.auth_url
-        ))
-    })?;
+    .map_err(|e| Error::InvalidInput(format!("invalid authorization URL {}: {e}", config.auth_url)))?;
     Ok(url.into())
 }
 
 /// URL-safe random string with `bytes` bytes of entropy (4/3 as many characters).
 fn random_token(bytes: usize) -> Result<String> {
     let mut buffer = vec![0u8; bytes];
-    getrandom::fill(&mut buffer)
-        .map_err(|e| Error::io("generating random sign-in values", e.into()))?;
+    getrandom::fill(&mut buffer).map_err(|e| Error::io("generating random sign-in values", e.into()))?;
     Ok(URL_SAFE_NO_PAD.encode(buffer))
 }
 
@@ -308,8 +238,7 @@ fn read_request_target(stream: &TcpStream) -> Option<String> {
     stream.set_nonblocking(false).ok()?;
     stream.set_write_timeout(Some(REQUEST_READ_TIMEOUT)).ok()?;
     let deadline = Instant::now() + REQUEST_READ_TIMEOUT;
-    let mut reader =
-        BufReader::new(DeadlineReader { stream, deadline }.take(MAX_REQUEST_HEAD as u64));
+    let mut reader = BufReader::new(DeadlineReader { stream, deadline }.take(MAX_REQUEST_HEAD as u64));
     let mut request_line = String::new();
     reader.read_line(&mut request_line).ok()?;
     let mut parts = request_line.split_whitespace();
@@ -353,17 +282,11 @@ fn respond(stream: &mut TcpStream, status: &str, body: &str) {
         body.len()
     );
     // The browser may already have given up on the tab; the sign-in result stands either way.
-    let _ = stream
-        .write_all(response.as_bytes())
-        .and_then(|()| stream.flush());
+    let _ = stream.write_all(response.as_bytes()).and_then(|()| stream.flush());
 }
 
 fn page(title: &str, message: &str, success: bool) -> String {
-    let (accent, icon) = if success {
-        ("#16a34a", "&#10003;")
-    } else {
-        ("#dc2626", "!")
-    };
+    let (accent, icon) = if success { ("#16a34a", "&#10003;") } else { ("#dc2626", "!") };
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -391,16 +314,10 @@ fn page(title: &str, message: &str, success: bool) -> String {
 }
 
 fn escape_html(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-fn token_request(
-    mut response: HttpResponse,
-    previous: Option<&Credentials>,
-) -> Result<Credentials> {
+fn token_request(mut response: HttpResponse, previous: Option<&Credentials>) -> Result<Credentials> {
     let status = response.status().as_u16();
     if !response.status().is_success() {
         return Err(oauth_error(status, &body_text(&mut response)));
@@ -429,21 +346,46 @@ fn exchange_code(
     token_request(agent.post(&config.token_url).send_form(form)?, None)
 }
 
+/// Asks the token endpoint whether it knows the OAuth client, before any browser
+/// opens. A made-up authorization code is refused with `invalid_grant` when the client
+/// exists and with `invalid_client` when the client ID or secret is wrong; only the
+/// latter is an error here. Fails with [`Error::Http`] when the server can't be reached.
+pub fn check_client(config: &YoutubeConfig) -> Result<()> {
+    let mut form = vec![
+        ("grant_type", "authorization_code"),
+        ("code", "videocrm-client-check"),
+        ("redirect_uri", "http://127.0.0.1"),
+        ("client_id", config.client_id.as_str()),
+        ("code_verifier", "videocrm-client-check-videocrm-client-check-videocrm"),
+    ];
+    if let Some(secret) = &config.client_secret {
+        form.push(("client_secret", secret));
+    }
+    let mut response = http::agent()
+        .post(&config.token_url)
+        .config()
+        .timeout_global(Some(CLIENT_CHECK_TIMEOUT))
+        .build()
+        .send_form(form)?;
+    let status = response.status().as_u16();
+    if response.status().is_success() {
+        return Ok(());
+    }
+    match oauth_error(status, &body_text(&mut response)) {
+        error if error.is_invalid_client() => Err(error),
+        // Anything else is about the made-up code, or for the real sign-in to find out.
+        _ => Ok(()),
+    }
+}
+
 /// Exchanges the refresh token for a new access token. Google usually does not
 /// return a new refresh token; the old one is kept then.
 pub fn refresh(config: &YoutubeConfig, credentials: &Credentials) -> Result<Credentials> {
     refresh_with(&http::agent(), config, credentials)
 }
 
-pub(crate) fn refresh_with(
-    agent: &Agent,
-    config: &YoutubeConfig,
-    credentials: &Credentials,
-) -> Result<Credentials> {
-    let refresh_token = credentials
-        .refresh_token
-        .as_deref()
-        .ok_or(Error::NoRefreshToken)?;
+pub(crate) fn refresh_with(agent: &Agent, config: &YoutubeConfig, credentials: &Credentials) -> Result<Credentials> {
+    let refresh_token = credentials.refresh_token.as_deref().ok_or(Error::NoRefreshToken)?;
     let mut form = vec![
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
@@ -452,10 +394,7 @@ pub(crate) fn refresh_with(
     if let Some(secret) = &config.client_secret {
         form.push(("client_secret", secret));
     }
-    token_request(
-        agent.post(&config.token_url).send_form(form)?,
-        Some(credentials),
-    )
+    token_request(agent.post(&config.token_url).send_form(form)?, Some(credentials))
 }
 
 /// Revokes the grant: the access token and, if present, the refresh token. Tokens
@@ -464,17 +403,10 @@ pub fn revoke(config: &YoutubeConfig, credentials: &Credentials) -> Result<()> {
     revoke_with(&http::agent(), config, credentials)
 }
 
-pub(crate) fn revoke_with(
-    agent: &Agent,
-    config: &YoutubeConfig,
-    credentials: &Credentials,
-) -> Result<()> {
-    let tokens = std::iter::once(credentials.access_token.as_str())
-        .chain(credentials.refresh_token.as_deref());
+pub(crate) fn revoke_with(agent: &Agent, config: &YoutubeConfig, credentials: &Credentials) -> Result<()> {
+    let tokens = std::iter::once(credentials.access_token.as_str()).chain(credentials.refresh_token.as_deref());
     for token in tokens {
-        let mut response = agent
-            .post(&config.revoke_url)
-            .send_form([("token", token)])?;
+        let mut response = agent.post(&config.revoke_url).send_form([("token", token)])?;
         let status = response.status().as_u16();
         if response.status().is_success() {
             continue;
@@ -504,24 +436,14 @@ mod tests {
     fn verifier_is_64_url_safe_characters() {
         let verifier = random_token(48).unwrap();
         assert_eq!(verifier.len(), 64);
-        assert!(
-            verifier
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        );
+        assert!(verifier.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
         assert_ne!(verifier, random_token(48).unwrap());
     }
 
     #[test]
     fn authorize_url_carries_the_installed_app_parameters() {
         let config = YoutubeConfig::google("client.apps.googleusercontent.com", None);
-        let url = authorize_url(
-            &config,
-            "http://127.0.0.1:5555",
-            "the-state",
-            "the-challenge",
-        )
-        .unwrap();
+        let url = authorize_url(&config, "http://127.0.0.1:5555", "the-state", "the-challenge").unwrap();
         let url = Url::parse(&url).unwrap();
         assert_eq!(url.host_str(), Some("accounts.google.com"));
         let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
@@ -545,10 +467,7 @@ mod tests {
     }
 
     fn address(pending: &PendingAuthorization) -> String {
-        pending
-            .redirect_uri()
-            .trim_start_matches("http://")
-            .to_owned()
+        pending.redirect_uri().trim_start_matches("http://").to_owned()
     }
 
     /// Sends a raw request to the loopback server and returns the raw response.
@@ -564,20 +483,13 @@ mod tests {
     fn begin_authorization_binds_a_loopback_port() {
         let pending = begin_authorization(&emulator_config()).unwrap();
         assert!(pending.redirect_uri().starts_with("http://127.0.0.1:"));
-        assert!(
-            pending
-                .authorize_url()
-                .contains(&format!("state={}", pending.state))
-        );
+        assert!(pending.authorize_url().contains(&format!("state={}", pending.state)));
     }
 
     #[test]
     fn google_sign_in_requires_the_client_secret() {
         let without = YoutubeConfig::google("id.apps.googleusercontent.com", None);
-        assert!(matches!(
-            begin_authorization(&without),
-            Err(Error::InvalidInput(_))
-        ));
+        assert!(matches!(begin_authorization(&without), Err(Error::InvalidInput(_))));
         let with = YoutubeConfig::google("id.apps.googleusercontent.com", Some("secret".into()));
         assert!(begin_authorization(&with).is_ok());
     }
@@ -601,10 +513,7 @@ mod tests {
         assert!(favicon.starts_with("HTTP/1.1 404"));
         assert!(forged.starts_with("HTTP/1.1 400"), "{forged}");
         assert!(forged.contains("Sign-in link expired"));
-        assert!(matches!(
-            result,
-            Err(Error::Cancelled { session_url: None })
-        ));
+        assert!(matches!(result, Err(Error::Cancelled { session_url: None })));
     }
 
     #[test]
@@ -638,12 +547,43 @@ mod tests {
         let pending = begin_authorization(&emulator_config()).unwrap();
         let address = address(&pending);
         let state = pending.state.clone();
-        let browser = thread::spawn(move || {
-            browser_get(&address, &format!("/?error=access_denied&state={state}"))
-        });
+        let browser = thread::spawn(move || browser_get(&address, &format!("/?error=access_denied&state={state}")));
         let result = pending.wait(Duration::from_secs(10), &AtomicBool::new(false));
         assert!(browser.join().unwrap().contains("Sign-in didn"));
         assert!(matches!(result, Err(Error::AccessDenied)));
+    }
+
+    /// A token endpoint that answers one request with `status` and `body`.
+    fn token_server(status: &'static str, body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        format!("http://{address}/token")
+    }
+
+    #[test]
+    fn client_check_tells_a_wrong_client_from_a_made_up_code() {
+        let config = |token_url: String| YoutubeConfig {
+            token_url,
+            ..YoutubeConfig::google("000000000000-bogus.apps.googleusercontent.com", Some("GOCSPX-x".into()))
+        };
+        let unknown = token_server(
+            "401 Unauthorized",
+            r#"{"error":"invalid_client","error_description":"The OAuth client was not found."}"#,
+        );
+        assert!(check_client(&config(unknown)).unwrap_err().is_invalid_client());
+        let known =
+            token_server("400 Bad Request", r#"{"error":"invalid_grant","error_description":"Malformed auth code."}"#);
+        assert!(check_client(&config(known)).is_ok());
     }
 
     #[test]

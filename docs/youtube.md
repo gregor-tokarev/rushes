@@ -120,13 +120,15 @@ All calls block; run them on a background thread and stream progress back to the
    `resume_upload(session_url, path, ...)` continues from the bytes YouTube already has
    (only for session URLs on the configured upload server). Transient failures (5xx, 408,
    429, 403 rate limits, dropped or stalled connections) are retried with exponential
-   backoff from the server's offset; the retry budget resets whenever the server confirms
-   new bytes. Cancel takes effect at the next read of the chunk being sent.
-   `Error::SessionExpired` means start over.
+   backoff from the server's offset (2, 4, 8, 16 and 32 s by default, about a minute in
+   all); the retry budget resets whenever the server confirms new bytes. Each retry is
+   reported before its wait as `UploadProgress::Retrying { attempt, max_retries, wait,
+   cause }`, where `cause` is `Network`, `Server` or `RateLimited`. Cancel takes effect at
+   the next read of the chunk being sent. `Error::SessionExpired` means start over.
 5. `Error::needs_sign_in()` tells when to ask the user to reconnect (revoked or expired
    grant, or a `403 insufficientPermissions` because a YouTube scope was unticked);
-   `quotaExceeded`, `uploadLimitExceeded` and `insufficientPermissions` errors have
-   user-facing messages.
+   `quotaExceeded`, `uploadLimitExceeded`, `insufficientPermissions`, rate limits and server
+   errors (5xx) have user-facing messages; `Error::is_network()` tells a missing connection.
 
 ## In the app
 
@@ -191,6 +193,11 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   it was (private). The custom thumbnail is set next; a failure there is a warning
   notification, not a failed upload. `get_video` is polled every 5 s for about two minutes
   to report processing → ready.
+- While the worker retries a passing failure, the Upload card, the Uploads page and the
+  sidebar badge say so ("YouTube isn't responding · Retrying (2 of 5)…", or "Can't reach
+  YouTube" when offline) until the upload gets further than before. A failure reads as a
+  plain sentence (`describe_error`; the technical error goes to stderr) and stays
+  resumable when YouTube had opened a session.
 - `cancel_upload` stops at the next chunk read and keeps the session; `resume_upload`
   continues from the offset YouTube reports. A session the current connection refuses
   (another backend's after a switch, or a file that changed) is dropped, so the job stops
