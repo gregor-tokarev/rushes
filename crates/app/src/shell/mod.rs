@@ -60,13 +60,17 @@ const KEY_CONTEXT: &str = "Workspace";
 
 /// Binds the application's keys and the app-wide Quit. Call once at startup,
 /// after `gpui_kit::init` and before opening windows.
+///
+/// These bindings have no context, and GPUI ranks a context-free binding above
+/// every context-scoped one, so none of them may reuse a key that a component
+/// binds for itself (the editor's Ctrl+B, the table's Enter).
 pub fn init(cx: &mut App) {
     // Pending saves are written by each workspace's quit hook.
     cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
     cx.bind_keys([
         KeyBinding::new("secondary-n", NewVideo, None),
         KeyBinding::new("secondary-k", OpenCommandPalette, None),
-        KeyBinding::new("secondary-b", ToggleSidebar, None),
+        KeyBinding::new("secondary-\\", ToggleSidebar, None),
         KeyBinding::new("secondary-,", OpenSettings, None),
         KeyBinding::new("secondary-q", Quit, None),
         #[cfg(target_os = "macos")]

@@ -423,7 +423,7 @@ fn palette_actions_and_keys_toggle_the_sidebar(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, true, &[]);
     assert!(!cx.read(|cx| app.workspace.read(cx).is_sidebar_collapsed()));
 
-    app.press(cx, "ctrl-b");
+    app.press(cx, "ctrl-\\");
     assert!(cx.read(|cx| app.workspace.read(cx).is_sidebar_collapsed()));
 
     app.press(cx, "ctrl-k");
@@ -441,7 +441,7 @@ fn keys_keep_working_after_the_focused_page_goes_away(cx: &mut TestAppContext) {
     app.click(cx, "page-hook");
 
     app.navigate(cx, Route::Settings);
-    app.press(cx, "ctrl-b");
+    app.press(cx, "ctrl-\\");
     assert!(cx.read(|cx| app.workspace.read(cx).is_sidebar_collapsed()));
 }
 
@@ -656,4 +656,55 @@ fn importing_markdown_can_replace_the_script(cx: &mut TestAppContext) {
     assert_eq!(app.stored_first_block(cx, id, DocumentKind::Script), "Cold open");
     let words = cx.read(|cx| script.read(cx).stats().words);
     assert_eq!(words, 7);
+}
+
+#[gpui_kit::test]
+fn ctrl_b_in_the_script_makes_text_bold(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
+    let first = app.script_first_block(cx);
+    app.click(cx, block_part(first, "text"));
+    app.type_text(cx, "simple");
+    app.press(cx, "ctrl-a");
+
+    app.press(cx, "ctrl-b");
+    let text = cx.read(|cx| {
+        let page = app.workspace.read(cx).video_page().expect("video page").read(cx);
+        let editor = page.script().expect("script tab").read(cx).editor().expect("script editor");
+        editor.read(cx).document(cx).blocks[0].text.clone()
+    });
+    assert_eq!(text, "**simple**");
+    assert!(!cx.read(|cx| app.workspace.read(cx).is_sidebar_collapsed()));
+
+    // The sidebar has its own key, which works from the editor too.
+    app.press(cx, "ctrl-\\");
+    assert!(cx.read(|cx| app.workspace.read(cx).is_sidebar_collapsed()));
+}
+
+#[gpui_kit::test]
+fn app_keys_leave_component_keys_alone(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    // The editor and the database bind their keys when they are first shown.
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
+
+    let conflicts = cx.read(|cx| {
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        let mut conflicts = Vec::new();
+        // A binding without a context outranks every scoped binding of the same keys.
+        for global in keymap.bindings().filter(|binding| binding.predicate().is_none()) {
+            if !global.action().name().starts_with("videocrm::") {
+                continue;
+            }
+            for scoped in keymap.bindings().filter(|binding| binding.predicate().is_some()) {
+                if scoped.keystrokes() == global.keystrokes() {
+                    conflicts.push(format!("{} shadows {}", global.action().name(), scoped.action().name()));
+                }
+            }
+        }
+        conflicts
+    });
+    assert!(conflicts.is_empty(), "{conflicts:?}");
 }
