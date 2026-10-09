@@ -29,7 +29,10 @@ use super::property_editor::{PropertyEditor, PropertyEditorMode};
 use super::query::{self, resolve_columns, view_rows, visible_columns};
 use super::table::{CellEditors, EmptyReason, TableModel, VideoTable};
 
-actions!(video_database, [OpenSelected, DeleteSelected]);
+actions!(
+    video_database,
+    [OpenSelected, RenameSelected, DeleteSelected]
+);
 
 const KEY_CONTEXT: &str = "VideoDatabase";
 
@@ -113,6 +116,7 @@ fn bind_keys(cx: &mut App) {
     let text_entry = Some(TEXT_ENTRY_CONTEXT);
     cx.bind_keys([
         KeyBinding::new("enter", OpenSelected, table),
+        KeyBinding::new("f2", RenameSelected, table),
         KeyBinding::new("backspace", DeleteSelected, table),
         KeyBinding::new("delete", DeleteSelected, table),
         // The input still sees these keys; `NoAction` only keeps the
@@ -1031,6 +1035,21 @@ impl DatabasePanel {
         }
     }
 
+    fn on_rename_selected(
+        &mut self,
+        _: &RenameSelected,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = self.selected {
+            let cell = CellRef {
+                video: id,
+                column: Column::Builtin(BuiltinField::Title),
+            };
+            self.start_editing(cell, window, cx);
+        }
+    }
+
     fn on_delete_selected(
         &mut self,
         _: &DeleteSelected,
@@ -1111,6 +1130,7 @@ impl Render for DatabasePanel {
             .id("video-database")
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::on_open_selected))
+            .on_action(cx.listener(Self::on_rename_selected))
             .on_action(cx.listener(Self::on_delete_selected))
             .size_full()
             .min_h_0()

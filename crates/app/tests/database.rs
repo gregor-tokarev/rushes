@@ -9,8 +9,8 @@ use chrono::{TimeZone as _, Utc};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, Bounds, ElementId, Entity, InputEvent as _, Modifiers,
-    MouseButton, MouseDownEvent, MouseUpEvent, TestAppContext, WindowBounds, WindowOptions, px,
-    size,
+    MouseButton, MouseDownEvent, MouseUpEvent, TestAppContext, WindowBounds, WindowOptions, point,
+    px, size,
 };
 use videocrm::database::{DatabaseEvent, DatabasePanel};
 use videocrm_core::{
@@ -579,4 +579,36 @@ fn sorting_from_a_column_header_saves_the_view(cx: &mut TestAppContext) {
             "rows are drawn in sorted order"
         );
     });
+}
+
+#[gpui_kit::test]
+fn keyboard_renames_and_opens_the_selected_row(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    // Between the title text and the Open button, which both open the video.
+    db.step(cx, |window, cx| {
+        window.click_at(row_id(db.desk), point(px(190.), px(16.)), cx)
+    });
+    assert_eq!(
+        cx.read(|cx| db.panel.read(cx).selected_video()),
+        Some(db.desk)
+    );
+    db.step(cx, |window, cx| window.press("f2", cx));
+    db.with_window(cx, |window, _| {
+        assert_eq!(window.find("cell-input").value(), Some("Desk setup 2026"));
+        assert_eq!(window.find("cell-input").focused(), Some(true));
+    });
+    db.step(cx, |window, cx| {
+        window.input(" tour", cx);
+        window.press("enter", cx);
+    });
+    let events = db.take_events();
+    let [DatabaseEvent::UpdateVideo(video)] = events.as_slice() else {
+        panic!("Enter commits the title and does not open the video, got {events:?}");
+    };
+    assert_eq!(video.title, "Desk setup 2026 tour");
+    assert!(db.with_window(cx, |window, _| window.try_find("cell-input").is_none()));
+
+    db.step(cx, |window, cx| window.press("enter", cx));
+    assert_eq!(db.take_events(), vec![DatabaseEvent::OpenVideo(db.desk)]);
 }

@@ -171,9 +171,12 @@ impl VideoTable {
     fn render_title(&self, row: &VideoRow, cx: &mut App) -> AnyElement {
         let video = &row.video;
         let id = video.id;
+        // The title text opens the page on the first click and keeps the
+        // second one of a double-click from also renaming the video.
         let open = {
             let panel = self.panel.clone();
             move |event: &ClickEvent, _: &mut Window, cx: &mut App| {
+                cx.stop_propagation();
                 if event.click_count() == 1 {
                     _ = panel.update(cx, |panel, cx| panel.open_video(id, cx));
                 }
@@ -1017,17 +1020,17 @@ pub(crate) fn render_empty_state(
 }
 
 /// The video's emoji, or a neutral page glyph when it has none.
-pub(crate) fn video_icon(icon: Option<&str>, cx: &App) -> AnyElement {
+///
+/// Drawn in a fixed slot so titles line up whatever the glyph's width.
+pub(crate) fn video_icon(icon: Option<&str>, cx: &App) -> Div {
+    let slot = h_flex().w_5().h_5().flex_shrink_0().justify_center();
     match icon.map(str::trim).filter(|icon| !icon.is_empty()) {
-        Some(emoji) => div()
-            .flex_shrink_0()
-            .child(emoji.to_string())
-            .into_any_element(),
-        None => Icon::new(IconName::FileText)
-            .small()
-            .flex_shrink_0()
-            .text_color(cx.theme().muted_foreground)
-            .into_any_element(),
+        Some(emoji) => slot.child(emoji.to_string()),
+        None => slot.child(
+            Icon::new(IconName::FileText)
+                .small()
+                .text_color(cx.theme().muted_foreground),
+        ),
     }
 }
 

@@ -212,6 +212,17 @@ impl PropertyEditor {
     }
 
     fn add_option(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let exists = self.options.iter().any(|draft| {
+            draft
+                .name
+                .read(cx)
+                .value()
+                .trim()
+                .eq_ignore_ascii_case(&name)
+        });
+        if exists {
+            return;
+        }
         // Rotate through the palette so neighbouring options differ; gray is
         // left for the default.
         let color = TagColor::ALL[1 + self.options.len() % (TagColor::ALL.len() - 1)];
