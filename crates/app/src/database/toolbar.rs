@@ -335,6 +335,8 @@ fn toggle<T: PartialEq>(values: &mut Vec<T>, value: T) {
     }
 }
 
+type SortsEdit = Box<dyn Fn(&mut Vec<SortSpec>)>;
+
 fn sort_popover(
     view: &DatabaseView,
     properties: &[PropertyDef],
@@ -353,7 +355,7 @@ fn sort_popover(
         .anchor(Anchor::TopRight)
         .trigger(trigger)
         .content(move |_, _, cx| {
-            let edit = |change: Box<dyn Fn(&mut Vec<SortSpec>)>| {
+            let edit = |change: SortsEdit| {
                 let panel = panel.clone();
                 move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
                     _ = panel.update(cx, |panel, cx| panel.update_view(|view| change(&mut view.sorts), cx));

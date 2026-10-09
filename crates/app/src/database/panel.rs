@@ -34,6 +34,9 @@ const KEY_CONTEXT: &str = "VideoDatabase";
 
 /// What the owner of a [`DatabasePanel`] must act on. The panel has already
 /// applied the change to its own copy; the owner persists it.
+// Events are emitted one at a time on user actions, so the size of the
+// `Video` variant does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum DatabaseEvent {
     OpenVideo(VideoId),

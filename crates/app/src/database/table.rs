@@ -685,13 +685,15 @@ pub(crate) fn video_menu(
     )
 }
 
+type PanelCommand = Rc<dyn Fn(&mut DatabasePanel, &mut Window, &mut Context<DatabasePanel>)>;
+
 fn column_menu(
     menu: PopupMenu,
     column: Column,
     properties: &[PropertyDef],
     panel: &WeakEntity<DatabasePanel>,
 ) -> PopupMenu {
-    let command = |run: Rc<dyn Fn(&mut DatabasePanel, &mut Window, &mut Context<DatabasePanel>)>| {
+    let command = |run: PanelCommand| {
         let panel = panel.clone();
         move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
             _ = panel.update(cx, |panel, cx| run(panel, window, cx));
