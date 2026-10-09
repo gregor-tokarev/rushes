@@ -17,13 +17,14 @@ use chrono::Utc;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     AnyView, AnyWindowHandle, App, AppContext as _, Bounds, Context, ElementId, Entity, ExternalPaths, FileDropEvent,
-    IntoElement, ParentElement as _, PlatformInput, Render, Styled as _, TestAppContext, Window, WindowBounds,
-    WindowOptions, div, px, size,
+    InteractiveElement as _, IntoElement, ParentElement as _, PlatformInput, Render, ScrollDelta, ScrollHandle,
+    StatefulInteractiveElement as _, Styled as _, TestAppContext, Window, WindowBounds, WindowOptions, div, point, px,
+    size,
 };
 use tempfile::TempDir;
 use videocrm::ai_edit::{
-    AiEditPanel, AiSettings, INTERRUPTED, LogEvent, PhaseKind, PipelineService, PipelinesPage, RunError, TimelineEntry,
-    split_failure,
+    AiEditPanel, AiSettings, INTERRUPTED, LogEvent, PhaseKind, PhaseStarted, PipelineService, PipelinesPage, RunError,
+    TimelineEntry, split_failure,
 };
 use videocrm::route::{Route, VideoTab};
 use videocrm::state::{AppEvent, AppState};
@@ -164,6 +165,36 @@ if [ "$LAZY_IS_ERROR" = 1 ]; then
 else
   echo '{"type":"result","subtype":"success","is_error":false,"result":"All done.","session_id":"lazy-session","total_cost_usd":0.01}'
 fi
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// An agent with a real run's log shape: a few dozen tool calls, then a final summary
+/// far taller than the activity box, then the result. It renders nothing.
+fn chatty_agent(dir: &Path) -> PathBuf {
+    let path = dir.join("chatty-agent");
+    fs::write(
+        &path,
+        r#"#!/usr/bin/env python3
+import json, sys
+def out(event):
+    event.setdefault("session_id", "chatty-session")
+    print(json.dumps(event), flush=True)
+def assistant(block):
+    out({"type": "assistant", "message": {"role": "assistant", "content": [block]}})
+out({"type": "system", "subtype": "init", "cwd": "/", "tools": ["Bash"], "model": "chatty"})
+for ix in range(30):
+    assistant({"type": "tool_use", "id": f"t{ix}", "name": "Bash", "input": {"command": f"ffprobe take{ix}.mp4"}})
+    out({"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": f"t{ix}", "content": "ok", "is_error": False}]}})
+point = "**Audio sync:** the sound drifted until it was 0.1s behind, so I rebuilt it from the `edit/` segments. "
+summary = "The final cut is rendered: **`edit/final.mp4`**, 14.6s.\n\n" + "\n\n".join(
+    f"**Section {n}:**\n" + "\n".join(f"- {point * 3}" for _ in range(4)) for n in range(4))
+assistant({"type": "text", "text": summary})
+out({"type": "result", "subtype": "success", "is_error": False, "result": summary, "total_cost_usd": 0.5})
 "#,
     )
     .unwrap();
@@ -981,4 +1012,141 @@ fn a_long_activity_log_lays_out_only_the_rows_in_view(cx: &mut TestAppContext) {
     let (first, last) = (format!("timeline-1-{}", run.id), format!("timeline-999-{}", run.id));
     wait_for_window(cx, window, "the first activity rows", |window, _| shows(window, &first));
     assert!(!cx.update_window(window, |_, window, _| shows(window, &last)).unwrap(), "rows far below are not laid out");
+}
+
+/// The panel inside a page that scrolls, as on the video page.
+struct ScrollPage {
+    panel: Entity<AiEditPanel>,
+    scroll: ScrollHandle,
+}
+
+impl Render for ScrollPage {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().id("page").size_full().overflow_y_scroll().track_scroll(&self.scroll).child(self.panel.clone())
+    }
+}
+
+#[gpui_kit::test]
+fn the_wheel_scrolls_back_through_a_log_that_followed_a_live_edit(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let chatty = chatty_agent(fx.root.path());
+    cx.update(|cx| {
+        fx.state.update(cx, |state, cx| {
+            state.update_settings(cx, |settings| settings.pipeline.agent_command = chatty.display().to_string())
+        })
+    });
+    let video = fx.video;
+    let scroll = ScrollHandle::new();
+    let page_scroll = scroll.clone();
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::new(Default::default(), size(px(1280.), px(900.))))),
+        ..WindowOptions::default()
+    };
+    let (window, _) = cx
+        .update(|cx| {
+            gpui_kit::open_window(options, cx, move |window, cx| {
+                let panel = cx.new(|cx| AiEditPanel::new(video, window, cx));
+                cx.new(|_| ScrollPage { panel, scroll: page_scroll })
+            })
+        })
+        .expect("open test window");
+    // The panel watches the edit from its start, so its log follows the newest rows.
+    let id = fx.start(cx, true);
+    fx.wait_for_status(cx, id, RunStatus::Failed);
+    let events = fx.stored_events(cx, id);
+    let last = format!("timeline-{}-{id}", events.last().expect("events").seq);
+    let summary_seq = events
+        .iter()
+        .rev()
+        .find(|entry| matches!(entry.event, LogEvent::Agent(AgentEvent::AssistantText { .. })))
+        .expect("the summary")
+        .seq;
+    let wheel = |cx: &mut TestAppContext, target: &str, lines: f32| {
+        let target = target.to_owned();
+        cx.update_window(window, |_, window, cx| window.scroll(target, ScrollDelta::Lines(point(0., lines)), cx))
+            .unwrap();
+        cx.run_until_parked();
+    };
+    let visible = |cx: &mut TestAppContext, id: &str| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            shows(window, id)
+        })
+        .unwrap()
+    };
+
+    // Down the page to the activity box.
+    wheel(cx, "footage-drop", -100.);
+    wait_for_window(cx, window, "the end of the log", |window, _| shows(window, &last));
+    let page_end = scroll.offset();
+    assert!(page_end.y < px(0.), "the page scrolled");
+
+    // The final summary shows its first lines; expanded, it is taller than the box.
+    let toggle = format!("message-toggle-{summary_seq}-{id}");
+    assert!(visible(cx, &toggle), "a long message offers Show more");
+    click(cx, window, ElementId::Name(toggle.into()));
+    let summary_row = ElementId::Name(format!("timeline-{summary_seq}-{id}").into());
+    wait_for_window(cx, window, "the whole summary", |window, _| {
+        window.find(summary_row.clone()).bounds().size.height > window.find("run-activity").bounds().size.height
+    });
+
+    // Back to the end, where the log follows its newest rows again, then up.
+    wheel(cx, "run-activity", -500.);
+    assert!(visible(cx, &last), "the wheel reaches the end of the log");
+    wheel(cx, "run-activity", 5.);
+    assert!(!visible(cx, &last), "wheeling up leaves the end of the log");
+    assert!(!visible(cx, &last), "and stays there");
+    assert_eq!(scroll.offset(), page_end, "the log takes the wheel, not the page");
+
+    // At the start of the log, the wheel moves the page.
+    wheel(cx, "run-activity", 2000.);
+    assert_eq!(scroll.offset(), page_end, "the log scrolls to its start first");
+    wheel(cx, "run-activity", 3.);
+    assert!(scroll.offset().y > page_end.y, "then the page scrolls up");
+}
+
+#[gpui_kit::test]
+fn a_short_activity_log_takes_only_the_room_it_needs(cx: &mut TestAppContext) {
+    let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
+    let now = Utc::now();
+    let run = PipelineRun {
+        id: RunId::new(),
+        video_id: fx.video,
+        status: RunStatus::Failed,
+        brief: String::new(),
+        footage_dir: fx.footage.clone(),
+        session_id: None,
+        summary: None,
+        output: None,
+        error: Some("The agent stopped.".into()),
+        cost_usd: None,
+        created_at: now,
+        updated_at: now,
+    };
+    cx.read(|cx| {
+        let store = fx.state.read(cx).store();
+        let mut store = store.lock().unwrap();
+        store.insert_run(&run).unwrap();
+        let events = [
+            LogEvent::Phase(PhaseStarted { phase: PhaseKind::Plan, text: None }),
+            LogEvent::Agent(AgentEvent::AssistantText { text: "Looking at the footage.".into() }),
+            LogEvent::Agent(AgentEvent::ToolUse { id: "t1".into(), name: "Bash".into(), summary: "ls".into() }),
+        ];
+        for event in events {
+            store.append_run_event(run.id, &event.to_payload()).unwrap();
+        }
+    });
+    cx.update(|cx| PipelineService::init(fx.state.clone(), cx));
+    let video = fx.video;
+    let window = open(cx, move |window, cx| AiEditPanel::new(video, window, cx));
+    let last = format!("timeline-3-{}", run.id);
+    wait_for_window(cx, window, "the log", |window, _| shows(window, &last));
+    wait_for_window(cx, window, "the box to fit the log", |window, _| {
+        let row = window.find(ElementId::Name(last.clone().into())).bounds();
+        let log = window.find("run-activity").bounds();
+        log.size.height < px(200.) && row.bottom() <= log.bottom()
+    });
 }
