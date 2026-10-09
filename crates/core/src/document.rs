@@ -759,8 +759,8 @@ fn process_emphasis(mut pieces: Vec<Piece>) -> Vec<Node> {
 /// when their combined length is not a multiple of 3 (so `*a**b*` stays sane).
 fn rule_of_three(opener: &Delimiter, closer: &Delimiter) -> bool {
     (opener.can_close || closer.can_open)
-        && (opener.original + closer.original) % 3 == 0
-        && !(opener.original % 3 == 0 && closer.original % 3 == 0)
+        && (opener.original + closer.original).is_multiple_of(3)
+        && !(opener.original.is_multiple_of(3) && closer.original.is_multiple_of(3))
 }
 
 /// Unmatched delimiters become literal text.

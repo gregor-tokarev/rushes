@@ -1,0 +1,1057 @@
+//! SQLite persistence.
+//!
+//! Queryable scalars (status, position, timestamps, foreign keys) are real
+//! columns; nested values (tags, publish settings, YouTube link, property
+//! values, view configuration, document blocks, upload status, settings) are
+//! JSON text. Child rows (documents, runs, run events, uploads) are deleted
+//! with their video through `ON DELETE CASCADE`.
+//!
+//! Writes take `&mut self`, reads `&self`. `Store` is `Send`; the app keeps it
+//! behind a mutex and calls it from background tasks.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use chrono::{DateTime, NaiveDate, Utc};
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
+use rusqlite::{Connection, OptionalExtension, Row, ToSql, Transaction, params};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use thiserror::Error;
+
+use crate::document::{self, DEFAULT_WPM};
+use crate::model::{
+    Block, BlockId, BuiltinField, Column, ColumnLayout, DatabaseView, Document, DocumentId, DocumentKind, FilterSpec,
+    PipelineRun, PropertyDef, PropertyId, PropertyKind, PropertyValue, RunId, RunStatus, SortSpec, UploadId, UploadJob,
+    UploadStatus, Video, VideoFormat, VideoId, VideoRow, VideoStatus, ViewId, ViewKind,
+};
+use crate::sample;
+use crate::settings::AppSettings;
+use crate::templates::{TemplateKind, script_template};
+
+/// Settings key holding [`AppSettings`].
+const APP_SETTINGS_KEY: &str = "app";
+
+#[derive(Debug, Error)]
+pub enum StoreError {
+    #[error("database error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("could not create database folder {path}: {source}")]
+    CreateDir { path: PathBuf, source: std::io::Error },
+    #[error("database schema version {found} is newer than this version of VideoCRM supports ({supported})")]
+    UnsupportedSchema { found: i64, supported: i64 },
+    #[error("{entity} {id} not found")]
+    NotFound { entity: &'static str, id: String },
+}
+
+pub type StoreResult<T> = Result<T, StoreError>;
+
+fn not_found(entity: &'static str, id: impl ToString) -> StoreError {
+    StoreError::NotFound { entity, id: id.to_string() }
+}
+
+/// Input of [`Store::create_video`] (the New-video wizard).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct NewVideo {
+    pub title: String,
+    pub format: VideoFormat,
+    pub hook: String,
+    pub publish_date: Option<NaiveDate>,
+    pub template: TemplateKind,
+}
+
+/// One entry of a pipeline run's append-only event log (agent messages, tool
+/// calls, status changes) as produced by the pipeline.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunEvent {
+    pub run_id: RunId,
+    /// 1-based, increasing per run.
+    pub seq: u32,
+    pub at: DateTime<Utc>,
+    pub payload: serde_json::Value,
+}
+
+pub struct Store {
+    conn: Connection,
+}
+
+impl Store {
+    /// Opens (creating if needed) the database file and its folder, enables WAL
+    /// and foreign keys, and runs pending migrations.
+    pub fn open(path: impl AsRef<Path>) -> StoreResult<Store> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)
+                .map_err(|source| StoreError::CreateDir { path: parent.to_path_buf(), source })?;
+        }
+        let conn = Connection::open(path)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        Self::init(conn)
+    }
+
+    /// A private in-memory database (tests, previews).
+    pub fn open_in_memory() -> StoreResult<Store> {
+        Self::init(Connection::open_in_memory()?)
+    }
+
+    fn init(mut conn: Connection) -> StoreResult<Store> {
+        conn.pragma_update(None, "foreign_keys", true)?;
+        migrate(&mut conn)?;
+        Ok(Store { conn })
+    }
+
+    /// Current `PRAGMA user_version`.
+    pub fn schema_version(&self) -> StoreResult<i64> {
+        Ok(self.conn.pragma_query_value(None, "user_version", |row| row.get(0))?)
+    }
+
+    // --- videos -----------------------------------------------------------
+
+    /// All videos in manual order.
+    pub fn list_videos(&self) -> StoreResult<Vec<Video>> {
+        let sql = format!("SELECT {VIDEO_COLUMNS} FROM videos ORDER BY position, created_at");
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let videos = stmt.query_map([], video_from_row)?.collect::<rusqlite::Result<_>>()?;
+        Ok(videos)
+    }
+
+    /// All videos in manual order with script stats (from the first Script
+    /// document) and the latest run / upload status, in one query.
+    pub fn list_video_rows(&self) -> StoreResult<Vec<VideoRow>> {
+        let sql = format!(
+            "SELECT {VIDEO_COLUMNS},
+                (SELECT d.spoken_words FROM documents d WHERE d.video_id = videos.id AND d.kind = ?1
+                 ORDER BY d.position, d.id LIMIT 1) AS script_words,
+                (SELECT r.status FROM pipeline_runs r WHERE r.video_id = videos.id
+                 ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS latest_run,
+                (SELECT u.status FROM uploads u WHERE u.video_id = videos.id
+                 ORDER BY u.created_at DESC, u.id DESC LIMIT 1) AS latest_upload
+             FROM videos ORDER BY position, created_at"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt
+            .query_map([DocumentKind::Script], |row| {
+                let script_words = row.get::<_, Option<i64>>("script_words")?.unwrap_or(0);
+                let script_words = usize::try_from(script_words).unwrap_or(0);
+                Ok(VideoRow {
+                    video: video_from_row(row)?,
+                    script_words,
+                    script_seconds: document::runtime_secs_for_words(script_words, DEFAULT_WPM),
+                    latest_run: row.get("latest_run")?,
+                    latest_upload: row.get::<_, Option<Json<UploadStatus>>>("latest_upload")?.map(Json::into_inner),
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    pub fn get_video(&self, id: VideoId) -> StoreResult<Option<Video>> {
+        Ok(query_video(&self.conn, id)?)
+    }
+
+    pub fn insert_video(&mut self, video: &Video) -> StoreResult<()> {
+        write_video(&self.conn, INSERT_VIDEO, video)?;
+        Ok(())
+    }
+
+    /// Saves all fields except `created_at` and sets `updated_at` to now (also on `video`).
+    pub fn update_video(&mut self, video: &mut Video) -> StoreResult<()> {
+        video.updated_at = Utc::now();
+        if write_video(&self.conn, UPDATE_VIDEO, video)? == 0 {
+            return Err(not_found("video", video.id));
+        }
+        Ok(())
+    }
+
+    /// Deletes the video with its documents, runs and uploads. Its media folder
+    /// on disk is left alone. Deleting a missing video is not an error.
+    pub fn delete_video(&mut self, id: VideoId) -> StoreResult<()> {
+        self.conn.execute("DELETE FROM videos WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Copies a video right below the original: title gets " (copy)", documents
+    /// are copied with fresh document and block ids. Things tied to the
+    /// original's footage and YouTube upload are not copied (media folder,
+    /// YouTube link, upload file, schedule, runs, uploads), and a published or
+    /// scheduled original yields an `Idea`.
+    pub fn duplicate_video(&mut self, id: VideoId) -> StoreResult<Video> {
+        let tx = self.conn.transaction()?;
+        let original = query_video(&tx, id)?.ok_or_else(|| not_found("video", id))?;
+        let next_position: Option<f64> =
+            tx.query_row("SELECT MIN(position) FROM videos WHERE position > ?1", [original.position], |row| {
+                row.get(0)
+            })?;
+        let now = Utc::now();
+        let mut copy = Video {
+            id: VideoId::new(),
+            title: format!("{} (copy)", original.title),
+            folder: None,
+            youtube: None,
+            position: next_position.map_or(original.position + 1.0, |next| (original.position + next) / 2.0),
+            created_at: now,
+            updated_at: now,
+            ..original
+        };
+        copy.publish.file = None;
+        copy.publish.publish_at = None;
+        if matches!(copy.status, VideoStatus::Published | VideoStatus::Scheduled) {
+            copy.status = VideoStatus::Idea;
+        }
+        write_video(&tx, INSERT_VIDEO, &copy)?;
+        for document in query_documents(&tx, id)? {
+            let blocks = document.blocks.into_iter().map(|block| Block { id: BlockId::new(), ..block }).collect();
+            let document = Document { id: DocumentId::new(), video_id: copy.id, blocks, updated_at: now, ..document };
+            upsert_document(&tx, &document)?;
+        }
+        tx.commit()?;
+        Ok(copy)
+    }
+
+    /// Position that places a new video after all existing ones.
+    pub fn next_position(&self) -> StoreResult<f64> {
+        Ok(self.conn.query_row("SELECT COALESCE(MAX(position) + 1.0, 0.0) FROM videos", [], |row| row.get(0))?)
+    }
+
+    /// Creates a video at the end of the list with a Script document from the
+    /// chosen template and an empty Notes document. The template's icon becomes
+    /// the video icon.
+    pub fn create_video(&mut self, new: NewVideo) -> StoreResult<(Video, Vec<Document>)> {
+        let tx = self.conn.transaction()?;
+        let position = tx.query_row("SELECT COALESCE(MAX(position) + 1.0, 0.0) FROM videos", [], |row| row.get(0))?;
+        let video = Video {
+            icon: new.template.icon().map(str::to_string),
+            format: new.format,
+            hook: new.hook,
+            publish_date: new.publish_date,
+            position,
+            ..Video::new(new.title)
+        };
+        write_video(&tx, INSERT_VIDEO, &video)?;
+        let now = video.created_at;
+        let documents = vec![
+            Document {
+                id: DocumentId::new(),
+                video_id: video.id,
+                kind: DocumentKind::Script,
+                title: "Script".to_string(),
+                blocks: script_template(new.template, &video),
+                position: 0,
+                updated_at: now,
+            },
+            Document {
+                id: DocumentId::new(),
+                video_id: video.id,
+                kind: DocumentKind::Notes,
+                title: "Notes".to_string(),
+                blocks: vec![Block::paragraph("")],
+                position: 1,
+                updated_at: now,
+            },
+        ];
+        for document in &documents {
+            upsert_document(&tx, document)?;
+        }
+        tx.commit()?;
+        Ok((video, documents))
+    }
+
+    // --- properties -------------------------------------------------------
+
+    pub fn list_properties(&self) -> StoreResult<Vec<PropertyDef>> {
+        let mut stmt =
+            self.conn.prepare_cached("SELECT id, name, kind, position FROM property_defs ORDER BY position, id")?;
+        let properties = stmt.query_map([], property_from_row)?.collect::<rusqlite::Result<_>>()?;
+        Ok(properties)
+    }
+
+    pub fn insert_property(&mut self, property: &PropertyDef) -> StoreResult<()> {
+        insert_property(&self.conn, property)?;
+        Ok(())
+    }
+
+    /// Saves the definition and keeps video values consistent with it: changing
+    /// the kind clears all values, removing select options drops values that
+    /// pointed at them.
+    pub fn update_property(&mut self, property: &PropertyDef) -> StoreResult<()> {
+        let tx = self.conn.transaction()?;
+        let old: PropertyKind = tx
+            .query_row("SELECT kind FROM property_defs WHERE id = ?1", [property.id], |row| row.get::<_, Json<_>>(0))
+            .optional()?
+            .ok_or_else(|| not_found("property", property.id))?
+            .into_inner();
+        tx.execute(
+            "UPDATE property_defs SET name = ?2, kind = ?3, position = ?4 WHERE id = ?1",
+            params![property.id, property.name, Json(&property.kind), property.position],
+        )?;
+        if std::mem::discriminant(&old) != std::mem::discriminant(&property.kind) {
+            remove_property_values(&tx, property.id)?;
+        } else if old.options().iter().any(|option| !property.kind.options().iter().any(|o| o.id == option.id)) {
+            prune_select_values(&tx, property)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Deletes the property, its values on every video and its columns/sorts in views.
+    pub fn delete_property(&mut self, id: PropertyId) -> StoreResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM property_defs WHERE id = ?1", [id])?;
+        remove_property_values(&tx, id)?;
+        for mut view in query_views(&tx)? {
+            let before = (view.columns.len(), view.sorts.len());
+            view.columns.retain(|layout| layout.column != Column::Custom(id));
+            view.sorts.retain(|sort| sort.column != Column::Custom(id));
+            if (view.columns.len(), view.sorts.len()) != before {
+                upsert_view(&tx, &view)?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    // --- documents --------------------------------------------------------
+
+    /// Documents of a video ordered by position.
+    pub fn list_documents(&self, video_id: VideoId) -> StoreResult<Vec<Document>> {
+        Ok(query_documents(&self.conn, video_id)?)
+    }
+
+    pub fn get_document(&self, id: DocumentId) -> StoreResult<Option<Document>> {
+        let sql = format!("SELECT {DOCUMENT_COLUMNS} FROM documents WHERE id = ?1");
+        Ok(self.conn.prepare_cached(&sql)?.query_row([id], document_from_row).optional()?)
+    }
+
+    /// Inserts or replaces the document and sets `updated_at` to now (also on `document`).
+    pub fn save_document(&mut self, document: &mut Document) -> StoreResult<()> {
+        document.updated_at = Utc::now();
+        upsert_document(&self.conn, document)?;
+        Ok(())
+    }
+
+    pub fn delete_document(&mut self, id: DocumentId) -> StoreResult<()> {
+        self.conn.execute("DELETE FROM documents WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Adds an empty document after the video's existing ones.
+    pub fn create_document(&mut self, video_id: VideoId, kind: DocumentKind, title: &str) -> StoreResult<Document> {
+        let position = self.conn.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM documents WHERE video_id = ?1",
+            [video_id],
+            |row| row.get(0),
+        )?;
+        let document = Document {
+            id: DocumentId::new(),
+            video_id,
+            kind,
+            title: title.to_string(),
+            blocks: vec![Block::paragraph("")],
+            position,
+            updated_at: Utc::now(),
+        };
+        upsert_document(&self.conn, &document)?;
+        Ok(document)
+    }
+
+    // --- views ------------------------------------------------------------
+
+    pub fn list_views(&self) -> StoreResult<Vec<DatabaseView>> {
+        Ok(query_views(&self.conn)?)
+    }
+
+    /// Inserts or replaces the view.
+    pub fn save_view(&mut self, view: &DatabaseView) -> StoreResult<()> {
+        upsert_view(&self.conn, view)?;
+        Ok(())
+    }
+
+    pub fn delete_view(&mut self, id: ViewId) -> StoreResult<()> {
+        self.conn.execute("DELETE FROM database_views WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    // --- pipeline runs ----------------------------------------------------
+
+    pub fn insert_run(&mut self, run: &PipelineRun) -> StoreResult<()> {
+        write_run(&self.conn, INSERT_RUN, run)?;
+        Ok(())
+    }
+
+    /// Saves all fields except `video_id`/`created_at` and sets `updated_at` to now (also on `run`).
+    pub fn update_run(&mut self, run: &mut PipelineRun) -> StoreResult<()> {
+        run.updated_at = Utc::now();
+        if write_run(&self.conn, UPDATE_RUN, run)? == 0 {
+            return Err(not_found("pipeline run", run.id));
+        }
+        Ok(())
+    }
+
+    pub fn get_run(&self, id: RunId) -> StoreResult<Option<PipelineRun>> {
+        let sql = format!("SELECT {RUN_COLUMNS} FROM pipeline_runs WHERE id = ?1");
+        Ok(self.conn.prepare_cached(&sql)?.query_row([id], run_from_row).optional()?)
+    }
+
+    /// Runs of one video, or of all videos, newest first.
+    pub fn list_runs(&self, video_id: Option<VideoId>) -> StoreResult<Vec<PipelineRun>> {
+        let sql = format!(
+            "SELECT {RUN_COLUMNS} FROM pipeline_runs WHERE ?1 IS NULL OR video_id = ?1 \
+             ORDER BY created_at DESC, id DESC"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let runs = stmt.query_map([video_id], run_from_row)?.collect::<rusqlite::Result<_>>()?;
+        Ok(runs)
+    }
+
+    /// Appends an event with the next sequence number and the current time.
+    pub fn append_run_event(&mut self, run_id: RunId, payload: &serde_json::Value) -> StoreResult<RunEvent> {
+        let at = Utc::now();
+        let seq = self
+            .conn
+            .prepare_cached(
+                "INSERT INTO run_events (run_id, seq, at, payload)
+             VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM run_events WHERE run_id = ?1), ?2, ?3)
+             RETURNING seq",
+            )?
+            .query_row(params![run_id, at, Json(payload)], |row| row.get(0))?;
+        Ok(RunEvent { run_id, seq, at, payload: payload.clone() })
+    }
+
+    /// Events of a run in append order.
+    pub fn list_run_events(&self, run_id: RunId) -> StoreResult<Vec<RunEvent>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT run_id, seq, at, payload FROM run_events WHERE run_id = ?1 ORDER BY seq")?;
+        let events = stmt
+            .query_map([run_id], |row| {
+                Ok(RunEvent {
+                    run_id: row.get(0)?,
+                    seq: row.get(1)?,
+                    at: row.get(2)?,
+                    payload: row.get::<_, Json<_>>(3)?.into_inner(),
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(events)
+    }
+
+    // --- uploads ----------------------------------------------------------
+
+    pub fn insert_upload(&mut self, upload: &UploadJob) -> StoreResult<()> {
+        write_upload(&self.conn, INSERT_UPLOAD, upload)?;
+        Ok(())
+    }
+
+    /// Saves all fields except `video_id`/`created_at` and sets `updated_at` to now (also on `upload`).
+    pub fn update_upload(&mut self, upload: &mut UploadJob) -> StoreResult<()> {
+        upload.updated_at = Utc::now();
+        if write_upload(&self.conn, UPDATE_UPLOAD, upload)? == 0 {
+            return Err(not_found("upload", upload.id));
+        }
+        Ok(())
+    }
+
+    pub fn get_upload(&self, id: UploadId) -> StoreResult<Option<UploadJob>> {
+        let sql = format!("SELECT {UPLOAD_COLUMNS} FROM uploads WHERE id = ?1");
+        Ok(self.conn.prepare_cached(&sql)?.query_row([id], upload_from_row).optional()?)
+    }
+
+    /// Uploads of one video, or of all videos, newest first.
+    pub fn list_uploads(&self, video_id: Option<VideoId>) -> StoreResult<Vec<UploadJob>> {
+        let sql = format!(
+            "SELECT {UPLOAD_COLUMNS} FROM uploads WHERE ?1 IS NULL OR video_id = ?1 ORDER BY created_at DESC, id DESC"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let uploads = stmt.query_map([video_id], upload_from_row)?.collect::<rusqlite::Result<_>>()?;
+        Ok(uploads)
+    }
+
+    // --- settings ---------------------------------------------------------
+
+    pub fn get_setting<T: DeserializeOwned>(&self, key: &str) -> StoreResult<Option<T>> {
+        let value = self
+            .conn
+            .prepare_cached("SELECT value FROM settings WHERE key = ?1")?
+            .query_row([key], |row| row.get::<_, Json<T>>(0))
+            .optional()?;
+        Ok(value.map(Json::into_inner))
+    }
+
+    pub fn set_setting<T: Serialize + ?Sized>(&mut self, key: &str, value: &T) -> StoreResult<()> {
+        self.conn.prepare_cached(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )?
+        .execute(params![key, Json(value)])?;
+        Ok(())
+    }
+
+    /// Saved settings, or defaults when none were saved yet.
+    pub fn load_settings(&self) -> StoreResult<AppSettings> {
+        Ok(self.get_setting(APP_SETTINGS_KEY)?.unwrap_or_default())
+    }
+
+    pub fn save_settings(&mut self, settings: &AppSettings) -> StoreResult<()> {
+        self.set_setting(APP_SETTINGS_KEY, settings)
+    }
+
+    // --- sample data ------------------------------------------------------
+
+    /// Adds a sample channel (videos in every stage with scripts, plus "Priority"
+    /// and "Sponsor" select properties shown in table views) after the existing
+    /// videos. Returns the inserted videos in order.
+    pub fn seed_sample_workspace(&mut self) -> StoreResult<Vec<Video>> {
+        let workspace = sample::sample_workspace();
+        let tx = self.conn.transaction()?;
+        let offset: f64 =
+            tx.query_row("SELECT COALESCE(MAX(position) + 1.0, 0.0) FROM videos", [], |row| row.get(0))?;
+        let property_offset: i32 =
+            tx.query_row("SELECT COALESCE(MAX(position) + 1, 0) FROM property_defs", [], |row| row.get(0))?;
+
+        for property in &workspace.properties {
+            insert_property(&tx, &PropertyDef { position: property.position + property_offset, ..property.clone() })?;
+        }
+        for mut view in query_views(&tx)?.into_iter().filter(|view| view.kind == ViewKind::Table) {
+            view.columns.extend(workspace.properties.iter().map(|property| ColumnLayout {
+                column: Column::Custom(property.id),
+                width: 150.0,
+                visible: true,
+            }));
+            upsert_view(&tx, &view)?;
+        }
+        let mut videos = Vec::with_capacity(workspace.videos.len());
+        for (mut video, documents) in workspace.videos {
+            video.position += offset;
+            write_video(&tx, INSERT_VIDEO, &video)?;
+            for document in &documents {
+                upsert_document(&tx, document)?;
+            }
+            videos.push(video);
+        }
+        tx.commit()?;
+        Ok(videos)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Schema
+// ---------------------------------------------------------------------------
+
+type Migration = fn(&Transaction<'_>) -> rusqlite::Result<()>;
+
+/// Applied in order; after `MIGRATIONS[i]` the database is at `user_version = i + 1`.
+/// Append new migrations, never edit released ones.
+const MIGRATIONS: &[Migration] = &[migration_1];
+
+fn migrate(conn: &mut Connection) -> StoreResult<()> {
+    let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let supported = MIGRATIONS.len() as i64;
+    let applied = usize::try_from(current)
+        .ok()
+        .filter(|&applied| applied <= MIGRATIONS.len())
+        .ok_or(StoreError::UnsupportedSchema { found: current, supported })?;
+    for (index, migration) in MIGRATIONS.iter().enumerate().skip(applied) {
+        let tx = conn.transaction()?;
+        migration(&tx)?;
+        tx.pragma_update(None, "user_version", index as i64 + 1)?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+/// Initial schema and the default views.
+fn migration_1(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE videos (
+            id           TEXT PRIMARY KEY NOT NULL,
+            title        TEXT NOT NULL,
+            icon         TEXT,
+            status       TEXT NOT NULL,
+            format       TEXT NOT NULL,
+            publish_date TEXT,
+            tags         TEXT NOT NULL,  -- JSON array of strings
+            hook         TEXT NOT NULL,
+            folder       TEXT,
+            publish      TEXT NOT NULL,  -- JSON PublishSettings
+            youtube      TEXT,           -- JSON YoutubeLink
+            properties   TEXT NOT NULL,  -- JSON object: property id -> PropertyValue
+            position     REAL NOT NULL,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX videos_position ON videos (position);
+
+        CREATE TABLE property_defs (
+            id       TEXT PRIMARY KEY NOT NULL,
+            name     TEXT NOT NULL,
+            kind     TEXT NOT NULL,      -- JSON PropertyKind
+            position INTEGER NOT NULL
+        );
+
+        CREATE TABLE documents (
+            id           TEXT PRIMARY KEY NOT NULL,
+            video_id     TEXT NOT NULL REFERENCES videos (id) ON DELETE CASCADE,
+            kind         TEXT NOT NULL,
+            title        TEXT NOT NULL,
+            blocks       TEXT NOT NULL,  -- JSON array of Block
+            spoken_words INTEGER NOT NULL,  -- derived from blocks on save
+            position     INTEGER NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX documents_video ON documents (video_id, position);
+
+        CREATE TABLE database_views (
+            id       TEXT PRIMARY KEY NOT NULL,
+            name     TEXT NOT NULL,
+            kind     TEXT NOT NULL,
+            config   TEXT NOT NULL,      -- JSON {columns, sorts, filter}
+            position INTEGER NOT NULL
+        );
+
+        CREATE TABLE pipeline_runs (
+            id          TEXT PRIMARY KEY NOT NULL,
+            video_id    TEXT NOT NULL REFERENCES videos (id) ON DELETE CASCADE,
+            status      TEXT NOT NULL,
+            brief       TEXT NOT NULL,
+            footage_dir TEXT NOT NULL,
+            session_id  TEXT,
+            summary     TEXT,
+            output      TEXT,
+            error       TEXT,
+            cost_usd    REAL,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+        CREATE INDEX pipeline_runs_video ON pipeline_runs (video_id, created_at);
+
+        CREATE TABLE run_events (
+            run_id  TEXT NOT NULL REFERENCES pipeline_runs (id) ON DELETE CASCADE,
+            seq     INTEGER NOT NULL,
+            at      TEXT NOT NULL,
+            payload TEXT NOT NULL,       -- JSON
+            PRIMARY KEY (run_id, seq)
+        ) WITHOUT ROWID;
+
+        CREATE TABLE uploads (
+            id          TEXT PRIMARY KEY NOT NULL,
+            video_id    TEXT NOT NULL REFERENCES videos (id) ON DELETE CASCADE,
+            file        TEXT NOT NULL,
+            status      TEXT NOT NULL,   -- JSON UploadStatus
+            state       TEXT GENERATED ALWAYS AS (json_extract(status, '$.state')) VIRTUAL,
+            session_url TEXT,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+        CREATE INDEX uploads_video ON uploads (video_id, created_at);
+
+        CREATE TABLE settings (
+            key   TEXT PRIMARY KEY NOT NULL,
+            value TEXT NOT NULL          -- JSON
+        );",
+    )?;
+    for view in default_views() {
+        upsert_view(tx, &view)?;
+    }
+    Ok(())
+}
+
+/// "All videos" (table) and "Board" (kanban by status).
+fn default_views() -> [DatabaseView; 2] {
+    use BuiltinField::*;
+    let layout = |field, width: f32, visible| ColumnLayout { column: Column::Builtin(field), width, visible };
+    let table = DatabaseView {
+        id: ViewId::new(),
+        name: "All videos".to_string(),
+        kind: ViewKind::Table,
+        columns: vec![
+            layout(Title, 320.0, true),
+            layout(Status, 140.0, true),
+            layout(Format, 120.0, true),
+            layout(PublishDate, 140.0, true),
+            layout(Tags, 200.0, true),
+            layout(Script, 130.0, true),
+            layout(Edit, 140.0, true),
+            layout(Youtube, 130.0, true),
+            layout(CreatedAt, 150.0, false),
+            layout(UpdatedAt, 150.0, false),
+        ],
+        sorts: Vec::new(),
+        filter: FilterSpec { hide_archived: true, ..FilterSpec::default() },
+        position: 0,
+    };
+    // On cards, `visible` selects the fields shown under the title.
+    let board = DatabaseView {
+        id: ViewId::new(),
+        name: "Board".to_string(),
+        kind: ViewKind::Board,
+        columns: vec![
+            layout(Title, 260.0, true),
+            layout(Format, 120.0, true),
+            layout(PublishDate, 140.0, true),
+            layout(Tags, 200.0, true),
+            layout(Script, 130.0, true),
+            layout(Edit, 140.0, false),
+            layout(Youtube, 130.0, false),
+            layout(Status, 140.0, false),
+            layout(CreatedAt, 150.0, false),
+            layout(UpdatedAt, 150.0, false),
+        ],
+        sorts: Vec::new(),
+        filter: FilterSpec::default(),
+        position: 1,
+    };
+    [table, board]
+}
+
+// ---------------------------------------------------------------------------
+// Rows
+// ---------------------------------------------------------------------------
+
+const VIDEO_COLUMNS: &str = "id, title, icon, status, format, publish_date, tags, hook, folder, publish, youtube, \
+                             properties, position, created_at, updated_at";
+const INSERT_VIDEO: &str = "INSERT INTO videos (id, title, icon, status, format, publish_date, tags, hook, folder, \
+                            publish, youtube, properties, position, created_at, updated_at) \
+                            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
+const UPDATE_VIDEO: &str = "UPDATE videos SET title = ?2, icon = ?3, status = ?4, format = ?5, publish_date = ?6, \
+                            tags = ?7, hook = ?8, folder = ?9, publish = ?10, youtube = ?11, properties = ?12, \
+                            position = ?13, updated_at = ?15 WHERE id = ?1";
+
+/// Runs `INSERT_VIDEO` or `UPDATE_VIDEO`, which share parameter numbering.
+fn write_video(conn: &Connection, sql: &str, video: &Video) -> rusqlite::Result<usize> {
+    conn.prepare_cached(sql)?.execute(params![
+        video.id,
+        video.title,
+        video.icon,
+        video.status,
+        video.format,
+        video.publish_date,
+        Json(&video.tags),
+        video.hook,
+        video.folder.as_deref().map(SqlPath),
+        Json(&video.publish),
+        video.youtube.as_ref().map(Json),
+        Json(&video.properties),
+        video.position,
+        video.created_at,
+        video.updated_at,
+    ])
+}
+
+fn video_from_row(row: &Row<'_>) -> rusqlite::Result<Video> {
+    Ok(Video {
+        id: row.get("id")?,
+        title: row.get("title")?,
+        icon: row.get("icon")?,
+        status: row.get("status")?,
+        format: row.get("format")?,
+        publish_date: row.get("publish_date")?,
+        tags: row.get::<_, Json<_>>("tags")?.into_inner(),
+        hook: row.get("hook")?,
+        folder: row.get::<_, Option<String>>("folder")?.map(PathBuf::from),
+        publish: row.get::<_, Json<_>>("publish")?.into_inner(),
+        youtube: row.get::<_, Option<Json<_>>>("youtube")?.map(Json::into_inner),
+        properties: row.get::<_, Json<_>>("properties")?.into_inner(),
+        position: row.get("position")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn query_video(conn: &Connection, id: VideoId) -> rusqlite::Result<Option<Video>> {
+    let sql = format!("SELECT {VIDEO_COLUMNS} FROM videos WHERE id = ?1");
+    conn.prepare_cached(&sql)?.query_row([id], video_from_row).optional()
+}
+
+fn property_from_row(row: &Row<'_>) -> rusqlite::Result<PropertyDef> {
+    Ok(PropertyDef {
+        id: row.get("id")?,
+        name: row.get("name")?,
+        kind: row.get::<_, Json<_>>("kind")?.into_inner(),
+        position: row.get("position")?,
+    })
+}
+
+fn insert_property(conn: &Connection, property: &PropertyDef) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO property_defs (id, name, kind, position) VALUES (?1, ?2, ?3, ?4)",
+        params![property.id, property.name, Json(&property.kind), property.position],
+    )?;
+    Ok(())
+}
+
+/// JSON path of a property's value inside `videos.properties`.
+fn property_path(id: PropertyId) -> String {
+    format!("$.\"{id}\"")
+}
+
+fn remove_property_values(conn: &Connection, id: PropertyId) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE videos SET properties = json_remove(properties, ?1) WHERE json_type(properties, ?1) IS NOT NULL",
+        [property_path(id)],
+    )?;
+    Ok(())
+}
+
+/// Drops select / multi-select values whose option no longer exists.
+fn prune_select_values(conn: &Connection, property: &PropertyDef) -> rusqlite::Result<()> {
+    let exists = |option: &String| property.kind.options().iter().any(|o| &o.id == option);
+    let mut stmt = conn.prepare("SELECT id, properties FROM videos WHERE json_type(properties, ?1) IS NOT NULL")?;
+    let videos = stmt
+        .query_map([property_path(property.id)], |row| {
+            Ok((row.get::<_, VideoId>(0)?, row.get::<_, Json<BTreeMap<PropertyId, PropertyValue>>>(1)?.into_inner()))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (video_id, mut values) in videos {
+        let keep = match values.get_mut(&property.id) {
+            Some(PropertyValue::Select(Some(option))) => exists(option),
+            Some(PropertyValue::MultiSelect(options)) => {
+                options.retain(exists);
+                !options.is_empty()
+            }
+            _ => true,
+        };
+        if !keep {
+            values.remove(&property.id);
+        }
+        conn.execute("UPDATE videos SET properties = ?2 WHERE id = ?1", params![video_id, Json(&values)])?;
+    }
+    Ok(())
+}
+
+const DOCUMENT_COLUMNS: &str = "id, video_id, kind, title, blocks, position, updated_at";
+
+fn document_from_row(row: &Row<'_>) -> rusqlite::Result<Document> {
+    Ok(Document {
+        id: row.get("id")?,
+        video_id: row.get("video_id")?,
+        kind: row.get("kind")?,
+        title: row.get("title")?,
+        blocks: row.get::<_, Json<_>>("blocks")?.into_inner(),
+        position: row.get("position")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn query_documents(conn: &Connection, video_id: VideoId) -> rusqlite::Result<Vec<Document>> {
+    let sql = format!("SELECT {DOCUMENT_COLUMNS} FROM documents WHERE video_id = ?1 ORDER BY position, id");
+    let mut stmt = conn.prepare_cached(&sql)?;
+    stmt.query_map([video_id], document_from_row)?.collect()
+}
+
+fn upsert_document(conn: &Connection, document: &Document) -> rusqlite::Result<()> {
+    let spoken_words = i64::try_from(document::spoken_word_count(&document.blocks)).unwrap_or(i64::MAX);
+    conn.prepare_cached(
+        "INSERT INTO documents (id, video_id, kind, title, blocks, spoken_words, position, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT (id) DO UPDATE SET video_id = excluded.video_id, kind = excluded.kind, title = excluded.title,
+             blocks = excluded.blocks, spoken_words = excluded.spoken_words, position = excluded.position,
+             updated_at = excluded.updated_at",
+    )?
+    .execute(params![
+        document.id,
+        document.video_id,
+        document.kind,
+        document.title,
+        Json(&document.blocks),
+        spoken_words,
+        document.position,
+        document.updated_at,
+    ])?;
+    Ok(())
+}
+
+/// Serialized `DatabaseView` fields that live in the `config` column.
+#[derive(Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct ViewConfig {
+    columns: Vec<ColumnLayout>,
+    sorts: Vec<SortSpec>,
+    filter: FilterSpec,
+}
+
+fn query_views(conn: &Connection) -> rusqlite::Result<Vec<DatabaseView>> {
+    let mut stmt =
+        conn.prepare_cached("SELECT id, name, kind, config, position FROM database_views ORDER BY position, id")?;
+    stmt.query_map([], |row| {
+        let config: ViewConfig = row.get::<_, Json<_>>("config")?.into_inner();
+        Ok(DatabaseView {
+            id: row.get("id")?,
+            name: row.get("name")?,
+            kind: row.get("kind")?,
+            columns: config.columns,
+            sorts: config.sorts,
+            filter: config.filter,
+            position: row.get("position")?,
+        })
+    })?
+    .collect()
+}
+
+fn upsert_view(conn: &Connection, view: &DatabaseView) -> rusqlite::Result<()> {
+    let config = ViewConfig { columns: view.columns.clone(), sorts: view.sorts.clone(), filter: view.filter.clone() };
+    conn.prepare_cached(
+        "INSERT INTO database_views (id, name, kind, config, position) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (id) DO UPDATE SET name = excluded.name, kind = excluded.kind, config = excluded.config,
+             position = excluded.position",
+    )?
+    .execute(params![view.id, view.name, view.kind, Json(&config), view.position])?;
+    Ok(())
+}
+
+const RUN_COLUMNS: &str =
+    "id, video_id, status, brief, footage_dir, session_id, summary, output, error, cost_usd, created_at, updated_at";
+const INSERT_RUN: &str = "INSERT INTO pipeline_runs (id, video_id, status, brief, footage_dir, session_id, summary, \
+                          output, error, cost_usd, created_at, updated_at) \
+                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)";
+const UPDATE_RUN: &str = "UPDATE pipeline_runs SET status = ?3, brief = ?4, footage_dir = ?5, session_id = ?6, \
+                          summary = ?7, output = ?8, error = ?9, cost_usd = ?10, updated_at = ?12 \
+                          WHERE id = ?1";
+
+/// Runs `INSERT_RUN` or `UPDATE_RUN`, which share parameter numbering.
+fn write_run(conn: &Connection, sql: &str, run: &PipelineRun) -> rusqlite::Result<usize> {
+    conn.prepare_cached(sql)?.execute(params![
+        run.id,
+        run.video_id,
+        run.status,
+        run.brief,
+        SqlPath(&run.footage_dir),
+        run.session_id,
+        run.summary,
+        run.output.as_deref().map(SqlPath),
+        run.error,
+        run.cost_usd,
+        run.created_at,
+        run.updated_at,
+    ])
+}
+
+fn run_from_row(row: &Row<'_>) -> rusqlite::Result<PipelineRun> {
+    Ok(PipelineRun {
+        id: row.get("id")?,
+        video_id: row.get("video_id")?,
+        status: row.get("status")?,
+        brief: row.get("brief")?,
+        footage_dir: PathBuf::from(row.get::<_, String>("footage_dir")?),
+        session_id: row.get("session_id")?,
+        summary: row.get("summary")?,
+        output: row.get::<_, Option<String>>("output")?.map(PathBuf::from),
+        error: row.get("error")?,
+        cost_usd: row.get("cost_usd")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+const UPLOAD_COLUMNS: &str = "id, video_id, file, status, session_url, created_at, updated_at";
+const INSERT_UPLOAD: &str = "INSERT INTO uploads (id, video_id, file, status, session_url, created_at, updated_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+const UPDATE_UPLOAD: &str = "UPDATE uploads SET file = ?3, status = ?4, session_url = ?5, updated_at = ?7 \
+                             WHERE id = ?1";
+
+/// Runs `INSERT_UPLOAD` or `UPDATE_UPLOAD`, which share parameter numbering.
+fn write_upload(conn: &Connection, sql: &str, upload: &UploadJob) -> rusqlite::Result<usize> {
+    conn.prepare_cached(sql)?.execute(params![
+        upload.id,
+        upload.video_id,
+        SqlPath(&upload.file),
+        Json(&upload.status),
+        upload.session_url,
+        upload.created_at,
+        upload.updated_at,
+    ])
+}
+
+fn upload_from_row(row: &Row<'_>) -> rusqlite::Result<UploadJob> {
+    Ok(UploadJob {
+        id: row.get("id")?,
+        video_id: row.get("video_id")?,
+        file: PathBuf::from(row.get::<_, String>("file")?),
+        status: row.get::<_, Json<_>>("status")?.into_inner(),
+        session_url: row.get("session_url")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// SQL conversions
+// ---------------------------------------------------------------------------
+
+/// A value stored as JSON text.
+struct Json<T>(T);
+
+impl<T> Json<T> {
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T: Serialize> ToSql for Json<T> {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        serde_json::to_string(&self.0)
+            .map(ToSqlOutput::from)
+            .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
+    }
+}
+
+impl<T: DeserializeOwned> FromSql for Json<T> {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        serde_json::from_str(value.as_str()?).map(Json).map_err(FromSqlError::other)
+    }
+}
+
+/// A path stored as UTF-8 text.
+struct SqlPath<'a>(&'a Path);
+
+impl ToSql for SqlPath<'_> {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        let text = self.0.to_str().ok_or_else(|| {
+            rusqlite::Error::ToSqlConversionFailure(format!("path is not valid UTF-8: {}", self.0.display()).into())
+        })?;
+        Ok(ToSqlOutput::from(text))
+    }
+}
+
+/// Stores ids and unit enums as their serde string (`"0192…"`, `"in_review"`).
+macro_rules! sql_as_serde_string {
+    ($($ty:ty),* $(,)?) => {$(
+        impl ToSql for $ty {
+            fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+                match serde_json::to_value(self) {
+                    Ok(serde_json::Value::String(text)) => Ok(ToSqlOutput::from(text)),
+                    Ok(other) => Err(rusqlite::Error::ToSqlConversionFailure(
+                        format!("{} did not serialize to a string: {other}", stringify!($ty)).into(),
+                    )),
+                    Err(err) => Err(rusqlite::Error::ToSqlConversionFailure(Box::new(err))),
+                }
+            }
+        }
+
+        impl FromSql for $ty {
+            fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+                serde_json::from_value(serde_json::Value::String(value.as_str()?.to_owned()))
+                    .map_err(FromSqlError::other)
+            }
+        }
+    )*};
+}
+
+sql_as_serde_string!(
+    VideoId,
+    DocumentId,
+    PropertyId,
+    ViewId,
+    RunId,
+    UploadId,
+    VideoStatus,
+    VideoFormat,
+    DocumentKind,
+    ViewKind,
+    RunStatus,
+);
+
+#[cfg(test)]
+mod tests;

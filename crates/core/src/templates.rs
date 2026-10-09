@@ -210,3 +210,81 @@ pub(crate) fn onscreen(text: &str) -> Block {
 pub(crate) fn todo(text: &str) -> Block {
     Block::new(BlockKind::Todo, text)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::{DEFAULT_WPM, estimated_runtime_secs, outline, spoken_word_count};
+
+    fn count(blocks: &[Block], kind: BlockKind) -> usize {
+        blocks.iter().filter(|block| block.kind == kind).count()
+    }
+
+    #[test]
+    fn every_template_has_metadata() {
+        for kind in TemplateKind::ALL {
+            assert!(!kind.label().is_empty());
+            assert!(!kind.description().is_empty());
+        }
+        assert_eq!(TemplateKind::default(), TemplateKind::Blank);
+    }
+
+    #[test]
+    fn blank_is_a_single_empty_paragraph() {
+        let blocks = script_template(TemplateKind::Blank, &Video::new("Anything"));
+        assert_eq!(blocks.len(), 1);
+        assert_eq!((blocks[0].kind, blocks[0].text.as_str()), (BlockKind::Paragraph, ""));
+    }
+
+    #[test]
+    fn templates_have_sections_cues_and_a_checklist() {
+        let video = Video::new("Rust in 10 minutes");
+        for kind in TemplateKind::ALL.into_iter().filter(|kind| *kind != TemplateKind::Blank) {
+            let blocks = script_template(kind, &video);
+            assert!(outline(&blocks).len() >= 3, "{kind:?} has sections");
+            assert!(spoken_word_count(&blocks) > 0, "{kind:?} has spoken text");
+            assert!(count(&blocks, BlockKind::BRoll) >= 1, "{kind:?} has B-roll cues");
+            assert!(count(&blocks, BlockKind::OnScreen) >= 1, "{kind:?} has on-screen cues");
+            assert!(count(&blocks, BlockKind::Todo) >= 4, "{kind:?} has a checklist");
+            assert_eq!(blocks[0].kind, BlockKind::Heading2, "{kind:?} opens with the hook section");
+            assert!(blocks.iter().all(|block| !block.text.trim().is_empty() || block.kind == BlockKind::Divider));
+            let ids: std::collections::HashSet<_> = blocks.iter().map(|block| block.id).collect();
+            assert_eq!(ids.len(), blocks.len(), "{kind:?} block ids are unique");
+        }
+    }
+
+    #[test]
+    fn templates_use_title_and_hook() {
+        let mut video = Video::new("I tried every keyboard switch");
+        let blocks = script_template(TemplateKind::Review, &video);
+        assert!(blocks.iter().any(|b| b.kind == BlockKind::OnScreen && b.text == "I tried every keyboard switch"));
+        assert!(blocks[1].text.starts_with('*'), "placeholder guidance without a hook");
+
+        video.hook = "  Ninety switches, one winner.  ".into();
+        let blocks = script_template(TemplateKind::Review, &video);
+        assert_eq!((blocks[1].kind, blocks[1].text.as_str()), (BlockKind::Paragraph, "Ninety switches, one winner."));
+    }
+
+    #[test]
+    fn short_template_fits_in_a_minute() {
+        let video = Video {
+            hook: "This one Python trick saves me an hour every week, and nobody talks about it".into(),
+            ..Video::new("Python trick")
+        };
+        let blocks = script_template(TemplateKind::Short, &video);
+        assert!(estimated_runtime_secs(&blocks, DEFAULT_WPM) < 60);
+        assert!(blocks.iter().any(|b| b.text.contains("9:16")));
+    }
+
+    #[test]
+    fn checklist_follows_the_format() {
+        let has = |kind, format, item: &str| {
+            let video = Video { format, ..Video::new("Video") };
+            script_template(kind, &video).iter().any(|b| b.kind == BlockKind::Todo && b.text.contains(item))
+        };
+        assert!(has(TemplateKind::Tutorial, VideoFormat::Livestream, "stream key"));
+        assert!(!has(TemplateKind::Tutorial, VideoFormat::LongForm, "stream key"));
+        assert!(has(TemplateKind::Vlog, VideoFormat::Short, "Export a vertical 9:16 cut"));
+        assert!(!has(TemplateKind::Short, VideoFormat::Short, "Export a vertical 9:16 cut"));
+    }
+}
