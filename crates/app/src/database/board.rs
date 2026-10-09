@@ -9,8 +9,8 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, AppContext as _, Context, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    TestSupportExt as _, Window, div,
 };
 use videocrm_core::{VideoId, VideoRow, VideoStatus};
 
@@ -126,6 +126,7 @@ impl DatabasePanel {
 
         v_flex()
             .id(SharedString::from(format!("board-column-{status_key}")))
+            .test_support()
             .w_64()
             .flex_shrink_0()
             .min_h_0()
@@ -149,7 +150,6 @@ impl DatabasePanel {
             )
             .child(
                 v_flex()
-                    .id(SharedString::from(format!("board-cards-{status_key}")))
                     .flex_1()
                     .min_h_0()
                     .px_2()
@@ -164,9 +164,7 @@ impl DatabasePanel {
                     .children(card_elements)
                     .child(new_button)
                     .overflow_y_scrollbar()
-                    .id(SharedString::from(format!(
-                        "board-cards-scroll-{status_key}"
-                    ))),
+                    .id(SharedString::from(format!("board-cards-{status_key}"))),
             )
             .into_any_element()
     }
@@ -219,6 +217,7 @@ impl DatabasePanel {
         // it does not move the card.
         div()
             .id(element_id("card-slot", id))
+            .test_support()
             .border_t_2()
             .border_color(cx.theme().transparent)
             .drag_over::<DraggedCard>(|style, _, _, cx| style.border_color(cx.theme().drag_border))
@@ -228,6 +227,7 @@ impl DatabasePanel {
             .child(
                 v_flex()
                     .id(element_id("card", id))
+                    .test_support()
                     .gap_1p5()
                     .px_3()
                     .py_2()

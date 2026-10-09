@@ -795,7 +795,20 @@ impl DatabasePanel {
                 cx.emit(DatabaseEvent::CreateProperty(def.clone()));
                 self.set_column_visible(Column::Custom(def.id), true, cx);
                 self.refresh(cx);
+                self.reveal_column(Column::Custom(def.id), cx);
             }
+        }
+    }
+
+    /// Scrolls the table horizontally until `column` is in view.
+    fn reveal_column(&mut self, column: Column, cx: &mut Context<Self>) {
+        let Some(view) = self.active_view() else {
+            return;
+        };
+        let columns = visible_columns(view, &self.properties);
+        if let Some(ix) = columns.iter().position(|layout| layout.column == column) {
+            self.table
+                .update(cx, |table, cx| table.scroll_to_col(ix, cx));
         }
     }
 

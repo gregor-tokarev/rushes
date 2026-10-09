@@ -1,0 +1,582 @@
+//! UI integration tests for the videos database: a real `DatabasePanel` in a
+//! headless window, driven through clicks and typing, with the owner's view of
+//! it observed through the `DatabaseEvent`s it emits.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use chrono::{TimeZone as _, Utc};
+use gpui_kit::test::TestWindowExt;
+use gpui_kit::{
+    AnyWindowHandle, AppContext as _, Bounds, ElementId, Entity, InputEvent as _, Modifiers,
+    MouseButton, MouseDownEvent, MouseUpEvent, TestAppContext, WindowBounds, WindowOptions, px,
+    size,
+};
+use videocrm::database::{DatabaseEvent, DatabasePanel};
+use videocrm_core::{
+    BuiltinField, Column, DatabaseView, FilterSpec, PropertyKind, SortDirection, SortSpec, Video,
+    VideoFormat, VideoId, VideoRow, VideoStatus, ViewId, ViewKind,
+};
+
+struct Fixture {
+    window: AnyWindowHandle,
+    panel: Entity<DatabasePanel>,
+    events: Rc<RefCell<Vec<DatabaseEvent>>>,
+    tokyo: VideoId,
+    ownership: VideoId,
+    desk: VideoId,
+    recap: VideoId,
+    table: ViewId,
+    board: ViewId,
+}
+
+impl Fixture {
+    fn open(cx: &mut TestAppContext) -> Self {
+        cx.update(gpui_kit::init);
+
+        let video = |title: &str, status, format, tags: &[&str], position: f64| {
+            let mut video = Video::new(title);
+            video.status = status;
+            video.format = format;
+            video.tags = tags.iter().map(|tag| tag.to_string()).collect();
+            video.position = position;
+            video.created_at = Utc.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap();
+            video.updated_at = video.created_at;
+            video
+        };
+        let mut desk = video(
+            "Desk setup 2026",
+            VideoStatus::Filming,
+            VideoFormat::LongForm,
+            &[],
+            2.0,
+        );
+        desk.hook = "Everything on my desk, and the cable management".into();
+        let videos = vec![
+            video(
+                "Tokyo tech stores tour",
+                VideoStatus::Idea,
+                VideoFormat::LongForm,
+                &["Travel"],
+                0.0,
+            ),
+            video(
+                "Rust ownership in 60 seconds",
+                VideoStatus::Published,
+                VideoFormat::Short,
+                &["Rust"],
+                1.0,
+            ),
+            desk,
+            video(
+                "My 2025 channel recap",
+                VideoStatus::Archived,
+                VideoFormat::LongForm,
+                &[],
+                3.0,
+            ),
+        ];
+        let ids: Vec<VideoId> = videos.iter().map(|video| video.id).collect();
+        let rows = videos.into_iter().map(row).collect();
+
+        let table = DatabaseView {
+            id: ViewId::new(),
+            name: "All videos".into(),
+            kind: ViewKind::Table,
+            columns: Vec::new(),
+            sorts: Vec::new(),
+            filter: FilterSpec {
+                hide_archived: true,
+                ..FilterSpec::default()
+            },
+            position: 0,
+        };
+        let board = DatabaseView {
+            id: ViewId::new(),
+            name: "Pipeline".into(),
+            kind: ViewKind::Board,
+            position: 1,
+            ..table.clone()
+        };
+        let views = vec![table.clone(), board.clone()];
+
+        let (window, panel) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        Default::default(),
+                        size(px(1600.), px(900.)),
+                    ))),
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| {
+                    cx.new(|cx| {
+                        let mut panel = DatabasePanel::new(window, cx);
+                        panel.set_data(rows, Vec::new(), views, window, cx);
+                        panel
+                    })
+                },
+            )
+            .expect("open test window")
+        });
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let events = events.clone();
+            cx.subscribe(&panel, move |_, event: &DatabaseEvent, _| {
+                events.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        let fixture = Self {
+            window,
+            panel,
+            events,
+            tokyo: ids[0],
+            ownership: ids[1],
+            desk: ids[2],
+            recap: ids[3],
+            table: table.id,
+            board: board.id,
+        };
+        fixture.render(cx);
+        fixture
+    }
+
+    /// Runs pending effects, then completes two frames: the table measures
+    /// itself in the first one and lays out its rows in the second.
+    fn render(&self, cx: &mut TestAppContext) {
+        cx.run_until_parked();
+        self.with_window(cx, |window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+        });
+    }
+
+    fn with_window<R>(
+        &self,
+        cx: &mut TestAppContext,
+        f: impl FnOnce(&mut gpui_kit::Window, &mut gpui_kit::App) -> R,
+    ) -> R {
+        cx.update_window(self.window, |_, window, cx| f(window, cx))
+            .expect("window is open")
+    }
+
+    /// Performs a UI step, then lets its deferred effects run and redraws.
+    fn step(
+        &self,
+        cx: &mut TestAppContext,
+        f: impl FnOnce(&mut gpui_kit::Window, &mut gpui_kit::App),
+    ) {
+        self.with_window(cx, f);
+        self.render(cx);
+    }
+
+    /// Clicks the way the platform delivers a click: press and release in
+    /// separate updates, so whatever the press opens has settled before the
+    /// release reaches the row underneath. `TestWindowExt::click` sends both
+    /// in one update, and a popup trigger inside a table row does not open
+    /// then. The pointer is not moved onto the target first: after a
+    /// synthetic hover the headless table drops the press (the running app,
+    /// driven through X11, opens the menu either way).
+    fn press_and_release(&self, cx: &mut TestAppContext, id: impl Into<ElementId>) {
+        let id = id.into();
+        let position = self.with_window(cx, |window, _| window.find(id).bounds().center());
+        let press = MouseDownEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        };
+        let release = MouseUpEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        };
+        self.step(cx, |window, cx| {
+            window.dispatch_event(press.to_platform_input(), cx);
+        });
+        self.step(cx, |window, cx| {
+            window.dispatch_event(release.to_platform_input(), cx);
+        });
+    }
+
+    fn shown_rows(&self, cx: &mut TestAppContext) -> Vec<VideoId> {
+        let ids = [self.tokyo, self.ownership, self.desk, self.recap];
+        self.with_window(cx, |window, _| {
+            ids.into_iter()
+                .filter(|id| {
+                    window
+                        .try_find(row_id(*id))
+                        .is_some_and(|row| row.visible())
+                })
+                .collect()
+        })
+    }
+
+    fn take_events(&self) -> Vec<DatabaseEvent> {
+        self.events.borrow_mut().drain(..).collect()
+    }
+}
+
+fn row(video: Video) -> VideoRow {
+    VideoRow {
+        video,
+        script_words: 0,
+        script_seconds: 0,
+        latest_run: None,
+        latest_upload: None,
+    }
+}
+
+fn row_id(video: VideoId) -> String {
+    format!("video-row-{video}")
+}
+
+#[gpui_kit::test]
+fn set_data_renders_a_row_per_visible_video(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    // The archived recap is hidden by the view's filter.
+    assert_eq!(db.shown_rows(cx), vec![db.tokyo, db.ownership, db.desk]);
+    assert_eq!(
+        cx.read(|cx| db.panel.read(cx).visible_videos()),
+        vec![db.tokyo, db.ownership, db.desk]
+    );
+    assert_eq!(
+        db.with_window(cx, |window, _| window.find(row_id(db.tokyo)).selected()),
+        Some(false)
+    );
+
+    // New data from the owner keeps the active view and shows the new row.
+    let mut extra = Video::new("SQLite is all you need");
+    extra.position = 0.5;
+    let extra_id = extra.id;
+    db.step(cx, |window, cx| {
+        db.panel.update(cx, |panel, cx| {
+            let mut rows: Vec<VideoRow> = panel
+                .visible_videos()
+                .iter()
+                .filter_map(|id| panel.video(*id))
+                .cloned()
+                .map(row)
+                .collect();
+            rows.push(row(extra));
+            let views = panel.views().to_vec();
+            panel.set_data(rows, Vec::new(), views, window, cx);
+        });
+    });
+    assert_eq!(
+        cx.read(|cx| db.panel.read(cx).visible_videos()),
+        vec![db.tokyo, extra_id, db.ownership, db.desk]
+    );
+    assert!(db.with_window(cx, |window, _| window.find(row_id(extra_id)).visible()));
+    assert!(db.take_events().is_empty(), "set_data reports nothing back");
+}
+
+#[gpui_kit::test]
+fn search_and_filters_narrow_the_rows(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    // Search matches tags case-insensitively, and the hook too.
+    db.step(cx, |window, cx| {
+        window.click("database-search", cx);
+        window.input("TRAVEL", cx);
+    });
+    assert_eq!(db.shown_rows(cx), vec![db.tokyo]);
+    db.step(cx, |window, cx| {
+        for _ in 0.."TRAVEL".len() {
+            window.press("backspace", cx);
+        }
+        window.input("cable", cx);
+    });
+    assert_eq!(db.shown_rows(cx), vec![db.desk]);
+    db.step(cx, |window, cx| {
+        for _ in 0.."cable".len() {
+            window.press("backspace", cx);
+        }
+    });
+    assert_eq!(db.shown_rows(cx), vec![db.tokyo, db.ownership, db.desk]);
+    // Searching is transient: it does not change the saved view.
+    assert!(db.take_events().is_empty());
+
+    // The Filter popover narrows by format and saves the view.
+    db.step(cx, |window, cx| window.click("filter", cx));
+    db.step(cx, |window, cx| window.click("filter-format-Short", cx));
+    assert_eq!(db.shown_rows(cx), vec![db.ownership]);
+    let saved = db.take_events();
+    let [DatabaseEvent::SaveView(view)] = saved.as_slice() else {
+        panic!("expected one SaveView, got {saved:?}");
+    };
+    assert_eq!(view.id, db.table);
+    assert_eq!(view.filter.formats, vec![VideoFormat::Short]);
+    assert!(view.filter.hide_archived);
+
+    // Letting archived videos through brings the recap back for long-form.
+    db.step(cx, |window, cx| window.click("filter-format-Short", cx));
+    db.step(cx, |window, cx| window.click("filter-hide-archived", cx));
+    assert_eq!(
+        db.shown_rows(cx),
+        vec![db.tokyo, db.ownership, db.desk, db.recap]
+    );
+}
+
+#[gpui_kit::test]
+fn changing_a_status_emits_update_video(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    // Through the panel API.
+    db.step(cx, |_, cx| {
+        db.panel.update(cx, |panel, cx| {
+            panel.set_status(db.tokyo, VideoStatus::Scripting, cx)
+        });
+    });
+    let events = db.take_events();
+    let [DatabaseEvent::UpdateVideo(video)] = events.as_slice() else {
+        panic!("expected one UpdateVideo, got {events:?}");
+    };
+    assert_eq!((video.id, video.status), (db.tokyo, VideoStatus::Scripting));
+    assert!(
+        video.updated_at > video.created_at,
+        "edits stamp the update time"
+    );
+
+    // Setting the same status again is not a change.
+    db.step(cx, |_, cx| {
+        db.panel.update(cx, |panel, cx| {
+            panel.set_status(db.tokyo, VideoStatus::Scripting, cx)
+        });
+    });
+    assert!(db.take_events().is_empty());
+
+    // Through the status cell's menu: the fifth status is Ready.
+    db.press_and_release(cx, format!("status-{}", db.desk));
+    db.step(cx, |window, cx| {
+        window.within("popup-menu").click(4usize, cx)
+    });
+    let events = db.take_events();
+    let [DatabaseEvent::UpdateVideo(video)] = events.as_slice() else {
+        panic!("expected one UpdateVideo, got {events:?}");
+    };
+    assert_eq!((video.id, video.status), (db.desk, VideoStatus::Ready));
+    assert_eq!(
+        cx.read(|cx| db.panel.read(cx).video(db.desk).map(|video| video.status)),
+        Some(VideoStatus::Ready)
+    );
+}
+
+#[gpui_kit::test]
+fn switching_views_emits_active_view_changed(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+    assert!(db.with_window(cx, |window, _| {
+        window.try_find("board-column-idea").is_none()
+    }));
+
+    db.step(cx, |window, cx| {
+        window.within("database-views").click(1usize, cx)
+    });
+    assert_eq!(
+        db.take_events(),
+        vec![DatabaseEvent::ActiveViewChanged(db.board)]
+    );
+    db.with_window(cx, |window, _| {
+        assert!(window.find("board-column-idea").visible());
+        assert!(window.find(format!("card-{}", db.tokyo)).visible());
+        // Archived only gets a column when the filter lets it through.
+        assert!(window.try_find("board-column-archived").is_none());
+        assert!(window.try_find(row_id(db.tokyo)).is_none());
+    });
+
+    // Clicking the active tab again changes nothing.
+    db.step(cx, |window, cx| {
+        window.within("database-views").click(1usize, cx)
+    });
+    assert!(db.take_events().is_empty());
+
+    // The owner switching views is not reported back to it.
+    db.step(cx, |window, cx| {
+        db.panel
+            .update(cx, |panel, cx| panel.set_active_view(db.table, window, cx))
+    });
+    assert!(db.take_events().is_empty());
+    assert!(db.with_window(cx, |window, _| window.find(row_id(db.tokyo)).visible()));
+}
+
+#[gpui_kit::test]
+fn adding_a_property_emits_create_property(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    db.step(cx, |window, cx| window.click("properties", cx));
+    db.step(cx, |window, cx| window.click("new-property", cx));
+    // The dialog focuses the name field; an empty name is rejected.
+    db.step(cx, |window, cx| window.click("property-commit", cx));
+    assert!(db.take_events().is_empty());
+    db.step(cx, |window, cx| {
+        window.click("property-name", cx);
+        window.input("Sponsor", cx);
+    });
+    db.step(cx, |window, cx| window.click("property-commit", cx));
+
+    let events = db.take_events();
+    let [
+        DatabaseEvent::CreateProperty(property),
+        DatabaseEvent::SaveView(view),
+    ] = events.as_slice()
+    else {
+        panic!("expected CreateProperty then SaveView, got {events:?}");
+    };
+    assert_eq!(property.name, "Sponsor");
+    assert_eq!(property.kind, PropertyKind::Text);
+    // The new property is shown in the view it was added from.
+    assert_eq!(view.id, db.table);
+    let layout = view
+        .columns
+        .iter()
+        .find(|layout| layout.column == Column::Custom(property.id));
+    assert!(layout.is_some_and(|layout| layout.visible));
+    assert_eq!(
+        cx.read(|cx| db.panel.read(cx).properties().to_vec()),
+        vec![property.clone()]
+    );
+    db.with_window(cx, |window, _| {
+        assert!(
+            window.try_find("property-name").is_none(),
+            "the dialog closes"
+        );
+        assert!(window.find(format!("column-{}", property.id)).visible());
+    });
+}
+
+#[gpui_kit::test]
+fn deleting_from_the_row_menu_asks_first(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    db.step(cx, |window, cx| {
+        window.right_click(row_id(db.ownership), cx)
+    });
+    // Open, Rename, Duplicate, separator, Delete…
+    db.step(cx, |window, cx| {
+        window.within("popup-menu").click(4usize, cx)
+    });
+    assert!(
+        db.take_events().is_empty(),
+        "nothing is deleted before confirming"
+    );
+    assert_eq!(db.shown_rows(cx), vec![db.tokyo, db.ownership, db.desk]);
+
+    db.step(cx, |window, cx| window.click("ok", cx));
+    assert_eq!(
+        db.take_events(),
+        vec![DatabaseEvent::DeleteVideos(vec![db.ownership])]
+    );
+    assert_eq!(db.shown_rows(cx), vec![db.tokyo, db.desk]);
+}
+
+#[gpui_kit::test]
+fn dragging_a_card_moves_it_between_columns(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+    db.step(cx, |window, cx| {
+        db.panel
+            .update(cx, |panel, cx| panel.set_active_view(db.board, window, cx))
+    });
+
+    // Onto the Filming column's only card: Filming, ordered before it.
+    db.step(cx, |window, cx| {
+        window.drag_to(
+            format!("card-{}", db.tokyo),
+            format!("card-slot-{}", db.desk),
+            cx,
+        )
+    });
+    let events = db.take_events();
+    let [DatabaseEvent::UpdateVideo(video)] = events.as_slice() else {
+        panic!("expected one UpdateVideo, got {events:?}");
+    };
+    assert_eq!(video.id, db.tokyo);
+    assert_eq!(video.status, VideoStatus::Filming);
+    assert!(
+        video.position < 2.0,
+        "placed before the desk video, got {}",
+        video.position
+    );
+    db.with_window(cx, |window, _| {
+        let moved = window.find(format!("card-{}", db.tokyo)).bounds();
+        let column = window.find("board-column-filming").bounds();
+        assert!(
+            column.contains(&moved.center()),
+            "the card is drawn in the Filming column"
+        );
+        assert!(moved.top() < window.find(format!("card-{}", db.desk)).bounds().top());
+        assert!(
+            window
+                .try_find("board-column-idea")
+                .is_some_and(|column| column.visible())
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn titles_open_the_video_and_new_video_reports_its_status(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    db.step(cx, |window, cx| {
+        window.click(format!("title-text-{}", db.desk), cx)
+    });
+    assert_eq!(db.take_events(), vec![DatabaseEvent::OpenVideo(db.desk)]);
+
+    db.step(cx, |window, cx| window.click("new-video", cx));
+    assert_eq!(
+        db.take_events(),
+        vec![DatabaseEvent::CreateVideo { status: None }]
+    );
+
+    db.step(cx, |window, cx| {
+        db.panel
+            .update(cx, |panel, cx| panel.set_active_view(db.board, window, cx))
+    });
+    db.step(cx, |window, cx| window.click("board-add-filming", cx));
+    assert_eq!(
+        db.take_events(),
+        vec![DatabaseEvent::CreateVideo {
+            status: Some(VideoStatus::Filming)
+        }]
+    );
+}
+
+#[gpui_kit::test]
+fn sorting_from_a_column_header_saves_the_view(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    db.step(cx, |window, cx| window.click("column-title", cx));
+    // Sort ascending, Sort descending, …
+    db.step(cx, |window, cx| {
+        window.within("popup-menu").click(0usize, cx)
+    });
+    let events = db.take_events();
+    let [DatabaseEvent::SaveView(view)] = events.as_slice() else {
+        panic!("expected one SaveView, got {events:?}");
+    };
+    assert_eq!(
+        view.sorts,
+        vec![SortSpec {
+            column: Column::Builtin(BuiltinField::Title),
+            direction: SortDirection::Ascending
+        }]
+    );
+    let sorted = vec![db.desk, db.ownership, db.tokyo];
+    assert_eq!(cx.read(|cx| db.panel.read(cx).visible_videos()), sorted);
+    db.with_window(cx, |window, _| {
+        let tops: Vec<_> = sorted
+            .iter()
+            .map(|id| window.find(row_id(*id)).bounds().top())
+            .collect();
+        assert!(
+            tops.windows(2).all(|pair| pair[0] < pair[1]),
+            "rows are drawn in sorted order"
+        );
+    });
+}

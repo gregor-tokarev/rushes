@@ -7,8 +7,8 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Selectable, Sizable as _, h_fl
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Div, ElementId, InteractiveElement, Interactivity, IntoElement, ParentElement,
-    RenderOnce, SharedString, Stateful, StatefulInteractiveElement, StyleRefinement, Styled,
-    Window, div,
+    RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement, StyleRefinement, Styled,
+    TestSupportExt as _, Window, div,
 };
 use videocrm_core::TagColor;
 
@@ -113,6 +113,8 @@ impl RenderOnce for CellButton {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let hover = cx.theme().secondary_hover;
         self.base
+            .role(Role::Button)
+            .test_support()
             .flex()
             .items_center()
             .gap_1()

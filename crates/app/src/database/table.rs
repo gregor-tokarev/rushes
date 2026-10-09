@@ -21,7 +21,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight,
     InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, WeakEntity, Window, div, px,
 };
 use videocrm_core::{
     BuiltinField, Column, ColumnLayout, PropertyDef, PropertyKind, PropertyValue, SortDirection,
@@ -207,6 +207,7 @@ impl VideoTable {
             .child(
                 div()
                     .id(element_id("title-text", id))
+                    .test_support()
                     .min_w_0()
                     .truncate()
                     .font_weight(FontWeight::MEDIUM)
@@ -986,6 +987,7 @@ pub(crate) fn render_empty_state(
 
     v_flex()
         .id("database-empty")
+        .test_support()
         .size_full()
         .items_center()
         .justify_center()
