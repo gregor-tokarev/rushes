@@ -431,14 +431,16 @@ impl YoutubeClient {
 
 /// Waits out a backoff while watching `cancel`.
 fn backoff_sleep(duration: Duration, cancel: &AtomicBool, session_url: Option<&str>) -> Result<()> {
-    let deadline = Instant::now() + duration;
-    while Instant::now() < deadline {
+    // A backoff too long for an `Instant` (from huge `UploadOptions`) waits for cancel.
+    let deadline = Instant::now().checked_add(duration);
+    while deadline.is_none_or(|deadline| Instant::now() < deadline) {
         if cancel.load(Ordering::Relaxed) {
             return Err(Error::Cancelled {
                 session_url: session_url.map(str::to_owned),
             });
         }
-        thread::sleep(CANCEL_POLL.min(deadline.saturating_duration_since(Instant::now())));
+        let left = deadline.map_or(CANCEL_POLL, |d| d.saturating_duration_since(Instant::now()));
+        thread::sleep(CANCEL_POLL.min(left));
     }
     Ok(())
 }
@@ -656,6 +658,15 @@ mod tests {
         assert_eq!(options.backoff(3), Duration::from_secs(8));
         assert_eq!(options.backoff(10), Duration::from_secs(64));
         assert_eq!(options.backoff(40), Duration::from_secs(64));
+    }
+
+    #[test]
+    fn backoff_longer_than_an_instant_can_hold_is_cancellable() {
+        let cancel = AtomicBool::new(true);
+        assert!(matches!(
+            backoff_sleep(Duration::MAX, &cancel, Some("session")),
+            Err(Error::Cancelled { session_url: Some(url) }) if url == "session"
+        ));
     }
 
     #[test]

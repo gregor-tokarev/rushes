@@ -154,18 +154,18 @@ impl PendingAuthorization {
 
     /// Serves the browser redirect, then exchanges the code for tokens. Unrelated
     /// requests (favicon, probes) are answered and ignored. Checks `cancel` about
-    /// every 50 ms.
+    /// every 50 ms. `Duration::MAX` waits until the redirect or cancel.
     pub fn wait(self, timeout: Duration, cancel: &AtomicBool) -> Result<Credentials> {
         self.listener
             .set_nonblocking(true)
             .map_err(|e| Error::io("configuring the sign-in redirect listener", e))?;
-        let deadline = Instant::now() + timeout;
+        let deadline = Instant::now().checked_add(timeout);
         let agent = http::agent();
         loop {
             if cancel.load(Ordering::Relaxed) {
                 return Err(Error::Cancelled { session_url: None });
             }
-            if Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Err(Error::Timeout);
             }
             match self.listener.accept() {
@@ -624,6 +624,13 @@ mod tests {
         let result = pending.wait(Duration::from_millis(500), &AtomicBool::new(false));
         assert!(matches!(result, Err(Error::Timeout)));
         assert!(started.elapsed() < REQUEST_READ_TIMEOUT + Duration::from_secs(1));
+    }
+
+    #[test]
+    fn wait_without_a_deadline_still_honours_cancel() {
+        let pending = begin_authorization(&emulator_config()).unwrap();
+        let result = pending.wait(Duration::MAX, &AtomicBool::new(true));
+        assert!(matches!(result, Err(Error::Cancelled { .. })));
     }
 
     #[test]
