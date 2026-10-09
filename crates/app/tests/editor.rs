@@ -534,3 +534,17 @@ fn clicking_inside_the_edited_block_places_the_caret_there(cx: &mut TestAppConte
     f.type_text(cx, "X");
     assert_eq!(f.summary(cx), owned(&[(BlockKind::Paragraph, "XHello world")]));
 }
+
+#[gpui_kit::test]
+fn escape_closes_the_block_menu_and_returns_to_the_block(cx: &mut TestAppContext) {
+    let second = paragraph("second");
+    let f = Fixture::new(cx, vec![paragraph("first"), second.clone()]);
+    f.focus_last(cx);
+    f.press(cx, &["secondary-/"]);
+    assert!(f.is_visible(cx, "popup-menu".into()));
+    f.press(cx, &["escape"]);
+    assert!(!f.is_visible(cx, "popup-menu".into()));
+    assert_eq!(f.focused(cx), Some(second.id));
+    f.type_text(cx, "!");
+    assert_eq!(f.summary(cx), owned(&[(BlockKind::Paragraph, "first"), (BlockKind::Paragraph, "second!")]));
+}

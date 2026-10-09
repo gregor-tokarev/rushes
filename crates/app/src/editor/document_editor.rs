@@ -92,6 +92,8 @@ struct BlockMenu {
     block: BlockId,
     menu: Entity<PopupMenu>,
     position: Point<Pixels>,
+    /// Focus before the menu opened, restored when it is dismissed.
+    restore_focus: Option<FocusHandle>,
     _subscription: Subscription,
 }
 
@@ -882,8 +884,21 @@ impl DocumentEditor {
             is_first: ix == 0,
             is_last: ix + 1 == self.document.blocks.len(),
         };
-        let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
-            render::block_menu(menu, editor, &target, window, cx)
+        // Dismissing the menu returns focus to where it was opened from; a
+        // menu reopened over another keeps the first one's origin.
+        let restore_focus = match self.block_menu.take() {
+            Some(open) => open.restore_focus,
+            None => window.focused(cx),
+        };
+        let menu = PopupMenu::build(window, cx, {
+            let restore_focus = restore_focus.clone();
+            move |menu, window, cx| {
+                let menu = render::block_menu(menu, editor, &target, window, cx);
+                match restore_focus {
+                    Some(handle) => menu.action_context(handle),
+                    None => menu,
+                }
+            }
         });
         menu.focus_handle(cx).focus(window, cx);
         let subscription = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, _, cx| {
@@ -891,7 +906,8 @@ impl DocumentEditor {
             cx.notify();
         });
         self.slash = None;
-        self.block_menu = Some(BlockMenu { block: id, menu, position, _subscription: subscription });
+        self.block_menu =
+            Some(BlockMenu { block: id, menu, position, restore_focus, _subscription: subscription });
         cx.notify();
     }
 
