@@ -7,6 +7,7 @@
 pub(crate) mod elements;
 mod palette;
 mod sidebar;
+mod startup;
 mod theme;
 mod title_bar;
 
@@ -33,6 +34,7 @@ use crate::video_page::VideoPage;
 use crate::wizard;
 
 use palette::CommandPalette;
+pub use startup::{InstanceLock, StartupNotice, StartupProblem, open_startup_notice};
 pub use theme::{apply_theme, register_fonts};
 
 actions!(
@@ -171,6 +173,15 @@ impl Workspace {
         };
         workspace.sync_data(window, cx);
         workspace.sync_route(window, cx);
+        let problems = workspace.state.update(cx, |state, _| state.take_startup_problems());
+        if !problems.is_empty() {
+            // The window's notification layer exists once the window does.
+            window.defer(cx, move |window, cx| {
+                for problem in &problems {
+                    window.push_notification(problem_notification(problem), cx);
+                }
+            });
+        }
         workspace
     }
 

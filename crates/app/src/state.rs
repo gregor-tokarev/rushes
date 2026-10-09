@@ -22,6 +22,8 @@ use crate::route::{Route, SettingsSection, VideoTab};
 pub use problem::{Problem, Remedy};
 
 const RECENT_LIMIT: usize = 8;
+/// The key [`Store::load_settings`] reads, for reading what it can't parse.
+const APP_SETTINGS_KEY: &str = "app";
 
 /// Shared handle to the database. `Store` is `Send` but not `Sync`.
 pub type SharedStore = Arc<Mutex<Store>>;
@@ -50,6 +52,8 @@ pub struct AppState {
     recent: Vec<VideoId>,
     /// A just-created video whose script takes keyboard focus when its page opens.
     script_focus: Option<VideoId>,
+    /// Problems found while loading, shown once the window is open.
+    startup_problems: Vec<Problem>,
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -62,7 +66,7 @@ impl AppState {
     /// Loads settings and data from `store`. The first route is onboarding until
     /// it has been completed.
     pub fn new(store: Store) -> Result<Self, StoreError> {
-        let settings = store.load_settings()?;
+        let (settings, settings_problem) = load_settings(&store)?;
         let route = if settings.onboarding_completed { Route::default() } else { Route::Onboarding };
         let mut state = Self {
             store: Arc::new(Mutex::new(store)),
@@ -75,9 +79,15 @@ impl AppState {
             forward: Vec::new(),
             recent: Vec::new(),
             script_focus: None,
+            startup_problems: settings_problem.into_iter().collect(),
         };
         state.load()?;
         Ok(state)
+    }
+
+    /// Problems found while loading; asking clears them.
+    pub fn take_startup_problems(&mut self) -> Vec<Problem> {
+        std::mem::take(&mut self.startup_problems)
     }
 
     /// Registers `state` as the app-wide instance returned by [`AppState::global`].
@@ -427,5 +437,103 @@ impl AppState {
         self.forward.clear();
         self.route = Route::default();
         self.on_route_changed(cx);
+    }
+}
+
+/// The stored settings. Values this version can't read (an unknown theme from a
+/// newer VideoCRM, a field of the wrong type) fall back to their defaults one
+/// by one instead of keeping the creator from their videos; the stored JSON is
+/// left alone until a setting is changed.
+fn load_settings(store: &Store) -> Result<(AppSettings, Option<Problem>), StoreError> {
+    let error = match store.load_settings() {
+        Ok(settings) => return Ok((settings, None)),
+        Err(error @ StoreError::Sqlite(rusqlite::Error::FromSqlConversionFailure(..))) => error,
+        Err(error) => return Err(error),
+    };
+    eprintln!("videocrm: some settings can't be read, using their defaults: {error}");
+    let stored = match store.get_setting::<serde_json::Value>(APP_SETTINGS_KEY) {
+        Ok(stored) => stored.unwrap_or_default(),
+        Err(StoreError::Sqlite(rusqlite::Error::FromSqlConversionFailure(..))) => serde_json::Value::Null,
+        Err(error) => return Err(error),
+    };
+    let problem = Problem::new(
+        "Some settings couldn’t be read",
+        "Another version of VideoCRM saved them, so they use their defaults for now. Your videos aren’t affected.",
+    )
+    .with_remedy(Remedy::OpenSettings(SettingsSection::General));
+    Ok((readable_settings(stored), Some(problem)))
+}
+
+/// `stored` with every value [`AppSettings`] can't read replaced by its default.
+fn readable_settings(stored: serde_json::Value) -> AppSettings {
+    use serde_json::{Map, Value};
+
+    /// Copies the readable values of `stored` into the object at `parent` in `merged`.
+    fn merge(merged: &mut Value, parent: &str, stored: Map<String, Value>) {
+        for (key, value) in stored {
+            let mut candidate = merged.clone();
+            let Some(object) = candidate.pointer_mut(parent).and_then(Value::as_object_mut) else { return };
+            object.insert(key.clone(), value.clone());
+            if serde_json::from_value::<AppSettings>(candidate.clone()).is_ok() {
+                *merged = candidate;
+                continue;
+            }
+            // The readable fields of an unreadable group, such as the pipeline settings.
+            let child = format!("{parent}/{}", key.replace('~', "~0").replace('/', "~1"));
+            if let Value::Object(inner) = value
+                && merged.pointer(&child).is_some_and(Value::is_object)
+            {
+                merge(merged, &child, inner);
+            }
+        }
+    }
+
+    let mut merged = serde_json::to_value(AppSettings::default()).unwrap_or_default();
+    if let Value::Object(stored) = stored {
+        merge(&mut merged, "", stored);
+    }
+    serde_json::from_value(merged).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use videocrm_core::Store;
+    use videocrm_core::settings::ThemeMode;
+
+    // Not a glob: the parent's `gpui_kit::*` would bring GPUI's `test` macro.
+    use super::{APP_SETTINGS_KEY, load_settings, readable_settings};
+
+    #[test]
+    fn unreadable_settings_fall_back_one_by_one() {
+        let stored = json!({
+            "media_root": "/srv/media",
+            "onboarding_completed": true,
+            "theme": "high_contrast",
+            "pipeline": { "agent_command": "my-agent", "auto_approve": "sometimes" },
+        });
+        let settings = readable_settings(stored);
+        assert_eq!(settings.media_root.as_deref(), Some(std::path::Path::new("/srv/media")));
+        assert!(settings.onboarding_completed);
+        assert_eq!(settings.theme, ThemeMode::default());
+        assert_eq!(settings.pipeline.agent_command, "my-agent");
+        assert!(!settings.pipeline.auto_approve);
+    }
+
+    #[test]
+    fn a_store_with_unreadable_settings_still_loads() {
+        let mut store = Store::open_in_memory().expect("store");
+        store
+            .set_setting(APP_SETTINGS_KEY, &json!({ "onboarding_completed": true, "theme": "high_contrast" }))
+            .expect("write settings");
+        let (settings, problem) = load_settings(&store).expect("settings load");
+        assert!(settings.onboarding_completed);
+        assert!(problem.is_some());
+        // Nothing is written back until a setting changes.
+        let stored: Option<serde_json::Value> = store.get_setting(APP_SETTINGS_KEY).expect("read settings");
+        assert_eq!(
+            stored.and_then(|stored| stored["theme"].as_str().map(str::to_string)).as_deref(),
+            Some("high_contrast")
+        );
     }
 }
