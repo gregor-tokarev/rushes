@@ -143,6 +143,8 @@ fn footage_is_listed_and_probed() {
     fs::write(ws.footage.join("notes.txt"), "not media").unwrap();
     fs::write(ws.footage.join(".hidden.mp4"), "").unwrap();
     fs::create_dir(ws.footage.join("edit")).unwrap();
+    // A take on an unplugged drive must not break the listing.
+    std::os::unix::fs::symlink("/nonexistent/take0.mp4", ws.footage.join("take0.mp4")).unwrap();
 
     let footage = list_footage(&ws.footage).expect("list");
     let names: Vec<_> = footage.iter().map(|file| file.name.as_str()).collect();
@@ -228,7 +230,7 @@ fn plan_then_approve_then_feedback() {
             "missing {expected} in {argv:?}"
         );
     }
-    assert!(!argv.iter().any(|arg| arg == "--resume"));
+    assert!(!argv.iter().any(|arg| arg.starts_with("--resume")));
 
     // Approve: resumes the session and renders.
     let (approve, events) = run(
@@ -242,10 +244,7 @@ fn plan_then_approve_then_feedback() {
     assert_eq!(approve.session_id.as_deref(), Some(session_id.as_str()));
     assert!(matches!(&events[0], AgentEvent::Init { session_id: id, .. } if *id == session_id));
     let argv = ws.argv();
-    assert!(
-        argv.windows(2)
-            .any(|pair| pair == ["--resume", session_id.as_str()])
-    );
+    assert!(argv.contains(&format!("--resume={session_id}")), "{argv:?}");
     assert!(argv[1].contains("Keep it tight."));
 
     let final_cut = approve.final_cut.clone().expect("final cut");
@@ -286,15 +285,22 @@ fn auto_renders_in_one_pass() {
     // No footage: the fake agent falls back to a synthetic clip.
     let ws = Workspace::new(0);
     let config = fake_agent(&[("FAKE_AGENT_ARGV_FILE", ws.argv_file.to_str().unwrap())]);
+    // A blank stored session id starts a fresh session.
     let (outcome, events) = run(
         &config,
-        &ws.context(None),
+        &ws.context(Some(" ".to_owned())),
         Phase::Auto {
             brief: String::new(),
         },
     );
     let outcome = outcome.expect("auto succeeds");
-    assert!(ws.argv()[1].contains("No media files were found"));
+    let argv = ws.argv();
+    assert!(argv[1].contains("No media files were found"));
+    assert!(
+        !argv.iter().any(|arg| arg.starts_with("--resume")),
+        "{argv:?}"
+    );
+    assert!(outcome.session_id.is_some_and(|id| !id.trim().is_empty()));
     assert!(outcome.rendered);
     let media = probe_media(outcome.final_cut.as_ref().expect("final cut")).expect("valid video");
     assert!((media.duration_secs - 3.0).abs() < 0.3, "{media:?}");
@@ -485,5 +491,79 @@ mod cancel {
             &[("FAKE_AGENT_IGNORE_TERM", "1")],
             Duration::from_millis(500),
         );
+    }
+
+    /// A process the agent leaves behind (like a backgrounded ffmpeg) is stopped when
+    /// the agent exits, instead of running on and holding the output pipes open.
+    #[test]
+    fn leftover_processes_are_terminated_after_the_agent_exits() {
+        if !tools_available() {
+            return;
+        }
+        let ws = Workspace::new(1);
+        let pid_file = ws.footage.parent().unwrap().join("pids");
+        let config = fake_agent(&[
+            ("FAKE_AGENT_LEAVE_CHILD", "1"),
+            ("FAKE_AGENT_PID_FILE", pid_file.to_str().unwrap()),
+        ]);
+        let started = Instant::now();
+        let (result, _) = run(
+            &config,
+            &ws.context(None),
+            Phase::Plan {
+                brief: String::new(),
+            },
+        );
+        result.expect("plan succeeds");
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "waited for the leftover: {:?}",
+            started.elapsed()
+        );
+        let pids = recorded_pids(&pid_file);
+        assert_eq!(pids.len(), 2, "agent and its leftover child");
+        for pid in pids {
+            assert!(
+                wait_until(Duration::from_secs(5), || is_dead(pid)),
+                "pid {pid} survived"
+            );
+        }
+    }
+
+    /// A panicking event callback must not leave the agent running unsupervised.
+    #[test]
+    fn panicking_callback_still_stops_the_agent() {
+        if !tools_available() {
+            return;
+        }
+        let ws = Workspace::new(1);
+        let pid_file = ws.footage.parent().unwrap().join("pids");
+        let config = AgentConfig {
+            kill_grace: Duration::from_secs(2),
+            ..fake_agent(&[
+                ("FAKE_AGENT_DELAY_MS", "30000"),
+                ("FAKE_AGENT_PID_FILE", pid_file.to_str().unwrap()),
+            ])
+        };
+        let outcome = std::panic::catch_unwind(|| {
+            run_phase(
+                &config,
+                &ws.context(None),
+                Phase::Plan {
+                    brief: String::new(),
+                },
+                &mut |_| panic!("event sink gone"),
+                &AtomicBool::new(false),
+            )
+        });
+        assert!(outcome.is_err(), "the callback panicked");
+        let pids = recorded_pids(&pid_file);
+        assert!(!pids.is_empty());
+        for pid in pids {
+            assert!(
+                wait_until(Duration::from_secs(5), || is_dead(pid)),
+                "pid {pid} survived"
+            );
+        }
     }
 }

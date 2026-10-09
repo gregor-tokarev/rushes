@@ -1,6 +1,7 @@
 //! Running the coding agent (Claude Code in print mode) and streaming its events.
 
 use std::ffi::OsString;
+use std::fmt;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -38,7 +39,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How to launch the agent CLI.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct AgentConfig {
     /// Executable: a bare name looked up on `PATH`, or a path.
     pub command: PathBuf,
@@ -77,6 +78,24 @@ impl Default for AgentConfig {
     }
 }
 
+// `env` often carries API keys, so only the variable names are printed.
+impl fmt::Debug for AgentConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let env: Vec<&str> = self.env.iter().map(|(name, _)| name.as_str()).collect();
+        f.debug_struct("AgentConfig")
+            .field("command", &self.command)
+            .field("model", &self.model)
+            .field("permission_mode", &self.permission_mode)
+            .field("allowed_tools", &self.allowed_tools)
+            .field("append_system_prompt", &self.append_system_prompt)
+            .field("max_turns", &self.max_turns)
+            .field("extra_args", &self.extra_args)
+            .field("env", &env)
+            .field("kill_grace", &self.kill_grace)
+            .finish()
+    }
+}
+
 impl AgentConfig {
     /// Absolute path of the agent executable, if it exists.
     pub fn resolve_command(&self) -> Option<PathBuf> {
@@ -96,6 +115,8 @@ impl AgentConfig {
     fn args(&self, invocation: &Invocation) -> Vec<OsString> {
         // The prompt directly follows `-p`, and the variadic options (`--allowedTools`,
         // `--add-dir`) use the `--flag=value` form, so no option can swallow an argument.
+        // `--resume` takes an optional value, so its id is attached the same way: a
+        // separate argument starting with `-` would be parsed as an option instead.
         let mut args: Vec<OsString> = vec![
             "-p".into(),
             invocation.prompt.clone().into(),
@@ -104,7 +125,7 @@ impl AgentConfig {
             "--verbose".into(),
         ];
         if let Some(session_id) = &invocation.resume {
-            args.extend(["--resume".into(), session_id.into()]);
+            args.push(format!("--resume={session_id}").into());
         }
         if let Some(model) = &self.model {
             args.extend(["--model".into(), model.into()]);
@@ -181,7 +202,7 @@ enum Line {
 
 /// Runs the agent to completion, reporting every event as it arrives, and returns
 /// its exit status with what it reported. Setting `cancel` terminates the agent and
-/// everything it started.
+/// everything it started; processes it leaves behind when it exits are terminated too.
 pub(crate) fn run_agent(
     config: &AgentConfig,
     program: &Path,
@@ -200,24 +221,29 @@ pub(crate) fn run_agent(
     // Own process group, so cancelling reaches ffmpeg/python grandchildren too.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let mut child = command.spawn().map_err(|source| PipelineError::Spawn {
+    let child = command.spawn().map_err(|source| PipelineError::Spawn {
         command: program.to_owned(),
         source,
     })?;
+    let mut agent = AgentProcess {
+        child,
+        kill_grace: config.kill_grace,
+    };
 
     let (tx, rx) = mpsc::channel();
     let readers = [
-        child
+        agent
+            .child
             .stdout
             .take()
             .map(|out| spawn_reader(out, tx.clone(), Line::Stdout)),
-        child
+        agent
+            .child
             .stderr
             .take()
             .map(|err| spawn_reader(err, tx, Line::Stderr)),
     ];
     if let Some(error) = readers.into_iter().flatten().find_map(Result::err) {
-        terminate(&mut child, config.kill_grace);
         return Err(error.into());
     }
 
@@ -236,7 +262,6 @@ pub(crate) fn run_agent(
     let mut streams_open = true;
     let status = loop {
         if cancel.load(Ordering::Relaxed) {
-            terminate(&mut child, config.kill_grace);
             return Err(PipelineError::Cancelled);
         }
         if streams_open {
@@ -248,10 +273,13 @@ pub(crate) fn run_agent(
         } else {
             thread::sleep(POLL_INTERVAL);
         }
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = agent.child.try_wait()? {
             break status;
         }
     };
+    // Whatever the agent left running (a backgrounded ffmpeg, a helper script) would
+    // keep going and hold the output pipes open.
+    drop(agent);
 
     let deadline = Instant::now() + DRAIN_TIMEOUT;
     while streams_open && let Some(left) = deadline.checked_duration_since(Instant::now()) {
@@ -291,8 +319,21 @@ fn spawn_reader(
         .map(drop)
 }
 
+/// The running agent. Every way out of [`run_agent`] (exit, cancellation, an error,
+/// a panicking `on_event`) drops it, which terminates what is left of its process group.
+struct AgentProcess {
+    child: Child,
+    kill_grace: Duration,
+}
+
+impl Drop for AgentProcess {
+    fn drop(&mut self) {
+        terminate(&mut self.child, self.kill_grace);
+    }
+}
+
 /// SIGTERM to the agent's process group, SIGKILL to whatever is left after the
-/// grace period, then reap the agent.
+/// grace period, then reap the agent. Returns at once when the group is already gone.
 #[cfg(unix)]
 fn terminate(child: &mut Child, grace: Duration) {
     let group = child.id() as libc::pid_t;
@@ -316,9 +357,10 @@ fn terminate(child: &mut Child, grace: Duration) {
 /// Sends `signal` to every process in `group`; `false` once the group is gone.
 #[cfg(unix)]
 fn signal_group(group: libc::pid_t, signal: libc::c_int) -> bool {
-    // SAFETY: killpg has no memory-safety preconditions. `group` is the id of a
-    // process group we created and whose leader we have not reaped before the
-    // first signal, so it cannot name an unrelated group.
+    // SAFETY: killpg has no memory-safety preconditions. `group` is the id of the
+    // process group we created for the agent. The kernel does not hand that id out
+    // again while any member is alive, even after the leader was reaped; once the
+    // group is empty, killpg fails with ESRCH.
     unsafe { libc::killpg(group, signal) == 0 }
 }
 
@@ -380,8 +422,7 @@ mod tests {
         assert_eq!(
             args[5..],
             [
-                "--resume",
-                "abc-123",
+                "--resume=abc-123",
                 "--model",
                 "sonnet",
                 "--permission-mode",
@@ -394,6 +435,17 @@ mod tests {
                 "high",
             ]
         );
+    }
+
+    #[test]
+    fn debug_output_hides_env_values() {
+        let config = AgentConfig {
+            env: vec![("ANTHROPIC_API_KEY".to_owned(), "sk-ant-secret".to_owned())],
+            ..AgentConfig::default()
+        };
+        let debug = format!("{config:?}");
+        assert!(debug.contains("ANTHROPIC_API_KEY"), "{debug}");
+        assert!(!debug.contains("sk-ant-secret"), "{debug}");
     }
 
     #[test]

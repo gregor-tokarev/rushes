@@ -64,8 +64,10 @@ pub fn list_footage(dir: &Path) -> io::Result<Vec<FootageFile>> {
             .extension()
             .and_then(OsStr::to_str)
             .is_some_and(|ext| MEDIA_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()));
-        // `metadata` follows symlinks, so linked takes count too.
-        if is_media && !name.starts_with('.') && entry.path().metadata()?.is_file() {
+        // `metadata` follows symlinks, so linked takes count too. A dangling link or an
+        // unreadable entry is skipped rather than failing the whole listing.
+        let is_file = || entry.path().metadata().is_ok_and(|meta| meta.is_file());
+        if is_media && !name.starts_with('.') && is_file() {
             names.push(name);
         }
     }

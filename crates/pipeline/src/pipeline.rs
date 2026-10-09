@@ -92,18 +92,24 @@ pub fn run_phase(
         Phase::Approve { .. } | Phase::Feedback { .. } => Vec::new(),
     };
 
+    // A blank id (e.g. an unset database column) means a fresh session.
+    let resume = ctx
+        .session_id
+        .clone()
+        .filter(|session_id| !session_id.trim().is_empty());
+
     let edit_dir = ctx.footage_dir.join(EDIT_DIR);
     let final_cut = edit_dir.join(FINAL_CUT);
     let before = file_stamp(&final_cut);
     let invocation = Invocation {
         cwd: ctx.footage_dir.clone(),
         prompt: build_prompt(&phase, &skill_dir.join(SKILL_FILE), &footage),
-        resume: ctx.session_id.clone(),
+        resume: resume.clone(),
         add_dirs: vec![skill_dir],
     };
     let (status, run) = run_agent(config, &program, &invocation, on_event, cancel)?;
 
-    let session_id = run.session_id.or_else(|| ctx.session_id.clone());
+    let session_id = run.session_id.or(resume);
     let failed = |message: String| PipelineError::AgentFailed {
         message,
         stderr_tail: run.stderr_tail.clone(),

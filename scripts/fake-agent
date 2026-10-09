@@ -14,6 +14,8 @@ Environment:
   FAKE_AGENT_MODE=fail     emit an error result, write to stderr, exit 1
   FAKE_AGENT_DELAY_MS=N    sleep N ms (in a child `sleep` process) between events
   FAKE_AGENT_IGNORE_TERM=1 ignore SIGTERM (exercises the SIGKILL fallback)
+  FAKE_AGENT_LEAVE_CHILD=1 start a `sleep` that outlives the agent, like a backgrounded
+                           ffmpeg (it inherits stdout/stderr and is in the agent's group)
   FAKE_AGENT_PID_FILE=path append "<pid>" of this process and of each delay child
   FAKE_AGENT_ARGV_FILE=path write the received argv as JSON
 """
@@ -315,6 +317,8 @@ def main():
     session = Session(args)
     session.record_pid(os.getpid())
     session.init()
+    if os.environ.get("FAKE_AGENT_LEAVE_CHILD") == "1":
+        session.record_pid(subprocess.Popen(["sleep", "30"]).pid)
 
     if os.environ.get("FAKE_AGENT_MODE") == "fail":
         session.text("Checking the footage.")
