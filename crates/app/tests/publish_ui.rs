@@ -255,19 +255,83 @@ fn chapters_come_from_the_script_headings(cx: &mut TestAppContext) {
             Block::new(BlockKind::Heading2, "Why ownership"),
             Block::paragraph(vec!["word"; 150].join(" ")),
             Block::new(BlockKind::Heading2, "Borrowing"),
+            Block::paragraph(vec!["word"; 150].join(" ")),
+            Block::new(BlockKind::Heading2, "Lifetimes"),
         ];
         state.save_document(script, cx);
     });
     let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
+        assert!(window.find("chapters-estimate").visible());
         window.click("insert-chapters", cx);
     });
     settle(cx);
     assert_eq!(
         workspace.video(cx, video_id).publish.description,
-        format!("One owner, many borrowers.\n\n{CHAPTERS_HEADING}\n0:00 Why ownership\n1:00 Borrowing")
+        format!("One owner, many borrowers.\n\n{CHAPTERS_HEADING}\n0:00 Why ownership\n1:00 Borrowing\n2:00 Lifetimes")
     );
+}
+
+#[gpui_kit::test]
+fn only_chapters_youtube_shows_are_offered(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Stop Using print() to Debug Python", |video| {
+        video.format = videocrm_core::VideoFormat::Short;
+        video.publish.file = Some(file.clone());
+    });
+    let script = |sections: usize, cx: &mut TestAppContext| {
+        workspace.state.update(cx, |state, cx| {
+            let mut script =
+                state.documents(video_id).into_iter().find(|doc| doc.kind == DocumentKind::Script).unwrap();
+            script.blocks = (0..sections)
+                .flat_map(|ix| {
+                    [
+                        Block::new(BlockKind::Heading2, format!("Part {ix}")),
+                        Block::paragraph(vec!["word"; 50].join(" ")),
+                    ]
+                })
+                .collect();
+            state.save_document(script, cx);
+        });
+    };
+    script(3, cx);
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    cx.run_until_parked();
+    let unavailable = |handle: AnyWindowHandle, cx: &mut TestAppContext| {
+        let mut shown = false;
+        window(cx, handle, |window, cx| {
+            window.render_frame(cx);
+            // Disabled: inserting would add a list YouTube ignores.
+            window.click("insert-chapters", cx);
+            shown = window.find("chapters-unavailable").visible();
+        });
+        settle(cx);
+        shown && workspace.video(cx, video_id).publish.description.is_empty()
+    };
+    assert!(unavailable(handle, cx), "Shorts have no chapters");
+
+    workspace.state.update(cx, |state, cx| {
+        let mut video = state.video(video_id).unwrap().clone();
+        video.format = videocrm_core::VideoFormat::LongForm;
+        state.update_video(video, cx);
+    });
+    script(2, cx);
+    assert!(unavailable(handle, cx), "two chapters are too few");
+
+    script(3, cx);
+    cx.run_until_parked();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        // Three 20 s sections end at 0:40; the one-second test clip is far shorter.
+        if videocrm_pipeline::probe_media(&file).is_some() {
+            assert!(window.find("chapters-past-the-end").visible());
+        }
+        window.click("insert-chapters", cx);
+    });
+    settle(cx);
+    assert!(workspace.video(cx, video_id).publish.description.contains("0:40 Part 2"));
 }
 
 #[gpui_kit::test]

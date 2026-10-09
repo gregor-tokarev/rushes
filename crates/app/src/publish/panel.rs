@@ -31,10 +31,12 @@ use gpui_kit::{
 };
 use videocrm_core::document::DEFAULT_WPM;
 use videocrm_core::media::{self, MediaKind};
-use videocrm_core::{DocumentKind, Privacy, PublishSettings, UploadJob, UploadStatus, Video, VideoId, VideoStatus};
+use videocrm_core::{
+    DocumentKind, Privacy, PublishSettings, UploadJob, UploadStatus, Video, VideoFormat, VideoId, VideoStatus,
+};
 use videocrm_pipeline::MediaInfo;
 
-use super::chapters::{chapters, chapters_text, insert_chapters};
+use super::chapters::{MIN_CHAPTERS, chapters, chapters_text, insert_chapters, timestamp};
 use super::rules::{
     self, BlockingReason, CATEGORIES, Category, DESCRIPTION_MAX_BYTES, TAGS_MAX_CHARS, THUMBNAIL_MAX_BYTES,
     TITLE_MAX_CHARS, tags_length,
@@ -66,6 +68,20 @@ impl SelectItem for CategoryItem {
     fn value(&self) -> &Self::Value {
         &self.0.id
     }
+}
+
+/// Why there are no chapters to insert.
+const NO_SECTIONS: &str = "Add Heading 2 sections to the script to make chapters.";
+const TOO_FEW_SECTIONS: &str =
+    "YouTube shows chapters only for three or more sections of 10 seconds or longer. The script has fewer.";
+const SHORTS_HAVE_NO_CHAPTERS: &str = "Shorts don't have chapters on YouTube.";
+
+/// Chapters YouTube will show, as description text.
+#[derive(Clone, Debug, PartialEq)]
+struct ChapterList {
+    text: String,
+    /// Start of the last chapter, which the video must outlast by 10 s.
+    last_start: u32,
 }
 
 /// A video file the creator is likely to upload.
@@ -168,8 +184,8 @@ pub struct PublishPanel {
     file: Option<FileDetails>,
     /// Size of the chosen thumbnail, `None` while unknown or missing.
     thumbnail_size: Option<(PathBuf, Option<u64>)>,
-    /// Chapter list from the script, `None` when the script has no Heading 2.
-    chapters: Option<String>,
+    /// Chapter list from the script, or why YouTube wouldn't show one.
+    chapters: Result<ChapterList, &'static str>,
     /// Who could watch before "Schedule" forced private, restored when it is turned off.
     unscheduled_privacy: Option<Privacy>,
     _subscriptions: Vec<Subscription>,
@@ -270,7 +286,7 @@ impl PublishPanel {
             choices: Vec::new(),
             file: None,
             thumbnail_size: None,
-            chapters: None,
+            chapters: Err(NO_SECTIONS),
             unscheduled_privacy: None,
             _subscriptions: subscriptions,
         };
@@ -395,9 +411,16 @@ impl PublishPanel {
         let documents = self.state.read(cx).documents(self.video_id);
         let script = documents.iter().find(|document| document.kind == DocumentKind::Script);
         let found = script.map(|script| chapters(&script.blocks, DEFAULT_WPM)).unwrap_or_default();
-        let text = (!found.is_empty()).then(|| chapters_text(&found));
-        if text != self.chapters {
-            self.chapters = text;
+        let short = self.state.read(cx).video(self.video_id).is_some_and(|video| video.format == VideoFormat::Short);
+        // YouTube silently drops a list it can't use, so only usable ones are offered.
+        let offer = match found.last() {
+            _ if short => Err(SHORTS_HAVE_NO_CHAPTERS),
+            None => Err(NO_SECTIONS),
+            Some(_) if found.len() < MIN_CHAPTERS => Err(TOO_FEW_SECTIONS),
+            Some(last) => Ok(ChapterList { text: chapters_text(&found), last_start: last.start_secs }),
+        };
+        if offer != self.chapters {
+            self.chapters = offer;
             cx.notify();
         }
     }
@@ -569,8 +592,8 @@ impl PublishPanel {
     }
 
     fn insert_chapters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(chapters) = self.chapters.clone() else { return };
-        let description = insert_chapters(&self.draft.description, &chapters);
+        let Ok(chapters) = self.chapters.clone() else { return };
+        let description = insert_chapters(&self.draft.description, &chapters.text);
         // Replacing keeps the change undoable and reports it like typing would.
         self.description.update(cx, |input, cx| input.replace_all(description, window, cx));
     }
@@ -631,9 +654,33 @@ impl PublishPanel {
             .icon(IconName::ListOrdered)
             .small()
             .outline()
-            .disabled(self.chapters.is_none())
-            .when(self.chapters.is_none(), |this| this.tooltip("Add Heading 2 sections to the script first"))
+            .disabled(self.chapters.is_err())
             .on_click(cx.listener(|this, _, window, cx| this.insert_chapters(window, cx)));
+        // The estimate may run past the end of the chosen file, where YouTube ignores it.
+        let file_secs = self
+            .file
+            .as_ref()
+            .filter(|file| Some(&file.path) == self.draft.file.as_ref())
+            .and_then(|file| file.media.as_ref())
+            .map(|media| media.duration_secs);
+        let past_the_end = match (&self.chapters, file_secs) {
+            (Ok(list), Some(secs)) if f64::from(list.last_start) + 10.0 > secs => Some(format!(
+                "The chosen file is {} long, but these chapters run to {}. YouTube ignores chapters past the end.",
+                format_duration(secs),
+                timestamp(list.last_start)
+            )),
+            _ => None,
+        };
+        let chapters_help = match (&self.chapters, past_the_end) {
+            (Err(reason), _) => help_text(*reason, cx).id("chapters-unavailable"),
+            (Ok(_), Some(warning)) => help_text(warning, cx).text_color(cx.theme().warning).id("chapters-past-the-end"),
+            (Ok(_), None) => {
+                help_text(format!("Timestamps are estimated from the script at {DEFAULT_WPM} words per minute."), cx)
+                    .id("chapters-estimate")
+            }
+        }
+        // Tests check which note is on screen.
+        .test_support();
         let uploaded = self.state.read(cx).video(self.video_id).is_some_and(|video| video.youtube.is_some());
         v_flex()
             .gap_5()
@@ -661,16 +708,7 @@ impl PublishPanel {
                     .counter(self.draft.description.len(), DESCRIPTION_MAX_BYTES)
                     .control(Textarea::new(&self.description).aria_label("Description")),
             )
-            .child(
-                h_flex().gap_3().child(chapters_button).child(
-                    help_text(
-                        format!("Timestamps are estimated from the script at {DEFAULT_WPM} words per minute."),
-                        cx,
-                    )
-                    .flex_1()
-                    .min_w_0(),
-                ),
-            )
+            .child(h_flex().gap_3().child(chapters_button).child(chapters_help.flex_1().min_w_0()))
             .child(
                 FieldRow::new("Tags")
                     .counter(tags_length(&self.draft.tags), TAGS_MAX_CHARS)

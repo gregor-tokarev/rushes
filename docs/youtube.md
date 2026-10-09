@@ -253,7 +253,10 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   (`videocrm_core::document`, 150 wpm). YouTube wants the first chapter at 0:00 and none
   shorter than 10 s, so spoken words before the first heading become "Intro" and shorter
   sections give their slot to the next heading. Inserting again replaces the earlier list.
-  The timestamps are estimates; the button says so.
+  The timestamps are estimates; the button says so. YouTube ignores lists of fewer than
+  three chapters and Shorts have none, so the button is disabled then and says why; when
+  the chosen file is shorter than the list (its last chapter needs 10 s before the end),
+  a warning says so.
 - **Schedule** forces private (YouTube makes the video public at the publish time) and
   restores the earlier visibility when turned off.
 - The Upload card lists what blocks an upload in every state, so a disabled **Upload to

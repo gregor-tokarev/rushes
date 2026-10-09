@@ -9,6 +9,8 @@ use videocrm_core::{Block, BlockKind};
 pub const CHAPTERS_HEADING: &str = "Chapters:";
 /// YouTube ignores the whole list when a chapter is shorter than this.
 const MIN_CHAPTER_SECS: u32 = 10;
+/// YouTube ignores lists with fewer chapters than this.
+pub const MIN_CHAPTERS: usize = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chapter {
@@ -19,7 +21,8 @@ pub struct Chapter {
 /// Chapters for the script `blocks` at `wpm` words per minute. YouTube requires the
 /// first chapter at 0:00, so spoken words before the first Heading 2 become an "Intro",
 /// and chapters of at least ten seconds, so a shorter section gives its slot to the
-/// heading after it. Empty when the script has no Heading 2.
+/// heading after it. Empty when the script has no Heading 2. YouTube also needs at
+/// least [`MIN_CHAPTERS`]; fewer is for the caller to refuse.
 pub fn chapters(blocks: &[Block], wpm: u32) -> Vec<Chapter> {
     let mut chapters: Vec<Chapter> = Vec::new();
     let mut words = 0;
