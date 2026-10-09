@@ -884,3 +884,48 @@ fn onboarding_checks_the_media_folder_before_going_on(cx: &mut TestAppContext) {
     assert_eq!(app.media_root(cx), Some(footage.clone()));
     assert!(footage.is_dir());
 }
+
+#[gpui_kit::test]
+fn history_skips_deleted_videos(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour", "Rust in 100 seconds", "Tokyo tech stores"]);
+    let (desk, rust, tokyo) = (
+        app.video_id(cx, "Desk setup tour"),
+        app.video_id(cx, "Rust in 100 seconds"),
+        app.video_id(cx, "Tokyo tech stores"),
+    );
+    let video = |id| Route::Video { id, tab: VideoTab::Script };
+    let delete = |app: &Fixture, cx: &mut TestAppContext, id: VideoId| {
+        let state = app.state.clone();
+        app.step(cx, move |_, cx| state.update(cx, |state, cx| state.delete_videos(&[id], cx)));
+    };
+    app.navigate(cx, Route::Pipelines);
+    app.navigate(cx, video(desk));
+    app.navigate(cx, video(rust));
+
+    // Deleting the open video leaves its page without keeping it in the history.
+    delete(&app, cx, rust);
+    assert_eq!(app.route(cx), Route::default());
+    app.press(cx, "alt-left");
+    assert_eq!(app.route(cx), video(desk));
+    app.press(cx, "alt-left");
+    assert_eq!(app.route(cx), Route::Pipelines);
+
+    // Pages ahead in the history go too.
+    app.press(cx, "alt-right");
+    app.navigate(cx, video(tokyo));
+    app.press(cx, "alt-left");
+    assert_eq!(app.route(cx), video(desk));
+    delete(&app, cx, tokyo);
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_forward()));
+
+    // And so do pages behind, with the repeats they leave.
+    app.navigate(cx, Route::Pipelines);
+    app.navigate(cx, Route::Uploads);
+    delete(&app, cx, desk);
+    assert_eq!(app.route(cx), Route::Uploads);
+    app.press(cx, "alt-left");
+    assert_eq!(app.route(cx), Route::Pipelines);
+    app.press(cx, "alt-left");
+    assert_eq!(app.route(cx), Route::default());
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_back()));
+}

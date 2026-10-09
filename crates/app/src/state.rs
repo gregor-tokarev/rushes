@@ -125,7 +125,21 @@ impl AppState {
         self.views = views;
         let known: Vec<VideoId> = self.rows.iter().map(|row| row.video.id).collect();
         self.recent.retain(|id| known.contains(id));
+        self.prune_history(&known);
         Ok(())
+    }
+
+    /// Drops the history entries of videos that no longer exist, and the repeats
+    /// that leaves, so Back and Forward never land on a missing page.
+    fn prune_history(&mut self, known: &[VideoId]) {
+        let exists = |route: &Route| !matches!(route, Route::Video { id, .. } if !known.contains(id));
+        for stack in [&mut self.back, &mut self.forward] {
+            stack.retain(exists);
+            stack.dedup();
+            while stack.last() == Some(&self.route) {
+                stack.pop();
+            }
+        }
     }
 
     /// Re-reads rows, properties and views and notifies observers.
@@ -237,7 +251,11 @@ impl AppState {
         self.write(cx, |store| ids.iter().try_for_each(|id| store.delete_video(*id)));
         let leaves_current_page = matches!(&self.route, Route::Video { id, .. } if ids.contains(id));
         if leaves_current_page {
-            self.navigate(Route::default(), cx);
+            // The deleted page is replaced, not kept in the history.
+            self.route = Route::default();
+            let known: Vec<VideoId> = self.rows.iter().map(|row| row.video.id).collect();
+            self.prune_history(&known);
+            self.on_route_changed(cx);
         }
     }
 
