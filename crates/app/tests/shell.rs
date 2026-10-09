@@ -462,3 +462,52 @@ fn shutting_down_writes_pending_edits(cx: &mut TestAppContext) {
     let script = documents.iter().find(|document| document.kind == DocumentKind::Script).expect("script");
     assert_eq!(script.blocks[0].text, "Last words");
 }
+
+/// Creates a video from `template` through the app state, as the wizard does.
+fn create_video(app: &Fixture, cx: &mut TestAppContext, title: &str, template: TemplateKind) -> VideoId {
+    let state = app.state.clone();
+    let new = NewVideo { title: title.to_string(), template, ..NewVideo::default() };
+    cx.update(|cx| state.update(cx, |state, cx| state.create_video(new, cx))).expect("video created")
+}
+
+#[gpui_kit::test]
+fn the_outline_jumps_to_a_heading(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    let id = create_video(&app, cx, "Build a home studio", TemplateKind::Tutorial);
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
+
+    let (outline, words) = cx.read(|cx| {
+        let page = app.workspace.read(cx).video_page().expect("video page").read(cx);
+        let stats = page.script().expect("script tab").read(cx).stats().clone();
+        (stats.outline, stats.words)
+    });
+    assert!(outline.len() > 2, "the tutorial template has sections");
+    assert_eq!(cx.read(|cx| app.state.read(cx).row(id).map(|row| row.script_words)), Some(words));
+
+    let heading = outline[2].block_id;
+    app.click(cx, ElementId::Name(format!("outline-{heading}").into()));
+    assert_eq!(app.script_focused_block(cx), Some(heading));
+}
+
+#[gpui_kit::test]
+fn importing_markdown_can_replace_the_script(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
+    let script = cx.read(|cx| {
+        app.workspace.read(cx).video_page().expect("video page").read(cx).script().cloned().expect("script tab")
+    });
+
+    let blocks = videocrm_core::document::from_markdown("## Cold open\n\nEverything on this desk earned its spot.\n");
+    let tab = script.clone();
+    app.step(cx, move |window, cx| {
+        tab.update(cx, |tab, cx| tab.confirm_import(std::path::Path::new("desk.md"), blocks, window, cx))
+    });
+    assert!(app.has_dialog(cx));
+    app.click(cx, "import-replace");
+
+    assert!(!app.has_dialog(cx));
+    assert_eq!(app.stored_first_block(cx, id, DocumentKind::Script), "Cold open");
+    let words = cx.read(|cx| script.read(cx).stats().words);
+    assert_eq!(words, 7);
+}
