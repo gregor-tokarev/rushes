@@ -524,6 +524,23 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
 
       const tokenCache = new Map<string, { user: GoogleUser | null; expires: number }>();
 
+      // Requests to one upload session run one at a time, so a status query racing an
+      // aborted chunk sees what that chunk persisted.
+      const sessionQueues = new Map<string, Promise<void>>();
+
+      function exclusive<T>(id: string, task: () => Promise<T>): Promise<T> {
+        const run = (sessionQueues.get(id) ?? Promise.resolve()).then(task);
+        const tail = run.then(
+          () => undefined,
+          () => undefined,
+        );
+        sessionQueues.set(id, tail);
+        void tail.then(() => {
+          if (sessionQueues.get(id) === tail) sessionQueues.delete(id);
+        });
+        return run;
+      }
+
       async function lookupUser(token: string): Promise<GoogleUser | null> {
         const now = Date.now();
         const cached = tokenCache.get(token);
@@ -892,83 +909,85 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
             await discardBody(c);
             throw new YoutubeError(404, "notFound", "The upload session does not exist or has expired.", { location: "upload_id" });
           }
-          const owner = state.channels[session.channelId];
-          if (session.videoId) {
-            // Already complete: repeat the final answer, unless the video was deleted since.
-            await discardBody(c);
-            const video = state.videos[session.videoId];
-            if (!video) throw videoNotFound();
-            return c.json(renderVideo(video, session.parts, owner, Date.now()), 200);
-          }
-
-          const range = parseContentRange(c.req.header("Content-Range"));
-          if (range.kind !== "whole" && range.total !== null && range.total !== session.total) {
-            await discardBody(c);
-            throw badRequest("badContent", `Content-Range total ${range.total} does not match X-Upload-Content-Length ${session.total}.`, {
-              location: "Content-Range",
-              locationType: "header",
-            });
-          }
-          if (range.kind === "query") {
-            await discardBody(c);
-            return resumeIncomplete(c, session);
-          }
-          const start = range.kind === "chunk" ? range.start : 0;
-          const limit = range.kind === "chunk" ? range.end + 1 : session.total;
-          if (start > session.received || limit > session.total) {
-            await discardBody(c);
-            throw badRequest("badContent", `Content-Range bytes ${start}-${limit - 1} do not continue the ${session.received} bytes received so far.`, {
-              location: "Content-Range",
-              locationType: "header",
-            });
-          }
-
-          // Append the part of the body past what is already persisted.
-          const path = sessionFile(session.id);
-          const before = session.received;
-          const file = await open(path, "a");
-          let offset = start;
-          let appended = 0;
-          let interrupted = false;
-          try {
-            for await (const piece of c.req.raw.body ?? []) {
-              const bytes = piece as Uint8Array;
-              const skip = Math.min(bytes.length, Math.max(0, before + appended - offset));
-              const room = Math.max(0, limit - (before + appended));
-              const fresh = bytes.subarray(skip, skip + room);
-              offset += bytes.length;
-              if (fresh.length) {
-                await file.write(fresh);
-                appended += fresh.length;
-              }
+          return exclusive(session.id, async () => {
+            const owner = state.channels[session.channelId];
+            if (session.videoId) {
+              // Already complete: repeat the final answer, unless the video was deleted since.
+              await discardBody(c);
+              const video = state.videos[session.videoId];
+              if (!video) throw videoNotFound();
+              return c.json(renderVideo(video, session.parts, owner, Date.now()), 200);
             }
-          } catch {
-            interrupted = true;
-          } finally {
-            await file.close();
-          }
 
-          if (!interrupted && offset !== limit) {
-            await truncate(path, before);
-            throw badRequest("badContent", `Content-Range declares ${limit - start} bytes but the request body has ${offset - start}.`, {
-              location: "Content-Range",
-              locationType: "header",
-            });
-          }
+            const range = parseContentRange(c.req.header("Content-Range"));
+            if (range.kind !== "whole" && range.total !== null && range.total !== session.total) {
+              await discardBody(c);
+              throw badRequest("badContent", `Content-Range total ${range.total} does not match X-Upload-Content-Length ${session.total}.`, {
+                location: "Content-Range",
+                locationType: "header",
+              });
+            }
+            if (range.kind === "query") {
+              await discardBody(c);
+              return resumeIncomplete(c, session);
+            }
+            const start = range.kind === "chunk" ? range.start : 0;
+            const limit = range.kind === "chunk" ? range.end + 1 : session.total;
+            if (start > session.received || limit > session.total) {
+              await discardBody(c);
+              throw badRequest("badContent", `Content-Range bytes ${start}-${limit - 1} do not continue the ${session.received} bytes received so far.`, {
+                location: "Content-Range",
+                locationType: "header",
+              });
+            }
 
-          let persisted = before + appended;
-          const partial = takeFault("PUT", c.req.path, "partial");
-          if (partial?.persistBytes !== null && partial?.persistBytes !== undefined) {
-            persisted = Math.min(persisted, before + partial.persistBytes);
-          }
-          if (persisted < session.total) {
-            persisted = Math.max(before, persisted - (persisted % UPLOAD_GRANULARITY));
-          }
-          if (persisted !== before + appended) await truncate(path, persisted);
-          session.received = persisted;
+            // Append the part of the body past what is already persisted.
+            const path = sessionFile(session.id);
+            const before = session.received;
+            const file = await open(path, "a");
+            let offset = start;
+            let appended = 0;
+            let interrupted = false;
+            try {
+              for await (const piece of c.req.raw.body ?? []) {
+                const bytes = piece as Uint8Array;
+                const skip = Math.min(bytes.length, Math.max(0, before + appended - offset));
+                const room = Math.max(0, limit - (before + appended));
+                const fresh = bytes.subarray(skip, skip + room);
+                offset += bytes.length;
+                if (fresh.length) {
+                  await file.write(fresh);
+                  appended += fresh.length;
+                }
+              }
+            } catch {
+              interrupted = true;
+            } finally {
+              await file.close();
+            }
 
-          if (session.received === session.total) return completeUpload(c, session, owner);
-          return resumeIncomplete(c, session);
+            if (!interrupted && offset !== limit) {
+              await truncate(path, before);
+              throw badRequest("badContent", `Content-Range declares ${limit - start} bytes but the request body has ${offset - start}.`, {
+                location: "Content-Range",
+                locationType: "header",
+              });
+            }
+
+            let persisted = before + appended;
+            const partial = takeFault("PUT", c.req.path, "partial");
+            if (partial?.persistBytes !== null && partial?.persistBytes !== undefined) {
+              persisted = Math.min(persisted, before + partial.persistBytes);
+            }
+            if (persisted < session.total) {
+              persisted = Math.max(before, persisted - (persisted % UPLOAD_GRANULARITY));
+            }
+            if (persisted !== before + appended) await truncate(path, persisted);
+            session.received = persisted;
+
+            if (session.received === session.total) return completeUpload(c, session, owner);
+            return resumeIncomplete(c, session);
+          });
         }),
       );
 
