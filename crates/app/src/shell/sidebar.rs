@@ -3,7 +3,6 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
-use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::sidebar::{
     Sidebar, SidebarCollapsible, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem,
 };
@@ -15,6 +14,7 @@ use gpui_kit::{
 };
 use videocrm_core::{UploadStatus, VideoId, ViewKind};
 
+use super::elements::shortcut_hint;
 use super::{NewVideo, OpenCommandPalette, Workspace};
 use crate::route::{Route, VideoTab};
 use crate::state::AppState;
@@ -189,10 +189,8 @@ impl Workspace {
             .child(
                 SidebarMenuItem::new("Search")
                     .icon(Icon::new(IconName::Search))
-                    .suffix(|window, _| {
-                        Kbd::binding_for_action(&OpenCommandPalette, None, window)
-                            .map(|kbd| kbd.appearance(false).into_any_element())
-                            .unwrap_or_else(|| div().into_any_element())
+                    .suffix(|window, cx| {
+                        shortcut_hint(&OpenCommandPalette, window, cx).unwrap_or_else(|| div().into_any_element())
                     })
                     .on_click(move |_, window, cx| {
                         _ = workspace.update(cx, |workspace, cx| workspace.open_command_palette(window, cx));
@@ -226,7 +224,7 @@ impl Workspace {
     }
 
     fn render_sidebar_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let shortcut = Kbd::binding_for_action(&NewVideo, None, window);
+        let shortcut = shortcut_hint(&NewVideo, window, cx);
         v_flex()
             .w_full()
             .gap_3()
@@ -254,9 +252,7 @@ impl Workspace {
                     .outline()
                     .icon(IconName::Plus)
                     .label("New video")
-                    .when_some(shortcut, |this, kbd| {
-                        this.child(div().flex_1()).child(kbd.appearance(false).text_color(cx.theme().muted_foreground))
-                    })
+                    .when_some(shortcut, |this, hint| this.child(div().flex_1()).child(hint))
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(NewVideo), cx)),
             )
     }

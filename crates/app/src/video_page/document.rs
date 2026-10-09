@@ -377,12 +377,13 @@ impl Render for ScriptRail {
                 .child(div().text_xs().text_color(cx.theme().muted_foreground).child(label))
         };
         let tab = self.tab.clone();
+        let top_level = stats.outline.iter().map(|item| item.level).min().unwrap_or(1);
         let outline: Vec<RowButton> = stats.outline.into_iter().map(|item| {
             let tab = tab.clone();
             let id = item.block_id;
             RowButton::new(SharedString::from(format!("outline-{id}")), item.text)
-                .indent(Rems(0.75 * f32::from(item.level.saturating_sub(1))))
-                .muted(item.level > 1)
+                .indent(Rems(0.75 * f32::from(item.level - top_level)))
+                .muted(item.level > top_level)
                 .on_click(move |_, window, cx| tab.update(cx, |tab, cx| tab.focus_block(id, window, cx)))
         }).collect();
         let action = |id: &'static str, icon: IconName, label: &'static str, run: fn(&mut DocumentTab, &mut Window, &mut Context<DocumentTab>)| {

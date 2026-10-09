@@ -440,11 +440,9 @@ impl PropertiesPanel {
                     .into_any_element()
             }
             PropertyKind::Date => match self.dates.get(&id) {
-                Some(picker) => DatePicker::new(picker)
-                    .appearance(false)
-                    .small()
-                    .cleanable(true)
-                    .placeholder("Empty")
+                Some(picker) => div()
+                    .w_56()
+                    .child(DatePicker::new(picker).appearance(false).small().cleanable(true).placeholder("Empty"))
                     .into_any_element(),
                 None => div().into_any_element(),
             },
@@ -619,8 +617,9 @@ impl Render for PropertiesPanel {
         let tags = self.render_tags(&video, cx).into_any_element();
         let folder = self.render_media_folder(&video, cx).into_any_element();
         let youtube = self.render_youtube(&video, cx);
-        let publish_date =
-            DatePicker::new(&self.publish_date).appearance(false).small().cleanable(true).placeholder("Empty");
+        let publish_date = div().w_56().child(
+            DatePicker::new(&self.publish_date).appearance(false).small().cleanable(true).placeholder("Empty"),
+        );
 
         v_flex()
             .id("properties")

@@ -14,7 +14,7 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, StyledExt as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Selectable as _, Sizable as _, Size, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, Focusable as _, FontWeight,
@@ -272,12 +272,15 @@ impl VideoPage {
 
     fn render_icon(&self, video: &Video, cx: &mut Context<Self>) -> impl IntoElement {
         let page = cx.weak_entity();
-        let has_icon = video.icon.as_deref().is_some_and(|icon| !icon.is_empty());
+        let current = video.icon.clone().filter(|icon| !icon.is_empty());
+        let has_icon = current.is_some();
         let trigger = match video.icon.clone().filter(|icon| !icon.is_empty()) {
+            // The emoji sits on the column's edge; its hover surface bleeds past it.
             Some(icon) => Button::new("page-icon")
                 .ghost()
                 .h(rems(4.5))
                 .w(rems(4.5))
+                .ml(rems(-0.625))
                 .accessibility_label("Change icon")
                 .child(div().text_size(rems(3.25)).line_height(rems(4.)).child(icon)),
             None => Button::new("page-icon")
@@ -302,9 +305,10 @@ impl VideoPage {
                 .child(div().grid().grid_cols(8).gap_0p5().children(emoji::EMOJI.iter().map(|emoji| {
                     Button::new(SharedString::from(format!("emoji-{emoji}")))
                         .ghost()
-                        .size(rems(2.))
+                        .size(rems(2.25))
                         .accessibility_label(*emoji)
-                        .child(div().text_lg().child(*emoji))
+                        .selected(current.as_deref() == Some(*emoji))
+                        .child(div().text_xl().child(*emoji))
                         .on_click(pick(Some(emoji.to_string())))
                 })))
                 .when(has_icon, |this| {
@@ -354,12 +358,15 @@ impl VideoPage {
                     .key_context("VideoTitle")
                     .capture_action(cx.listener(Self::on_title_enter))
                     .child(
+                        // A textarea pads its text by its size's input inset;
+                        // the margin puts the title on the column's edge.
                         Textarea::new(&self.title)
                             .appearance(false)
+                            .xsmall()
+                            .ml(-Size::XSmall.input_px())
                             .text_size(rems(2.))
                             .line_height(rems(2.5))
-                            .font_weight(FontWeight::BOLD)
-                            .px_0(),
+                            .font_weight(FontWeight::BOLD),
                     ),
             )
             .child(
@@ -377,14 +384,7 @@ impl VideoPage {
             .underline()
             .w_full()
             .selected_index(selected)
-            .children(VideoTab::ALL.iter().map(|tab| {
-                Tab::new().label(tab.label()).icon(Icon::new(match tab {
-                    VideoTab::Script => IconName::ScrollText,
-                    VideoTab::Notes => IconName::NotebookPen,
-                    VideoTab::Footage => IconName::WandSparkles,
-                    VideoTab::Publish => IconName::CloudUpload,
-                }))
-            }))
+            .children(VideoTab::ALL.iter().map(|tab| Tab::new().label(tab.label())))
             .suffix(self.render_page_menu(cx))
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
                 if let Some(tab) = VideoTab::ALL.get(*ix) {

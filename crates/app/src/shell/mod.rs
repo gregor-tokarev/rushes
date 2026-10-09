@@ -18,7 +18,8 @@ use gpui_kit::{
     KeyBinding, ParentElement as _, Render, Styled as _, Subscription, TestSupportExt as _, Window, actions, div,
 };
 use videocrm_core::settings::ThemeMode;
-use videocrm_core::{VideoStatus, ViewId};
+use chrono::{Local, NaiveDate};
+use videocrm_core::{VideoRow, VideoStatus, ViewId};
 
 use crate::ai_edit::PipelinesPage;
 use crate::database::{DatabaseEvent, DatabasePanel};
@@ -365,20 +366,7 @@ impl Workspace {
     }
 
     fn render_database_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        let state = self.state.read(cx);
-        let count = state.rows().len();
-        let in_production = state
-            .rows()
-            .iter()
-            .filter(|row| {
-                matches!(row.video.status, VideoStatus::Scripting | VideoStatus::Filming | VideoStatus::Editing)
-            })
-            .count();
-        let summary = match count {
-            0 => "Plan every video from idea to upload.".to_string(),
-            1 => "1 video".to_string(),
-            count => format!("{count} videos · {in_production} in production"),
-        };
+        let summary = production_summary(self.state.read(cx).rows(), Local::now().date_naive());
         v_flex()
             .size_full()
             .min_h_0()
@@ -395,6 +383,31 @@ impl Workspace {
             .child(div().flex_1().min_h_0().child(self.database.clone()))
             .into_any_element()
     }
+}
+
+/// One line under the database title: what is in production and what ships next.
+fn production_summary(rows: &[VideoRow], today: NaiveDate) -> String {
+    let in_production = rows
+        .iter()
+        .filter(|row| matches!(row.video.status, VideoStatus::Scripting | VideoStatus::Filming | VideoStatus::Editing))
+        .count();
+    let next_publish = rows
+        .iter()
+        .filter(|row| !matches!(row.video.status, VideoStatus::Published | VideoStatus::Archived))
+        .filter_map(|row| row.video.publish_date)
+        .filter(|date| *date >= today)
+        .min();
+    if rows.is_empty() {
+        return "Plan every video from idea to upload.".to_string();
+    }
+    let mut summary = match in_production {
+        0 => "Nothing in production".to_string(),
+        count => format!("{count} in production"),
+    };
+    if let Some(date) = next_publish {
+        summary.push_str(&format!(" · next publish {}", date.format("%b %-d")));
+    }
+    summary
 }
 
 /// Persists a change the database panel already made to its own copy.

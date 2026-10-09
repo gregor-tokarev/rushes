@@ -3,7 +3,6 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::breadcrumb::{Breadcrumb, BreadcrumbItem};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::sidebar::SidebarToggleButton;
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, Disableable as _, Sizable as _, TitleBar, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -12,6 +11,7 @@ use gpui_kit::{
     Window, div,
 };
 
+use super::elements::shortcut_hint;
 use super::sidebar::{display_title, video_emoji};
 use super::{GoBack, GoForward, OpenCommandPalette, ToggleSidebar, ToggleTheme, Workspace};
 use crate::route::{Route, VideoTab};
@@ -34,7 +34,7 @@ impl Workspace {
         let (can_go_back, can_go_forward) = (state.can_go_back(), state.can_go_forward());
         let collapsed = self.sidebar_collapsed;
         let workspace = cx.weak_entity();
-        let search_shortcut = Kbd::binding_for_action(&OpenCommandPalette, None, window);
+        let search_shortcut = shortcut_hint(&OpenCommandPalette, window, cx);
         let is_dark = cx.theme().is_dark();
 
         TitleBar::new()
@@ -84,9 +84,7 @@ impl Workspace {
                             .small()
                             .icon(IconName::Search)
                             .label("Search")
-                            .when_some(search_shortcut, |this, kbd| {
-                                this.child(kbd.appearance(false).text_color(cx.theme().muted_foreground))
-                            })
+                            .when_some(search_shortcut, |this, hint| this.child(hint))
                             .on_click(move |_, window, cx| {
                                 _ = workspace.update(cx, |workspace, cx| workspace.open_command_palette(window, cx));
                             }),

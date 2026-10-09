@@ -211,6 +211,8 @@ impl Onboarding {
                         )
                         .child(
                             v_flex()
+                                .flex_1()
+                                .min_w_0()
                                 .gap_0p5()
                                 .child(div().text_sm().font_medium().child(title))
                                 .child(div().text_sm().text_color(cx.theme().muted_foreground).child(description)),
@@ -407,7 +409,8 @@ impl Render for Onboarding {
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .bg(cx.theme().muted.opacity(0.4))
-            .child(v_flex().w_full().min_h_full().items_center().justify_center().px_6().py_10().child(card))
+            // Anchored at the top so the stepper stays put while steps change height.
+            .child(v_flex().w_full().items_center().px_6().pt_20().pb_10().child(card))
             .vertical_scrollbar(&self.scroll)
     }
 }

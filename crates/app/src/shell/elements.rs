@@ -3,11 +3,12 @@
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::empty::{Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle};
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, Icon, Sizable as _, ThemeStyled as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, Rems, Role,
+    Action, AnyElement, App, ClickEvent, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, Rems, Role,
     SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
 };
 
@@ -167,4 +168,10 @@ impl RenderOnce for ChoiceCard {
             .child(div().text_xs().text_color(cx.theme().muted_foreground).child(self.description))
             .when_some(self.on_click, |this, on_click| this.on_click(move |event, window, cx| on_click(event, window, cx)))
     }
+}
+
+/// The key binding of `action` as muted text, for controls that show their shortcut.
+pub(crate) fn shortcut_hint(action: &dyn Action, window: &Window, cx: &App) -> Option<AnyElement> {
+    let kbd = Kbd::binding_for_action(action, None, window)?;
+    Some(div().text_xs().text_color(cx.theme().muted_foreground).child(kbd.appearance(false)).into_any_element())
 }
