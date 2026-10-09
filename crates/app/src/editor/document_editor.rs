@@ -65,6 +65,7 @@ pub struct DocumentEditor {
     scroll_handle: Option<ScrollHandle>,
     focus_handle: FocusHandle,
     _focus_out: Subscription,
+    _focus_root: Subscription,
 }
 
 struct BlockInput {
@@ -148,6 +149,13 @@ impl DocumentEditor {
             this.set_focused(None, cx);
             cx.notify();
         });
+        // The editor itself takes focus for a selected divider, and for clicks
+        // between blocks, which leave no block focused.
+        let focus_root = cx.on_focus(&focus_handle, window, |this, _, cx| {
+            if this.selected.is_none() {
+                this.set_focused(None, cx);
+            }
+        });
         Self {
             document,
             inputs: HashMap::new(),
@@ -161,6 +169,7 @@ impl DocumentEditor {
             scroll_handle: None,
             focus_handle,
             _focus_out: focus_out,
+            _focus_root: focus_root,
         }
     }
 
@@ -811,6 +820,7 @@ impl DocumentEditor {
 
     fn clear_selection(&mut self, _: &ClearBlockSelection, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected.take().is_some() {
+            self.set_focused(None, cx);
             cx.notify();
         }
     }

@@ -56,6 +56,9 @@ impl Fixture {
             })
             .expect("open test window")
         });
+        // Focus and blur callbacks only flow in an active window, as on a desktop.
+        cx.update_window(window, |_, window, _| window.activate_window()).expect("window is open");
+        cx.run_until_parked();
         let events = Rc::new(RefCell::new(Vec::new()));
         let sink = events.clone();
         cx.update(|cx| {
@@ -598,4 +601,27 @@ fn slash_menu_scrolls_to_the_keyboard_selection(cx: &mut TestAppContext) {
     assert!(f.is_visible(cx, slash_item("Text")));
     f.press(cx, &["enter"]);
     assert_eq!(f.summary(cx), owned(&[(BlockKind::Paragraph, "")]));
+}
+
+#[gpui_kit::test]
+fn focus_on_the_editor_itself_leaves_no_block_focused(cx: &mut TestAppContext) {
+    let blocks = vec![paragraph("one"), block(BlockKind::Divider, "")];
+    let ids: Vec<_> = blocks.iter().map(|block| block.id).collect();
+    let f = Fixture::new(cx, blocks);
+    f.focus_first(cx);
+    f.press(cx, &["down"]);
+    assert_eq!(f.focused(cx), Some(ids[1]));
+    f.press(cx, &["escape"]);
+    assert_eq!(f.focused(cx), None, "Escape clears the divider selection");
+    assert_eq!(f.events.borrow().last(), Some(&DocumentEditorEvent::FocusChanged(None)));
+
+    // A click beside a block, outside its text column, focuses the editor.
+    f.focus_first(cx);
+    let row = cx
+        .update_window(f.window, |_, window, _| window.try_find(part(ids[0], "row")).map(|row| row.bounds()))
+        .expect("window is open")
+        .expect("the row is rendered");
+    f.step(cx, |window, cx| window.click_at(part(ids[0], "row"), point(row.size.width - px(8.), px(8.)), cx));
+    assert_eq!(f.focused(cx), None);
+    assert_eq!(f.events.borrow().last(), Some(&DocumentEditorEvent::FocusChanged(None)));
 }
