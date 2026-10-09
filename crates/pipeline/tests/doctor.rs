@@ -150,8 +150,47 @@ fn empty_key_and_broken_agent_are_reported() {
     assert!(!report.agent.ok);
     assert!(report.agent.detail.contains("does not run"));
     assert!(!report.elevenlabs.ok);
-    assert!(report.elevenlabs.detail.contains("is missing"));
+    assert!(report.elevenlabs.detail.contains("is empty in"));
     assert!(report.skill.ok && report.ffmpeg.ok && report.python.ok);
+}
+
+/// video-use's helpers read the skill's `.env` before the environment, so an empty
+/// line there (`cp .env.example .env`) hides a key exported in the environment.
+#[test]
+fn empty_dotenv_line_shadows_the_environment() {
+    let machine = Machine::new().with_tools();
+    let (link, real) = machine.skill("ELEVENLABS_API_KEY=\n");
+    let mut config = machine.config();
+    config
+        .env
+        .push(("ELEVENLABS_API_KEY".to_owned(), SECRET.to_owned()));
+    let report = doctor(&config, Some(&link));
+
+    assert!(!report.ready());
+    assert_eq!(
+        report.elevenlabs.detail,
+        format!(
+            "ELEVENLABS_API_KEY is empty in {}: the skill reads that file before the \
+             environment, so fill in the key there or remove the line",
+            real.join(".env").display()
+        )
+    );
+    assert!(!format!("{report:?}").contains(SECRET));
+}
+
+/// The skill does not understand `export KEY=...` lines, so they do not count.
+#[test]
+fn exported_dotenv_line_is_not_a_key() {
+    let machine = Machine::new().with_tools();
+    let (link, _) = machine.skill(&format!("export ELEVENLABS_API_KEY={SECRET}\n"));
+    let report = doctor(&machine.config(), Some(&link));
+
+    assert!(!report.elevenlabs.ok);
+    assert!(
+        report.elevenlabs.detail.contains("is missing"),
+        "{report:?}"
+    );
+    assert!(!format!("{report:?}").contains(SECRET));
 }
 
 #[test]

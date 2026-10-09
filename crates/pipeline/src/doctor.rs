@@ -137,38 +137,47 @@ fn check_ffmpeg_tool(program: Option<PathBuf>, name: &str) -> Check {
     }
 }
 
+/// Mirrors how video-use's `helpers/transcribe.py` finds the key: a `KEY=` line in the
+/// skill's `.env` wins, even when empty, and only then the environment counts.
 fn check_elevenlabs(config: &AgentConfig, skill_dir: Option<&Path>) -> Check {
-    if config
+    let env_file = skill_dir.map(|dir| dir.join(".env"));
+    let in_file = env_file.as_deref().and_then(|path| {
+        let text = fs::read_to_string(path).ok()?;
+        dotenv_has_value(&text, ELEVENLABS_KEY).map(|filled| (path, filled))
+    });
+    let in_environment = config
         .env_var(ELEVENLABS_KEY)
-        .is_some_and(|key| !key.to_string_lossy().trim().is_empty())
-    {
-        return Check::pass(format!("{ELEVENLABS_KEY} is set in the environment"));
-    }
-    let Some(skill_dir) = skill_dir else {
-        return Check::fail(format!("{ELEVENLABS_KEY} is not set in the environment"));
-    };
-    let env_file = skill_dir.join(".env");
-    if fs::read_to_string(&env_file).is_ok_and(|text| dotenv_has_value(&text, ELEVENLABS_KEY)) {
-        Check::pass(format!("{ELEVENLABS_KEY} is set in {}", env_file.display()))
-    } else {
-        Check::fail(format!(
+        .is_some_and(|key| !key.to_string_lossy().trim().is_empty());
+    match (in_file, env_file.as_deref()) {
+        (Some((path, true)), _) => {
+            Check::pass(format!("{ELEVENLABS_KEY} is set in {}", path.display()))
+        }
+        (Some((path, false)), _) => Check::fail(format!(
+            "{ELEVENLABS_KEY} is empty in {}: the skill reads that file before the \
+             environment, so fill in the key there or remove the line",
+            path.display()
+        )),
+        (None, _) if in_environment => {
+            Check::pass(format!("{ELEVENLABS_KEY} is set in the environment"))
+        }
+        (None, Some(path)) => Check::fail(format!(
             "{ELEVENLABS_KEY} is missing: add it to {} or the environment",
-            env_file.display()
-        ))
+            path.display()
+        )),
+        (None, None) => Check::fail(format!("{ELEVENLABS_KEY} is not set in the environment")),
     }
 }
 
-/// Whether a `.env` file assigns a non-empty value to `key`. The value is only
-/// tested for emptiness, never copied out.
-fn dotenv_has_value(text: &str, key: &str) -> bool {
-    text.lines().any(|line| {
-        let line = line.trim();
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        line.split_once('=').is_some_and(|(name, value)| {
-            let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
-            name.trim() == key && !value.is_empty()
-        })
-    })
+/// Whether the first `key=` line of a `.env` file has a non-empty value, parsed like
+/// the skill does (`#` comments, surrounding quotes stripped, no `export` prefix);
+/// `None` when no line assigns `key`. The value is only tested, never copied out.
+fn dotenv_has_value(text: &str, key: &str) -> Option<bool> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .find(|(name, _)| name.trim() == key)
+        .map(|(_, value)| !value.trim().trim_matches('"').trim_matches('\'').is_empty())
 }
 
 fn check_python(skill_dir: Option<&Path>, uv: Option<PathBuf>, python3: Option<PathBuf>) -> Check {
@@ -205,20 +214,19 @@ mod tests {
 
     #[test]
     fn dotenv_detects_assignments_without_reading_values_out() {
-        assert!(dotenv_has_value(
-            "ELEVENLABS_API_KEY=sk_123\n",
-            ELEVENLABS_KEY
-        ));
-        assert!(dotenv_has_value(
-            "# c\nexport ELEVENLABS_API_KEY = \"x\"",
-            ELEVENLABS_KEY
-        ));
-        assert!(!dotenv_has_value("ELEVENLABS_API_KEY=\n", ELEVENLABS_KEY));
-        assert!(!dotenv_has_value("ELEVENLABS_API_KEY=\"\"", ELEVENLABS_KEY));
-        assert!(!dotenv_has_value("# ELEVENLABS_API_KEY=x", ELEVENLABS_KEY));
-        assert!(!dotenv_has_value(
-            "OTHER_ELEVENLABS_API_KEY=x",
-            ELEVENLABS_KEY
-        ));
+        let has = |text: &str| dotenv_has_value(text, ELEVENLABS_KEY);
+        assert_eq!(has("ELEVENLABS_API_KEY=sk_123\n"), Some(true));
+        assert_eq!(has("# c\n ELEVENLABS_API_KEY = \"x\""), Some(true));
+        assert_eq!(has("ELEVENLABS_API_KEY=\n"), Some(false));
+        assert_eq!(has("ELEVENLABS_API_KEY=\"\""), Some(false));
+        // The first assignment wins, as in the skill.
+        assert_eq!(
+            has("ELEVENLABS_API_KEY=\nELEVENLABS_API_KEY=x"),
+            Some(false)
+        );
+        assert_eq!(has("# ELEVENLABS_API_KEY=x"), None);
+        assert_eq!(has("OTHER_ELEVENLABS_API_KEY=x"), None);
+        // The skill does not understand `export`, so neither may we.
+        assert_eq!(has("export ELEVENLABS_API_KEY=x"), None);
     }
 }
