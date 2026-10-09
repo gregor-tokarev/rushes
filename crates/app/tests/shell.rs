@@ -20,7 +20,8 @@ use videocrm::video_page::SAVE_DELAY;
 use videocrm_core::settings::AppSettings;
 use videocrm_core::templates::TemplateKind;
 use videocrm_core::{
-    BlockId, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, Store, VideoId, VideoStatus,
+    BlockId, DatabaseView, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, Store,
+    VideoId, VideoStatus, ViewId,
 };
 
 struct Fixture {
@@ -509,6 +510,26 @@ fn hidden_properties_show_how_many_there_are(cx: &mut TestAppContext) {
         .expect("window is open");
     // Status, format, publish date, tags, media folder, YouTube and Sponsor.
     assert_eq!(label.as_deref(), Some("7 properties"));
+}
+
+#[gpui_kit::test]
+fn going_back_to_a_deleted_view_shows_the_first_view(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    let views = cx.read(|cx| app.state.read(cx).views().to_vec());
+    let (first, board) = (views[0].id, views[1].id);
+    let shorts = DatabaseView { id: ViewId::new(), name: "Shorts".into(), position: 2, ..views[1].clone() };
+    let (state, view) = (app.state.clone(), shorts.clone());
+    app.step(cx, move |_, cx| state.update(cx, |state, cx| state.save_view(view, cx)));
+
+    app.navigate(cx, Route::Database { view: Some(shorts.id) });
+    app.navigate(cx, Route::Database { view: Some(board) });
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| state.update(cx, |state, cx| state.delete_view(shorts.id, cx)));
+    app.press(cx, "alt-left");
+
+    assert_eq!(app.route(cx), Route::Database { view: Some(shorts.id) });
+    let shown = cx.read(|cx| app.workspace.read(cx).database().read(cx).active_view().map(|view| view.id));
+    assert_eq!(shown, Some(first));
 }
 
 #[gpui_kit::test]

@@ -249,7 +249,7 @@ impl Workspace {
         }
         match route {
             Route::Database { view } => {
-                if let Some(view) = view.or_else(|| self.first_view(cx)) {
+                if let Some(view) = self.shown_view(view, cx) {
                     self.database.update(cx, |panel, cx| panel.set_active_view(view, window, cx));
                 }
             }
@@ -286,8 +286,12 @@ impl Workspace {
         cx.notify();
     }
 
-    fn first_view(&self, cx: &App) -> Option<ViewId> {
-        self.state.read(cx).views().iter().min_by_key(|view| view.position).map(|view| view.id)
+    /// The saved view the database page shows for a route's `view`: that view
+    /// while it exists (history can outlive it), otherwise the first one.
+    fn shown_view(&self, view: Option<ViewId>, cx: &App) -> Option<ViewId> {
+        let views = self.state.read(cx).views();
+        view.filter(|id| views.iter().any(|known| known.id == *id))
+            .or_else(|| views.iter().min_by_key(|known| known.position).map(|known| known.id))
     }
 
     fn on_database_event(

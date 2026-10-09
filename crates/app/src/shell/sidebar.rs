@@ -133,7 +133,7 @@ impl Workspace {
         let state = self.state.read(cx);
         let route = state.route().clone();
         let active_view = match &route {
-            Route::Database { view } => view.or_else(|| self.first_view(cx)),
+            Route::Database { view } => self.shown_view(*view, cx),
             _ => None,
         };
         let active_video = match &route {
