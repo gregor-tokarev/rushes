@@ -16,7 +16,7 @@ use videocrm_core::{UploadStatus, VideoId, ViewKind};
 
 use super::elements::shortcut_hint;
 use super::{NewVideo, OpenCommandPalette, Workspace};
-use crate::route::{Route, VideoTab};
+use crate::route::{Route, SettingsSection, VideoTab};
 use crate::state::AppState;
 
 /// Emoji shown for a video without its own icon.
@@ -223,7 +223,7 @@ impl Workspace {
             sidebar =
                 sidebar.child(Section::Pages(PageList { label: "Recent".into(), pages: recent, collapsed: false }));
         }
-        sidebar.footer(self.render_sidebar_footer(route == Route::Settings, window, cx))
+        sidebar.footer(self.render_sidebar_footer(matches!(route, Route::Settings { .. }), window, cx))
     }
 
     fn render_sidebar_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -265,7 +265,7 @@ impl Workspace {
         let settings = SidebarMenu::new().child(
             SidebarMenuItem::new("Settings").icon(Icon::new(IconName::Settings)).active(settings_active).on_click(
                 move |_, _, cx| {
-                    state.update(cx, |state, cx| state.navigate(Route::Settings, cx));
+                    state.update(cx, |state, cx| state.open_settings(SettingsSection::General, cx));
                 },
             ),
         );

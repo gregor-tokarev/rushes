@@ -13,7 +13,7 @@ use gpui_kit::{
 use videocrm::ai_edit::PipelineService;
 use videocrm::onboarding::{StartChoice, Step};
 use videocrm::publish::YoutubeService;
-use videocrm::route::{Route, VideoTab};
+use videocrm::route::{Route, SettingsSection, VideoTab};
 use videocrm::shell::{self, Page, Workspace};
 use videocrm::state::AppState;
 use videocrm::video_page::SAVE_DELAY;
@@ -164,7 +164,7 @@ fn routes_show_their_pages(cx: &mut TestAppContext) {
     assert_eq!(app.page(cx), Page::Database);
     assert!(app.has(cx, "database-page"));
 
-    app.navigate(cx, Route::Settings);
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
     assert_eq!(app.page(cx), Page::Settings);
     assert!(app.has(cx, "settings-page"));
     assert!(!app.has(cx, "database-page"));
@@ -440,7 +440,7 @@ fn keys_keep_working_after_the_focused_page_goes_away(cx: &mut TestAppContext) {
     app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
     app.click(cx, "page-hook");
 
-    app.navigate(cx, Route::Settings);
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
     app.press(cx, "ctrl-\\");
     assert!(cx.read(|cx| app.workspace.read(cx).is_sidebar_collapsed()));
 }
@@ -707,4 +707,24 @@ fn app_keys_leave_component_keys_alone(cx: &mut TestAppContext) {
         conflicts
     });
     assert!(conflicts.is_empty(), "{conflicts:?}");
+}
+
+#[gpui_kit::test]
+fn the_account_badge_opens_the_youtube_settings(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    app.click(cx, "account-badge");
+    assert_eq!(app.route(cx), Route::Settings { section: SettingsSection::Youtube });
+    assert!(app.has(cx, "check-emulators"));
+
+    // The sidebar's Settings opens General; the badge switches back to YouTube.
+    app.click(cx, "sidebar-footer-0");
+    assert_eq!(app.route(cx), Route::Settings { section: SettingsSection::General });
+    assert!(!app.has(cx, "check-emulators"));
+    assert!(app.has(cx, "settings-media-root"));
+    app.click(cx, "account-badge");
+    assert!(app.has(cx, "check-emulators"));
+
+    // Back returns to the section that was open.
+    app.press(cx, "alt-left");
+    assert!(app.has(cx, "settings-media-root"));
 }

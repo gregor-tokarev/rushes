@@ -16,7 +16,7 @@ use videocrm_core::{VideoId, ViewKind};
 
 use super::sidebar::{display_title, video_emoji};
 use super::{NewVideo, OpenSettings, ToggleSidebar, ToggleTheme, Workspace};
-use crate::route::{Route, VideoTab};
+use crate::route::{Route, SettingsSection, VideoTab};
 use crate::state::AppState;
 use crate::wizard;
 
@@ -353,7 +353,7 @@ fn run(command: PaletteCommand, workspace: &WeakEntity<Workspace>, window: &mut 
             window.defer(cx, |window, cx| wizard::open_new_video_dialog(None, window, cx));
         }
         PaletteCommand::Action(PaletteAction::OpenSettings) => {
-            state.update(cx, |state, cx| state.navigate(Route::Settings, cx));
+            state.update(cx, |state, cx| state.open_settings(SettingsSection::General, cx));
         }
         PaletteCommand::Action(PaletteAction::ToggleTheme) => {
             workspace.update(cx, |workspace, cx| workspace.toggle_theme(cx));

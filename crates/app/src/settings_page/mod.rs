@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
+use gpui_kit::component::setting::{SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::{
     App, AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
@@ -17,10 +17,15 @@ use videocrm_core::settings::{ThemeMode, data_dir};
 
 use crate::ai_edit::AiSettings;
 use crate::publish::YoutubeSettings;
+use crate::route::SettingsSection;
 use crate::state::{AppEvent, AppState};
 
 pub struct SettingsPage {
     state: Entity<AppState>,
+    section: SettingsSection,
+    /// Bumped by [`SettingsPage::open_section`]: the kit's settings keep their
+    /// selected page in element state, so a new key is how a section is opened.
+    opened: usize,
     media_root: Entity<InputState>,
     youtube: Entity<YoutubeSettings>,
     ai: Entity<AiSettings>,
@@ -28,7 +33,7 @@ pub struct SettingsPage {
 }
 
 impl SettingsPage {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(section: SettingsSection, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = AppState::global(cx);
         let root = state.read(cx).settings().resolved_media_root();
         let media_root = cx.new(|cx| {
@@ -55,11 +60,25 @@ impl SettingsPage {
         ];
         Self {
             state,
+            section,
+            opened: 0,
             media_root,
             youtube: cx.new(|cx| YoutubeSettings::new(window, cx)),
             ai: cx.new(|cx| AiSettings::new(window, cx)),
             _subscriptions: subscriptions,
         }
+    }
+
+    /// The section shown when the page was last opened; the creator can pick another in its list.
+    pub fn section(&self) -> SettingsSection {
+        self.section
+    }
+
+    /// Shows `section`, replacing the page the creator picked in the list.
+    pub fn open_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        self.section = section;
+        self.opened += 1;
+        cx.notify();
     }
 
     /// Stores the media root; the platform default stays unset so it follows the platform.
@@ -103,50 +122,54 @@ impl SettingsPage {
         let youtube = self.youtube.clone();
         let ai = self.ai.clone();
         vec![
-            SettingPage::new("General").icon(Icon::new(IconName::Settings2)).default_open(true).groups(vec![
-                SettingGroup::new().title("Appearance").item(
-                    SettingItem::new(
-                        "Theme",
-                        SettingField::dropdown(
-                            ThemeMode::ALL
-                                .iter()
-                                .map(|mode| (theme_key(*mode), SharedString::from(mode.label())))
-                                .collect(),
-                            |cx: &App| theme_key(AppState::global(cx).read(cx).settings().theme),
-                            |key: SharedString, cx: &mut App| {
-                                let Some(mode) = ThemeMode::ALL.into_iter().find(|mode| theme_key(*mode) == key) else {
-                                    return;
-                                };
-                                AppState::global(cx).update(cx, |state, cx| {
-                                    state.update_settings(cx, |settings| settings.theme = mode)
-                                });
-                            },
-                        ),
-                    )
-                    .description("System follows your operating system’s light or dark appearance."),
-                ),
-                SettingGroup::new().title("Storage").items(vec![
-                    SettingItem::new("Media folder", media_folder_field(media_root, page))
-                        .description("Each video gets a folder here for raw footage and AI edit outputs.")
-                        .keywords(["footage", "path"]),
-                    SettingItem::new("Data folder", data_folder_field())
-                        .description("The database and YouTube credentials. Set VIDEOCRM_DATA_DIR to move it.")
-                        .keywords(["database", "path"]),
+            SettingPage::new(SettingsSection::General.label())
+                .icon(Icon::new(IconName::Settings2))
+                .default_open(true)
+                .groups(vec![
+                    SettingGroup::new().title("Appearance").item(
+                        SettingItem::new(
+                            "Theme",
+                            SettingField::dropdown(
+                                ThemeMode::ALL
+                                    .iter()
+                                    .map(|mode| (theme_key(*mode), SharedString::from(mode.label())))
+                                    .collect(),
+                                |cx: &App| theme_key(AppState::global(cx).read(cx).settings().theme),
+                                |key: SharedString, cx: &mut App| {
+                                    let Some(mode) = ThemeMode::ALL.into_iter().find(|mode| theme_key(*mode) == key)
+                                    else {
+                                        return;
+                                    };
+                                    AppState::global(cx).update(cx, |state, cx| {
+                                        state.update_settings(cx, |settings| settings.theme = mode)
+                                    });
+                                },
+                            ),
+                        )
+                        .description("System follows your operating system’s light or dark appearance."),
+                    ),
+                    SettingGroup::new().title("Storage").items(vec![
+                        SettingItem::new("Media folder", media_folder_field(media_root, page))
+                            .description("Each video gets a folder here for raw footage and AI edit outputs.")
+                            .keywords(["footage", "path"]),
+                        SettingItem::new("Data folder", data_folder_field())
+                            .description("The database and YouTube credentials. Set VIDEOCRM_DATA_DIR to move it.")
+                            .keywords(["database", "path"]),
+                    ]),
                 ]),
-            ]),
-            SettingPage::new("YouTube").icon(Icon::new(IconName::CirclePlay)).group(
+            SettingPage::new(SettingsSection::Youtube.label()).icon(Icon::new(IconName::CirclePlay)).group(
                 SettingGroup::new().item(
                     SettingItem::render(move |_, _, _| youtube.clone()).keywords(["account", "upload", "google"]),
                 ),
             ),
-            SettingPage::new("AI editing").icon(Icon::new(IconName::WandSparkles)).group(
+            SettingPage::new(SettingsSection::AiEditing.label()).icon(Icon::new(IconName::WandSparkles)).group(
                 SettingGroup::new().item(SettingItem::render(move |_, _, _| ai.clone()).keywords([
                     "agent",
                     "claude",
                     "video-use",
                 ])),
             ),
-            SettingPage::new("About").icon(Icon::new(IconName::Info)).group(
+            SettingPage::new(SettingsSection::About.label()).icon(Icon::new(IconName::Info)).group(
                 SettingGroup::new().item(
                     SettingItem::render(|_, _, cx| {
                         v_flex()
@@ -229,6 +252,10 @@ fn data_folder_field() -> SettingField<SharedString> {
 
 impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        Settings::new("settings").sidebar_width(window.rem_size() * 14.).pages(self.pages(cx))
+        let page_ix = SettingsSection::ALL.iter().position(|section| *section == self.section).unwrap_or(0);
+        Settings::new(("settings", self.opened))
+            .default_selected_index(SelectIndex { page_ix, group_ix: None })
+            .sidebar_width(window.rem_size() * 14.)
+            .pages(self.pages(cx))
     }
 }

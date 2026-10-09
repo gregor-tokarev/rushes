@@ -25,7 +25,7 @@ use crate::ai_edit::PipelinesPage;
 use crate::database::{DatabaseEvent, DatabasePanel};
 use crate::onboarding::Onboarding;
 use crate::publish::{AccountBadge, UploadsPage};
-use crate::route::{Route, VideoTab};
+use crate::route::{Route, SettingsSection, VideoTab};
 use crate::settings_page::SettingsPage;
 use crate::state::{AppEvent, AppState};
 use crate::video_page::VideoPage;
@@ -102,7 +102,7 @@ impl Page {
             Route::Video { .. } => Page::Video,
             Route::Pipelines => Page::Pipelines,
             Route::Uploads => Page::Uploads,
-            Route::Settings => Page::Settings,
+            Route::Settings { .. } => Page::Settings,
             Route::Onboarding => Page::Onboarding,
         }
     }
@@ -276,11 +276,10 @@ impl Workspace {
                     self.uploads = Some(cx.new(|cx| UploadsPage::new(window, cx)));
                 }
             }
-            Route::Settings => {
-                if self.settings.is_none() {
-                    self.settings = Some(cx.new(|cx| SettingsPage::new(window, cx)));
-                }
-            }
+            Route::Settings { section } => match &self.settings {
+                Some(page) => page.update(cx, |page, cx| page.open_section(section, cx)),
+                None => self.settings = Some(cx.new(|cx| SettingsPage::new(section, window, cx))),
+            },
             Route::Onboarding => {
                 if self.onboarding.is_none() {
                     self.onboarding = Some(cx.new(|cx| Onboarding::new(window, cx)));
@@ -339,7 +338,7 @@ impl Workspace {
     }
 
     fn open_settings(&mut self, _: &OpenSettings, _: &mut Window, cx: &mut Context<Self>) {
-        self.state.update(cx, |state, cx| state.navigate(Route::Settings, cx));
+        self.state.update(cx, |state, cx| state.open_settings(SettingsSection::General, cx));
     }
 
     fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -349,7 +348,7 @@ impl Workspace {
             Route::Video { .. } => self.video_page.clone().map(IntoElement::into_any_element),
             Route::Pipelines => self.pipelines.clone().map(IntoElement::into_any_element),
             Route::Uploads => self.uploads.clone().map(IntoElement::into_any_element),
-            Route::Settings => self.settings.clone().map(IntoElement::into_any_element),
+            Route::Settings { .. } => self.settings.clone().map(IntoElement::into_any_element),
             Route::Onboarding => self.onboarding.clone().map(IntoElement::into_any_element),
         };
         let page_id = match Page::of(&route) {

@@ -15,7 +15,7 @@ use videocrm_core::{
     VideoRow, ViewId,
 };
 
-use crate::route::{Route, VideoTab};
+use crate::route::{Route, SettingsSection, VideoTab};
 
 const RECENT_LIMIT: usize = 8;
 
@@ -334,6 +334,17 @@ impl AppState {
         self.back.push(previous);
         self.forward.clear();
         self.on_route_changed(cx);
+    }
+
+    /// Shows `section` of the settings, also when the settings are already open
+    /// on another section (the route does not follow the settings' own list).
+    pub fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        let route = Route::Settings { section };
+        if self.route == route {
+            self.on_route_changed(cx);
+        } else {
+            self.navigate(route, cx);
+        }
     }
 
     pub fn open_video(&mut self, id: VideoId, tab: VideoTab, cx: &mut Context<Self>) {
