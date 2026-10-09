@@ -1056,6 +1056,33 @@ fn settings_save_toggles_at_once_and_text_after_a_pause(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
+fn a_skill_folder_typed_with_a_tilde_is_found_in_the_home_folder(cx: &mut TestAppContext) {
+    let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
+    let window = open(cx, AiSettings::new);
+    let pipeline = |cx: &mut TestAppContext| cx.read(|cx| fx.state.read(cx).settings().pipeline.clone());
+    let saved = pipeline(cx).skill_dir;
+    let type_folder = |cx: &mut TestAppContext, text: &str| {
+        click(cx, window, "ai-settings-skill-dir");
+        cx.update_window(window, |_, window, cx| {
+            window.press("secondary-a", cx);
+            window.input(text, cx);
+        })
+        .unwrap();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+    };
+
+    // A relative path would resolve against wherever the app was started from.
+    type_folder(cx, "video-use");
+    assert_eq!(pipeline(cx).skill_dir, saved, "the unusable path is not saved");
+    wait_for_window(cx, window, "the reason", |window, _| shows(window, "ai-settings-skill-dir-error"));
+
+    type_folder(cx, "~/video_editing/video-use");
+    let home = std::env::home_dir().expect("home folder");
+    assert_eq!(pipeline(cx).skill_dir, Some(home.join("video_editing/video-use")));
+}
+
+#[gpui_kit::test]
 fn takes_dropped_on_the_footage_card_are_copied_in(cx: &mut TestAppContext) {
     let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
     let card = fx.root.path().join("sd-card");

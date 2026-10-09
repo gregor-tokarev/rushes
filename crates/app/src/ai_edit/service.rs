@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui_kit::{App, AppContext as _, Context, Entity, Global, SharedString, Subscription, Task};
+use videocrm_core::input::expand_user_path;
 use videocrm_core::media::{self, MediaKind};
 use videocrm_core::settings::PipelineSettings;
 use videocrm_core::{PipelineRun, RunId, RunStatus, Store, StoreError, VideoId, VideoStatus};
@@ -431,7 +432,7 @@ impl PipelineService {
         let (phase, text) = (started.phase, started.text.clone());
         let run = self.run(id).ok_or(RunError::RunNotFound)?.clone();
         let settings = self.state.read(cx).settings().pipeline.clone();
-        let skill_dir = settings.skill_dir.clone().or_else(default_skill_dir).ok_or(RunError::NoSkillFolder)?;
+        let skill_dir = skill_dir(&settings).or_else(default_skill_dir).ok_or(RunError::NoSkillFolder)?;
         let config = self.agent_config(&settings);
         let context =
             RunContext { footage_dir: run.footage_dir.clone(), skill_dir, session_id: run.session_id.clone() };
@@ -740,7 +741,7 @@ impl PipelineService {
     pub fn refresh_doctor(&mut self, cx: &mut Context<Self>) {
         let settings = self.state.read(cx).settings().pipeline.clone();
         let config = self.agent_config(&settings);
-        let skill_dir = settings.skill_dir.clone();
+        let skill_dir = skill_dir(&settings);
         self.checked = Some(settings);
         self.doctor_task = Some(cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(async move { doctor(&config, skill_dir.as_deref()) }).await;
@@ -767,7 +768,12 @@ impl PipelineService {
         let command = settings.agent_command.trim();
         let defaults = AgentConfig::default();
         AgentConfig {
-            command: if command.is_empty() { defaults.command.clone() } else { PathBuf::from(command) },
+            command: match command {
+                "" => defaults.command.clone(),
+                // Saved before the settings expanded `~` themselves.
+                path if path.starts_with('~') => expand_user_path(path).unwrap_or_else(|_| PathBuf::from(path)),
+                command => PathBuf::from(command),
+            },
             model: settings.model.as_deref().map(str::trim).filter(|model| !model.is_empty()).map(str::to_owned),
             env: self.agent_env.clone(),
             ..defaults
@@ -803,6 +809,16 @@ fn keep_cut(mut outcome: PhaseOutcome, footage_dir: &Path) -> PhaseOutcome {
         outcome.final_cut = Some(kept);
     }
     outcome
+}
+
+/// The configured skill folder, `~` expanded (settings saved before the field expanded
+/// it may hold one).
+fn skill_dir(settings: &PipelineSettings) -> Option<PathBuf> {
+    let dir = settings.skill_dir.clone()?;
+    match dir.to_str() {
+        Some(text) if text.starts_with('~') => Some(expand_user_path(text).unwrap_or(dir)),
+        _ => Some(dir),
+    }
 }
 
 /// Whether `dir` holds at least one video or audio take.
