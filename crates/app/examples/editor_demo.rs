@@ -1,0 +1,197 @@
+//! Opens the block editor on a sample YouTube script for manual testing.
+//!
+//! ```sh
+//! cargo run -p videocrm --example editor_demo            # sample script
+//! cargo run -p videocrm --example editor_demo -- --dark  # dark theme
+//! cargo run -p videocrm --example editor_demo -- --blocks 300
+//! cargo run -p videocrm --example editor_demo -- --font Inter
+//! ```
+
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, h_flex, v_flex};
+use gpui_kit::{
+    App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, px, rems, size,
+};
+use videocrm::editor::{DocumentEditor, DocumentEditorEvent};
+use videocrm_core::{Block, BlockKind, Document, DocumentId, DocumentKind, VideoId};
+
+struct Demo {
+    title: SharedString,
+    editor: Entity<DocumentEditor>,
+    scroll: ScrollHandle,
+    edits: usize,
+    status: SharedString,
+    _subscription: Subscription,
+}
+
+impl Demo {
+    fn new(document: Document, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let title = document.title.clone().into();
+        let scroll = ScrollHandle::new();
+        let editor = cx.new(|cx| {
+            let mut editor = DocumentEditor::new(document, window, cx);
+            editor.set_scroll_handle(scroll.clone());
+            editor
+        });
+        let subscription = cx.subscribe(&editor, |this, _, event, cx| {
+            if *event == DocumentEditorEvent::Changed {
+                this.edits += 1;
+                this.status = status(&this.editor, this.edits, cx);
+                cx.notify();
+            }
+        });
+        let status = status(&editor, 0, cx);
+        Self { title, editor, scroll, edits: 0, status, _subscription: subscription }
+    }
+}
+
+/// Status line for the bottom bar, recomputed when the document changes.
+fn status(editor: &Entity<DocumentEditor>, edits: usize, cx: &App) -> SharedString {
+    let document = editor.read(cx).document(cx);
+    let words: usize = document.blocks.iter().map(|block| block.text.split_whitespace().count()).sum();
+    let edits = if edits == 0 { "No changes".to_owned() } else { format!("{edits} edits") };
+    format!("{} blocks · {words} words · {edits}", document.blocks.len()).into()
+}
+
+impl Render for Demo {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let header = v_flex().w_full().items_center().child(
+            v_flex()
+                .w_full()
+                .max_w(rems(46.))
+                .gap_1()
+                .child(div().text_3xl().font_weight(FontWeight::BOLD).child(self.title.clone()))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("Script · Long-form · Scripting"),
+                ),
+        );
+
+        v_flex()
+            .size_full()
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .child(
+                div()
+                    .id("page")
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(
+                        v_flex().w_full().pt_16().child(header).child(div().h_6()).child(self.editor.clone()),
+                    )
+                    .vertical_scrollbar(&self.scroll),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .h_8()
+                    .px_4()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(self.status.clone()),
+            )
+    }
+}
+
+fn block(kind: BlockKind, text: &str) -> Block {
+    Block::new(kind, text)
+}
+
+fn sample_script() -> Vec<Block> {
+    vec![
+        block(BlockKind::Heading2, "Hook"),
+        block(
+            BlockKind::Paragraph,
+            "What if I told you that **90% of editing time** goes into work an AI can do in seconds?",
+        ),
+        block(BlockKind::BRoll, "Fast montage of timeline scrubbing, cut to a render bar hitting 100%"),
+        block(BlockKind::OnScreen, "90% of editing = busywork"),
+        block(BlockKind::Heading2, "Intro"),
+        block(
+            BlockKind::Paragraph,
+            "Hey, I'm Sam. I've published *every week* for three years, and today I'm showing you the exact pipeline I use, with [video-use](https://github.com/browser-use/video-use) doing the heavy lifting.",
+        ),
+        block(BlockKind::Callout, "Keep the intro under **20 seconds**. Retention drops hard after that."),
+        block(BlockKind::Heading2, "The workflow"),
+        block(BlockKind::Numbered, "Record everything in one take, mistakes included"),
+        block(BlockKind::Numbered, "Let the agent cut the `ums`, silences and retakes"),
+        Block { indent: 1, ..block(BlockKind::Numbered, "It reads the transcript, not the waveform") },
+        Block { indent: 1, ..block(BlockKind::Numbered, "Every cut lands on a word boundary") },
+        block(BlockKind::Numbered, "Review the edit plan before anything renders"),
+        block(BlockKind::BRoll, "Screen recording: the agent's plan scrolling by in the terminal"),
+        block(BlockKind::Paragraph, "What you get back is a first cut with:"),
+        block(BlockKind::Bulleted, "Color grade presets applied per scene"),
+        block(BlockKind::Bulleted, "Burned-in subtitles in your brand font"),
+        Block { indent: 1, ..block(BlockKind::Bulleted, "Styled like the rest of the channel") },
+        block(BlockKind::Quote, "The best edit is the one viewers never notice."),
+        block(BlockKind::Divider, ""),
+        block(BlockKind::Heading3, "Production checklist"),
+        Block { checked: true, ..block(BlockKind::Todo, "Write the hook") },
+        Block { checked: true, ..block(BlockKind::Todo, "Film A-roll") },
+        block(BlockKind::Todo, "Capture screen recordings for B-roll"),
+        block(BlockKind::Todo, "Design the thumbnail"),
+        block(
+            BlockKind::Code,
+            "claude -p \"edit footage/ with video-use\" \\\n  --output-format stream-json",
+        ),
+        block(BlockKind::Heading2, "Outro"),
+        block(
+            BlockKind::Paragraph,
+            "If this saved you an hour, **subscribe**. Next week I'm automating thumbnails.",
+        ),
+        block(BlockKind::OnScreen, "Subscribe for part 2 →"),
+    ]
+}
+
+/// A long document for checking that editing stays smooth.
+fn long_document(count: usize) -> Vec<Block> {
+    let script = sample_script();
+    (0..count)
+        .map(|ix| Block { id: videocrm_core::BlockId::new(), ..script[ix % script.len()].clone() })
+        .collect()
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let dark = args.iter().any(|arg| arg == "--dark");
+    let value = |flag: &str| args.iter().position(|arg| arg == flag).and_then(|ix| args.get(ix + 1)).cloned();
+    let count = value("--blocks").and_then(|count| count.parse().ok());
+    let font = value("--font");
+
+    let document = Document {
+        id: DocumentId::new(),
+        video_id: VideoId::new(),
+        kind: DocumentKind::Script,
+        title: "I let AI edit my videos for a month".into(),
+        blocks: count.map(long_document).unwrap_or_else(sample_script),
+        position: 0,
+        updated_at: chrono::Utc::now(),
+    };
+
+    gpui_kit::application().with_assets(videocrm::editor::Assets).run(move |cx| {
+        gpui_kit::init(cx);
+        if dark {
+            Theme::change(ThemeMode::Dark, None, cx);
+        }
+        if let Some(font) = font {
+            Theme::update(cx, |theme| theme.font_family = font.into());
+        }
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::centered(size(px(1180.), px(860.)), cx)),
+            titlebar: Some(TitlebarOptions { title: Some("Editor demo".into()), ..Default::default() }),
+            ..Default::default()
+        };
+        gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Demo::new(document, window, cx)))
+            .expect("failed to open the demo window");
+    });
+}

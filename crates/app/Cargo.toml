@@ -9,3 +9,7 @@ publish.workspace = true
 gpui-kit.workspace = true
 videocrm-core = { path = "../core" }
 videocrm-pipeline = { path = "../pipeline" }
+
+[dev-dependencies]
+chrono = "0.4"
+gpui-kit = { workspace = true, features = ["test-support"] }
