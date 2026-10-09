@@ -1024,6 +1024,16 @@ fn a_running_edit_can_be_cancelled_and_retried(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_empty_pipelines_page_leads_to_the_videos(cx: &mut TestAppContext) {
+    let fx = Fixture::new(cx, &[]);
+    let window = open(cx, PipelinesPage::new);
+    cx.update(|cx| fx.state.update(cx, |state, cx| state.navigate(Route::Pipelines, cx)));
+    // The same empty state as Videos and Uploads, with the next step.
+    click(cx, window, "pipelines-go-to-videos");
+    assert_eq!(route(cx, &fx), Route::default());
+}
+
+#[gpui_kit::test]
 fn a_pipelines_row_opens_its_run(cx: &mut TestAppContext) {
     if !tools_available() {
         return;

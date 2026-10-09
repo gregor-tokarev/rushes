@@ -7,7 +7,7 @@
 
 use std::rc::Rc;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Local, NaiveDate, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::calendar::{Calendar, CalendarState};
@@ -36,7 +36,7 @@ use super::icons::column_icon;
 use super::panel::{CELL_EDITOR_CONTEXT, CellRef, DatabasePanel, TEXT_ENTRY_CONTEXT};
 use super::property_editor::PropertyEditorMode;
 use super::query::column_name;
-use crate::ui::video_icon;
+use crate::ui::{EmptyState, format_when, video_icon};
 
 /// Narrowest a column can be resized to, in pixels.
 const MIN_COLUMN_WIDTH: f32 = 72.0;
@@ -131,10 +131,12 @@ impl VideoTable {
                 BuiltinField::Edit => self.render_edit(row, cx),
                 BuiltinField::Youtube => self.render_youtube(row, cx),
                 BuiltinField::CreatedAt => {
-                    static_cell(muted_text(format::timestamp(video.created_at, self.model.now), cx)).into_any_element()
+                    static_cell(muted_text(format_when(video.created_at, self.model.now.with_timezone(&Local)), cx))
+                        .into_any_element()
                 }
                 BuiltinField::UpdatedAt => {
-                    static_cell(muted_text(format::timestamp(video.updated_at, self.model.now), cx)).into_any_element()
+                    static_cell(muted_text(format_when(video.updated_at, self.model.now.with_timezone(&Local)), cx))
+                        .into_any_element()
                 }
             },
             Column::Custom(property) => {
@@ -708,8 +710,8 @@ impl TableDelegate for VideoTable {
         }
     }
 
-    fn render_empty(&mut self, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
-        render_empty_state(self.model.empty, &self.panel, cx)
+    fn render_empty(&mut self, _: &mut Window, _: &mut Context<TableState<Self>>) -> impl IntoElement {
+        render_empty_state(self.model.empty, &self.panel)
     }
 }
 
@@ -858,14 +860,14 @@ fn tags_editor(
 }
 
 /// The empty state of the table and the board.
-pub(crate) fn render_empty_state(reason: EmptyReason, panel: &WeakEntity<DatabasePanel>, cx: &App) -> AnyElement {
+pub(crate) fn render_empty_state(reason: EmptyReason, panel: &WeakEntity<DatabasePanel>) -> AnyElement {
     let panel = panel.clone();
     let (icon, title, description, action) = match reason {
         EmptyReason::NoVideos => (
             IconName::Clapperboard,
             "No videos yet",
             "Plan your first video: add an idea, then move it through scripting, filming and editing.",
-            Button::new("empty-new-video").primary().small().icon(IconName::Plus).label("New video").on_click(
+            Button::new("empty-new-video").outline().small().icon(IconName::Plus).label("New video…").on_click(
                 move |_, _, cx| {
                     _ = panel.update(cx, |panel, cx| panel.create_video_in_view(cx));
                 },
@@ -891,19 +893,7 @@ pub(crate) fn render_empty_state(reason: EmptyReason, panel: &WeakEntity<Databas
         ),
     };
 
-    v_flex()
-        .id("database-empty")
-        .test_support()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .py_8()
-        .child(Icon::new(icon).size_8().text_color(cx.theme().muted_foreground.opacity(0.7)))
-        .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(title))
-        .child(div().max_w_80().text_sm().text_center().text_color(cx.theme().muted_foreground).child(description))
-        .child(div().pt_2().child(action))
-        .into_any_element()
+    EmptyState::new("database-empty", icon, title, description).action(action).into_any_element()
 }
 
 /// The hint icon of a newer attempt: a warning when it failed.

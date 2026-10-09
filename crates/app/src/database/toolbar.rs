@@ -29,6 +29,7 @@ use super::panel::{DatabasePanel, SortPicker};
 use super::property_editor::PropertyEditorMode;
 use super::query::{active_filter_count, column_name, resolve_columns};
 use super::table::column_key;
+use crate::ui::PAGE_INSET;
 
 impl DatabasePanel {
     pub(super) fn set_sort_picker(&mut self, picker: Option<SortPicker>, cx: &mut Context<Self>) {
@@ -93,8 +94,7 @@ impl DatabasePanel {
             .flex_shrink_0()
             .flex_wrap()
             .gap_2()
-            .px_4()
-            .pt_2()
+            .px(PAGE_INSET)
             .pb_2()
             .child(self.render_view_tabs(window, cx))
             .child(actions)

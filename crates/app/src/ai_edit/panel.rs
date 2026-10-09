@@ -1,6 +1,6 @@
 //! [`AiEditPanel`]: the "Footage & AI edit" tab of a video page.
 
-use chrono::Utc;
+use chrono::Local;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -25,6 +25,7 @@ use super::service::PipelineService;
 use crate::database::Chip;
 use crate::database::colors::run_status_color;
 use crate::state::{AppEvent, AppState};
+use crate::ui::format_when;
 
 /// The "Footage & AI edit" tab of a video page: the raw takes, the edit brief, and
 /// the video's AI edits with the selected one in detail.
@@ -274,15 +275,15 @@ impl AiEditPanel {
     fn render_section_header(&self, cx: &mut Context<Self>) -> Div {
         let runs = self.runs(cx);
         let selected = self.run_view.read(cx).run_id();
-        let now = Utc::now();
+        let now = Local::now();
         let history = selected.and_then(|id| runs.iter().find(|run| run.id == id)).map(|run| {
-            let label = format!("{} · {}", format::started(run.created_at, now), run.status.label());
+            let label = format!("{} · {}", format_when(run.created_at, now), run.status.label());
             let entries: Vec<HistoryEntry> = runs
                 .iter()
                 .map(|run| HistoryEntry {
                     id: run.id,
                     status: run.status,
-                    started: format::started(run.created_at, now),
+                    started: format_when(run.created_at, now),
                     cost: run.cost_usd.map(format::cost),
                     selected: Some(run.id) == selected,
                 })

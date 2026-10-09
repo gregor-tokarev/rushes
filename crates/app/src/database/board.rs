@@ -20,7 +20,7 @@ use super::format;
 use super::panel::DatabasePanel;
 use super::query::status_visible;
 use super::table::{EmptyReason, element_id, render_empty_state, video_menu};
-use crate::ui::video_icon;
+use crate::ui::{PAGE_INSET, video_icon};
 
 /// The payload of a card being dragged.
 #[derive(Clone)]
@@ -53,7 +53,7 @@ impl Render for DraggedCard {
 impl DatabasePanel {
     pub(super) fn render_board(&self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.empty_reason(cx) == EmptyReason::NoVideos && self.shown_rows().next().is_none() {
-            return render_empty_state(EmptyReason::NoVideos, &cx.weak_entity(), cx);
+            return render_empty_state(EmptyReason::NoVideos, &cx.weak_entity());
         }
         let Some(view) = self.active_view() else {
             return div().into_any_element();
@@ -70,7 +70,7 @@ impl DatabasePanel {
             .overflow_x_scroll()
             .track_scroll(&self.board_scroll)
             .horizontal_scrollbar(&self.board_scroll)
-            .child(h_flex().h_full().items_stretch().gap_3().px_4().pb_4().children(statuses.into_iter().map(
+            .child(h_flex().h_full().items_stretch().gap_3().px(PAGE_INSET).pb_4().children(statuses.into_iter().map(
                 |status| {
                     let cards: Vec<&VideoRow> = self.shown_rows().filter(|row| row.video.status == status).collect();
                     self.render_board_column(status, &cards, now, cx)

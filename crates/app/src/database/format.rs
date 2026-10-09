@@ -1,6 +1,6 @@
 //! Text presentation of cell values: script stats, runtimes, dates and numbers.
 
-use chrono::{DateTime, Datelike as _, Local, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Datelike as _, Local, NaiveDate, Utc};
 use videocrm_core::{UploadStatus, YoutubeState};
 
 /// Numbers at least this large are shown as Rust formats them, without
@@ -76,25 +76,6 @@ pub fn local_day(at: DateTime<Utc>) -> NaiveDate {
     at.with_timezone(&Local).date_naive()
 }
 
-/// A past timestamp relative to `now`: "Just now", "5m ago", "3h ago", then
-/// calendar dates in the user's time zone.
-pub fn timestamp(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    timestamp_in(at, now, &Local)
-}
-
-fn timestamp_in<Tz: TimeZone>(at: DateTime<Utc>, now: DateTime<Utc>, zone: &Tz) -> String {
-    let elapsed = now - at;
-    if elapsed.num_minutes() < 1 {
-        "Just now".into()
-    } else if elapsed.num_hours() < 1 {
-        format!("{}m ago", elapsed.num_minutes())
-    } else if elapsed.num_hours() < 24 {
-        format!("{}h ago", elapsed.num_hours())
-    } else {
-        date(at.with_timezone(zone).date_naive(), now.with_timezone(zone).date_naive())
-    }
-}
-
 /// Whether a video already on YouTube is still waiting for its publish time.
 pub fn is_scheduled(publish_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
     publish_at.is_some_and(|at| at > now)
@@ -122,6 +103,8 @@ pub fn upload(status: &UploadStatus) -> String {
 
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone as _;
+
     use super::*;
 
     #[test]
@@ -160,27 +143,6 @@ mod tests {
         assert_eq!(date(day(10, 8), today), "Yesterday");
         assert_eq!(date(day(3, 4), today), "Mar 4");
         assert_eq!(date(NaiveDate::from_ymd_opt(2027, 1, 2).unwrap(), today), "Jan 2, 2027");
-    }
-
-    #[test]
-    fn timestamps_count_back_from_now() {
-        let now = Utc.with_ymd_and_hms(2026, 10, 9, 12, 0, 0).unwrap();
-        assert_eq!(timestamp(now, now), "Just now");
-        assert_eq!(timestamp(now - chrono::Duration::minutes(5), now), "5m ago");
-        assert_eq!(timestamp(now - chrono::Duration::hours(3), now), "3h ago");
-        assert_eq!(timestamp(now - chrono::Duration::days(1), now), "Yesterday");
-        assert_eq!(timestamp_in(now - chrono::Duration::days(40), now, &Utc), "Aug 30");
-    }
-
-    #[test]
-    fn timestamps_count_days_in_the_users_time_zone() {
-        // 22:30 on Oct 9 in UTC-7, already Oct 10 in UTC.
-        let zone = chrono::FixedOffset::west_opt(7 * 3600).unwrap();
-        let now = Utc.with_ymd_and_hms(2026, 10, 10, 5, 30, 0).unwrap();
-        // 13:00 on Oct 8 there.
-        let at = Utc.with_ymd_and_hms(2026, 10, 8, 20, 0, 0).unwrap();
-        assert_eq!(timestamp_in(at, now, &zone), "Yesterday");
-        assert_eq!(timestamp_in(at, now, &Utc), "Oct 8");
     }
 
     #[test]

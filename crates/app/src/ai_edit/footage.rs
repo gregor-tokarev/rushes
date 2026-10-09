@@ -29,6 +29,7 @@ use super::format;
 use super::icons::media_icon;
 use super::panel::section_header;
 use crate::state::AppState;
+use crate::ui::EmptyState;
 
 /// How often the folder is listed again, to pick up takes added outside the app.
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -425,23 +426,14 @@ impl FootageCard {
         }))
     }
 
-    fn render_empty(&self, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme();
-        v_flex()
-            .items_center()
-            .gap_2()
-            .px_6()
-            .py_8()
-            .child(Icon::new(IconName::Clapperboard).large().text_color(theme.muted_foreground))
-            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("No footage yet"))
-            .child(
-                div()
-                    .max_w_96()
-                    .text_center()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("Drop your raw takes here, or add them from disk. The AI edit cuts them into one video."),
-            )
+    /// The empty drop zone; "Add footage…" is right above it in the header.
+    fn render_empty(&self) -> EmptyState {
+        EmptyState::new(
+            "footage-empty",
+            IconName::Clapperboard,
+            "No footage yet",
+            "Drop your raw takes here, or add them from disk. The AI edit cuts them into one video.",
+        )
     }
 
     /// How to add takes when the file chooser can't open.
@@ -539,7 +531,11 @@ impl FootageCard {
 impl Render for FootageCard {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let header = self.render_header(cx);
-        let body = if self.takes.is_empty() && self.loaded { self.render_empty(cx) } else { self.render_list(cx) };
+        let body = if self.takes.is_empty() && self.loaded {
+            self.render_empty().into_any_element()
+        } else {
+            self.render_list(cx).into_any_element()
+        };
         let chooser_failed = self.chooser_failed.then(|| self.render_chooser_failed(cx));
         let dismiss_error = self.error.is_some().then(|| {
             Button::new("footage-dismiss-error").ghost().xsmall().icon(IconName::X).tooltip("Dismiss").on_click(

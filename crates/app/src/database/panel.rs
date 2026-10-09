@@ -30,6 +30,7 @@ use super::format;
 use super::property_editor::{PropertyEditor, PropertyEditorMode};
 use super::query::{self, resolve_columns, view_rows, visible_columns};
 use super::table::{CellEditors, EmptyReason, TableModel, VideoTable};
+use crate::ui::PAGE_INSET;
 
 actions!(video_database, [OpenSelected, RenameSelected, DeleteSelected, CancelEdit]);
 
@@ -1017,7 +1018,7 @@ impl DatabasePanel {
         v_flex()
             .flex_1()
             .min_h_0()
-            .px_4()
+            .px(PAGE_INSET)
             .pb_2()
             .child(
                 div()

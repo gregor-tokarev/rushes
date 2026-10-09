@@ -3,19 +3,19 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Datelike as _, Local, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::group_box::{GroupBox, GroupBoxVariants as _};
+use gpui_kit::component::link::Link;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, Size, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClipboardItem, Div, ElementId, Entity, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div, relative,
+    ParentElement as _, RenderOnce, SharedString, Styled as _, TestSupportExt as _, Window, div, relative,
 };
 use videocrm_core::{TagColor, UploadStatus};
 use videocrm_youtube::Account;
@@ -115,6 +115,23 @@ pub(super) fn card(id: impl Into<ElementId>, title: &'static str) -> GroupBox {
     GroupBox::new().id(id).outline().title(div().text_sm().child(title))
 }
 
+/// "Open on YouTube ↗": the video's page on YouTube, a link everywhere it is
+/// offered. `id` names the frame tests find it by.
+pub(super) fn youtube_link(id: impl Into<ElementId>, url: String) -> AnyElement {
+    let id = id.into();
+    div()
+        .id(id.clone())
+        .text_sm()
+        .child(
+            Link::new(ElementId::Name(format!("{id}-link").into()))
+                .href(url)
+                .child(h_flex().gap_1().child("Open on YouTube").child(Icon::new(IconName::ExternalLink).xsmall())),
+        )
+        // Links are not observable on their own; tests find the link through this frame.
+        .test_support()
+        .into_any_element()
+}
+
 /// Status of an upload job as the videos table shows it, except that a failure
 /// the job can resume from reads as a stop that needs attention, not a dead end.
 pub(super) fn upload_chip(status: &UploadStatus, progress: Option<f32>, resumable: bool) -> Chip {
@@ -126,7 +143,7 @@ pub(super) fn upload_chip(status: &UploadStatus, progress: Option<f32>, resumabl
 }
 
 /// `Uploading 42%` from the live progress when there is one, else the stored status.
-fn upload_label(status: &UploadStatus, progress: Option<f32>, resumable: bool) -> String {
+pub(super) fn upload_label(status: &UploadStatus, progress: Option<f32>, resumable: bool) -> String {
     match (status, progress) {
         (UploadStatus::Failed { .. }, _) if resumable => "Stopped".to_owned(),
         (UploadStatus::Uploading { .. }, Some(fraction)) => format!("Uploading {}%", (fraction * 100.0).floor()),
@@ -134,18 +151,6 @@ fn upload_label(status: &UploadStatus, progress: Option<f32>, resumable: bool) -
             format!("Uploading {}%", sent.saturating_mul(100) / total)
         }
         (status, _) => status.label().to_owned(),
-    }
-}
-
-/// `Today, 14:02`, `Yesterday, 09:10`, `Oct 7, 14:02`, or `Oct 7, 2025` in another year.
-pub(super) fn format_when(at: DateTime<Utc>, now: DateTime<Local>) -> String {
-    let at = at.with_timezone(&Local);
-    let days = (now.date_naive() - at.date_naive()).num_days();
-    match days {
-        0 => format!("Today, {}", at.format("%H:%M")),
-        1 => format!("Yesterday, {}", at.format("%H:%M")),
-        _ if at.year() == now.year() => at.format("%b %-d, %H:%M").to_string(),
-        _ => at.format("%b %-d, %Y").to_string(),
     }
 }
 
@@ -425,23 +430,7 @@ fn confirm_disconnect(service: Entity<YoutubeService>, name: String, window: &mu
 
 #[cfg(test)]
 mod tests {
-    use chrono::{NaiveDate, TimeZone as _};
-
     use super::*;
-
-    #[test]
-    fn times_read_relative_to_today() {
-        let local = |y, m, d, h, min| {
-            let naive = NaiveDate::from_ymd_opt(y, m, d).unwrap().and_hms_opt(h, min, 0).unwrap();
-            Local.from_local_datetime(&naive).earliest().unwrap()
-        };
-        let now = local(2026, 10, 9, 18, 30);
-        let utc = |at: DateTime<Local>| at.with_timezone(&Utc);
-        assert_eq!(format_when(utc(local(2026, 10, 9, 14, 2)), now), "Today, 14:02");
-        assert_eq!(format_when(utc(local(2026, 10, 8, 9, 10)), now), "Yesterday, 09:10");
-        assert_eq!(format_when(utc(local(2026, 10, 1, 7, 5)), now), "Oct 1, 07:05");
-        assert_eq!(format_when(utc(local(2025, 12, 31, 23, 0)), now), "Dec 31, 2025");
-    }
 
     #[test]
     fn upload_chips_show_progress() {

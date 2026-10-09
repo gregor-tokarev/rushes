@@ -19,7 +19,7 @@ use serde_json::json;
 use videocrm::publish::{
     AccountBadge, BlockingReason, CHAPTERS_HEADING, Connection, PublishPanel, UploadsPage, YoutubeSettings,
 };
-use videocrm::route::{Route, SettingsSection};
+use videocrm::route::{Route, SettingsSection, VideoTab};
 use videocrm_core::settings::YoutubeBackend;
 use videocrm_core::{Block, BlockKind, DocumentKind, Privacy, UploadId, UploadJob, UploadStatus, VideoId, YoutubeLink};
 use videocrm_youtube::{CredentialStore, RetryCause};
@@ -397,6 +397,16 @@ fn the_uploads_page_offers_what_each_job_allows(cx: &mut TestAppContext) {
         Some(UploadStatus::Failed { error: videocrm::publish::INTERRUPTED_RESUMABLE.into() })
     );
     assert_eq!(cx.opened_url().as_deref(), Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ"));
+
+    // Like a Pipelines row, the row itself opens the video, on its Publish tab.
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click(format!("upload-{}", done.id), cx);
+    });
+    assert_eq!(
+        workspace.state.read_with(cx, |state, _| state.route().clone()),
+        Route::Video { id: video_id, tab: VideoTab::Publish }
+    );
 }
 
 #[gpui_kit::test]

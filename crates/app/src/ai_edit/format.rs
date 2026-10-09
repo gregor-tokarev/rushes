@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use chrono::{DateTime, Local, Utc};
 use videocrm_core::document::strip_inline_markdown;
 use videocrm_pipeline::MediaInfo;
 
@@ -56,18 +55,6 @@ pub fn cost(usd: f64) -> String {
     if usd > 0.0 && usd < 0.005 { "<$0.01".to_owned() } else { format!("${usd:.2}") }
 }
 
-/// When a run started, in local time: "Today 14:02", "Yesterday 09:15", "Oct 3, 18:40".
-pub fn started(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let (at, now) = (at.with_timezone(&Local), now.with_timezone(&Local));
-    let time = at.format("%H:%M");
-    match (now.date_naive() - at.date_naive()).num_days() {
-        0 => format!("Today {time}"),
-        1 => format!("Yesterday {time}"),
-        _ if at.format("%Y").to_string() == now.format("%Y").to_string() => at.format("%b %-d, %H:%M").to_string(),
-        _ => at.format("%b %-d %Y, %H:%M").to_string(),
-    }
-}
-
 /// Characters from which an agent message is shown as a preview in the activity log.
 const PREVIEW_CHARS: usize = 280;
 /// Non-blank lines from which an agent message is shown as a preview.
@@ -112,8 +99,6 @@ fn strip_block_marker(line: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone as _;
-
     use super::*;
 
     #[test]
@@ -145,18 +130,6 @@ mod tests {
         assert_eq!(cost(0.001), "<$0.01");
         assert_eq!(cost(0.0), "$0.00");
         assert_eq!(cost(1.2), "$1.20");
-    }
-
-    #[test]
-    fn start_times_are_relative_to_today() {
-        let now = Local.with_ymd_and_hms(2026, 10, 9, 15, 0, 0).unwrap().with_timezone(&Utc);
-        let at =
-            |day, hour, minute| Local.with_ymd_and_hms(2026, 10, day, hour, minute, 0).unwrap().with_timezone(&Utc);
-        assert_eq!(started(at(9, 14, 2), now), "Today 14:02");
-        assert_eq!(started(at(8, 9, 15), now), "Yesterday 09:15");
-        assert_eq!(started(at(3, 18, 40), now), "Oct 3, 18:40");
-        let last_year = Local.with_ymd_and_hms(2025, 12, 31, 8, 0, 0).unwrap().with_timezone(&Utc);
-        assert_eq!(started(last_year, now), "Dec 31 2025, 08:00");
     }
 
     #[test]

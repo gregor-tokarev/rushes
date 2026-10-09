@@ -45,7 +45,7 @@ use super::rules::{
 };
 use super::service::{YoutubeEvent, YoutubeService};
 use super::transfer::{format_bytes, format_duration, format_eta, format_speed};
-use super::ui::{ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, status_line};
+use super::ui::{ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, status_line, youtube_link};
 use super::upload::{ProcessingOutcome, UploadError};
 use crate::state::{AppEvent, AppState};
 
@@ -932,17 +932,7 @@ impl PublishPanel {
             .video(self.video_id)
             .and_then(|video| video.youtube.as_ref())
             .map(|link| link.url.clone());
-        let open_link =
-            |url: String| {
-                div()
-                    .id("open-on-youtube")
-                    .text_sm()
-                    .child(Link::new("open-on-youtube-link").href(url).child(
-                        h_flex().gap_1().child("Open on YouTube").child(Icon::new(IconName::ExternalLink).xsmall()),
-                    ))
-                    // Links are not observable on their own; tests find the link through this frame.
-                    .test_support()
-            };
+        let open_link = |url: String| youtube_link("open-on-youtube", url);
 
         let body = match &job {
             Some(job) if service.is_active(job.id) => {
