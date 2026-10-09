@@ -440,6 +440,31 @@ fn the_title_and_hook_save_on_enter(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn enter_in_the_title_continues_at_the_end_of_the_hook(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| {
+        state.update(cx, |state, cx| {
+            let mut video = state.video(id).cloned().expect("video");
+            video.hook = "Everything that survived".into();
+            state.update_video(video, cx);
+        })
+    });
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
+
+    app.click(cx, "page-title");
+    app.press(cx, "end");
+    app.type_text(cx, " (2026)");
+    app.press(cx, "enter");
+    app.type_text(cx, " a year later");
+    app.press(cx, "enter");
+    let video = cx.read(|cx| app.state.read(cx).video(id).cloned().expect("video"));
+    assert_eq!(video.title, "Desk setup tour (2026)");
+    assert_eq!(video.hook, "Everything that survived a year later");
+}
+
+#[gpui_kit::test]
 fn tabs_of_a_deleted_video_create_nothing(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, true, &["Desk setup tour"]);
     let id = app.video_id(cx, "Desk setup tour");

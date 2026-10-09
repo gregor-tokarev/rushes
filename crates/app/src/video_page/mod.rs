@@ -9,7 +9,7 @@ mod properties;
 use chrono::Utc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::input::{Enter, Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Enter, Input, InputEvent, InputState, Position, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -221,10 +221,14 @@ impl VideoPage {
         }
     }
 
+    /// Enter ends the title: it is saved and typing continues at the end of the hook.
     fn on_title_enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         self.commit_title(cx);
-        self.hook.update(cx, |input, cx| input.focus(window, cx));
+        self.hook.update(cx, |input, cx| {
+            let end = input.value().chars().count() as u32;
+            input.set_cursor_position(Position::new(0, end), window, cx);
+        });
     }
 
     fn open_tab(&mut self, tab: VideoTab, cx: &mut Context<Self>) {
@@ -360,6 +364,7 @@ impl VideoPage {
             .child(
                 div()
                     .id("page-title")
+                    .test_support()
                     .key_context("VideoTitle")
                     .capture_action(cx.listener(Self::on_title_enter))
                     .child(
