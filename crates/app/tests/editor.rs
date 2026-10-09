@@ -346,6 +346,7 @@ fn todo_checkbox_and_shortcut_toggle_completion(cx: &mut TestAppContext) {
     f.click(cx, part(todo.id, "check"));
     assert!(f.blocks(cx)[0].checked);
     assert!(f.changes() > before);
+    assert_eq!(f.focused(cx), None, "toggling does not move the caret into the item");
 
     f.focus_last(cx);
     f.press(cx, &["secondary-enter"]);
@@ -404,6 +405,14 @@ fn multi_line_paste_creates_blocks(cx: &mut TestAppContext) {
     );
     let last = f.blocks(cx).last().map(|block| block.id);
     assert_eq!(f.focused(cx), last);
+}
+
+#[gpui_kit::test]
+fn an_empty_document_starts_with_a_paragraph_on_click(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, Vec::new());
+    f.click(cx, "document-end".into());
+    f.type_text(cx, "Hello");
+    assert_eq!(f.summary(cx), owned(&[(BlockKind::Paragraph, "Hello")]));
 }
 
 #[gpui_kit::test]

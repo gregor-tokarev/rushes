@@ -206,9 +206,20 @@ impl Render for DocumentEditor {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                    // The root would otherwise take focus back from the new block.
+                                    cx.stop_propagation();
                                     this.focus_end(window, cx)
                                 }),
-                            ),
+                            )
+                            .when(self.document.blocks.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .px(GUTTER)
+                                        .line_height(Metrics::of(BlockKind::Paragraph).line_height)
+                                        .text_color(row.palette.placeholder)
+                                        .child("Start writing, or type '/' for commands"),
+                                )
+                            }),
                     ),
             )
             .when_some(self.block_menu.as_ref(), |this, menu| this.child(render_block_menu(menu)))
@@ -248,6 +259,16 @@ impl DocumentEditor {
             .when(highlighted, |this| this.bg(row.palette.selected))
             .text_size(metrics.text_size)
             .line_height(metrics.line_height)
+            .when(block.kind.has_text(), |this| {
+                // Clicks on a block's padding or marker put the caret at its end.
+                this.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.click_text(id, usize::MAX, window, cx);
+                    }),
+                )
+            })
             .child(self.render_content(block, number, metrics, row, cx))
             .when_some(
                 self.slash.as_ref().filter(|menu| menu.block == id && row.editing == Some(id)),
@@ -393,7 +414,13 @@ impl DocumentEditor {
                 );
                 h_flex()
                     .items_start()
-                    .child(marker(checkbox.into_any_element()))
+                    .child(marker(
+                        // Toggling the checkbox does not move the caret into the item.
+                        div()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(checkbox)
+                            .into_any_element(),
+                    ))
                     .child(text)
                     .into_any_element()
             }
