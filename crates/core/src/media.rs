@@ -198,6 +198,13 @@ mod tests {
     }
 
     #[test]
+    fn videos_with_the_same_title_get_separate_folders() {
+        // UUID v7 ids created close together share their leading timestamp hex digits.
+        let names: std::collections::HashSet<_> = (0..1000).map(|_| video_folder_name(&video("Untitled"))).collect();
+        assert_eq!(names.len(), 1000);
+    }
+
+    #[test]
     fn folder_name_is_truncated() {
         let v = video(&"long title ".repeat(20));
         let name = video_folder_name(&v);

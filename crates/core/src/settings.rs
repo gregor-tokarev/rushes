@@ -6,6 +6,7 @@
 //! after fields are added.
 
 use std::ffi::OsString;
+use std::fmt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -58,13 +59,27 @@ impl AppSettings {
 }
 
 /// Which OAuth / YouTube Data API endpoints the app talks to.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum YoutubeBackend {
     /// Real Google with the user's own OAuth client (Desktop app type).
     Google { client_id: String, client_secret: String },
     /// Local emulators (`emulators/`), for development and demos.
     Emulator { google_url: String, youtube_url: String },
+}
+
+/// Redacts the client secret so settings can be logged.
+impl fmt::Debug for YoutubeBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            YoutubeBackend::Google { client_id, client_secret: _ } => {
+                f.debug_struct("Google").field("client_id", client_id).field("client_secret", &"<redacted>").finish()
+            }
+            YoutubeBackend::Emulator { google_url, youtube_url } => {
+                f.debug_struct("Emulator").field("google_url", google_url).field("youtube_url", youtube_url).finish()
+            }
+        }
+    }
 }
 
 impl Default for YoutubeBackend {
@@ -202,5 +217,16 @@ mod tests {
         assert!(json.contains(r#""type":"google""#), "{json}");
         assert_eq!(serde_json::from_str::<AppSettings>(&json).unwrap(), settings);
         assert_eq!(settings.resolved_media_root(), PathBuf::from("/media"));
+    }
+
+    #[test]
+    fn debug_output_redacts_the_client_secret() {
+        let settings = AppSettings {
+            youtube: YoutubeBackend::Google { client_id: "id-123".into(), client_secret: "GOCSPX-hunter2".into() },
+            ..AppSettings::default()
+        };
+        let debug = format!("{settings:?}");
+        assert!(debug.contains("id-123") && debug.contains("<redacted>"), "{debug}");
+        assert!(!debug.contains("hunter2"), "{debug}");
     }
 }

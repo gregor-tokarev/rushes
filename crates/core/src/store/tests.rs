@@ -108,6 +108,43 @@ fn file_database_uses_wal_and_persists_without_reseeding() {
 }
 
 #[test]
+fn concurrent_first_opens_migrate_once() {
+    for _ in 0..5 {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("videocrm.db");
+        let barrier = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            let opens: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        Store::open(&path).map(|store| store.list_views().unwrap().len())
+                    })
+                })
+                .collect();
+            for open in opens {
+                assert_eq!(open.join().unwrap().unwrap(), 2, "every open succeeds and views are seeded once");
+            }
+        });
+        assert_eq!(Store::open(&path).unwrap().schema_version().unwrap(), 1);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn new_database_files_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("videocrm.db");
+    let mut store = Store::open(&path).unwrap();
+    insert(&mut store, "Secret plans", 0.0);
+    for file in ["videocrm.db", "videocrm.db-wal", "videocrm.db-shm"] {
+        let mode = std::fs::metadata(dir.path().join(file)).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{file}");
+    }
+}
+
+#[test]
 fn rejects_databases_from_newer_versions() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("videocrm.db");
@@ -412,6 +449,28 @@ fn multi_select_values_are_pruned_per_option() {
         Some(&PropertyValue::MultiSelect(vec!["a".into()]))
     );
     assert!(store.get_video(only_b.id).unwrap().unwrap().properties.is_empty());
+}
+
+#[test]
+fn non_finite_numbers_are_rejected_instead_of_breaking_listings() {
+    let mut store = store();
+    let score = PropertyId::new();
+    // `"nan".parse::<f64>()` and `"inf"` succeed, so a number cell can produce these.
+    for number in [f64::NAN, f64::INFINITY] {
+        let mut video = Video::new("Scored");
+        video.properties.insert(score, PropertyValue::Number(number));
+        assert!(store.insert_video(&video).is_err());
+    }
+    let mut video = insert(&mut store, "Scored", 0.0);
+    video.properties.insert(score, PropertyValue::Number(f64::NEG_INFINITY));
+    assert!(store.update_video(&mut video).is_err());
+    assert_eq!(store.list_videos().unwrap().len(), 1);
+    assert!(store.get_video(video.id).unwrap().unwrap().properties.is_empty());
+
+    let mut view = store.list_views().unwrap().remove(0);
+    view.columns[0].width = f32::NAN;
+    assert!(store.save_view(&view).is_err());
+    assert_eq!(store.list_views().unwrap().len(), 2);
 }
 
 #[test]

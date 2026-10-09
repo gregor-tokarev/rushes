@@ -688,9 +688,11 @@ fn parse_link(chars: &[char], open: usize) -> Option<(usize, String, usize)> {
         i += 1;
     };
     let destination: String = chars[label_end + 2..url_end].iter().collect();
-    // A link title (`[a](url "title")`) is accepted and ignored.
-    let url = destination.split_whitespace().next()?;
-    let url = url.strip_prefix('<').and_then(|u| u.strip_suffix('>')).unwrap_or(url);
+    // `<...>` may contain spaces. A link title (`[a](url "title")`) is accepted and ignored.
+    let url = match destination.trim_start().strip_prefix('<').and_then(|rest| rest.split_once('>')) {
+        Some((url, _)) => url,
+        None => destination.split_whitespace().next()?,
+    };
     Some((label_end, url.to_string(), url_end + 1))
 }
 
@@ -1194,6 +1196,10 @@ mod tests {
                 InlineSpan { code: true, link: Some("u".into()), ..span("code") },
                 InlineSpan { link: Some("u".into()), ..span(" link") }
             ]
+        );
+        assert_eq!(
+            parse_inline("[take](<file:///My Videos/a.mp4> \"t\")"),
+            vec![InlineSpan { link: Some("file:///My Videos/a.mp4".into()), ..span("take") }]
         );
     }
 
