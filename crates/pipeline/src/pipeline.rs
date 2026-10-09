@@ -1,0 +1,302 @@
+//! Pipeline phases: what to ask the agent, and what came out of it.
+//!
+//! video-use never cuts before the creator approved its plain-English strategy, so an
+//! edit runs as a [`Phase::Plan`] followed by [`Phase::Approve`] (and any number of
+//! [`Phase::Feedback`] rounds), each resuming the same agent session. [`Phase::Auto`]
+//! does everything in one go for creators who pre-approve.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::time::SystemTime;
+
+use crate::agent::{AgentConfig, Invocation, run_agent};
+use crate::error::PipelineError;
+use crate::event::AgentEvent;
+use crate::media::{FootageFile, list_footage};
+
+const SKILL_FILE: &str = "SKILL.md";
+const EDIT_DIR: &str = "edit";
+const FINAL_CUT: &str = "final.mp4";
+const PREVIEW: &str = "preview.mp4";
+
+const HEADLESS_NOTE: &str = "You are running headless inside the VideoCRM app: nobody can \
+answer questions mid-run. Where something is ambiguous, make the most sensible choice and \
+say which choice you made.\n\n";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// Inventory, transcribe and propose a strategy, then stop without rendering.
+    Plan { brief: String },
+    /// The creator approved the strategy: render, self-evaluate, summarise.
+    Approve { notes: Option<String> },
+    /// Revise the edit with the creator's feedback and re-render.
+    Feedback { message: String },
+    /// Plan and render in one pass; the creator pre-approved the strategy.
+    Auto { brief: String },
+}
+
+/// Where a phase runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunContext {
+    /// Raw footage; the agent's working directory. Outputs go to `<footage_dir>/edit/`.
+    pub footage_dir: PathBuf,
+    /// Folder holding the video-use `SKILL.md` and its `helpers/`.
+    pub skill_dir: PathBuf,
+    /// Agent session to resume (the previous phase's [`PhaseOutcome::session_id`]).
+    pub session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhaseOutcome {
+    /// Session to resume in the next phase.
+    pub session_id: Option<String>,
+    /// The agent's final message: the strategy after a plan, a summary otherwise.
+    pub summary_text: String,
+    pub cost_usd: Option<f64>,
+    /// The agent finished normally but reported an error (e.g. it hit the turn limit).
+    pub is_error: bool,
+    /// `<footage_dir>/edit/final.mp4`, if it exists after the phase.
+    pub final_cut: Option<PathBuf>,
+    /// `<footage_dir>/edit/preview.mp4`, if it exists after the phase.
+    pub preview: Option<PathBuf>,
+    /// `final.mp4` was created or rewritten during this phase.
+    pub rendered: bool,
+}
+
+/// Runs one phase to completion, streaming agent events to `on_event`.
+///
+/// Blocks until the agent exits. Setting `cancel` stops the agent and every
+/// process it started, and returns [`PipelineError::Cancelled`].
+pub fn run_phase(
+    config: &AgentConfig,
+    ctx: &RunContext,
+    phase: Phase,
+    on_event: &mut dyn FnMut(&AgentEvent),
+    cancel: &AtomicBool,
+) -> Result<PhaseOutcome, PipelineError> {
+    if !ctx.footage_dir.is_dir() {
+        return Err(PipelineError::FootageNotFound(ctx.footage_dir.clone()));
+    }
+    let skill_md = ctx.skill_dir.join(SKILL_FILE);
+    if !skill_md.is_file() {
+        return Err(PipelineError::SkillNotFound(skill_md));
+    }
+    // The skill is usually a symlink; `--add-dir` and the agent work with real paths.
+    let skill_dir = fs::canonicalize(&ctx.skill_dir)?;
+    let program = config
+        .resolve_command()
+        .ok_or_else(|| PipelineError::AgentNotFound(config.command.clone()))?;
+    let footage = match phase {
+        Phase::Plan { .. } | Phase::Auto { .. } => list_footage(&ctx.footage_dir)?,
+        Phase::Approve { .. } | Phase::Feedback { .. } => Vec::new(),
+    };
+
+    let edit_dir = ctx.footage_dir.join(EDIT_DIR);
+    let final_cut = edit_dir.join(FINAL_CUT);
+    let before = file_stamp(&final_cut);
+    let invocation = Invocation {
+        cwd: ctx.footage_dir.clone(),
+        prompt: build_prompt(&phase, &skill_dir.join(SKILL_FILE), &footage),
+        resume: ctx.session_id.clone(),
+        add_dirs: vec![skill_dir],
+    };
+    let run = run_agent(config, &program, &invocation, on_event, cancel)?;
+
+    let session_id = run.session_id.or_else(|| ctx.session_id.clone());
+    let status = run
+        .status
+        .map(|status| status.to_string())
+        .unwrap_or_default();
+    let failed = |message: String| PipelineError::AgentFailed {
+        message,
+        stderr_tail: run.stderr_tail.clone(),
+        session_id: session_id.clone(),
+    };
+    let Some(AgentEvent::Result {
+        is_error,
+        result_text,
+        cost_usd,
+        ..
+    }) = run.result
+    else {
+        return Err(failed(format!(
+            "the agent stopped without reporting a result ({status})"
+        )));
+    };
+    if !run.status.is_some_and(|status| status.success()) {
+        return Err(failed(if is_error && !result_text.is_empty() {
+            result_text
+        } else {
+            format!("the agent stopped unexpectedly ({status})")
+        }));
+    }
+
+    let summary_text = if result_text.trim().is_empty() {
+        run.last_text.unwrap_or_default()
+    } else {
+        result_text
+    };
+    let after = file_stamp(&final_cut);
+    let preview = edit_dir.join(PREVIEW);
+    Ok(PhaseOutcome {
+        session_id,
+        summary_text,
+        cost_usd,
+        is_error,
+        rendered: after.is_some() && after != before,
+        final_cut: final_cut.is_file().then_some(final_cut),
+        preview: preview.is_file().then_some(preview),
+    })
+}
+
+/// Modification time and size, to tell whether a file was rewritten.
+fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let meta = fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+/// The prompt sent to the agent for `phase`. `skill_md` is the absolute path of the
+/// video-use `SKILL.md`; `footage` lists the source files (used by plan and auto).
+pub fn build_prompt(phase: &Phase, skill_md: &Path, footage: &[FootageFile]) -> String {
+    let skill = skill_md.display();
+    match phase {
+        Phase::Plan { brief } => format!(
+            "VideoCRM edit request (planning phase).\n\n\
+             {intro}{brief}\
+             This phase is planning only:\n\
+             1. Inventory and transcribe the footage as the skill describes (transcripts are \
+             cached for the render phase).\n\
+             2. Pre-scan the transcripts for slips, false starts and retakes.\n\
+             3. Propose the edit strategy in plain English, 4-8 sentences: shape, take choices, \
+             cut direction, grade, subtitles, animations and estimated length. Append it to \
+             ./edit/project.md as a new session.\n\
+             4. Then STOP. Do not cut or render anything. The creator reviews the strategy in \
+             VideoCRM and approves it or sends feedback in a follow-up message.\n\n\
+             {HEADLESS_NOTE}\
+             End with the strategy only: your final message must be the strategy in Markdown, \
+             without preamble, with any open questions for the creator at the end.",
+            intro = intro(skill_md, footage),
+            brief = brief_section(brief),
+        ),
+        Phase::Approve { notes } => format!(
+            "VideoCRM edit: strategy approved (render phase).\n\n\
+             The creator approved the edit strategy you proposed (recorded in \
+             ./edit/project.md).{notes}\n\n\
+             Continue with the video-use skill ({skill}) in the current directory:\n\
+             1. Execute the edit. Render a preview to ./edit/preview.mp4, then the final cut \
+             to ./edit/final.mp4.\n\
+             2. Self-evaluate the rendered output as the skill describes; fix and re-render \
+             if needed (at most 3 passes).\n\
+             3. Append this session to ./edit/project.md.\n\n\
+             {HEADLESS_NOTE}\
+             Reply with a short summary of what was produced: final length, structure, \
+             notable decisions and anything the creator should check.",
+            notes = match notes.as_deref().map(str::trim) {
+                Some(notes) if !notes.is_empty() => {
+                    format!(" Their notes, to take into account:\n\n{notes}")
+                }
+                _ => String::new(),
+            },
+        ),
+        Phase::Feedback { message } => format!(
+            "VideoCRM edit: feedback from the creator (revision phase).\n\n\
+             The creator reviewed your work and asks for these changes:\n\n\
+             {message}\n\n\
+             Continue with the video-use skill ({skill}) in the current directory; the \
+             decisions so far are in ./edit/project.md:\n\
+             1. Apply the feedback. If nothing has been rendered yet, adjust the strategy \
+             accordingly and go ahead with it.\n\
+             2. Re-render ./edit/preview.mp4 and ./edit/final.mp4, reusing the cached \
+             transcripts.\n\
+             3. Self-evaluate the new render (at most 3 passes) and append the decisions to \
+             ./edit/project.md.\n\n\
+             {HEADLESS_NOTE}\
+             Reply with a short summary of what changed.",
+            message = message.trim(),
+        ),
+        Phase::Auto { brief } => format!(
+            "VideoCRM edit request (single pass, pre-approved).\n\n\
+             {intro}{brief}\
+             The creator pre-approved this edit, so do not stop to confirm the strategy:\n\
+             1. Inventory and transcribe the footage, decide the strategy and append it to \
+             ./edit/project.md.\n\
+             2. Execute the edit. Render a preview to ./edit/preview.mp4, then the final cut \
+             to ./edit/final.mp4.\n\
+             3. Self-evaluate the rendered output as the skill describes; fix and re-render \
+             if needed (at most 3 passes).\n\n\
+             {HEADLESS_NOTE}\
+             Reply with a short summary: the strategy you chose and what was produced.",
+            intro = intro(skill_md, footage),
+            brief = brief_section(brief),
+        ),
+    }
+}
+
+fn intro(skill_md: &Path, footage: &[FootageFile]) -> String {
+    let files = if footage.is_empty() {
+        "No media files were found in the current directory. Check with `ls`, and if there \
+         is nothing to edit, say so and stop."
+            .to_owned()
+    } else {
+        let lines: Vec<String> = footage.iter().map(describe).collect();
+        format!("Raw footage in the current directory:\n{}", lines.join("\n"))
+    };
+    format!(
+        "Use the video-use skill to edit the raw footage in the current directory. Read the \
+         skill first: {}. Its helper scripts are in helpers/ next to it.\n\n\
+         {files}\n\n\
+         Write every output to ./edit/. Never modify the source files or anything in the \
+         skill directory.\n\n",
+        skill_md.display(),
+    )
+}
+
+fn brief_section(brief: &str) -> String {
+    match brief.trim() {
+        "" => "The creator gave no brief: infer the kind of video from the footage.\n\n".to_owned(),
+        brief => format!("The creator's brief:\n\n{brief}\n\n"),
+    }
+}
+
+/// `- take1.mp4 (1:02, 1920x1080)`
+fn describe(file: &FootageFile) -> String {
+    let Some(media) = &file.media else {
+        return format!("- {}", file.name);
+    };
+    let mut facts = vec![format_duration(media.duration_secs)];
+    match (media.width, media.height) {
+        (Some(width), Some(height)) => {
+            facts.push(format!("{width}x{height}"));
+            if !media.has_audio {
+                facts.push("no audio".to_owned());
+            }
+        }
+        _ => facts.push("audio only".to_owned()),
+    }
+    format!("- {} ({})", file.name, facts.join(", "))
+}
+
+/// `m:ss`, or `h:mm:ss` from one hour.
+fn format_duration(seconds: f64) -> String {
+    let total = seconds.max(0.0).round() as u64;
+    let (hours, minutes, seconds) = (total / 3600, total / 60 % 60, total % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durations_read_like_a_player() {
+        assert_eq!(format_duration(3.023), "0:03");
+        assert_eq!(format_duration(62.5), "1:03");
+        assert_eq!(format_duration(3725.0), "1:02:05");
+        assert_eq!(format_duration(-1.0), "0:00");
+    }
+}
