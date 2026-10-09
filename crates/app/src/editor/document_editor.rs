@@ -80,11 +80,23 @@ struct SlashMenu {
     query: String,
     /// Index into the filtered block types.
     selected: usize,
+    /// Keeps the keyboard selection in view when the list scrolls.
+    scroll: ScrollHandle,
 }
 
 impl SlashMenu {
+    fn new(block: BlockId, start: usize) -> Self {
+        Self { block, start, query: String::new(), selected: 0, scroll: ScrollHandle::new() }
+    }
+
     fn items(&self) -> Vec<&'static BlockType> {
         slash::filter(&self.query)
+    }
+
+    fn select(&mut self, ix: usize) {
+        self.selected = ix;
+        // The list's first child is its heading; show it with the first item.
+        self.scroll.scroll_to_item(if ix == 0 { 0 } else { ix + 1 });
     }
 }
 
@@ -392,7 +404,7 @@ impl DocumentEditor {
                 Some(query) if !(query.ends_with(' ') && slash::filter(query).is_empty()) => {
                     if menu.query != query {
                         menu.query = query.to_owned();
-                        menu.selected = 0;
+                        menu.select(0);
                     }
                 }
                 _ => self.slash = None,
@@ -402,7 +414,7 @@ impl DocumentEditor {
         if block.kind != BlockKind::Code
             && let Some(start) = slash::typed_slash(previous, text, cursor)
         {
-            self.slash = Some(SlashMenu { block: block.id, start, query: String::new(), selected: 0 });
+            self.slash = Some(SlashMenu::new(block.id, start));
         }
     }
 
@@ -468,7 +480,7 @@ impl DocumentEditor {
         if let Some(menu) = self.slash.as_mut() {
             let count = menu.items().len();
             if count > 0 {
-                menu.selected = (menu.selected as isize + delta).rem_euclid(count as isize) as usize;
+                menu.select((menu.selected as isize + delta).rem_euclid(count as isize) as usize);
             }
             cx.notify();
         }
@@ -824,7 +836,7 @@ impl DocumentEditor {
         let Some(ix) = self.index(after) else { return };
         let id = self.insert_after(ix, Block::paragraph("/"), window, cx);
         self.focus_block(id, Caret::End, window, cx);
-        self.slash = Some(SlashMenu { block: id, start: 0, query: String::new(), selected: 0 });
+        self.slash = Some(SlashMenu::new(id, 0));
     }
 
     fn set_checked(&mut self, id: BlockId, checked: bool, cx: &mut Context<Self>) {

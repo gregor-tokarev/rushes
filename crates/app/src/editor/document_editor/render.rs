@@ -673,6 +673,7 @@ impl DocumentEditor {
                     .w(rems(20.))
                     .max_h(SLASH_MENU_MAX_HEIGHT)
                     .overflow_y_scroll()
+                    .track_scroll(&menu.scroll)
                     .p_1()
                     .popover_style(cx)
                     .text_size(rems(1.))

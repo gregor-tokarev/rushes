@@ -584,3 +584,18 @@ fn pasted_dividers_and_code_keep_their_own_blocks(cx: &mut TestAppContext) {
         owned(&[(BlockKind::Divider, ""), (BlockKind::Divider, ""), (BlockKind::Paragraph, "after")])
     );
 }
+
+#[gpui_kit::test]
+fn slash_menu_scrolls_to_the_keyboard_selection(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![paragraph("")]);
+    f.focus_first(cx);
+    f.type_text(cx, "/");
+    assert!(!f.is_visible(cx, slash_item("Divider")), "the list is taller than the menu");
+    f.press(cx, &["down"; 10]);
+    assert!(f.is_visible(cx, slash_item("Divider")));
+    // Wrapping around shows the top of the list again.
+    f.press(cx, &["down"; 3]);
+    assert!(f.is_visible(cx, slash_item("Text")));
+    f.press(cx, &["enter"]);
+    assert_eq!(f.summary(cx), owned(&[(BlockKind::Paragraph, "")]));
+}
