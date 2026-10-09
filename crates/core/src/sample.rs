@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Days, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
 use uuid::Uuid;
 
 use crate::model::{
@@ -109,11 +109,7 @@ fn video(title: &str, icon: &str, status: VideoStatus, format: VideoFormat, tags
 }
 
 fn days_from(today: NaiveDate, days: i64) -> Option<NaiveDate> {
-    if days >= 0 {
-        today.checked_add_days(Days::new(days as u64))
-    } else {
-        today.checked_sub_days(Days::new(-days as u64))
-    }
+    today.checked_add_signed(TimeDelta::days(days))
 }
 
 fn at_hour(date: Option<NaiveDate>, hour: u32) -> Option<DateTime<Utc>> {
