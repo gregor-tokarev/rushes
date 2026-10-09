@@ -470,3 +470,22 @@ fn set_document_replaces_content_without_reporting_a_change(cx: &mut TestAppCont
     assert_eq!(cx.read(|cx| f.editor.read(cx).document(cx)), replacement);
     assert_eq!(f.changes(), edits);
 }
+
+#[gpui_kit::test]
+fn long_documents_render_only_rows_near_the_viewport(cx: &mut TestAppContext) {
+    let blocks: Vec<_> = (0..300).map(|ix| paragraph(&format!("Line {ix}"))).collect();
+    let (first, last) = (blocks[0].id, blocks[299].id);
+    let f = Fixture::new(cx, blocks);
+    // The first frame measures every row; later frames skip the far ones.
+    f.step(cx, |window, cx| window.render_frame(cx));
+    assert!(f.is_visible(cx, part(first, "text")));
+    let rendered = cx
+        .update_window(f.window, |_, window, _| window.try_find(part(last, "text")).is_some())
+        .expect("window is open");
+    assert!(!rendered, "a row far below the viewport is a spacer");
+
+    f.focus_last(cx);
+    f.type_text(cx, "!");
+    assert_eq!(f.blocks(cx)[299].text, "Line 299!");
+    assert_eq!(f.blocks(cx).len(), 300);
+}
