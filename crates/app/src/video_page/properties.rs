@@ -3,30 +3,34 @@
 
 use std::collections::HashMap;
 
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::calendar::Date;
+use gpui_kit::component::calendar::{Calendar, CalendarEvent, CalendarState, Date};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState, DateTime};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::form::{Field, Form};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Backspace, Input, InputEvent, InputState};
 use gpui_kit::component::link::Link;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Icon, Side, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::popover::Popover;
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, Selectable as _, Side, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, TestSupportExt as _, Window, div,
 };
+use videocrm_core::input::normalize_link;
 use videocrm_core::{
-    PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, TagColor, Video, VideoFormat, VideoId,
-    VideoStatus,
+    Column, PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, TagColor, Video, VideoFormat, VideoId,
+    VideoStatus, ViewKind,
 };
 
 use crate::database::Chip;
-use crate::database::colors::{format_color, free_tag_color};
+use crate::database::colors::{format_color, free_tag_color, tag_colors};
+use crate::database::{format, query};
 use crate::state::{AppEvent, AppState};
 
 /// Retained editors of one video's properties. Values are written through
@@ -35,7 +39,10 @@ pub struct PropertiesPanel {
     state: Entity<AppState>,
     video_id: VideoId,
     collapsed: bool,
-    publish_date: Entity<DatePickerState>,
+    /// The calendar of the date popover, shared by the date rows.
+    calendar: Entity<CalendarState>,
+    /// The date row whose calendar is open.
+    date_open: Option<DateField>,
     tag_input: Entity<InputState>,
     /// Whether the media folder exists, checked off the UI thread after each data change.
     folder_exists: bool,
@@ -43,14 +50,20 @@ pub struct PropertiesPanel {
     /// Editors of text, number and URL properties, each with the subscription
     /// that commits it, so both go away when the property changes type.
     inputs: HashMap<PropertyId, (Entity<InputState>, Subscription)>,
-    dates: HashMap<PropertyId, (Entity<DatePickerState>, Subscription)>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A date row of the panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DateField {
+    Publish,
+    Custom(PropertyId),
 }
 
 impl PropertiesPanel {
     pub fn new(video_id: VideoId, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = AppState::global(cx);
-        let publish_date = cx.new(|cx| DatePickerState::new(window, cx).date_format("%b %-d, %Y"));
+        let calendar = cx.new(|cx| CalendarState::new(window, cx));
         let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("Add a tag…"));
         let subscriptions = vec![
             cx.subscribe_in(&state, window, |this, _, event: &AppEvent, window, cx| {
@@ -58,16 +71,21 @@ impl PropertiesPanel {
                     this.sync(window, cx);
                 }
             }),
-            cx.subscribe(&publish_date, |this, _, event: &DatePickerEvent, cx| {
-                let DatePickerEvent::Change(DateTime::Single(date)) = event else { return };
-                let date = date.map(|date| date.date());
-                this.edit(cx, |video| video.publish_date = date);
+            cx.subscribe(&calendar, |this, _, event: &CalendarEvent, cx| {
+                let CalendarEvent::Selected(Date::Single(Some(date))) = event else { return };
+                if let Some(field) = this.date_open.take() {
+                    this.set_date(field, Some(*date), cx);
+                }
+                cx.notify();
             }),
+            // A typed tag is added on Enter, or when the field is left.
             cx.subscribe_in(&tag_input, window, |this, input, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
                     let tag = input.read(cx).value().trim().to_string();
-                    input.update(cx, |input, cx| input.set_value("", window, cx));
-                    this.add_tag(tag, cx);
+                    if !tag.is_empty() {
+                        input.update(cx, |input, cx| input.set_value("", window, cx));
+                        this.add_tag(tag, cx);
+                    }
                 }
             }),
         ];
@@ -75,12 +93,12 @@ impl PropertiesPanel {
             state,
             video_id,
             collapsed: false,
-            publish_date,
+            calendar,
+            date_open: None,
             tag_input,
             folder_exists: false,
             folder_check: None,
             inputs: HashMap::new(),
-            dates: HashMap::new(),
             _subscriptions: subscriptions,
         };
         panel.sync(window, cx);
@@ -122,6 +140,97 @@ impl PropertiesPanel {
         self.edit(cx, |video| video.tags.retain(|known| known != tag));
     }
 
+    /// Backspace in the empty tag field removes the last tag, the keyboard
+    /// path to the remove buttons that show on hover.
+    fn on_tag_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.tag_input.read(cx).value().is_empty() {
+            return;
+        }
+        let Some(last) = self.video(cx).and_then(|video| video.tags.last().cloned()) else { return };
+        cx.stop_propagation();
+        self.remove_tag(&last, cx);
+    }
+
+    /// Saves what the property fields hold but have not committed yet, such
+    /// as a value typed right before quitting or leaving the page by keyboard.
+    pub fn flush(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<PropertyId> = self.inputs.keys().copied().collect();
+        for id in ids {
+            self.commit_input(id, cx);
+        }
+        let tag = self.tag_input.read(cx).value().trim().to_string();
+        self.add_tag(tag, cx);
+    }
+
+    /// Commits a text, number or URL field when its text differs from the stored value.
+    fn commit_input(&mut self, id: PropertyId, cx: &mut Context<Self>) {
+        let Some((input, _)) = self.inputs.get(&id) else { return };
+        let text = input.read(cx).value().trim().to_string();
+        let stored = self.video(cx).and_then(|video| video.properties.get(&id)).cloned();
+        let unchanged = match &stored {
+            Some(value) => text == property_text(value) || text == display_text(value),
+            None => text.is_empty(),
+        };
+        if !unchanged {
+            self.commit_text(id, text, cx);
+        }
+    }
+
+    /// Shows the stored value in a field that is not being edited.
+    fn show_stored(&mut self, id: PropertyId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((input, _)) = self.inputs.get(&id) else { return };
+        let input = input.clone();
+        if input.read(cx).focus_handle(cx).is_focused(window) {
+            return;
+        }
+        let text = self.video(cx).and_then(|video| video.properties.get(&id)).map(display_text).unwrap_or_default();
+        if input.read(cx).value().as_ref() != text {
+            input.update(cx, |input, cx| input.set_value(text, window, cx));
+        }
+    }
+
+    /// A number is edited as typed, without the grouping it is shown with.
+    fn show_for_editing(&mut self, id: PropertyId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((input, _)) = self.inputs.get(&id) else { return };
+        let input = input.clone();
+        let Some(value @ PropertyValue::Number(_)) =
+            self.video(cx).and_then(|video| video.properties.get(&id)).cloned()
+        else {
+            return;
+        };
+        if input.read(cx).value().as_ref() == display_text(&value) {
+            input.update(cx, |input, cx| input.set_value(property_text(&value), window, cx));
+        }
+    }
+
+    fn set_date(&mut self, field: DateField, date: Option<NaiveDate>, cx: &mut Context<Self>) {
+        match field {
+            DateField::Publish => self.edit(cx, |video| video.publish_date = date),
+            DateField::Custom(id) => self.set_value(id, date.map(|date| PropertyValue::Date(Some(date))), cx),
+        }
+    }
+
+    /// Opens the calendar of a date row on its date, or closes it.
+    fn set_date_open(&mut self, field: Option<DateField>, window: &mut Window, cx: &mut Context<Self>) {
+        self.date_open = field;
+        if let Some(field) = field {
+            let date = self.date(field, cx);
+            self.calendar.update(cx, |calendar, cx| calendar.set_date(Date::Single(date), window, cx));
+        }
+        cx.notify();
+    }
+
+    fn date(&self, field: DateField, cx: &App) -> Option<NaiveDate> {
+        let video = self.video(cx)?;
+        match field {
+            DateField::Publish => video.publish_date,
+            DateField::Custom(id) => match video.properties.get(&id) {
+                Some(PropertyValue::Date(date)) => *date,
+                _ => None,
+            },
+        }
+    }
+
     /// Creates editors for new custom properties and shows the stored values
     /// in editors that are not being edited.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -142,72 +251,31 @@ impl PropertiesPanel {
             });
         }));
 
-        let stored = video.publish_date;
-        if self.publish_date.read(cx).date() != Date::Single(stored) {
-            self.publish_date.update(cx, |picker, cx| picker.set_date(Date::Single(stored), window, cx));
+        self.inputs
+            .retain(|id, _| properties.iter().any(|property| property.id == *id && is_text_like(&property.kind)));
+        if let Some(DateField::Custom(id)) = self.date_open
+            && !properties.iter().any(|property| property.id == id && property.kind == PropertyKind::Date)
+        {
+            self.date_open = None;
         }
-
-        let has = |id: &PropertyId, kind: fn(&PropertyKind) -> bool| {
-            properties.iter().any(|property| property.id == *id && kind(&property.kind))
-        };
-        self.inputs.retain(|id, _| has(id, is_text_like));
-        self.dates.retain(|id, _| has(id, |kind| *kind == PropertyKind::Date));
-        for property in &properties {
-            let value = video.properties.get(&property.id);
-            match &property.kind {
-                PropertyKind::Text | PropertyKind::Number | PropertyKind::Url => {
-                    let text = value.map(property_text).unwrap_or_default();
-                    match self.inputs.get(&property.id) {
-                        Some((input, _)) => {
-                            let editing = input.read(cx).focus_handle(cx).is_focused(window);
-                            if !editing && input.read(cx).value().as_ref() != text {
-                                input.update(cx, |input, cx| input.set_value(text, window, cx));
-                            }
-                        }
-                        None => {
-                            let input =
-                                cx.new(|cx| InputState::new(window, cx).placeholder("Empty").default_value(text));
-                            let id = property.id;
-                            let subscription =
-                                cx.subscribe_in(&input, window, move |this, input, event: &InputEvent, _, cx| {
-                                    if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                                        let text = input.read(cx).value().to_string();
-                                        this.commit_text(id, text, cx);
-                                    }
-                                });
-                            self.inputs.insert(property.id, (input, subscription));
-                        }
-                    }
-                }
-                PropertyKind::Date => {
-                    let date = match value {
-                        Some(PropertyValue::Date(date)) => *date,
-                        _ => None,
-                    };
-                    match self.dates.get(&property.id) {
-                        Some((picker, _)) => {
-                            if picker.read(cx).date() != Date::Single(date) {
-                                picker.update(cx, |picker, cx| picker.set_date(Date::Single(date), window, cx));
-                            }
-                        }
-                        None => {
-                            let picker = cx.new(|cx| {
-                                let mut picker = DatePickerState::new(window, cx).date_format("%b %-d, %Y");
-                                picker.set_date(Date::Single(date), window, cx);
-                                picker
-                            });
-                            let id = property.id;
-                            let subscription = cx.subscribe(&picker, move |this, _, event: &DatePickerEvent, cx| {
-                                let DatePickerEvent::Change(DateTime::Single(date)) = event else { return };
-                                let date = date.map(|date| date.date());
-                                this.set_value(id, date.map(|date| PropertyValue::Date(Some(date))), cx);
-                            });
-                            self.dates.insert(property.id, (picker, subscription));
-                        }
-                    }
-                }
-                _ => {}
+        for property in properties.iter().filter(|property| is_text_like(&property.kind)) {
+            let id = property.id;
+            if self.inputs.contains_key(&id) {
+                self.show_stored(id, window, cx);
+                continue;
             }
+            let text = video.properties.get(&id).map(display_text).unwrap_or_default();
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Empty").default_value(text));
+            let subscription =
+                cx.subscribe_in(&input, window, move |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::Focus => this.show_for_editing(id, window, cx),
+                    InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                        this.commit_input(id, cx);
+                        this.show_stored(id, window, cx);
+                    }
+                    InputEvent::Change => {}
+                });
+            self.inputs.insert(id, (input, subscription));
         }
         cx.notify();
     }
@@ -334,6 +402,8 @@ impl PropertiesPanel {
             })
     }
 
+    /// Tags as chips. A chip's remove button shows on hover; from the
+    /// keyboard, Backspace in the empty tag field removes the last tag.
     fn render_tags(&self, video: &Video, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .flex_wrap()
@@ -343,16 +413,82 @@ impl PropertiesPanel {
             .py_1()
             .children(video.tags.iter().map(|tag| {
                 let name = tag.clone();
-                h_flex().gap_0p5().child(Chip::new(tag.clone(), free_tag_color(tag))).child(
-                    Button::new(SharedString::from(format!("remove-tag-{tag}")))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::X)
-                        .accessibility_label(format!("Remove tag {tag}"))
-                        .on_click(cx.listener(move |this, _, _, cx| this.remove_tag(&name, cx))),
-                )
+                let group = SharedString::from(format!("tag-chip-{tag}"));
+                let colors = tag_colors(free_tag_color(tag), cx);
+                h_flex()
+                    .id(SharedString::from(format!("tag-{tag}")))
+                    .group(group.clone())
+                    .relative()
+                    .child(Chip::new(tag.clone(), free_tag_color(tag)))
+                    .child(
+                        // Over the chip's end, in the chip's own colors.
+                        h_flex()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .right_0()
+                            .rounded(cx.theme().radius_tokens().sm)
+                            .bg(colors.background)
+                            .invisible()
+                            .group_hover(group, |this| this.visible())
+                            .child(
+                                Button::new(SharedString::from(format!("remove-tag-{tag}")))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icon::new(IconName::X).text_color(colors.foreground))
+                                    .tab_stop(false)
+                                    .accessibility_label(format!("Remove tag {tag}"))
+                                    .on_click(cx.listener(move |this, _, _, cx| this.remove_tag(&name, cx))),
+                            ),
+                    )
             }))
-            .child(Input::new(&self.tag_input).id("property-tags-input").appearance(false).xsmall().px_0().w_32())
+            .child(
+                div().capture_action(cx.listener(Self::on_tag_backspace)).child(
+                    Input::new(&self.tag_input).id("property-tags-input").appearance(false).xsmall().px_0().w_32(),
+                ),
+            )
+    }
+
+    /// A date shown like the other values; its calendar opens in a popover.
+    fn render_date(&self, field: DateField, cx: &mut Context<Self>) -> AnyElement {
+        let date = self.date(field, cx);
+        let key = match field {
+            DateField::Publish => "publish".to_string(),
+            DateField::Custom(id) => id.to_string(),
+        };
+        let trigger = Button::new(SharedString::from(format!("property-date-{key}")))
+            .ghost()
+            .small()
+            .selected(self.date_open == Some(field))
+            .map(|this| match date {
+                Some(date) => this.label(date.format("%b %-d, %Y").to_string()),
+                None => this.child(empty_value(cx)),
+            });
+        let calendar = self.calendar.clone();
+        let panel = cx.weak_entity();
+        Popover::new(SharedString::from(format!("property-date-popover-{key}")))
+            .open(self.date_open == Some(field))
+            .on_open_change(cx.listener(move |this, open: &bool, window, cx| {
+                this.set_date_open(open.then_some(field), window, cx);
+            }))
+            .trigger(trigger)
+            .content(move |_, _, _| {
+                let panel = panel.clone();
+                v_flex().gap_2().child(Calendar::new(&calendar).small()).when(date.is_some(), |this| {
+                    this.child(
+                        Button::new("clear-date").ghost().small().icon(IconName::X).label("Clear date").on_click(
+                            move |_, _, cx| {
+                                _ = panel.update(cx, |panel, cx| {
+                                    panel.date_open = None;
+                                    panel.set_date(field, None, cx);
+                                    cx.notify();
+                                });
+                            },
+                        ),
+                    )
+                })
+            })
+            .into_any_element()
     }
 
     fn render_media_folder(&self, video: &Video, cx: &mut Context<Self>) -> impl IntoElement {
@@ -403,6 +539,8 @@ impl PropertiesPanel {
                     Some(PropertyValue::Url(url)) if !url.trim().is_empty() => Some(url.clone()),
                     _ => None,
                 };
+                // Links open through the same rule as everywhere else: a bare
+                // address gets https://, and only web and mail links open.
                 h_flex()
                     .w_full()
                     .gap_1()
@@ -421,7 +559,7 @@ impl PropertiesPanel {
                                 .icon(IconName::ExternalLink)
                                 .accessibility_label("Open link")
                                 .tooltip("Open link")
-                                .on_click(move |_, _, cx| cx.open_url(&url)),
+                                .on_click(move |_, window, cx| open_link(&url, window, cx)),
                         )
                     })
                     .into_any_element()
@@ -437,13 +575,7 @@ impl PropertiesPanel {
                     ))
                     .into_any_element()
             }
-            PropertyKind::Date => match self.dates.get(&id) {
-                Some((picker, _)) => div()
-                    .w_56()
-                    .child(DatePicker::new(picker).appearance(false).small().cleanable(true).placeholder("Empty"))
-                    .into_any_element(),
-                None => div().into_any_element(),
-            },
+            PropertyKind::Date => self.render_date(DateField::Custom(id), cx),
             PropertyKind::Select { options } => {
                 let selected = match value {
                     Some(PropertyValue::Select(Some(option))) => options.iter().find(|known| known.id == *option),
@@ -556,12 +688,31 @@ fn is_text_like(kind: &PropertyKind) -> bool {
     matches!(kind, PropertyKind::Text | PropertyKind::Number | PropertyKind::Url)
 }
 
-/// Text shown for a stored text, number or URL value.
+/// A stored text, number or URL value as it is edited.
 fn property_text(value: &PropertyValue) -> String {
     match value {
         PropertyValue::Text(text) | PropertyValue::Url(text) => text.clone(),
         PropertyValue::Number(number) => number.to_string(),
         _ => String::new(),
+    }
+}
+
+/// A stored value as a field shows it at rest: numbers grouped like the
+/// database's cells.
+fn display_text(value: &PropertyValue) -> String {
+    match value {
+        PropertyValue::Number(number) => format::number(*number),
+        value => property_text(value),
+    }
+}
+
+/// Opens a link property's value, or says why it can't be opened.
+fn open_link(url: &str, window: &mut Window, cx: &mut App) {
+    match normalize_link(url) {
+        Some(link) => cx.open_url(&link),
+        None => {
+            window.push_notification(format!("“{}” isn’t a web or email link, so it wasn’t opened.", url.trim()), cx)
+        }
     }
 }
 
@@ -623,9 +774,7 @@ impl Render for PropertiesPanel {
         let tags = self.render_tags(&video, cx).into_any_element();
         let folder = self.render_media_folder(&video, cx).into_any_element();
         let youtube = self.render_youtube(&video, cx);
-        let publish_date = div()
-            .w_56()
-            .child(DatePicker::new(&self.publish_date).appearance(false).small().cleanable(true).placeholder("Empty"));
+        let publish_date = self.render_date(DateField::Publish, cx);
 
         v_flex()
             .id("properties")
@@ -748,7 +897,23 @@ impl AddPropertyForm {
             return false;
         }
         let property = PropertyDef { id: PropertyId::new(), name, kind: self.kind(cx), position: self.position };
-        AppState::global(cx).update(cx, |state, cx| state.insert_property(property, cx));
+        AppState::global(cx).update(cx, |state, cx| {
+            state.insert_property(property.clone(), cx);
+            // Added from a video, the property also shows as a column in the
+            // database's tables, as one added there does.
+            let properties = state.properties().to_vec();
+            let tables: Vec<_> = state.views().iter().filter(|view| view.kind == ViewKind::Table).cloned().collect();
+            for mut view in tables {
+                let mut columns = query::resolve_columns(&view, &properties);
+                for layout in &mut columns {
+                    if layout.column == Column::Custom(property.id) {
+                        layout.visible = true;
+                    }
+                }
+                view.columns = columns;
+                state.save_view(view, cx);
+            }
+        });
         true
     }
 }

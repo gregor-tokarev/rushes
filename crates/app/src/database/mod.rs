@@ -8,7 +8,7 @@
 mod board;
 pub mod colors;
 mod elements;
-mod format;
+pub mod format;
 mod icons;
 mod panel;
 mod property_editor;
