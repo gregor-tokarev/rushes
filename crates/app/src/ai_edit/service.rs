@@ -46,6 +46,8 @@ pub enum RunError {
     NoSkillFolder,
     /// The run is not in a state that allows the request.
     NotAvailable(RunStatus),
+    /// Feedback without a message.
+    EmptyFeedback,
     Store(String),
     Spawn(String),
 }
@@ -68,6 +70,7 @@ impl fmt::Display for RunError {
             RunError::NotAvailable(status) => {
                 write!(f, "This isn't possible while the edit is {}.", status.label().to_lowercase())
             }
+            RunError::EmptyFeedback => write!(f, "Write what should change first."),
             RunError::Store(error) => write!(f, "Couldn't save the edit: {error}"),
             RunError::Spawn(error) => write!(f, "Couldn't start the agent: {error}"),
         }
@@ -295,7 +298,9 @@ impl PipelineService {
 
         let phase = if auto_approve { PhaseKind::Auto } else { PhaseKind::Plan };
         if let Err(error) = self.launch(id, phase, None, cx) {
-            self.finish(id, Err(error.to_string()), cx);
+            if self.run(id).is_some_and(|run| run.status == RunStatus::Queued) {
+                self.finish(id, Err(error.to_string()), cx);
+            }
             return Err(error);
         }
         Ok(id)
@@ -316,6 +321,9 @@ impl PipelineService {
     /// again.
     pub fn send_feedback(&mut self, id: RunId, message: String, cx: &mut Context<Self>) -> Result<(), RunError> {
         let run = self.run(id).ok_or(RunError::RunNotFound)?;
+        if message.trim().is_empty() {
+            return Err(RunError::EmptyFeedback);
+        }
         let phase = match run.status {
             RunStatus::AwaitingApproval => PhaseKind::Revise,
             RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled => PhaseKind::Feedback,
@@ -399,21 +407,23 @@ impl PipelineService {
         let (stopped_tx, stopped) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let agent_cancel = cancel.clone();
-        std::thread::Builder::new()
-            .name(format!("ai-edit-{}", id.short()))
-            .spawn(move || {
-                let result = run_phase(
-                    &config,
-                    &context,
-                    pipeline_phase,
-                    &mut |event| send(&events, AgentMessage::Event(event.clone())),
-                    &agent_cancel,
-                );
-                send(&events, AgentMessage::Finished(result));
-                // The quit handler may already have stopped waiting.
-                _ = stopped_tx.send(());
-            })
-            .map_err(|error| RunError::Spawn(error.to_string()))?;
+        let spawned = std::thread::Builder::new().name(format!("ai-edit-{}", id.short())).spawn(move || {
+            let result = run_phase(
+                &config,
+                &context,
+                pipeline_phase,
+                &mut |event| send(&events, AgentMessage::Event(event.clone())),
+                &agent_cancel,
+            );
+            send(&events, AgentMessage::Finished(result));
+            // The quit handler may already have stopped waiting.
+            _ = stopped_tx.send(());
+        });
+        if let Err(error) = spawned {
+            let error = RunError::Spawn(error.to_string());
+            self.finish(id, Err(error.to_string()), cx);
+            return Err(error);
+        }
 
         let phase = LivePhase { kind: phase, started_at: Utc::now(), cancelling: false };
         self.live.insert(id, LiveRun { video_id: run.video_id, phase, cancel, stopped });

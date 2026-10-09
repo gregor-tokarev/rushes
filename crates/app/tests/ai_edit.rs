@@ -235,6 +235,9 @@ fn plan_revise_approve_renders_and_prepares_the_upload(cx: &mut TestAppContext) 
     assert_eq!(cx.read(|cx| fx.service.read(cx).timeline(id).to_vec()), events, "live timeline matches the store");
     assert!(!fx.final_cut().exists(), "planning renders nothing");
 
+    let empty = cx.update(|cx| fx.service.update(cx, |service, cx| service.send_feedback(id, "  ".into(), cx)));
+    assert_eq!(empty, Err(RunError::EmptyFeedback));
+
     // Feedback on the strategy asks for a revised strategy, in the same session.
     cx.update(|cx| fx.service.update(cx, |service, cx| service.send_feedback(id, "Add an end card.".into(), cx)))
         .expect("feedback sent");
