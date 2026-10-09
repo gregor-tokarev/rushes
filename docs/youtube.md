@@ -233,8 +233,9 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
 ### Publish tab
 
 - Form edits are saved into `video.publish` 500 ms after the last change (and when the tab
-  closes or the app quits). Changes made elsewhere, such as "Use for upload" in AI edit, replace the form
-  unless it has unsaved edits.
+  closes or the app quits). Only the fields the form changed are written, so changes made
+  elsewhere meanwhile, such as the final cut AI edit picks or "Use for upload", stay; they
+  show up in the form at once, except in fields with edits of its own waiting.
 - **Insert chapters from script** turns the Script document's Heading 2 blocks into a
   `Chapters:` list with timestamps from the spoken words before each heading
   (`videocrm_core::document`, 150 wpm). YouTube wants the first chapter at 0:00 and none

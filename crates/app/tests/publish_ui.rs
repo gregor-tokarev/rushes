@@ -114,6 +114,38 @@ fn the_publish_form_saves_metadata_and_explains_what_blocks_the_upload(cx: &mut 
 }
 
 #[gpui_kit::test]
+fn a_pending_form_edit_keeps_the_final_cut_ai_edit_chose(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |_| {});
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    // The creator types the YouTube title ...
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("publish-title", cx);
+        window.input("My title", cx);
+    });
+    cx.run_until_parked();
+    // ... while the AI edit render finishes and picks its final cut, within the save delay.
+    let cut = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    workspace.state.update(cx, |state, cx| {
+        let mut video = state.video(video_id).unwrap().clone();
+        video.publish.file = Some(cut.clone());
+        state.update_video(video, cx);
+    });
+    cx.run_until_parked();
+    // The form shows the new file right away and keeps the typed title.
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), [BlockingReason::NotConnected]);
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("publish-title").value(), Some("My title"));
+    });
+    settle(cx);
+    let publish = workspace.video(cx, video_id).publish;
+    assert_eq!(publish.title, "My title");
+    assert_eq!(publish.file, Some(cut), "the form's save leaves the final cut in place");
+}
+
+#[gpui_kit::test]
 fn a_chosen_file_counts_as_missing_only_once_it_is_known_to_be(cx: &mut TestAppContext) {
     let workspace = Workspace::open(cx, YoutubeBackend::default());
     let file = publish_support::video_file(workspace.dir.path(), "final.mp4");

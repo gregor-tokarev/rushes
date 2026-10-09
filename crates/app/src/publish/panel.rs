@@ -84,14 +84,78 @@ struct FileDetails {
     media: Option<MediaInfo>,
 }
 
+/// A part of the publish settings the form edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Field {
+    Title,
+    Description,
+    Tags,
+    Category,
+    /// Privacy and schedule, which change together.
+    Visibility,
+    Audience,
+    File,
+    Thumbnail,
+}
+
+/// The fields the form changed since its last save.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Edited(u8);
+
+impl Edited {
+    fn insert(&mut self, field: Field) {
+        self.0 |= 1 << field as u8;
+    }
+
+    fn contains(self, field: Field) -> bool {
+        self.0 & (1 << field as u8) != 0
+    }
+
+    fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// `stored` with the edited fields taken from `draft`. The others may have changed
+    /// elsewhere meanwhile, such as the file AI edit picks, and keep that change.
+    fn merge(self, stored: &PublishSettings, draft: &PublishSettings) -> PublishSettings {
+        let mut merged = stored.clone();
+        if self.contains(Field::Title) {
+            merged.title.clone_from(&draft.title);
+        }
+        if self.contains(Field::Description) {
+            merged.description.clone_from(&draft.description);
+        }
+        if self.contains(Field::Tags) {
+            merged.tags.clone_from(&draft.tags);
+        }
+        if self.contains(Field::Category) {
+            merged.category_id.clone_from(&draft.category_id);
+        }
+        if self.contains(Field::Visibility) {
+            merged.privacy = draft.privacy;
+            merged.publish_at = draft.publish_at;
+        }
+        if self.contains(Field::Audience) {
+            merged.made_for_kids = draft.made_for_kids;
+        }
+        if self.contains(Field::File) {
+            merged.file.clone_from(&draft.file);
+        }
+        if self.contains(Field::Thumbnail) {
+            merged.thumbnail.clone_from(&draft.thumbnail);
+        }
+        merged
+    }
+}
+
 /// The Publish tab of a video page.
 pub struct PublishPanel {
     video_id: VideoId,
     state: Entity<AppState>,
     service: Entity<YoutubeService>,
-    /// The form's copy of `video.publish`; saved after [`SAVE_DELAY`].
+    /// The form's copy of `video.publish`; its edited fields are saved after [`SAVE_DELAY`].
     draft: PublishSettings,
-    dirty: bool,
+    edited: Edited,
     save_task: Option<Task<()>>,
     title: Entity<InputState>,
     /// The video title, shown while the YouTube title is empty.
@@ -146,20 +210,20 @@ impl PublishPanel {
             cx.subscribe(&title, |this, input, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.draft.title = input.read(cx).value().to_string();
-                    this.schedule_save(cx);
+                    this.schedule_save(Field::Title, cx);
                 }
             }),
             cx.subscribe(&description, |this, input, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.draft.description = input.read(cx).value().to_string();
-                    this.schedule_save(cx);
+                    this.schedule_save(Field::Description, cx);
                 }
             }),
             cx.subscribe_in(&tag_input, window, Self::on_tag_input),
             cx.subscribe(&category, |this, _, event: &SelectEvent<Vec<CategoryItem>>, cx| {
                 let SelectEvent::Confirm(id) = event;
                 this.draft.category_id = id.map(str::to_owned).unwrap_or_default();
-                this.schedule_save(cx);
+                this.schedule_save(Field::Category, cx);
             }),
             cx.subscribe(&schedule, |this, _, event: &DatePickerEvent, cx| {
                 let DatePickerEvent::Change(value) = event;
@@ -167,7 +231,7 @@ impl PublishPanel {
                     && let Some(at) = value.start().and_then(utc_time)
                 {
                     this.draft.publish_at = Some(at);
-                    this.schedule_save(cx);
+                    this.schedule_save(Field::Visibility, cx);
                 }
             }),
             // Coming back from the file manager or another app may bring new files.
@@ -190,7 +254,7 @@ impl PublishPanel {
             state,
             service,
             draft,
-            dirty: false,
+            edited: Edited::default(),
             save_task: None,
             title,
             title_placeholder: video.title.clone(),
@@ -228,22 +292,24 @@ impl PublishPanel {
         rules::blocking_reasons(&video, self.service.read(cx).is_connected(), file_exists, Utc::now())
     }
 
-    /// Saves pending form edits now instead of after the delay.
+    /// Saves pending form edits now instead of after the delay. Only the fields the form
+    /// changed are written, so a file chosen elsewhere meanwhile stays.
     pub fn save_pending(&mut self, cx: &mut App) {
-        if !self.dirty {
+        if self.edited.is_empty() {
             return;
         }
-        self.dirty = false;
+        let edited = std::mem::take(&mut self.edited);
         let Some(mut video) = self.state.read(cx).video(self.video_id).cloned() else { return };
-        if video.publish == self.draft {
+        let publish = edited.merge(&video.publish, &self.draft);
+        if video.publish == publish {
             return;
         }
-        video.publish = self.draft.clone();
+        video.publish = publish;
         self.state.update(cx, |state, cx| state.update_video(video, cx));
     }
 
-    fn schedule_save(&mut self, cx: &mut Context<Self>) {
-        self.dirty = true;
+    fn schedule_save(&mut self, field: Field, cx: &mut Context<Self>) {
+        self.edited.insert(field);
         self.save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SAVE_DELAY).await;
             this.update(cx, |this, cx| this.save_pending(cx)).ok();
@@ -267,10 +333,11 @@ impl PublishPanel {
             self.title_placeholder = video.title.clone();
             self.title.update(cx, |input, cx| input.set_placeholder(video.title.clone(), window, cx));
         }
-        // Changes made elsewhere (such as "Use for upload" in AI edit) win unless the
-        // form has edits of its own waiting.
-        if !self.dirty && video.publish != self.draft {
-            self.adopt(video.publish, window, cx);
+        // Changes made elsewhere (such as "Use for upload" in AI edit) show up, except in
+        // fields with edits of the form's own waiting to be saved.
+        let publish = self.edited.merge(&video.publish, &self.draft);
+        if publish != self.draft {
+            self.adopt(publish, window, cx);
         }
         self.refresh_chapters(cx);
         self.refresh_choices(cx);
@@ -296,9 +363,11 @@ impl PublishPanel {
         if let Some(at) = publish.publish_at {
             self.schedule.update(cx, |picker, cx| picker.set_date_time(local_time(at), window, cx));
         }
+        if (publish.privacy, publish.publish_at) != (self.draft.privacy, self.draft.publish_at) {
+            // The privacy to restore belonged to the replaced settings.
+            self.unscheduled_privacy = None;
+        }
         self.draft = publish;
-        // The privacy to restore belonged to the replaced settings.
-        self.unscheduled_privacy = None;
         if file_changed {
             self.refresh_file(cx);
         }
@@ -383,7 +452,7 @@ impl PublishPanel {
         self.draft.file = path;
         self.file = None;
         self.refresh_file(cx);
-        self.schedule_save(cx);
+        self.schedule_save(Field::File, cx);
     }
 
     fn set_thumbnail(&mut self, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
@@ -397,7 +466,7 @@ impl PublishPanel {
         self.draft.thumbnail = path;
         self.thumbnail_size = None;
         self.refresh_thumbnail(cx);
-        self.schedule_save(cx);
+        self.schedule_save(Field::Thumbnail, cx);
     }
 
     fn choose_file(&mut self, window: &mut Window, cx: &mut Context<Self>, thumbnail: bool) {
@@ -453,18 +522,18 @@ impl PublishPanel {
         let rest = rest.trim_start().to_owned();
         input.update(cx, |input, cx| input.set_value(rest, window, cx));
         if added {
-            self.schedule_save(cx);
+            self.schedule_save(Field::Tags, cx);
         }
     }
 
     fn remove_tag(&mut self, tag: &str, cx: &mut Context<Self>) {
         self.draft.tags.retain(|existing| existing != tag);
-        self.schedule_save(cx);
+        self.schedule_save(Field::Tags, cx);
     }
 
     fn set_privacy(&mut self, privacy: Privacy, cx: &mut Context<Self>) {
         self.draft.privacy = privacy;
-        self.schedule_save(cx);
+        self.schedule_save(Field::Visibility, cx);
     }
 
     fn set_scheduled(&mut self, scheduled: bool, cx: &mut Context<Self>) {
@@ -482,7 +551,7 @@ impl PublishPanel {
                 self.draft.privacy = privacy;
             }
         }
-        self.schedule_save(cx);
+        self.schedule_save(Field::Visibility, cx);
     }
 
     fn insert_chapters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -677,7 +746,7 @@ impl PublishPanel {
                         .selected_index(Some(if self.draft.made_for_kids { 0 } else { 1 }))
                         .on_change(cx.listener(|this, ix: &usize, _, cx| {
                             this.draft.made_for_kids = *ix == 0;
-                            this.schedule_save(cx);
+                            this.schedule_save(Field::Audience, cx);
                         })),
                 ),
         )
@@ -1205,6 +1274,20 @@ fn utc_time(local: chrono::NaiveDateTime) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saving_keeps_fields_changed_elsewhere() {
+        let draft = PublishSettings { title: "My title".into(), ..PublishSettings::default() };
+        let stored = PublishSettings { file: Some("/media/edit/final.mp4".into()), ..PublishSettings::default() };
+        let mut edited = Edited::default();
+        assert!(edited.is_empty());
+        edited.insert(Field::Title);
+        let merged = edited.merge(&stored, &draft);
+        assert_eq!(merged.title, "My title");
+        assert_eq!(merged.file, stored.file, "the final cut AI edit chose stays");
+        edited.insert(Field::File);
+        assert_eq!(edited.merge(&stored, &draft).file, None, "unless the form changed the file too");
+    }
 
     #[test]
     fn tags_are_added_once_and_trimmed() {
