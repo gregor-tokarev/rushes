@@ -16,7 +16,7 @@ use videocrm_core::settings::PipelineSettings;
 use videocrm_core::{PipelineRun, RunId, RunStatus, Store, StoreError, VideoId, VideoStatus};
 use videocrm_pipeline::{
     AgentConfig, AgentEvent, Doctor, Phase, PhaseOutcome, PipelineError, RunContext, default_skill_dir, doctor,
-    run_phase,
+    keep_final_cut, run_phase,
 };
 
 use super::brief::BriefDraft;
@@ -425,6 +425,9 @@ impl PipelineService {
             PhaseKind::Feedback => Phase::Feedback { message: text.clone().unwrap_or_default() },
         };
 
+        if phase.renders() {
+            self.keep_shared_cut(run.video_id, &run.footage_dir, cx);
+        }
         self.append_event(id, LogEvent::Phase(PhaseStarted { phase, text }), cx);
         let status = if phase.renders() { RunStatus::Rendering } else { RunStatus::Planning };
         self.update_run(id, cx, |run| {
@@ -436,6 +439,7 @@ impl PipelineService {
         let (stopped_tx, stopped) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let agent_cancel = cancel.clone();
+        let renders = phase.renders();
         let spawned = std::thread::Builder::new().name(format!("ai-edit-{}", id.short())).spawn(move || {
             let result = run_phase(
                 &config,
@@ -443,7 +447,8 @@ impl PipelineService {
                 pipeline_phase,
                 &mut |event| send(&events, AgentMessage::Event(event.clone())),
                 &agent_cancel,
-            );
+            )
+            .map(|outcome| if renders { keep_cut(outcome, &context.footage_dir) } else { outcome });
             send(&events, AgentMessage::Finished(result));
             // The quit handler may already have stopped waiting.
             _ = stopped_tx.send(());
@@ -565,6 +570,36 @@ impl PipelineService {
             });
         }
         self.after_status_change(cx);
+    }
+
+    /// A cut left at the shared `edit/final.mp4` that a run or the upload form still
+    /// refers to (kept there by an earlier version, or when keeping it failed) moves to
+    /// `edit/cuts/` before a render can overwrite it.
+    fn keep_shared_cut(&mut self, video_id: VideoId, footage_dir: &Path, cx: &mut Context<Self>) {
+        let shared = media::edit_outputs(footage_dir).final_cut;
+        let Some(shared) = shared else { return };
+        let owner = self.video_runs(video_id).find(|run| run.output.as_ref() == Some(&shared)).map(|run| run.id);
+        let uploads =
+            self.state.read(cx).video(video_id).is_some_and(|video| video.publish.file.as_ref() == Some(&shared));
+        if owner.is_none() && !uploads {
+            return;
+        }
+        let kept = match keep_final_cut(footage_dir) {
+            Ok(kept) => kept,
+            Err(error) => {
+                return self.report(format!("Couldn't keep the earlier cut {}: {error}", shared.display()), cx);
+            }
+        };
+        if let Some(owner) = owner {
+            self.update_run(owner, cx, |run| run.output = Some(kept.clone()));
+        }
+        if uploads {
+            self.state.update(cx, |state, cx| {
+                let Some(mut video) = state.video(video_id).cloned() else { return };
+                video.publish.file = Some(kept);
+                state.update_video(video, cx);
+            });
+        }
     }
 
     fn after_status_change(&mut self, cx: &mut Context<Self>) {
@@ -728,6 +763,18 @@ fn send(events: &UnboundedSender<AgentMessage>, message: AgentMessage) {
     // A closed channel means the app is going away; the agent is stopped by the
     // cancel flag, not by its events.
     _ = events.unbounded_send(message);
+}
+
+/// Moves the final cut a render produced out of the way of later renders; see
+/// [`keep_final_cut`]. When it can't be moved, the run keeps the shared path.
+fn keep_cut(mut outcome: PhaseOutcome, footage_dir: &Path) -> PhaseOutcome {
+    if outcome.rendered
+        && !outcome.is_error
+        && let Ok(kept) = keep_final_cut(footage_dir)
+    {
+        outcome.final_cut = Some(kept);
+    }
+    outcome
 }
 
 /// Whether `dir` holds at least one video or audio take.

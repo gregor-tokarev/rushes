@@ -47,6 +47,18 @@ let render = run_phase(&config, &ctx, Phase::Approve { notes: None }, &mut |_| {
 limit), `final_cut` / `preview` when those files exist after the phase, and `rendered`
 (final cut created or rewritten during this phase; a failed re-render leaves the old one).
 
+### Kept cuts
+
+Every render writes the same `edit/final.mp4`, so a later render (an iteration, or a new
+edit of the same footage) would overwrite a cut that an earlier edit or the upload form
+refers to. `keep_final_cut(footage_dir)` moves the fresh `edit/final.mp4` to
+`edit/cuts/final-<n>.mp4` (numbers only count up) and returns that path; `kept_cuts`
+lists them, newest first. The app keeps the cut of every successful render this way and
+stores the kept path as the run's output; before a render starts, it also moves a cut
+still referenced at the shared path (left by an earlier version) into `edit/cuts/`.
+`edit/preview.mp4`, `edit/project.md` and the transcripts stay shared: they are the
+skill's working state for the footage.
+
 ## Agent invocation
 
 ```text

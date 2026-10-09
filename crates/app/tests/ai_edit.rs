@@ -143,8 +143,14 @@ impl Fixture {
         cx.read(|cx| self.state.read(cx).video(self.video).expect("video").publish.file.clone())
     }
 
+    /// Where the agent renders.
     fn final_cut(&self) -> PathBuf {
         self.footage.join("edit").join("final.mp4")
+    }
+
+    /// Where the `n`th render of the video is kept.
+    fn cut(&self, n: u32) -> PathBuf {
+        self.footage.join("edit").join("cuts").join(format!("final-{n}.mp4"))
     }
 }
 
@@ -305,12 +311,13 @@ fn plan_revise_approve_renders_and_prepares_the_upload(cx: &mut TestAppContext) 
         .expect("approved");
     assert_eq!(fx.run(cx, id).status, RunStatus::Rendering);
     let done = fx.wait_for_status(cx, id, RunStatus::Succeeded);
-    assert_eq!(done.output.as_deref(), Some(fx.final_cut().as_path()));
-    assert!(fx.final_cut().is_file());
+    assert_eq!(done.output, Some(fx.cut(1)), "the render is kept as the edit's own file");
+    assert!(fx.cut(1).is_file());
+    assert!(!fx.final_cut().exists(), "nothing is left where the next render writes");
     assert_eq!(done.session_id.as_deref(), Some(session.as_str()), "phases resume one session");
     assert!((done.cost_usd.unwrap() - 3.0 * 0.0123).abs() < 1e-9, "cost adds up over phases");
     assert!(done.summary.unwrap().contains("Rendered edit/final.mp4"));
-    assert_eq!(fx.upload_file(cx), Some(fx.final_cut()), "the final cut becomes the upload file");
+    assert_eq!(fx.upload_file(cx), Some(fx.cut(1)), "the final cut becomes the upload file");
     assert_eq!(fx.video_status(cx), VideoStatus::Editing);
 
     let events = fx.stored_events(cx, id);
@@ -337,7 +344,7 @@ fn auto_approve_renders_and_feedback_renders_again(cx: &mut TestAppContext) {
     let id = fx.start(cx, true);
     assert_eq!(fx.run(cx, id).status, RunStatus::Rendering);
     let first = fx.wait_for_status(cx, id, RunStatus::Succeeded);
-    assert_eq!(first.output.as_deref(), Some(fx.final_cut().as_path()));
+    assert_eq!(first.output, Some(fx.cut(1)));
     assert_eq!(phases(&fx.stored_events(cx, id)), [(PhaseKind::Auto, None)]);
 
     // An upload file chosen by hand is kept.
@@ -349,20 +356,92 @@ fn auto_approve_renders_and_feedback_renders_again(cx: &mut TestAppContext) {
             state.update_video(video, cx);
         })
     });
-    let rendered_at = fs::metadata(fx.final_cut()).unwrap().modified().unwrap();
+    let rendered_at = fs::metadata(fx.cut(1)).unwrap().modified().unwrap();
     std::thread::sleep(Duration::from_millis(20));
 
     cx.update(|cx| fx.service.update(cx, |service, cx| service.send_feedback(id, "Shorter outro.".into(), cx)))
         .expect("feedback sent");
     assert_eq!(fx.run(cx, id).status, RunStatus::Rendering);
     let again = fx.wait_for_status(cx, id, RunStatus::Succeeded);
-    assert!(fs::metadata(fx.final_cut()).unwrap().modified().unwrap() > rendered_at, "final.mp4 rendered again");
+    assert_eq!(again.output, Some(fx.cut(2)), "the new render is a new file");
+    assert_eq!(fs::metadata(fx.cut(1)).unwrap().modified().unwrap(), rendered_at, "the first render is kept");
     assert!(again.summary.unwrap().contains("feedback applied"));
     assert_eq!(fx.upload_file(cx), Some(chosen));
     assert_eq!(
         phases(&fx.stored_events(cx, id)),
         [(PhaseKind::Auto, None), (PhaseKind::Feedback, Some("Shorter outro.".into()))]
     );
+}
+
+#[gpui_kit::test]
+fn a_new_edit_keeps_the_cut_of_the_earlier_one(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let first = fx.start(cx, true);
+    fx.wait_for_status(cx, first, RunStatus::Succeeded);
+    let first_cut = fs::read(fx.cut(1)).unwrap();
+
+    // A second edit of the same footage, cut differently.
+    make_clip(&fx.footage.join("take2.mp4"));
+    let second = fx.start(cx, true);
+    let done = fx.wait_for_status(cx, second, RunStatus::Succeeded);
+    assert_eq!(done.output, Some(fx.cut(2)));
+    assert_eq!(fx.run(cx, first).output, Some(fx.cut(1)), "the earlier edit still has its cut");
+    assert_eq!(fs::read(fx.cut(1)).unwrap(), first_cut, "and the file is untouched");
+    assert_ne!(fs::read(fx.cut(2)).unwrap(), first_cut);
+    assert_eq!(fx.upload_file(cx), Some(fx.cut(1)), "the upload keeps the cut it was given");
+}
+
+#[gpui_kit::test]
+fn a_cut_left_at_the_shared_path_is_kept_before_the_next_render(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    // A store as an earlier version left it: the edit's output and the upload file
+    // are the shared edit/final.mp4.
+    let fx = Fixture::new(cx, &[]);
+    fs::create_dir_all(fx.final_cut().parent().unwrap()).unwrap();
+    fs::copy(fx.footage.join("take1.mp4"), fx.final_cut()).unwrap();
+    let old_cut = fs::read(fx.final_cut()).unwrap();
+    let now = Utc::now();
+    let old = PipelineRun {
+        id: RunId::new(),
+        video_id: fx.video,
+        status: RunStatus::Succeeded,
+        brief: String::new(),
+        footage_dir: fx.footage.clone(),
+        session_id: Some("old".into()),
+        summary: Some("Rendered.".into()),
+        output: Some(fx.final_cut()),
+        error: None,
+        cost_usd: None,
+        created_at: now,
+        updated_at: now,
+    };
+    cx.read(|cx| fx.state.read(cx).store().lock().unwrap().insert_run(&old).unwrap());
+    cx.update(|cx| {
+        fx.state.update(cx, |state, cx| {
+            let mut video = state.video(fx.video).unwrap().clone();
+            video.publish.file = Some(fx.final_cut());
+            state.update_video(video, cx);
+        });
+        PipelineService::init(fx.state.clone(), cx);
+    });
+    let service = cx.read(PipelineService::global);
+    let id = cx
+        .update(|cx| service.update(cx, |service, cx| service.start_run(fx.video, "Again.".into(), true, cx)))
+        .expect("run started");
+    assert_eq!(cx.read(|cx| service.read(cx).run(old.id).cloned().unwrap().output), Some(fx.cut(1)));
+    assert_eq!(fx.upload_file(cx), Some(fx.cut(1)), "the upload form follows the kept cut");
+    assert_eq!(fs::read(fx.cut(1)).unwrap(), old_cut);
+
+    wait_until(cx, "the new render", |cx| {
+        service.read(cx).run(id).is_some_and(|run| run.status == RunStatus::Succeeded)
+    });
+    assert_eq!(cx.read(|cx| service.read(cx).run(id).cloned().unwrap().output), Some(fx.cut(2)));
+    assert_eq!(fs::read(fx.cut(1)).unwrap(), old_cut, "the render did not overwrite it");
 }
 
 #[gpui_kit::test]
@@ -503,7 +582,7 @@ fn startup_marks_interrupted_runs_failed_and_they_can_continue(cx: &mut TestAppC
     });
     let continued = cx.read(|cx| service.read(cx).run(interrupted).cloned().unwrap());
     assert_eq!(continued.session_id.as_deref(), Some("s-render"));
-    assert_eq!(continued.output, Some(fx.final_cut()));
+    assert_eq!(continued.output, Some(fx.cut(1)));
 }
 
 #[gpui_kit::test]
@@ -780,7 +859,7 @@ fn the_panel_takes_an_edit_from_brief_to_publish(cx: &mut TestAppContext) {
     wait_for_window(cx, window, "the output card", |window, _| shows(window, "run-use-for-upload"));
     click(cx, window, "run-use-for-upload");
     assert_eq!(route(cx, &fx), Route::Video { id: video, tab: VideoTab::Publish });
-    assert_eq!(fx.upload_file(cx), Some(fx.final_cut()));
+    assert_eq!(fx.upload_file(cx), Some(fx.cut(1)));
 }
 
 #[gpui_kit::test]

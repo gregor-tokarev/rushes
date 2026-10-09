@@ -6,6 +6,7 @@
 //! does everything in one go for creators who pre-approve.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::SystemTime;
@@ -19,6 +20,8 @@ const SKILL_FILE: &str = "SKILL.md";
 const EDIT_DIR: &str = "edit";
 const FINAL_CUT: &str = "final.mp4";
 const PREVIEW: &str = "preview.mp4";
+/// Where [`keep_final_cut`] moves finished renders, inside the edit folder.
+const CUTS_DIR: &str = "cuts";
 
 const HEADLESS_NOTE: &str = "You are running headless inside the VideoCRM app: nobody can \
 answer questions mid-run. Where something is ambiguous, make the most sensible choice and \
@@ -132,6 +135,40 @@ pub fn run_phase(
         rendered: after.is_some() && after != before,
         final_cut: final_cut.is_file().then_some(final_cut),
         preview: preview.is_file().then_some(preview),
+    })
+}
+
+/// Moves the final cut a phase rendered (`<footage_dir>/edit/final.mp4`) to
+/// `<footage_dir>/edit/cuts/final-<n>.mp4`, numbered after the cuts already kept, and
+/// returns the new path. Each render keeps its own file this way: the next render
+/// writes a new `final.mp4` instead of overwriting one a run or an upload refers to.
+pub fn keep_final_cut(footage_dir: &Path) -> io::Result<PathBuf> {
+    let edit_dir = footage_dir.join(EDIT_DIR);
+    let cuts_dir = edit_dir.join(CUTS_DIR);
+    fs::create_dir_all(&cuts_dir)?;
+    let next = cut_numbers(&cuts_dir).max().unwrap_or(0) + 1;
+    let dest = (next..).map(|n| cuts_dir.join(cut_name(n))).find(|path| !path.exists()).unwrap_or_default();
+    fs::rename(edit_dir.join(FINAL_CUT), &dest)?;
+    Ok(dest)
+}
+
+/// The cuts [`keep_final_cut`] kept in `<footage_dir>/edit/cuts/`, newest first.
+pub fn kept_cuts(footage_dir: &Path) -> Vec<PathBuf> {
+    let cuts_dir = footage_dir.join(EDIT_DIR).join(CUTS_DIR);
+    let mut numbers: Vec<u32> = cut_numbers(&cuts_dir).collect();
+    numbers.sort_unstable_by(|a, b| b.cmp(a));
+    numbers.into_iter().map(|n| cuts_dir.join(cut_name(n))).filter(|path| path.is_file()).collect()
+}
+
+fn cut_name(n: u32) -> String {
+    format!("final-{n}.mp4")
+}
+
+/// Numbers of the `final-<n>.mp4` files in `cuts_dir`.
+fn cut_numbers(cuts_dir: &Path) -> impl Iterator<Item = u32> {
+    fs::read_dir(cuts_dir).into_iter().flatten().filter_map(|entry| {
+        let name = entry.ok()?.file_name().into_string().ok()?;
+        name.strip_prefix("final-")?.strip_suffix(".mp4")?.parse().ok()
     })
 }
 
@@ -272,6 +309,30 @@ fn format_duration(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_cuts_are_kept_under_new_numbers() {
+        let footage = tempfile::tempdir().unwrap();
+        let edit = footage.path().join(EDIT_DIR);
+        fs::create_dir_all(&edit).unwrap();
+        assert_eq!(kept_cuts(footage.path()), Vec::<PathBuf>::new());
+        assert!(keep_final_cut(footage.path()).is_err(), "nothing rendered");
+
+        fs::write(edit.join(FINAL_CUT), "first").unwrap();
+        let first = keep_final_cut(footage.path()).unwrap();
+        assert_eq!(first, edit.join("cuts/final-1.mp4"));
+        assert!(!edit.join(FINAL_CUT).exists());
+
+        // Gaps (a deleted cut) are not reused: numbers keep counting up.
+        fs::write(edit.join("cuts/final-7.mp4"), "kept by hand").unwrap();
+        fs::write(edit.join("cuts/notes.txt"), "").unwrap();
+        fs::write(edit.join(FINAL_CUT), "second").unwrap();
+        let second = keep_final_cut(footage.path()).unwrap();
+        assert_eq!(second, edit.join("cuts/final-8.mp4"));
+        assert_eq!(fs::read_to_string(&first).unwrap(), "first");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "second");
+        assert_eq!(kept_cuts(footage.path()), [second, edit.join("cuts/final-7.mp4"), first]);
+    }
 
     #[test]
     fn durations_read_like_a_player() {
