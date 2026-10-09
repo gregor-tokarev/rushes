@@ -37,6 +37,8 @@ pub(crate) struct FootageChanged;
 struct Take {
     file: MediaFile,
     info: Option<MediaInfo>,
+    /// ffprobe has run; `info` is `None` when it could not read the file.
+    probed: bool,
 }
 
 /// Copy progress of an import.
@@ -64,6 +66,8 @@ pub(crate) struct FootageCard {
     probes: HashMap<PathBuf, (Option<DateTime<Utc>>, Option<MediaInfo>)>,
     import: Option<Import>,
     error: Option<SharedString>,
+    /// A listing (and the probes it started) is in flight.
+    refreshing: bool,
     refresh_task: Option<Task<()>>,
     _poll: Task<()>,
 }
@@ -88,6 +92,7 @@ impl FootageCard {
             probes: HashMap::new(),
             import: None,
             error: None,
+            refreshing: false,
             refresh_task: None,
             _poll: poll,
         };
@@ -110,24 +115,22 @@ impl FootageCard {
 
     /// Lists the folder again on a background thread and probes new or changed takes.
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.refresh_task.is_some() {
+        if self.refreshing {
             return;
         }
         let Some(dir) = self.footage_dir(cx) else {
             self.set_files(Vec::new(), cx);
             return;
         };
+        self.refreshing = true;
         self.refresh_task = Some(cx.spawn(async move |this, cx| {
             let listed = cx.background_spawn(async move { media::list_footage(&dir) }).await;
-            let Ok(to_probe) = this.update(cx, |this, cx| {
-                this.refresh_task = None;
-                match listed {
-                    Ok(files) => this.set_files(files, cx),
-                    Err(error) => {
-                        this.error = Some(error.to_string().into());
-                        cx.notify();
-                        Vec::new()
-                    }
+            let Ok(to_probe) = this.update(cx, |this, cx| match listed {
+                Ok(files) => this.set_files(files, cx),
+                Err(error) => {
+                    this.error = Some(error.to_string().into());
+                    cx.notify();
+                    Vec::new()
                 }
             }) else {
                 return;
@@ -139,6 +142,7 @@ impl FootageCard {
                     return;
                 }
             }
+            _ = this.update(cx, |this, _| this.refreshing = false);
         }));
     }
 
@@ -152,16 +156,15 @@ impl FootageCard {
         self.takes = files
             .into_iter()
             .map(|file| {
-                let info = match self.probes.get(&file.path) {
-                    Some((modified, info)) if *modified == file.modified => info.clone(),
+                let (info, probed) = match self.probes.get(&file.path) {
+                    Some((modified, info)) if *modified == file.modified => (info.clone(), true),
+                    _ if file.kind == MediaKind::Image => (None, true),
                     _ => {
-                        if file.kind != MediaKind::Image {
-                            to_probe.push((file.path.clone(), file.modified));
-                        }
-                        None
+                        to_probe.push((file.path.clone(), file.modified));
+                        (None, false)
                     }
                 };
-                Take { file, info }
+                Take { file, info, probed }
             })
             .collect();
         if changed {
@@ -181,6 +184,7 @@ impl FootageCard {
         if let Some(take) = self.takes.iter_mut().find(|take| take.file.path == path && take.file.modified == modified)
         {
             take.info = info.clone();
+            take.probed = true;
             cx.notify();
         }
         self.probes.insert(path, (modified, info));
@@ -343,6 +347,7 @@ impl FootageCard {
             let meta = match (&take.info, take.file.kind) {
                 (Some(info), _) => format::media_info(info),
                 (None, MediaKind::Image) => "Image".to_owned(),
+                (None, _) if take.probed => "Unreadable".to_owned(),
                 (None, _) => String::new(),
             };
             h_flex()
@@ -357,9 +362,7 @@ impl FootageCard {
                         .flex_shrink_0()
                         .text_sm()
                         .text_color(theme.muted_foreground)
-                        .when(meta.is_empty() && take.file.kind != MediaKind::Image, |this| {
-                            this.child(Spinner::new().xsmall().color(theme.muted_foreground))
-                        })
+                        .when(!take.probed, |this| this.child(Spinner::new().xsmall().color(theme.muted_foreground)))
                         .child(meta),
                 )
                 .child(

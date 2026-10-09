@@ -331,19 +331,19 @@ impl Render for AiSettings {
         let model = self.render_model(cx);
         let preferences = self.render_preferences(cx);
         let theme = cx.theme();
-        let heading = |title: &'static str| div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title);
+        let heading = |title: &'static str| div().text_base().font_weight(FontWeight::SEMIBOLD).child(title);
 
         v_flex()
             .w_full()
-            .gap_8()
+            .gap_10()
             .child(
-                v_flex().gap_3().child(heading("Agent")).child(
+                v_flex().gap_4().child(heading("Agent")).child(
                     Form::new()
                         .child(
                             Field::new()
                                 .label("Agent command")
                                 .description("The Claude Code CLI: a command on PATH or the full path to it.")
-                                .child(Input::new(&self.agent_command)),
+                                .child(Input::new(&self.agent_command).id("ai-settings-agent-command")),
                         )
                         .child(Field::new().label("Model").child(model))
                         .child(
@@ -353,7 +353,7 @@ impl Render for AiSettings {
                                     "The folder with video-use's SKILL.md. Empty looks in ~/.claude/skills/video-use.",
                                 )
                                 .child(
-                                    h_flex().gap_2().child(div().flex_1().child(Input::new(&self.skill_dir))).child(
+                                    h_flex().gap_2().child(div().flex_1().child(Input::new(&self.skill_dir).id("ai-settings-skill-dir"))).child(
                                         Button::new("ai-settings-choose-skill")
                                             .outline()
                                             .icon(IconName::FolderOpen)
@@ -365,7 +365,7 @@ impl Render for AiSettings {
                 ),
             )
             .child(
-                v_flex().gap_3().child(heading("Edits")).child(
+                v_flex().gap_4().child(heading("Edits")).child(
                     Form::new()
                         .child(
                             Field::new()
@@ -374,9 +374,11 @@ impl Render for AiSettings {
                                 .child(Textarea::new(&self.extra_instructions)),
                         )
                         .child(
-                            Field::new().label_indent(false).child(
+                            Field::new().label("Strategy review").description(
+                                "Off: the agent proposes a strategy and waits for your approval before it renders.",
+                            ).child(
                                 Switch::new("ai-settings-auto-approve")
-                                    .label("Skip strategy review by default")
+                                    .label("Skip by default")
                                     .checked(auto_approve)
                                     .on_change(cx.listener(|this, checked: &bool, _, cx| {
                                         let checked = *checked;
@@ -394,11 +396,14 @@ impl Render for AiSettings {
             )
             .child(
                 v_flex()
-                    .gap_3()
-                    .child(heading("Requirements"))
-                    .child(div().text_sm().text_color(theme.muted_foreground).child(
-                        "AI edits run video-use inside Claude Code on this computer. The key and the tools stay local.",
-                    ))
+                    .gap_4()
+                    .child(
+                        v_flex().gap_1().child(heading("Requirements")).child(
+                            div().text_sm().text_color(theme.muted_foreground).child(
+                                "AI edits run video-use inside Claude Code on this computer. The key and the tools stay local.",
+                            ),
+                        ),
+                    )
                     .child(self.doctor.clone()),
             )
     }

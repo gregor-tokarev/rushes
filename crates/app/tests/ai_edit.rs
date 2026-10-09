@@ -1,5 +1,7 @@
 //! AI edit runs end to end: `PipelineService` drives `scripts/fake-agent` on generated
 //! footage, with the store, the video and the run timeline checked after each phase.
+//! The UI integration tests at the end drive the same runs through the real panel,
+//! pipelines page and settings in headless windows.
 
 #![cfg(unix)]
 
@@ -9,9 +11,17 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use gpui_kit::{App, AppContext as _, Entity, TestAppContext};
+use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::{
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, ElementId, Entity, Render, TestAppContext, Window,
+    WindowBounds, WindowOptions, px, size,
+};
 use tempfile::TempDir;
-use videocrm::ai_edit::{INTERRUPTED, LogEvent, PhaseKind, PipelineService, RunError, TimelineEntry, split_failure};
+use videocrm::ai_edit::{
+    AiEditPanel, AiSettings, INTERRUPTED, LogEvent, PhaseKind, PipelineService, PipelinesPage, RunError, TimelineEntry,
+    split_failure,
+};
+use videocrm::route::{Route, VideoTab};
 use videocrm::state::AppState;
 use videocrm_core::{NewVideo, PipelineRun, RunId, RunStatus, Store, VideoId, VideoStatus};
 use videocrm_pipeline::AgentEvent;
@@ -461,4 +471,200 @@ fn the_requirement_check_passes_with_the_fake_agent(cx: &mut TestAppContext) {
     wait_until(cx, "second check", |cx| !service.read(cx).is_checking());
     let doctor = cx.read(|cx| service.read(cx).doctor().cloned()).unwrap();
     assert!(!doctor.agent.ok && !doctor.ready());
+}
+
+// UI integration tests
+
+/// Opens `build`'s view in a headless window tall enough for the whole panel.
+fn open<V: Render>(
+    cx: &mut TestAppContext,
+    build: impl FnOnce(&mut Window, &mut Context<V>) -> V + 'static,
+) -> AnyWindowHandle {
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::new(Default::default(), size(px(1280.), px(2400.))))),
+        ..WindowOptions::default()
+    };
+    let (handle, _) = cx
+        .update(|cx| gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| build(window, cx))))
+        .expect("open test window");
+    handle
+}
+
+/// Like [`wait_until`], re-rendering the window and asking it each time.
+fn wait_for_window(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    what: &str,
+    mut done: impl FnMut(&mut Window, &mut App) -> bool,
+) {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        cx.run_until_parked();
+        let ready = cx
+            .update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                done(window, cx)
+            })
+            .expect("window");
+        if ready {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn click(cx: &mut TestAppContext, window: AnyWindowHandle, id: impl Into<ElementId>) {
+    let id = id.into();
+    cx.update_window(window, |_, window, cx| window.click(id, cx)).expect("window");
+}
+
+fn shows(window: &Window, id: &str) -> bool {
+    window.try_find(ElementId::Name(id.to_owned().into())).is_some_and(|element| element.visible())
+}
+
+fn latest_run(cx: &mut TestAppContext, fx: &Fixture) -> Option<RunId> {
+    cx.read(|cx| fx.service.read(cx).video_runs(fx.video).next().map(|run| run.id))
+}
+
+fn route(cx: &mut TestAppContext, fx: &Fixture) -> Route {
+    cx.read(|cx| fx.state.read(cx).route().clone())
+}
+
+#[gpui_kit::test]
+fn the_panel_takes_an_edit_from_brief_to_publish(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let video = fx.video;
+    let window = open(cx, move |window, cx| AiEditPanel::new(video, window, cx));
+    let service = fx.service.clone();
+    wait_until(cx, "requirement check", |cx| service.read(cx).doctor().is_some_and(|doctor| doctor.ready()));
+    wait_for_window(cx, window, "the composer", |window, _| shows(window, "ai-edit-start"));
+    assert!(latest_run(cx, &fx).is_none());
+
+    click(cx, window, "brief-subtitles");
+    click(cx, window, "ai-edit-start");
+    let id = latest_run(cx, &fx).expect("the panel started a run");
+    let planned = fx.wait_for_status(cx, id, RunStatus::AwaitingApproval);
+    assert!(planned.brief.contains("- Burn subtitles into the render."), "{}", planned.brief);
+    assert!(planned.brief.starts_with("Edit \"Desk setup 2026\""), "{}", planned.brief);
+
+    wait_for_window(cx, window, "the strategy card", |window, _| shows(window, "run-approve"));
+    let composing = cx.update_window(window, |_, window, _| shows(window, "ai-edit-start")).unwrap();
+    assert!(!composing, "the brief form closes once the edit starts");
+    click(cx, window, "run-approve");
+    fx.wait_for_status(cx, id, RunStatus::Succeeded);
+
+    wait_for_window(cx, window, "the output card", |window, _| shows(window, "run-use-for-upload"));
+    click(cx, window, "run-use-for-upload");
+    assert_eq!(route(cx, &fx), Route::Video { id: video, tab: VideoTab::Publish });
+    assert_eq!(fx.upload_file(cx), Some(fx.final_cut()));
+}
+
+#[gpui_kit::test]
+fn the_edit_cannot_start_without_footage(cx: &mut TestAppContext) {
+    let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
+    let video = fx.video;
+    let window = open(cx, move |window, cx| AiEditPanel::new(video, window, cx));
+    let service = fx.service.clone();
+    wait_until(cx, "requirement check", |cx| service.read(cx).doctor().is_some());
+    wait_for_window(cx, window, "the composer", |window, _| shows(window, "ai-edit-start"));
+    click(cx, window, "ai-edit-start");
+    cx.run_until_parked();
+    assert!(latest_run(cx, &fx).is_none(), "Start AI edit is disabled without footage");
+}
+
+#[gpui_kit::test]
+fn requested_changes_revise_the_strategy(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let id = fx.start(cx, false);
+    let video = fx.video;
+    let window = open(cx, move |window, cx| AiEditPanel::new(video, window, cx));
+    fx.wait_for_status(cx, id, RunStatus::AwaitingApproval);
+    wait_for_window(cx, window, "the strategy card", |window, _| shows(window, "run-request-changes"));
+
+    click(cx, window, "run-request-changes");
+    cx.update_window(window, |_, window, cx| window.input("Add an end card.", cx)).unwrap();
+    click(cx, window, "run-send-feedback");
+    assert_eq!(fx.run(cx, id).status, RunStatus::Planning);
+    fx.wait_for_status(cx, id, RunStatus::AwaitingApproval);
+    assert_eq!(
+        phases(&fx.stored_events(cx, id)),
+        [(PhaseKind::Plan, None), (PhaseKind::Revise, Some("Add an end card.".into()))]
+    );
+}
+
+#[gpui_kit::test]
+fn a_running_edit_can_be_cancelled_and_retried(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[("FAKE_AGENT_DELAY_MS", "1500")]);
+    let id = fx.start(cx, false);
+    let video = fx.video;
+    let window = open(cx, move |window, cx| AiEditPanel::new(video, window, cx));
+    wait_for_window(cx, window, "the live status", |window, _| shows(window, "run-cancel"));
+
+    click(cx, window, "run-cancel");
+    fx.wait_for_status(cx, id, RunStatus::Cancelled);
+    wait_for_window(cx, window, "the cancelled card", |window, _| shows(window, "run-retry"));
+    assert!(cx.update_window(window, |_, window, _| shows(window, "run-continue")).unwrap(), "a session to resume");
+
+    click(cx, window, "run-retry");
+    assert_eq!(fx.run(cx, id).status, RunStatus::Planning);
+    cx.update(|cx| fx.service.update(cx, |service, cx| service.cancel(id, cx)));
+    fx.wait_for_status(cx, id, RunStatus::Cancelled);
+}
+
+#[gpui_kit::test]
+fn a_pipelines_row_opens_its_run(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let id = fx.start(cx, true);
+    fx.wait_for_status(cx, id, RunStatus::Succeeded);
+    let window = open(cx, PipelinesPage::new);
+    let row = format!("pipeline-run-{id}");
+    wait_for_window(cx, window, "the run row", |window, _| shows(window, &row));
+
+    click(cx, window, ElementId::Name(row.into()));
+    assert_eq!(route(cx, &fx), Route::Video { id: fx.video, tab: VideoTab::Footage });
+    let revealed = cx.update(|cx| fx.service.update(cx, |service, _| service.take_revealed(fx.video)));
+    assert_eq!(revealed, Some(id), "the video's panel selects the clicked run");
+}
+
+#[gpui_kit::test]
+fn settings_save_toggles_at_once_and_text_after_a_pause(cx: &mut TestAppContext) {
+    let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
+    let window = open(cx, AiSettings::new);
+    let pipeline = |cx: &mut TestAppContext| cx.read(|cx| fx.state.read(cx).settings().pipeline.clone());
+    assert!(!pipeline(cx).auto_approve);
+
+    click(cx, window, "ai-settings-auto-approve");
+    assert!(pipeline(cx).auto_approve);
+    click(cx, window, "ai-settings-subtitles");
+    assert!(pipeline(cx).default_preferences.subtitles);
+
+    let before = pipeline(cx).agent_command;
+    click(cx, window, "ai-settings-agent-command");
+    cx.update_window(window, |_, window, cx| {
+        window.press("secondary-a", cx);
+        window.input("/opt/claude/bin/claude", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(pipeline(cx).agent_command, before, "typing is saved after a pause");
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(pipeline(cx).agent_command, "/opt/claude/bin/claude");
+    let service = fx.service.clone();
+    wait_until(cx, "the new check", |cx| !service.read(cx).is_checking());
+    let doctor = cx.read(|cx| service.read(cx).doctor().cloned()).expect("doctor");
+    assert!(!doctor.agent.ok, "the new agent command was checked: {:?}", doctor.agent);
 }

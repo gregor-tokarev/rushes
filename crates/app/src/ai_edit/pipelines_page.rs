@@ -7,8 +7,9 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Context, Div, ElementId, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    Stateful, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
+    AnyElement, App, Context, Div, ElementId, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
+    TestSupportExt as _, Window, div,
 };
 use videocrm_core::{PipelineRun, RunStatus};
 
@@ -63,7 +64,7 @@ impl PipelinesPage {
         self.state.update(cx, |state, cx| state.open_video(video_id, VideoTab::Footage, cx));
     }
 
-    fn render_row(&self, run: &PipelineRun, last: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_row(&self, run: &PipelineRun, last: bool, cx: &mut Context<Self>) -> AnyElement {
         let state = self.state.read(cx);
         let video = state.video(run.video_id);
         let title = video.map_or("Deleted video".to_owned(), |video| {
@@ -80,6 +81,9 @@ impl PipelinesPage {
 
         h_flex()
             .id(ElementId::Name(format!("pipeline-run-{}", run.id).into()))
+            .role(Role::Button)
+            .aria_label(format!("{title}, {}", run.status.label()))
+            .test_support()
             .gap_4()
             .px_3()
             .py_2p5()
@@ -131,6 +135,7 @@ impl PipelinesPage {
                     .child(run.cost_usd.map_or("—".to_owned(), format::cost)),
             )
             .on_click(cx.listener(move |this, _, _, cx| this.open(&run, cx)))
+            .into_any_element()
     }
 
     fn render_empty(&self, cx: &App) -> Div {
@@ -165,7 +170,7 @@ impl Render for PipelinesPage {
         if waiting > 0 {
             summary.push(format!("{waiting} waiting for approval"));
         }
-        let rows: Vec<Stateful<Div>> =
+        let rows: Vec<AnyElement> =
             runs.iter().enumerate().map(|(ix, run)| self.render_row(run, ix + 1 == runs.len(), cx)).collect();
         let empty = runs.is_empty().then(|| self.render_empty(cx));
         let theme = cx.theme();

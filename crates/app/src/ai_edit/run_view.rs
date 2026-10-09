@@ -239,11 +239,11 @@ impl RunView {
             return;
         };
         self.state.update(cx, |state, cx| {
-            if let Some(mut video) = state.video(video_id).cloned() {
-                if video.publish.file.as_ref() != Some(&output) {
-                    video.publish.file = Some(output);
-                    state.update_video(video, cx);
-                }
+            if let Some(mut video) = state.video(video_id).cloned()
+                && video.publish.file.as_ref() != Some(&output)
+            {
+                video.publish.file = Some(output);
+                state.update_video(video, cx);
             }
             state.open_video(video_id, VideoTab::Publish, cx);
         });
@@ -470,8 +470,7 @@ impl RunView {
                         )
                         .child(
                             Button::new("run-use-for-upload")
-                                .when(is_upload_file, |button| button.outline())
-                                .when(!is_upload_file, |button| button.primary())
+                                .primary()
                                 .small()
                                 .icon(IconName::Upload)
                                 .label(if is_upload_file { "Go to Publish" } else { "Use for upload" })
@@ -648,53 +647,51 @@ impl RunView {
                 )
                 .into_any_element(),
             TimelineItem::Thinking { text, .. } => {
-                let summary = div().flex_1().text_sm().text_color(muted).child("Thinking");
-                expandable(row(row_id, Icon::new(IconName::Brain).text_color(muted)), seq, expanded, cx)
+                let content = v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(div().text_sm().text_color(muted).child("Thinking"))
+                    .when(expanded, |this| this.child(div().text_sm().text_color(muted).child(text.clone())));
+                let base = row(row_id, Icon::new(IconName::Brain).text_color(muted)).child(content);
+                expandable(base, seq, expanded, cx).into_any_element()
+            }
+            TimelineItem::Tool { name, summary, output, .. } => {
+                let failed = output.as_ref().is_some_and(|output| output.is_error);
+                let mono = name == "Bash";
+                let details =
+                    expanded.then(|| output.as_ref().map(|output| code_block(output.summary.clone(), cx))).flatten();
+                let base = row(row_id, Icon::new(tool_icon(name)).text_color(if failed { danger } else { muted }))
                     .child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
                             .gap_1()
-                            .child(summary)
-                            .when(expanded, |this| this.child(div().text_sm().text_color(muted).child(text.clone()))),
-                    )
-                    .into_any_element()
-            }
-            TimelineItem::Tool { name, summary, output, .. } => {
-                let failed = output.as_ref().is_some_and(|output| output.is_error);
-                let mono = name == "Bash";
-                let base = row(row_id, Icon::new(tool_icon(name)).text_color(if failed { danger } else { muted }));
-                let base = if item.is_expandable() { expandable(base, seq, expanded, cx) } else { base };
-                base.child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_1()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .text_sm()
-                                .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).child(name.clone()))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_color(muted)
-                                        .when(mono, |this| this.font_family(mono_font.clone()).text_xs())
-                                        .child(summary.clone()),
-                                )
-                                .when(failed, |this| {
-                                    this.child(div().flex_shrink_0().text_xs().text_color(danger).child("failed"))
-                                }),
-                        )
-                        .when(expanded, |this| {
-                            this.when_some(output.as_ref(), |this, output| {
-                                this.child(code_block(output.summary.clone(), cx))
-                            })
-                        }),
-                )
-                .into_any_element()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .text_sm()
+                                    .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).child(name.clone()))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_color(muted)
+                                            .when(mono, |this| this.font_family(mono_font.clone()).text_xs())
+                                            .child(summary.clone()),
+                                    )
+                                    .when(failed, |this| {
+                                        this.child(div().flex_shrink_0().text_xs().text_color(danger).child("failed"))
+                                    }),
+                            )
+                            .children(details),
+                    );
+                if item.is_expandable() {
+                    expandable(base, seq, expanded, cx).into_any_element()
+                } else {
+                    base.child(disclosure_lane()).into_any_element()
+                }
             }
             TimelineItem::Problem { title, detail, .. } => {
                 row(row_id, Icon::new(IconName::ShieldAlert).text_color(danger))
@@ -728,17 +725,16 @@ impl RunView {
                 } else {
                     format!("{} background events", lines.len())
                 };
-                let body = lines.join("\n");
-                expandable(row(row_id, Icon::new(IconName::Layers).text_color(muted)), seq, expanded, cx)
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
-                            .child(div().text_sm().text_color(muted).child(label))
-                            .when(expanded, |this| this.child(code_block(body, cx))),
-                    )
-                    .into_any_element()
+                let details = expanded.then(|| code_block(lines.join("\n"), cx));
+                let base = row(row_id, Icon::new(IconName::Layers).text_color(muted)).child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(div().text_sm().text_color(muted).child(label))
+                        .children(details),
+                );
+                expandable(base, seq, expanded, cx).into_any_element()
             }
         }
     }
@@ -808,9 +804,14 @@ fn expandable(
     let muted = cx.theme().muted_foreground;
     row.hover(move |style| style.bg(hover))
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_row(seq, cx)))
-        .child(div().flex_shrink_0().pt_0p5().child(
+        .child(disclosure_lane().child(
             Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(muted),
         ))
+}
+
+/// The trailing lane of timeline rows, where expandable rows show their chevron.
+fn disclosure_lane() -> Div {
+    div().w_4().flex_shrink_0().pt_0p5()
 }
 
 fn code_block(text: impl Into<SharedString>, cx: &App) -> Div {

@@ -241,9 +241,12 @@ impl AiEditPanel {
                     .min_w_0()
                     .gap_0p5()
                     .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("AI edit"))
-                    .child(div().text_sm().text_color(theme.muted_foreground).child(
-                        "An agent cuts the takes with video-use: it proposes a strategy, you approve, it renders.",
-                    )),
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("video-use cuts the takes: it proposes a strategy, you approve, it renders."),
+                    ),
             )
             .children(history)
             .when(has_runs && !self.composing, |this| {
