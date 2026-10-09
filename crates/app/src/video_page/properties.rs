@@ -353,7 +353,7 @@ impl PropertiesPanel {
                         .on_click(cx.listener(move |this, _, _, cx| this.remove_tag(&name, cx))),
                 )
             }))
-            .child(Input::new(&self.tag_input).id("property-tags-input").appearance(false).xsmall().w_32())
+            .child(Input::new(&self.tag_input).id("property-tags-input").appearance(false).xsmall().px_0().w_32())
     }
 
     fn render_media_folder(&self, video: &Video, cx: &mut Context<Self>) -> impl IntoElement {

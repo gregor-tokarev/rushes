@@ -434,7 +434,7 @@ impl Render for ScriptRail {
                             .child(format!("Runtime at {DEFAULT_WPM} words per minute.")),
                     ),
             )
-            .child(v_flex().gap_1().child(div().pb_1().child(section_label("Outline", cx))).map(|this| {
+            .child(v_flex().gap_2().child(section_label("Outline", cx)).map(|this| {
                 if outline.is_empty() {
                     this.child(
                         div()
@@ -443,31 +443,33 @@ impl Render for ScriptRail {
                             .child("Headings in the script show up here."),
                     )
                 } else {
-                    this.children(outline)
+                    this.child(v_flex().mx_neg_2().gap_1().children(outline))
                 }
             }))
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().pb_1().child(section_label("Script text", cx)))
-                    .child(action(
-                        "copy-teleprompter",
-                        IconName::Copy,
-                        "Copy teleprompter text",
-                        DocumentTab::copy_teleprompter_text,
-                    ))
-                    .child(action(
-                        "export-markdown",
-                        IconName::FileDown,
-                        "Export Markdown…",
-                        DocumentTab::export_markdown,
-                    ))
-                    .child(action(
-                        "import-markdown",
-                        IconName::FileUp,
-                        "Import Markdown…",
-                        DocumentTab::import_markdown,
-                    )),
+                v_flex().gap_2().child(section_label("Script text", cx)).child(
+                    v_flex()
+                        .mx_neg_2()
+                        .gap_1()
+                        .child(action(
+                            "copy-teleprompter",
+                            IconName::Copy,
+                            "Copy teleprompter text",
+                            DocumentTab::copy_teleprompter_text,
+                        ))
+                        .child(action(
+                            "export-markdown",
+                            IconName::FileDown,
+                            "Export Markdown…",
+                            DocumentTab::export_markdown,
+                        ))
+                        .child(action(
+                            "import-markdown",
+                            IconName::FileUp,
+                            "Import Markdown…",
+                            DocumentTab::import_markdown,
+                        )),
+                ),
             )
     }
 }

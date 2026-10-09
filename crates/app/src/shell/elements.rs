@@ -35,6 +35,8 @@ pub(crate) fn section_label(label: impl Into<SharedString>, cx: &App) -> impl In
 
 /// A full-width, leading-aligned command row: an optional icon and a label
 /// that truncates. Focusable and activated by Enter or Space like a button.
+/// Its hover surface pads the content by `px_2`; a list of rows bleeds out by
+/// as much (`mx_neg_2`) so its text lines up with the heading above it.
 #[derive(IntoElement)]
 pub(crate) struct RowButton {
     id: ElementId,
@@ -90,6 +92,7 @@ impl RenderOnce for RowButton {
             .min_w_0()
             .h_7()
             .px_2()
+            .when(self.indent.0 > 0., |this| this.pl(Rems(0.5 + self.indent.0)))
             .gap_2()
             .rounded(cx.theme().radius)
             .text_sm()
@@ -97,7 +100,6 @@ impl RenderOnce for RowButton {
             .hover(move |this| this.bg(hover))
             .active(move |this| this.bg(active))
             .when(focused, |this| this.focus_ring_style(window, cx))
-            .child(div().flex_none().w(self.indent))
             .when_some(self.icon, |this, icon| {
                 this.child(Icon::new(icon).small().text_color(cx.theme().muted_foreground))
             })
