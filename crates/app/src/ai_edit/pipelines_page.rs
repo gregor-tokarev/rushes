@@ -61,7 +61,8 @@ impl PipelinesPage {
     fn open(&mut self, run: &PipelineRun, cx: &mut Context<Self>) {
         let (id, video_id) = (run.id, run.video_id);
         self.service.update(cx, |service, cx| service.reveal_run(id, cx));
-        self.state.update(cx, |state, cx| state.open_video(video_id, VideoTab::Footage, cx));
+        // The tab opens on its content rather than on the page header.
+        crate::video_page::open_tab_at_top(video_id, VideoTab::Footage, cx);
     }
 
     fn render_row(&self, run: &PipelineRun, last: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
