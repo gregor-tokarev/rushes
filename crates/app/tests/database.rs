@@ -733,3 +733,42 @@ fn a_typed_option_is_kept_without_pressing_enter(cx: &mut TestAppContext) {
         .collect();
     assert_eq!(names, ["NordVPN", "Brilliant"]);
 }
+
+#[gpui_kit::test]
+fn resizing_a_column_saves_its_width(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    // The resize handle straddles the right border of the Status header
+    // cell, the table's second column.
+    let (from, to, before) = db.with_window(cx, |window, _| {
+        let status = window.find(("col-header", 1usize)).bounds();
+        let y = status.center().y;
+        (
+            point(status.right() - px(2.), y),
+            point(status.right() + px(58.), y),
+            status.size.width,
+        )
+    });
+    db.step(cx, |window, cx| window.drag(from, to, cx));
+
+    let events = db.take_events();
+    let [DatabaseEvent::SaveView(view)] = events.as_slice() else {
+        panic!("expected one SaveView, got {events:?}");
+    };
+    let status = view
+        .columns
+        .iter()
+        .find(|layout| layout.column == Column::Builtin(BuiltinField::Status))
+        .expect("the view lists the status column");
+    // Dragged 60px from just inside the border: about that much wider than
+    // the default 140.
+    assert!(
+        (190.0..=202.0).contains(&status.width),
+        "expected about 200, got {}",
+        status.width
+    );
+    let after = db.with_window(cx, |window, _| {
+        window.find(("col-header", 1usize)).bounds().size.width
+    });
+    assert!(after > before, "the header is drawn wider");
+}
