@@ -16,6 +16,8 @@ pub(crate) fn agent() -> Agent {
         .http_status_as_error(false)
         .max_redirects(0)
         .timeout_connect(Some(Duration::from_secs(20)))
+        .timeout_send_request(Some(Duration::from_secs(30)))
+        .timeout_send_body(Some(Duration::from_secs(60)))
         .timeout_recv_response(Some(Duration::from_secs(120)))
         .timeout_recv_body(Some(Duration::from_secs(120)))
         .user_agent(concat!("videocrm/", env!("CARGO_PKG_VERSION")))

@@ -24,6 +24,8 @@ pub const UPLOAD_GRANULARITY: u64 = 256 * 1024;
 pub const DEFAULT_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 /// How often in-flight bytes are reported while a chunk is being sent.
 const PROGRESS_STEP: usize = 256 * 1024;
+/// Slowest upload speed (bytes/s) before a chunk send counts as stalled and is retried.
+const MIN_UPLOAD_SPEED: u64 = 32 * 1024;
 const CANCEL_POLL: Duration = Duration::from_millis(50);
 
 /// Metadata for `videos.insert`.
@@ -229,6 +231,7 @@ impl YoutubeClient {
         progress: &mut dyn FnMut(UploadProgress),
         cancel: &AtomicBool,
     ) -> Result<UploadedVideo> {
+        self.check_session_origin(session_url)?;
         let mut file = VideoFile::open(path)?;
         progress(UploadProgress::Started {
             session_url: session_url.to_owned(),
@@ -272,6 +275,19 @@ impl YoutubeClient {
         }
     }
 
+    /// The session URL receives the access token, so it must point at the configured
+    /// upload server (it may come from the app's database).
+    fn check_session_origin(&self, session_url: &str) -> Result<()> {
+        let origin = |url: &str| Url::parse(url).map(|url| url.origin());
+        match (origin(session_url), origin(&self.config.upload_base)) {
+            (Ok(session), Ok(server)) if session == server => Ok(()),
+            _ => Err(Error::InvalidInput(format!(
+                "{session_url} is not an upload session of {}",
+                self.config.upload_base
+            ))),
+        }
+    }
+
     fn session_location(&self, mut response: HttpResponse) -> Result<String> {
         let status = response.status().as_u16();
         if !response.status().is_success() {
@@ -308,6 +324,8 @@ impl YoutubeClient {
     ) -> Result<UploadedVideo> {
         let total = file.len;
         let mut failures = 0;
+        // Highest offset the server confirmed; any progress past it resets `failures`.
+        let mut confirmed = offset.unwrap_or(0);
         let mut chunk = Vec::new();
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -337,18 +355,19 @@ impl YoutubeClient {
                             "the upload server holds {next} of {total} bytes but did not finish the upload"
                         )));
                     }
-                    match offset {
-                        Some(start) if next <= start => {
-                            failures += 1;
-                            if failures > self.upload.max_retries {
-                                return Err(Error::Protocol(format!(
-                                    "the upload server keeps rejecting data at byte {start}"
-                                )));
-                            }
+                    if next > confirmed {
+                        failures = 0;
+                    } else if offset.is_some() {
+                        // A chunk went through but the server kept nothing new.
+                        if failures >= self.upload.max_retries {
+                            return Err(Error::Protocol(format!(
+                                "the upload server keeps rejecting data at byte {next}"
+                            )));
                         }
-                        Some(_) => failures = 0,
-                        None => {}
+                        backoff_sleep(self.upload.backoff(failures), cancel, Some(session_url))?;
+                        failures += 1;
                     }
+                    confirmed = next;
                     offset = Some(next);
                 }
                 Err(_) if cancel.load(Ordering::Relaxed) => return Err(cancelled(session_url)),
@@ -384,6 +403,9 @@ impl YoutubeClient {
             };
             self.agent
                 .put(session_url)
+                .config()
+                .timeout_send_body(Some(send_timeout(chunk.len())))
+                .build()
                 .header("Authorization", bearer(token))
                 .header("Content-Length", chunk.len().to_string())
                 .header("Content-Range", &range)
@@ -476,6 +498,12 @@ fn persisted_bytes(range: Option<&str>) -> Result<u64> {
         })
 }
 
+/// Time allowed to send one chunk; a dead connection otherwise blocks in a socket
+/// write for many minutes, during which the cancel flag is not looked at either.
+fn send_timeout(len: usize) -> Duration {
+    Duration::from_secs(30 + len as u64 / MIN_UPLOAD_SPEED)
+}
+
 fn content_range(start: u64, len: u64, total: u64) -> String {
     format!("bytes {start}-{}/{total}", start + len - 1)
 }
@@ -533,8 +561,8 @@ impl VideoFile {
     }
 }
 
-/// Chunk body that reports progress as the HTTP client pulls it and aborts the
-/// request as soon as `cancel` is set.
+/// Chunk body that reports progress as the HTTP client pulls it, and aborts the
+/// request at its next read once `cancel` is set.
 struct ProgressReader<'a> {
     chunk: &'a [u8],
     position: usize,
@@ -729,6 +757,36 @@ mod tests {
             cancel: &cancel,
         };
         assert!(reader.read(&mut [0; 16]).is_err());
+    }
+
+    #[test]
+    fn resume_refuses_session_urls_of_other_servers() {
+        let config = crate::YoutubeConfig::emulator("http://127.0.0.1:1", "http://127.0.0.1:2");
+        let credentials = crate::Credentials {
+            access_token: "token".into(),
+            refresh_token: None,
+            expires_at: Utc::now() + chrono::TimeDelta::hours(1),
+            scope: String::new(),
+            id_token: None,
+        };
+        let client = YoutubeClient::new(config, credentials, |_| {});
+        let resume = |url: &str| {
+            client.resume_upload(
+                url,
+                Path::new("missing.mp4"),
+                &mut |_| {},
+                &AtomicBool::new(false),
+            )
+        };
+        assert!(matches!(
+            resume("https://elsewhere.example/upload?upload_id=x"),
+            Err(Error::InvalidInput(_))
+        ));
+        // Same server: passes the check and fails on the missing file instead.
+        assert!(matches!(
+            resume("http://127.0.0.1:2/upload/youtube/v3/videos?upload_id=x"),
+            Err(Error::Io { .. })
+        ));
     }
 
     #[test]
