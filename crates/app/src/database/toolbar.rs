@@ -28,6 +28,7 @@ use super::icons::{column_icon, view_icon};
 use super::panel::DatabasePanel;
 use super::property_editor::PropertyEditorMode;
 use super::query::{active_filter_count, column_name, resolve_columns};
+use super::table::column_key;
 
 impl DatabasePanel {
     pub(super) fn render_toolbar(
@@ -452,6 +453,9 @@ fn sort_popover(
                     )
                 })
                 .children(sorts.iter().enumerate().map(|(ix, sort)| {
+                    // A column has at most one rule, so it names the rule's
+                    // controls; `ix` only addresses the edit.
+                    let key = column_key(sort.column);
                     let direction = sort.direction;
                     let label = column_name(sort.column, &properties).unwrap_or_default();
                     let choices = columns.clone();
@@ -460,7 +464,7 @@ fn sort_popover(
                     h_flex()
                         .gap_1()
                         .child(
-                            Button::new(("sort-column", ix))
+                            Button::new(SharedString::from(format!("sort-column-{key}")))
                                 .outline()
                                 .small()
                                 .flex_1()
@@ -499,7 +503,7 @@ fn sort_popover(
                                 }),
                         )
                         .child(
-                            Button::new(("sort-direction", ix))
+                            Button::new(SharedString::from(format!("sort-direction-{key}")))
                                 .outline()
                                 .small()
                                 .icon(match direction {
@@ -520,7 +524,7 @@ fn sort_popover(
                                 }))),
                         )
                         .child(
-                            Button::new(("sort-remove", ix))
+                            Button::new(SharedString::from(format!("sort-remove-{key}")))
                                 .ghost()
                                 .small()
                                 .icon(IconName::X)
@@ -624,21 +628,16 @@ fn properties_popover(
                                 .child(column_name(column, &properties).unwrap_or_default()),
                         )
                         .child(
-                            Switch::new(SharedString::from(format!(
-                                "show-{}",
-                                super::table::column_key(column)
-                            )))
-                            .small()
-                            .checked(layout.visible)
-                            .disabled(is_title)
-                            .on_click(
-                                move |visible: &bool, _, cx| {
+                            Switch::new(SharedString::from(format!("show-{}", column_key(column))))
+                                .small()
+                                .checked(layout.visible)
+                                .disabled(is_title)
+                                .on_click(move |visible: &bool, _, cx| {
                                     let visible = *visible;
                                     _ = panel.update(cx, |panel, cx| {
                                         panel.set_column_visible(column, visible, cx)
                                     });
-                                },
-                            ),
+                                }),
                         )
                 }))
                 .child(h_flex().pt_1().child({

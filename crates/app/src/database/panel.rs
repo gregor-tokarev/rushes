@@ -25,6 +25,7 @@ use videocrm_core::{
     ViewKind,
 };
 
+use super::format;
 use super::property_editor::{PropertyEditor, PropertyEditorMode};
 use super::query::{self, resolve_columns, view_rows, visible_columns};
 use super::table::{CellEditors, EmptyReason, TableModel, VideoTable};
@@ -518,6 +519,11 @@ impl DatabasePanel {
         if let Some(cell) = target {
             let current = self.cell_date(cell);
             self.editors.calendar.update(cx, |calendar, cx| {
+                // The calendar is shared by every date cell: an empty date
+                // opens on this month, not on the last date shown.
+                if current.is_none() {
+                    calendar.apply_date(Date::Single(Some(format::local_day(Utc::now()))));
+                }
                 calendar.set_date(Date::Single(current), window, cx)
             });
         }
@@ -649,6 +655,14 @@ impl DatabasePanel {
             },
             cx,
         );
+    }
+
+    /// Empties the search box. The search is never saved, so the view
+    /// stays as it is.
+    pub(crate) fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search
+            .update(cx, |search, cx| search.set_value("", window, cx));
+        self.refresh(cx);
     }
 
     pub(crate) fn clear_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -922,11 +936,13 @@ impl DatabasePanel {
         self.shown.iter().map(|&ix| &self.rows[ix])
     }
 
-    pub(super) fn empty_reason(&self) -> EmptyReason {
+    pub(super) fn empty_reason(&self, cx: &App) -> EmptyReason {
         if self.rows.is_empty() {
             EmptyReason::NoVideos
+        } else if !self.search_query(cx).trim().is_empty() {
+            EmptyReason::Search
         } else {
-            EmptyReason::NoMatches
+            EmptyReason::Filter
         }
     }
 
@@ -981,7 +997,7 @@ impl DatabasePanel {
             editing: self.editing,
             date_target: self.date_target,
             tags_target: self.tags_target,
-            empty: self.empty_reason(),
+            empty: self.empty_reason(cx),
             now: Utc::now(),
         };
         let selected_ix = self

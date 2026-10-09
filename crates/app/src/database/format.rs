@@ -1,7 +1,11 @@
 //! Text presentation of cell values: script stats, runtimes, dates and numbers.
 
-use chrono::{DateTime, Datelike as _, NaiveDate, Utc};
+use chrono::{DateTime, Datelike as _, Local, NaiveDate, TimeZone, Utc};
 use videocrm_core::UploadStatus;
+
+/// Numbers at least this large are shown as Rust formats them, without
+/// grouping: past it an `f64` no longer holds every whole number exactly.
+const LARGEST_GROUPED_NUMBER: f64 = 1e15;
 
 /// "1,240 words · 8m 16s", or `None` when the script is empty.
 pub fn script_summary(words: usize, seconds: u32) -> Option<String> {
@@ -42,7 +46,7 @@ pub fn group_thousands(value: u64) -> String {
 /// A number property value: thousands grouped, at most two decimals, no
 /// trailing zeros.
 pub fn number(value: f64) -> String {
-    if !value.is_finite() {
+    if !value.is_finite() || value.abs() >= LARGEST_GROUPED_NUMBER {
         return value.to_string();
     }
     let rounded = (value * 100.0).round() / 100.0;
@@ -69,9 +73,19 @@ pub fn date(date: NaiveDate, today: NaiveDate) -> String {
     }
 }
 
+/// The calendar day of `at` in the user's time zone, which is what "Today"
+/// and publish dates are measured against.
+pub fn local_day(at: DateTime<Utc>) -> NaiveDate {
+    at.with_timezone(&Local).date_naive()
+}
+
 /// A past timestamp relative to `now`: "Just now", "5m ago", "3h ago", then
-/// calendar dates.
+/// calendar dates in the user's time zone.
 pub fn timestamp(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    timestamp_in(at, now, &Local)
+}
+
+fn timestamp_in<Tz: TimeZone>(at: DateTime<Utc>, now: DateTime<Utc>, zone: &Tz) -> String {
     let elapsed = now - at;
     if elapsed.num_minutes() < 1 {
         "Just now".into()
@@ -80,8 +94,34 @@ pub fn timestamp(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     } else if elapsed.num_hours() < 24 {
         format!("{}h ago", elapsed.num_hours())
     } else {
-        date(at.date_naive(), now.date_naive())
+        date(
+            at.with_timezone(zone).date_naive(),
+            now.with_timezone(zone).date_naive(),
+        )
     }
+}
+
+/// Where a URL property's link button goes: web and mail links as written,
+/// a bare address as `https://`. Other schemes (`file:`, app handlers) get no
+/// link, so a stored value cannot launch a local file or program.
+pub fn link_target(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let lower = url.to_ascii_lowercase();
+    if ["http://", "https://", "mailto:"]
+        .iter()
+        .any(|scheme| lower.starts_with(scheme))
+    {
+        return Some(url.to_string());
+    }
+    let has_scheme = url.split_once(':').is_some_and(|(scheme, rest)| {
+        rest.starts_with("//")
+            || scheme.eq_ignore_ascii_case("file")
+            || scheme.eq_ignore_ascii_case("javascript")
+    });
+    (!has_scheme).then(|| format!("https://{url}"))
 }
 
 /// Upload state with progress, e.g. "Uploading 42%".
@@ -96,8 +136,6 @@ pub fn upload(status: &UploadStatus) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone as _;
-
     use super::*;
 
     #[test]
@@ -125,6 +163,9 @@ mod tests {
         assert_eq!(number(3.5), "3.5");
         assert_eq!(number(-0.125), "-0.13");
         assert_eq!(number(2.05), "2.05");
+        // Past exact whole numbers there is no grouping to get right.
+        assert_eq!(number(1e20), "100000000000000000000");
+        assert_eq!(number(-2.5e18), "-2500000000000000000");
     }
 
     #[test]
@@ -148,7 +189,46 @@ mod tests {
         assert_eq!(timestamp(now - chrono::Duration::minutes(5), now), "5m ago");
         assert_eq!(timestamp(now - chrono::Duration::hours(3), now), "3h ago");
         assert_eq!(timestamp(now - chrono::Duration::days(1), now), "Yesterday");
-        assert_eq!(timestamp(now - chrono::Duration::days(40), now), "Aug 30");
+        assert_eq!(
+            timestamp_in(now - chrono::Duration::days(40), now, &Utc),
+            "Aug 30"
+        );
+    }
+
+    #[test]
+    fn timestamps_count_days_in_the_users_time_zone() {
+        // 22:30 on Oct 9 in UTC-7, already Oct 10 in UTC.
+        let zone = chrono::FixedOffset::west_opt(7 * 3600).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 10, 10, 5, 30, 0).unwrap();
+        // 13:00 on Oct 8 there.
+        let at = Utc.with_ymd_and_hms(2026, 10, 8, 20, 0, 0).unwrap();
+        assert_eq!(timestamp_in(at, now, &zone), "Yesterday");
+        assert_eq!(timestamp_in(at, now, &Utc), "Oct 8");
+    }
+
+    #[test]
+    fn links_open_only_web_and_mail_addresses() {
+        assert_eq!(
+            link_target(" example.com/watch ").as_deref(),
+            Some("https://example.com/watch")
+        );
+        assert_eq!(
+            link_target("HTTP://Example.com").as_deref(),
+            Some("HTTP://Example.com")
+        );
+        assert_eq!(
+            link_target("mailto:me@example.com").as_deref(),
+            Some("mailto:me@example.com")
+        );
+        assert_eq!(
+            link_target("localhost:3000").as_deref(),
+            Some("https://localhost:3000")
+        );
+        assert_eq!(link_target("file:///etc/passwd"), None);
+        assert_eq!(link_target("file:/home/me/run.desktop"), None);
+        assert_eq!(link_target("javascript:alert(1)"), None);
+        assert_eq!(link_target("vscode://open?file=x"), None);
+        assert_eq!(link_target("   "), None);
     }
 
     #[test]

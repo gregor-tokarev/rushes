@@ -280,14 +280,16 @@ impl PropertyEditor {
         v_flex()
             .gap_1p5()
             .child(field_label("Options", cx))
-            .children(self.options.iter().enumerate().map(|(ix, draft)| {
+            .children(self.options.iter().map(|draft| {
                 let dot = tag_colors(draft.color, cx).dot;
+                let (id, current) = (draft.id.clone(), draft.color);
                 let color_editor = editor.clone();
                 let remove_editor = editor.clone();
+                let remove_id = id.clone();
                 h_flex()
                     .gap_1()
                     .child(
-                        Button::new(("option-color", ix))
+                        Button::new(SharedString::from(format!("option-color-{id}")))
                             .ghost()
                             .small()
                             .tooltip("Color")
@@ -295,14 +297,19 @@ impl PropertyEditor {
                             .dropdown_menu(move |menu, _, _| {
                                 TagColor::ALL.into_iter().fold(menu, |menu, color| {
                                     let editor = color_editor.clone();
+                                    let id = id.clone();
                                     menu.item(
                                         PopupMenuItem::element(move |_, _| {
                                             Chip::new(color.label(), color)
                                         })
+                                        .checked(color == current)
                                         .on_click(
                                             move |_, _, cx| {
                                                 _ = editor.update(cx, |editor, cx| {
-                                                    if let Some(draft) = editor.options.get_mut(ix)
+                                                    if let Some(draft) = editor
+                                                        .options
+                                                        .iter_mut()
+                                                        .find(|d| d.id == id)
                                                     {
                                                         draft.color = color;
                                                         cx.notify();
@@ -316,17 +323,15 @@ impl PropertyEditor {
                     )
                     .child(div().flex_1().child(Input::new(&draft.name)))
                     .child(
-                        Button::new(("option-remove", ix))
+                        Button::new(SharedString::from(format!("option-remove-{remove_id}")))
                             .ghost()
                             .small()
                             .icon(IconName::X)
                             .tooltip("Remove option")
                             .on_click(move |_, _, cx| {
                                 _ = remove_editor.update(cx, |editor, cx| {
-                                    if ix < editor.options.len() {
-                                        editor.options.remove(ix);
-                                        cx.notify();
-                                    }
+                                    editor.options.retain(|draft| draft.id != remove_id);
+                                    cx.notify();
                                 });
                             }),
                     )

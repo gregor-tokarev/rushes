@@ -29,7 +29,7 @@ use videocrm_core::{
 };
 
 use super::colors::{format_color, free_tag_color, run_status_color, upload_status_color};
-use super::elements::{CellButton, Chip, cell_slot, empty_value, muted_icon};
+use super::elements::{CellButton, Chip, cell_slot, empty_value, muted_icon, static_cell};
 use super::format;
 use super::icons::column_icon;
 use super::panel::{CELL_EDITOR_CONTEXT, CellRef, DatabasePanel, TEXT_ENTRY_CONTEXT};
@@ -48,7 +48,10 @@ const MAX_TAG_SUGGESTIONS: usize = 8;
 pub(crate) enum EmptyReason {
     #[default]
     NoVideos,
-    NoMatches,
+    /// The search finds nothing; the view's filters alone may well match.
+    Search,
+    /// The view's filters leave nothing.
+    Filter,
 }
 
 /// What the table shows, prepared by the panel.
@@ -69,7 +72,7 @@ pub(crate) struct TableModel {
 
 impl TableModel {
     fn today(&self) -> NaiveDate {
-        self.now.date_naive()
+        format::local_day(self.now)
     }
 }
 
@@ -129,35 +132,37 @@ impl VideoTable {
                 BuiltinField::Format => self.render_format(video.id, video.format),
                 BuiltinField::PublishDate => self.render_date(cell, video.publish_date, cx),
                 BuiltinField::Tags => self.render_tags(video.id, &video.tags, cx),
-                BuiltinField::Script => {
+                BuiltinField::Script => static_cell(
                     match format::script_summary(row.script_words, row.script_seconds) {
-                        Some(summary) => muted_text(summary, cx).into_any_element(),
-                        None => empty_value(cx).into_any_element(),
-                    }
-                }
-                BuiltinField::Edit => match row.latest_run {
-                    Some(run) => h_flex()
-                        .child(Chip::new(run.label(), run_status_color(run)).dot(true))
+                        Some(summary) => muted_text(summary, cx),
+                        None => empty_value(cx),
+                    },
+                )
+                .into_any_element(),
+                BuiltinField::Edit => static_cell(match row.latest_run {
+                    Some(run) => Chip::new(run.label(), run_status_color(run))
+                        .dot(true)
                         .into_any_element(),
                     None => empty_value(cx).into_any_element(),
-                },
-                BuiltinField::Youtube => match &row.latest_upload {
-                    Some(upload) => h_flex()
-                        .child(
-                            Chip::new(format::upload(upload), upload_status_color(upload))
-                                .dot(true),
-                        )
+                })
+                .into_any_element(),
+                BuiltinField::Youtube => static_cell(match &row.latest_upload {
+                    Some(upload) => Chip::new(format::upload(upload), upload_status_color(upload))
+                        .dot(true)
                         .into_any_element(),
                     None => empty_value(cx).into_any_element(),
-                },
-                BuiltinField::CreatedAt => {
-                    muted_text(format::timestamp(video.created_at, self.model.now), cx)
-                        .into_any_element()
-                }
-                BuiltinField::UpdatedAt => {
-                    muted_text(format::timestamp(video.updated_at, self.model.now), cx)
-                        .into_any_element()
-                }
+                })
+                .into_any_element(),
+                BuiltinField::CreatedAt => static_cell(muted_text(
+                    format::timestamp(video.created_at, self.model.now),
+                    cx,
+                ))
+                .into_any_element(),
+                BuiltinField::UpdatedAt => static_cell(muted_text(
+                    format::timestamp(video.updated_at, self.model.now),
+                    cx,
+                ))
+                .into_any_element(),
             },
             Column::Custom(property) => {
                 let Some(def) = self.model.properties.iter().find(|def| def.id == property) else {
@@ -403,13 +408,8 @@ impl VideoTable {
                     Some(PropertyValue::Url(url)) => url.trim().to_string(),
                     _ => String::new(),
                 };
-                if url.is_empty() {
+                let Some(target) = format::link_target(&url) else {
                     return self.editable_text(cell, url, false, cx);
-                }
-                let target = if url.contains("://") {
-                    url.clone()
-                } else {
-                    format!("https://{url}")
                 };
                 h_flex()
                     .size_full()
@@ -511,25 +511,20 @@ impl VideoTable {
                             .children(options.iter().map(|option| {
                                 let panel = panel.clone();
                                 let option_id = option.id.clone();
-                                h_flex()
-                                    .gap_2()
+                                // The chip is the checkbox's label, so the
+                                // whole option row toggles it.
+                                Checkbox::new(SharedString::from(format!("option-{}", option.id)))
+                                    .accessibility_label(option.name.clone())
+                                    .checked(selected.contains(&option.id))
+                                    .on_click(move |_, _, cx| {
+                                        _ = panel.update(cx, |panel, cx| {
+                                            panel.toggle_multi_option(id, property, &option_id, cx)
+                                        });
+                                    })
                                     .child(
-                                        Checkbox::new(SharedString::from(format!(
-                                            "option-{}",
-                                            option.id
-                                        )))
-                                        .checked(selected.contains(&option.id))
-                                        .on_click(
-                                            move |_, _, cx| {
-                                                _ = panel.update(cx, |panel, cx| {
-                                                    panel.toggle_multi_option(
-                                                        id, property, &option_id, cx,
-                                                    )
-                                                });
-                                            },
-                                        ),
+                                        h_flex()
+                                            .child(Chip::new(option.name.clone(), option.color)),
                                     )
-                                    .child(Chip::new(option.name.clone(), option.color))
                             }))
                             .when(options.is_empty(), |this| {
                                 this.child(muted_text("No options yet", cx))
@@ -734,8 +729,7 @@ impl TableDelegate for VideoTable {
         else {
             return div().into_any_element();
         };
-        let row = row.clone();
-        cell_slot(self.render_cell(&row, column, window, cx)).into_any_element()
+        cell_slot(self.render_cell(row, column, window, cx)).into_any_element()
     }
 
     fn context_menu(
@@ -974,10 +968,22 @@ pub(crate) fn render_empty_state(
                     _ = panel.update(cx, |panel, cx| panel.create_video(None, cx));
                 }),
         ),
-        EmptyReason::NoMatches => (
+        EmptyReason::Search => (
             IconName::SearchX,
             "No videos match",
-            "Try another search or remove some filters.",
+            "Try another search.",
+            Button::new("empty-clear-search")
+                .outline()
+                .small()
+                .label("Clear search")
+                .on_click(move |_, window, cx| {
+                    _ = panel.update(cx, |panel, cx| panel.clear_search(window, cx));
+                }),
+        ),
+        EmptyReason::Filter => (
+            IconName::SearchX,
+            "No videos match",
+            "Remove some filters to see more videos.",
             Button::new("empty-clear-filters")
                 .outline()
                 .small()

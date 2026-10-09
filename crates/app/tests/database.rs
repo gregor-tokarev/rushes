@@ -670,3 +670,30 @@ fn row_keys_do_not_reach_through_an_open_cell_menu(cx: &mut TestAppContext) {
     );
     assert!(db.take_events().is_empty());
 }
+
+#[gpui_kit::test]
+fn clearing_a_search_without_matches_keeps_the_view(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    db.step(cx, |window, cx| {
+        window.click("database-search", cx);
+        window.input("zzz", cx);
+    });
+    assert!(db.shown_rows(cx).is_empty());
+    assert!(
+        db.with_window(cx, |window, _| window
+            .try_find("empty-clear-filters")
+            .is_none()),
+        "a search with no matches offers to clear the search, not the view's filters"
+    );
+
+    db.step(cx, |window, cx| window.click("empty-clear-search", cx));
+    assert_eq!(db.shown_rows(cx), vec![db.tokyo, db.ownership, db.desk]);
+    assert!(db.take_events().is_empty(), "the saved view is untouched");
+    assert!(cx.read(|cx| {
+        db.panel
+            .read(cx)
+            .active_view()
+            .is_some_and(|view| view.filter.hide_archived)
+    }));
+}
