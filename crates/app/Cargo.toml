@@ -9,15 +9,16 @@ publish.workspace = true
 chrono = "0.4"
 futures = "0.3"
 gpui-kit.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "3"
 videocrm-core = { path = "../core" }
 videocrm-pipeline = { path = "../pipeline" }
 videocrm-youtube = { path = "../youtube" }
-ureq = "3"
 
 [dev-dependencies]
 base64 = "0.22"
 gpui-kit = { workspace = true, features = ["test-support"] }
-serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
 url = "2"

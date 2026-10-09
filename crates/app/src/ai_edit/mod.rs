@@ -1,100 +1,28 @@
-//! AI edit pipelines (video-use through a coding agent). Owned by the ai-edit workstream.
+//! AI edit pipelines: video-use driven through a headless coding agent.
+//!
+//! [`PipelineService`] (a global entity) runs and records edits; the views read it:
+//! [`AiEditPanel`] is the "Footage & AI edit" tab of a video, [`PipelinesPage`] lists
+//! every run, [`AiSettings`] is the settings section and [`DoctorChecklist`] shows
+//! what is missing on this machine. Register [`WithAiEditIcons`] around the
+//! application's asset source unless it serves the complete Lucide set.
 
-use gpui_kit::*;
-use videocrm_core::VideoId;
+mod brief;
+mod doctor;
+mod footage;
+mod format;
+mod icons;
+mod panel;
+mod pipelines_page;
+mod run_view;
+mod service;
+mod settings;
+mod timeline;
 
-use crate::state::AppState;
-
-/// App-wide pipeline runner: starts phases on background threads, persists runs
-/// and events, survives navigation, stops agents on quit.
-pub struct PipelineService {
-    state: Entity<AppState>,
-}
-
-struct GlobalPipelineService(Entity<PipelineService>);
-
-impl Global for GlobalPipelineService {}
-
-impl PipelineService {
-    /// Creates the service and registers it globally. Call once at startup, after
-    /// `AppState::set_global`.
-    pub fn init(state: Entity<AppState>, cx: &mut App) {
-        let service = cx.new(|_| PipelineService { state });
-        cx.set_global(GlobalPipelineService(service));
-    }
-
-    pub fn global(cx: &App) -> Entity<PipelineService> {
-        cx.global::<GlobalPipelineService>().0.clone()
-    }
-
-    pub fn state(&self) -> &Entity<AppState> {
-        &self.state
-    }
-}
-
-/// The "Footage & AI edit" tab of a video page.
-pub struct AiEditPanel {
-    video_id: VideoId,
-}
-
-impl AiEditPanel {
-    pub fn new(video_id: VideoId, _window: &mut Window, _cx: &mut Context<Self>) -> Self {
-        Self { video_id }
-    }
-
-    pub fn video_id(&self) -> VideoId {
-        self.video_id
-    }
-}
-
-impl Render for AiEditPanel {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().child("Footage & AI edit")
-    }
-}
-
-/// The Pipelines page: runs across all videos.
-pub struct PipelinesPage;
-
-impl PipelinesPage {
-    pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
-        Self
-    }
-}
-
-impl Render for PipelinesPage {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().child("Pipelines")
-    }
-}
-
-/// AI editing section of the Settings page.
-pub struct AiSettings;
-
-impl AiSettings {
-    pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
-        Self
-    }
-}
-
-impl Render for AiSettings {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().child("AI editing")
-    }
-}
-
-/// Requirement checklist (agent CLI, video-use skill, ffmpeg, ElevenLabs key, Python)
-/// with fix hints. Used by onboarding and settings.
-pub struct DoctorChecklist;
-
-impl DoctorChecklist {
-    pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
-        Self
-    }
-}
-
-impl Render for DoctorChecklist {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().child("Requirements")
-    }
-}
+pub use brief::{COLOR_GRADES, color_grade_label, default_brief, with_preferences};
+pub use doctor::DoctorChecklist;
+pub use icons::{AiEditIcons, WithAiEditIcons};
+pub use panel::AiEditPanel;
+pub use pipelines_page::PipelinesPage;
+pub use service::{INTERRUPTED, LivePhase, PipelineService, RunError, split_failure};
+pub use settings::AiSettings;
+pub use timeline::{LogEvent, PhaseKind, PhaseStarted, TimelineEntry, TimelineItem, ToolOutput, fold_timeline};
