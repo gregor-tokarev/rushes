@@ -83,7 +83,7 @@ impl EventEmitter<YoutubeEvent> for YoutubeService {}
 
 enum SignInStep {
     Opened(String),
-    Finished(Result<(Arc<YoutubeClient>, Account), YoutubeError>),
+    Finished(Box<Result<(Arc<YoutubeClient>, Account), YoutubeError>>),
 }
 
 impl YoutubeService {
@@ -260,7 +260,7 @@ impl YoutubeService {
             }
             SignInStep::Finished(result) => {
                 self.sign_in = None;
-                match result {
+                match *result {
                     Ok((client, account)) => {
                         self.client = Some(client);
                         self.set_connection(Connection::Connected(account), cx);
@@ -375,7 +375,7 @@ fn sign_in(
         store.save(&SavedLogin { credentials: client.credentials(), account: Some(account.clone()) })?;
         Ok((client, account))
     })();
-    let _ = steps.unbounded_send(SignInStep::Finished(result));
+    let _ = steps.unbounded_send(SignInStep::Finished(Box::new(result)));
 }
 
 pub(super) fn new_client(

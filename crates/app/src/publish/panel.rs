@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Local, NaiveTime, TimeDelta, TimeZone as _, Utc};
 use gpui_kit::assets::IconName;
+use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::calendar::Matcher;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState, DateTime as PickerValue};
@@ -657,11 +658,17 @@ impl PublishPanel {
             .video(self.video_id)
             .and_then(|video| video.youtube.as_ref())
             .map(|link| link.url.clone());
-        let open_link = |url: String| {
-            Link::new("open-on-youtube")
-                .href(url)
-                .child(h_flex().gap_1().child("Open on YouTube").child(Icon::new(IconName::ExternalLink).xsmall()))
-        };
+        let open_link =
+            |url: String| {
+                div()
+                    .id("open-on-youtube")
+                    .text_sm()
+                    .child(Link::new("open-on-youtube-link").href(url).child(
+                        h_flex().gap_1().child("Open on YouTube").child(Icon::new(IconName::ExternalLink).xsmall()),
+                    ))
+                    // Links are not observable on their own; tests find the link through this frame.
+                    .test_support()
+            };
 
         let body = match &job {
             Some(job) if service.is_active(job.id) => {
@@ -754,9 +761,7 @@ impl PublishPanel {
                             .flex_wrap()
                             .gap_x_4()
                             .gap_y_2()
-                            .when_some(youtube_url.clone(), |this, url| {
-                                this.child(div().text_sm().child(open_link(url)))
-                            })
+                            .when_some(youtube_url.clone(), |this, url| this.child(open_link(url)))
                             .child(
                                 Button::new("upload-again")
                                     .label("Upload again")
@@ -832,7 +837,7 @@ impl PublishPanel {
                         ))
                     })
                     .child(self.render_upload_button(window, cx))
-                    .when_some(youtube_url, |this, url| this.child(div().text_sm().child(open_link(url))))
+                    .when_some(youtube_url, |this, url| this.child(open_link(url)))
                     .into_any_element()
             }
         };

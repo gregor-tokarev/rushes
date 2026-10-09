@@ -155,10 +155,10 @@ impl UploadsPage {
         let page = cx.weak_entity();
         let menu_job = job.clone();
         let menu_actions: Vec<RowAction> = [
-            Some(RowAction::GoToVideo).filter(|_| has_video),
+            has_video.then_some(RowAction::GoToVideo),
             url.as_ref().map(|_| RowAction::Open),
-            Some(RowAction::Resume).filter(|_| service.is_resumable(job)),
-            Some(RowAction::Cancel).filter(|_| service.is_active(job.id) && !cancelling),
+            service.is_resumable(job).then_some(RowAction::Resume),
+            (service.is_active(job.id) && !cancelling).then_some(RowAction::Cancel),
         ]
         .into_iter()
         .flatten()
