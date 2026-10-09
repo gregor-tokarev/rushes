@@ -50,7 +50,7 @@ limit), `final_cut` / `preview` when those files exist after the phase, and `ren
 ## Agent invocation
 
 ```text
-claude -p <prompt> --output-format stream-json --verbose [--resume <id>] [--model <m>]
+claude -p <prompt> --output-format stream-json --verbose [--resume=<id>] [--model <m>]
        --permission-mode acceptEdits
        --allowedTools=Bash,Read,Write,Edit,Glob,Grep,Skill,Agent,TodoWrite
        --add-dir=<skill dir> [--append-system-prompt=<text>] [--max-turns <n>] [extra args]
@@ -65,10 +65,13 @@ claude -p <prompt> --output-format stream-json --verbose [--resume <id>] [--mode
   `permission_mode` explicitly if you want it.
 - `--add-dir` gets the symlink-resolved skill folder so the agent may read the helpers.
 - The prompt directly follows `-p`, and variadic flags use the `--flag=value` form, so no
-  option can swallow the prompt.
+  option can swallow the prompt. `--resume=<id>` uses it too, so an id can never be read
+  as an option. A blank `RunContext::session_id` starts a fresh session.
 - The agent runs in its own process group. Cancelling sends `SIGTERM` to the group (the
   agent and every ffmpeg/python child), waits `kill_grace` (default 5 s), then `SIGKILL`s
-  whatever is left. On non-Unix platforms only the agent process is killed.
+  whatever is left. The same happens to processes the agent leaves running when it exits,
+  and when `run_phase` unwinds (a panicking event callback). On non-Unix platforms only
+  the agent process is killed.
 
 ### Events
 
@@ -104,9 +107,11 @@ is true when all pass. Tools are looked up on the agent's `PATH` (`config.env` f
 - **Skill**: `SKILL.md` in the configured folder, default `~/.claude/skills/video-use`
   (symlinks resolved; the resolved folder is returned as `Doctor::skill_dir`).
 - **ffmpeg** and **ffprobe** on `PATH`.
-- **ElevenLabs key** for transcription: `ELEVENLABS_API_KEY` in the environment, or a
-  non-empty `ELEVENLABS_API_KEY=` line in `<skill>/.env`. The value is never read out,
-  logged or returned.
+- **ElevenLabs key** for transcription, looked up the way the skill's helpers do: an
+  `ELEVENLABS_API_KEY=` line in `<skill>/.env` wins (an empty one fails the check even
+  when the environment has the key; `export` lines are not understood), otherwise
+  `ELEVENLABS_API_KEY` in the environment. The value is never read out, logged or
+  returned, and `AgentConfig`'s `Debug` output shows only the names of `env` entries.
 - **Python**: the skill's `.venv`, else `uv`, else `python3` (dependencies unverified).
 
 An app started from a desktop launcher (Finder, a `.desktop` file) often gets a minimal
@@ -142,6 +147,7 @@ cargo clippy -p videocrm-pipeline --all-targets
   - `FAKE_AGENT_MODE=fail`: stderr lines, an error result, exit 1;
   - `FAKE_AGENT_DELAY_MS=<ms>`: wait between events in a child `sleep` process;
   - `FAKE_AGENT_IGNORE_TERM=1`: ignore `SIGTERM` (tests the `SIGKILL` fallback);
+  - `FAKE_AGENT_LEAVE_CHILD=1`: leave a `sleep` running after the agent exits;
   - `FAKE_AGENT_PID_FILE=<path>`, `FAKE_AGENT_ARGV_FILE=<path>`: record pids / argv.
 - `tests/pipeline.rs` runs Plan -> Approve -> Feedback and Auto on generated footage
   (ffmpeg `testsrc` + `sine`), checks session continuity and that `final.mp4` is a valid
