@@ -1,7 +1,10 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 
 use crate::config::YoutubeConfig;
@@ -43,15 +46,20 @@ pub struct SavedLogin {
 }
 
 /// JSON file holding the OAuth tokens and account, readable only by the user
-/// (mode 0600 on unix). Writes go through a temp file and a rename.
+/// (mode 0600 on unix). Writes go through a temp file and a rename. Clones share a
+/// lock, so share one store (e.g. with the refresh callback) to keep saves ordered.
 #[derive(Clone, Debug)]
 pub struct CredentialStore {
     path: PathBuf,
+    lock: Arc<Mutex<()>>,
 }
 
 impl CredentialStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            lock: Arc::default(),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -68,15 +76,15 @@ impl CredentialStore {
     }
 
     pub fn save(&self, login: &SavedLogin) -> Result<()> {
-        let json = serde_json::to_vec_pretty(login)?;
-        write_private(&self.path, &json)
-            .map_err(|e| Error::io(format!("writing {}", self.path.display()), e))
+        let _guard = self.locked();
+        self.write(login)
     }
 
     /// Replaces the tokens and keeps the stored account, e.g. after a token refresh.
     pub fn save_credentials(&self, credentials: &Credentials) -> Result<()> {
+        let _guard = self.locked();
         let account = self.load()?.and_then(|login| login.account);
-        self.save(&SavedLogin {
+        self.write(&SavedLogin {
             credentials: credentials.clone(),
             account,
         })
@@ -84,6 +92,7 @@ impl CredentialStore {
 
     /// Signs out locally. Missing file is fine.
     pub fn clear(&self) -> Result<()> {
+        let _guard = self.locked();
         match fs::remove_file(&self.path) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => {
                 Err(Error::io(format!("removing {}", self.path.display()), e))
@@ -91,33 +100,46 @@ impl CredentialStore {
             _ => Ok(()),
         }
     }
+
+    fn locked(&self) -> MutexGuard<'_, ()> {
+        self.lock.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn write(&self, login: &SavedLogin) -> Result<()> {
+        let json = serde_json::to_vec_pretty(login)?;
+        write_private(&self.path, &json)
+            .map_err(|e| Error::io(format!("writing {}", self.path.display()), e))
+    }
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         fs::create_dir_all(dir)?;
     }
+    // A fresh name per write: never reuse a leftover file or share one with another process.
+    let mut suffix = [0u8; 6];
+    getrandom::fill(&mut suffix)?;
     let mut temp_name = path.file_name().unwrap_or_default().to_os_string();
-    temp_name.push(".tmp");
+    temp_name.push(format!(".{}.tmp", URL_SAFE_NO_PAD.encode(suffix)));
     let temp = path.with_file_name(temp_name);
 
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(&temp)?;
-    // A leftover temp file keeps its old mode; tighten it before writing secrets.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    let written = options.open(&temp).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, path)
+    });
+    if written.is_err() {
+        // Best effort: the original error is what matters.
+        let _ = fs::remove_file(&temp);
     }
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    fs::rename(&temp, path)
+    written
 }
 
 #[cfg(test)]
@@ -169,24 +191,41 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn file_is_private() {
+    fn file_is_private_and_no_temp_files_remain() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials.json");
-        // A stale temp file with open permissions must not leak its mode.
-        fs::write(dir.path().join("credentials.json.tmp"), b"").unwrap();
-        fs::set_permissions(
-            dir.path().join("credentials.json.tmp"),
-            fs::Permissions::from_mode(0o644),
-        )
-        .unwrap();
         let store = CredentialStore::new(&path);
         store.save_credentials(&credentials("token")).unwrap();
+        store.save_credentials(&credentials("again")).unwrap();
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn concurrent_saves_leave_a_valid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(dir.path().join("credentials.json"));
+        let writers: Vec<_> = (0..4)
+            .map(|i| {
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    for j in 0..2 {
+                        store
+                            .save_credentials(&credentials(&format!("{i}-{j}")))
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        assert!(store.load().unwrap().is_some());
     }
 
     #[test]
