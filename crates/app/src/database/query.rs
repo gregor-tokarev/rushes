@@ -8,9 +8,8 @@ use std::cmp::Ordering;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use videocrm_core::{
-    BuiltinField, Column, ColumnLayout, DatabaseView, FilterSpec, PropertyDef, PropertyKind,
-    PropertyValue, RunStatus, SortDirection, SortSpec, UploadStatus, VideoFormat, VideoRow,
-    VideoStatus,
+    BuiltinField, Column, ColumnLayout, DatabaseView, FilterSpec, PropertyDef, PropertyKind, PropertyValue, RunStatus,
+    SortDirection, SortSpec, UploadStatus, VideoFormat, VideoRow, VideoStatus, YoutubeState,
 };
 
 /// Indices of the `rows` that match `filter`, in input order.
@@ -19,30 +18,18 @@ use videocrm_core::{
 /// in the title, the hook or one of the tags.
 pub fn apply_filter(rows: &[VideoRow], filter: &FilterSpec) -> Vec<usize> {
     let terms = search_terms(&filter.search);
-    rows.iter()
-        .enumerate()
-        .filter(|(_, row)| matches_filter(row, filter, &terms))
-        .map(|(ix, _)| ix)
-        .collect()
+    rows.iter().enumerate().filter(|(_, row)| matches_filter(row, filter, &terms)).map(|(ix, _)| ix).collect()
 }
 
 /// Reorders `indices` (into `rows`) by `sorts`, applied in order.
 ///
 /// Empty values sort last in both directions. Ties, and views without sorts,
 /// fall back to the manual `position` order.
-pub fn apply_sorts(
-    rows: &[VideoRow],
-    indices: &mut [usize],
-    sorts: &[SortSpec],
-    properties: &[PropertyDef],
-) {
+pub fn apply_sorts(rows: &[VideoRow], indices: &mut [usize], sorts: &[SortSpec], properties: &[PropertyDef]) {
     let mut keyed: Vec<(Vec<SortKey>, usize)> = indices
         .iter()
         .map(|&ix| {
-            let keys = sorts
-                .iter()
-                .map(|sort| sort_key(&rows[ix], sort.column, properties))
-                .collect();
+            let keys = sorts.iter().map(|sort| sort_key(&rows[ix], sort.column, properties)).collect();
             (keys, ix)
         })
         .collect();
@@ -80,17 +67,10 @@ pub fn resolve_columns(view: &DatabaseView, properties: &[PropertyDef]) -> Vec<C
         Column::Custom(id) => properties.iter().any(|property| property.id == *id),
     };
 
-    let title = view
-        .columns
-        .iter()
-        .find(|layout| layout.column == Column::Builtin(BuiltinField::Title))
-        .map_or_else(
-            || column_layout(Column::Builtin(BuiltinField::Title), properties, true),
-            |layout| ColumnLayout {
-                visible: true,
-                ..layout.clone()
-            },
-        );
+    let title = view.columns.iter().find(|layout| layout.column == Column::Builtin(BuiltinField::Title)).map_or_else(
+        || column_layout(Column::Builtin(BuiltinField::Title), properties, true),
+        |layout| ColumnLayout { visible: true, ..layout.clone() },
+    );
 
     let mut columns = vec![title];
     for layout in &view.columns {
@@ -120,10 +100,7 @@ pub fn resolve_columns(view: &DatabaseView, properties: &[PropertyDef]) -> Vec<C
 
 /// The visible subset of [`resolve_columns`], in display order.
 pub fn visible_columns(view: &DatabaseView, properties: &[PropertyDef]) -> Vec<ColumnLayout> {
-    resolve_columns(view, properties)
-        .into_iter()
-        .filter(|layout| layout.visible)
-        .collect()
+    resolve_columns(view, properties).into_iter().filter(|layout| layout.visible).collect()
 }
 
 /// Number of active filter rules, shown as a count on the Filter button.
@@ -160,10 +137,9 @@ pub fn position_between(previous: Option<f64>, next: Option<f64>) -> f64 {
 pub fn column_name(column: Column, properties: &[PropertyDef]) -> Option<String> {
     match column {
         Column::Builtin(field) => Some(field.label().to_string()),
-        Column::Custom(id) => properties
-            .iter()
-            .find(|property| property.id == id)
-            .map(|property| property.name.clone()),
+        Column::Custom(id) => {
+            properties.iter().find(|property| property.id == id).map(|property| property.name.clone())
+        }
     }
 }
 
@@ -182,14 +158,8 @@ pub fn default_width(column: Column, properties: &[PropertyDef]) -> f32 {
             | BuiltinField::UpdatedAt => 140.0,
         },
         Column::Custom(id) => match properties.iter().find(|property| property.id == id) {
-            Some(PropertyDef {
-                kind: PropertyKind::Number,
-                ..
-            }) => 120.0,
-            Some(PropertyDef {
-                kind: PropertyKind::Checkbox,
-                ..
-            }) => 110.0,
+            Some(PropertyDef { kind: PropertyKind::Number, .. }) => 120.0,
+            Some(PropertyDef { kind: PropertyKind::Checkbox, .. }) => 110.0,
             Some(PropertyDef {
                 kind: PropertyKind::MultiSelect { .. } | PropertyKind::Url | PropertyKind::Text,
                 ..
@@ -200,11 +170,7 @@ pub fn default_width(column: Column, properties: &[PropertyDef]) -> f32 {
 }
 
 fn column_layout(column: Column, properties: &[PropertyDef], visible: bool) -> ColumnLayout {
-    ColumnLayout {
-        column,
-        width: default_width(column, properties),
-        visible,
-    }
+    ColumnLayout { column, width: default_width(column, properties), visible }
 }
 
 fn search_terms(search: &str) -> Vec<String> {
@@ -279,11 +245,7 @@ impl SortKey {
 
 fn text_key(text: &str) -> SortKey {
     let text = text.trim();
-    if text.is_empty() {
-        SortKey::Empty
-    } else {
-        SortKey::Text(text.to_lowercase())
-    }
+    if text.is_empty() { SortKey::Empty } else { SortKey::Text(text.to_lowercase()) }
 }
 
 fn sort_key(row: &VideoRow, column: Column, properties: &[PropertyDef]) -> SortKey {
@@ -296,13 +258,15 @@ fn sort_key(row: &VideoRow, column: Column, properties: &[PropertyDef]) -> SortK
             BuiltinField::PublishDate => video.publish_date.map_or(SortKey::Empty, SortKey::Date),
             BuiltinField::Tags => text_key(&video.tags.join(", ")),
             BuiltinField::Script => SortKey::Number(row.script_words as f64),
-            BuiltinField::Edit => row
-                .latest_run
-                .map_or(SortKey::Empty, |run| SortKey::Rank(run_rank(run))),
-            BuiltinField::Youtube => row
-                .latest_upload
-                .as_ref()
-                .map_or(SortKey::Empty, |upload| SortKey::Rank(upload_rank(upload))),
+            // The states the cells show, so sorting follows what is on screen.
+            BuiltinField::Edit => row.edit_status().map_or(SortKey::Empty, |run| SortKey::Rank(run_rank(run))),
+            BuiltinField::Youtube => match row.youtube_state() {
+                Some(YoutubeState::Live(_)) => {
+                    SortKey::Rank(upload_rank(&UploadStatus::Done { video_id: String::new() }))
+                }
+                Some(YoutubeState::Upload(upload)) => SortKey::Rank(upload_rank(upload)),
+                None => SortKey::Empty,
+            },
             BuiltinField::CreatedAt => SortKey::Timestamp(video.created_at),
             BuiltinField::UpdatedAt => SortKey::Timestamp(video.updated_at),
         },
@@ -316,29 +280,21 @@ fn sort_key(row: &VideoRow, column: Column, properties: &[PropertyDef]) -> SortK
 }
 
 fn custom_sort_key(kind: &PropertyKind, value: Option<&PropertyValue>) -> SortKey {
-    let option_rank = |option_id: &str| {
-        kind.options()
-            .iter()
-            .position(|option| option.id == option_id)
-    };
+    let option_rank = |option_id: &str| kind.options().iter().position(|option| option.id == option_id);
     match (kind, value) {
         (PropertyKind::Checkbox, None) => SortKey::Flag(false),
         (_, None) => SortKey::Empty,
-        (PropertyKind::Text, Some(PropertyValue::Text(text)))
-        | (PropertyKind::Url, Some(PropertyValue::Url(text))) => text_key(text),
+        (PropertyKind::Text, Some(PropertyValue::Text(text))) | (PropertyKind::Url, Some(PropertyValue::Url(text))) => {
+            text_key(text)
+        }
         (PropertyKind::Number, Some(PropertyValue::Number(number))) => SortKey::Number(*number),
         (PropertyKind::Select { .. }, Some(PropertyValue::Select(Some(option_id)))) => {
             option_rank(option_id).map_or(SortKey::Empty, SortKey::Rank)
         }
         (PropertyKind::MultiSelect { .. }, Some(PropertyValue::MultiSelect(option_ids))) => {
-            let mut ranks: Vec<usize> =
-                option_ids.iter().filter_map(|id| option_rank(id)).collect();
+            let mut ranks: Vec<usize> = option_ids.iter().filter_map(|id| option_rank(id)).collect();
             ranks.sort_unstable();
-            if ranks.is_empty() {
-                SortKey::Empty
-            } else {
-                SortKey::Ranks(ranks)
-            }
+            if ranks.is_empty() { SortKey::Empty } else { SortKey::Ranks(ranks) }
         }
         (PropertyKind::Date, Some(PropertyValue::Date(Some(date)))) => SortKey::Date(*date),
         (PropertyKind::Checkbox, Some(PropertyValue::Checkbox(checked))) => SortKey::Flag(*checked),
@@ -348,17 +304,11 @@ fn custom_sort_key(kind: &PropertyKind, value: Option<&PropertyValue>) -> SortKe
 }
 
 fn status_rank(status: VideoStatus) -> usize {
-    VideoStatus::ALL
-        .iter()
-        .position(|known| *known == status)
-        .unwrap_or(usize::MAX)
+    VideoStatus::ALL.iter().position(|known| *known == status).unwrap_or(usize::MAX)
 }
 
 fn format_rank(format: VideoFormat) -> usize {
-    VideoFormat::ALL
-        .iter()
-        .position(|known| *known == format)
-        .unwrap_or(usize::MAX)
+    VideoFormat::ALL.iter().position(|known| *known == format).unwrap_or(usize::MAX)
 }
 
 /// Pipeline progression order.
@@ -403,15 +353,13 @@ mod tests {
             script_words: 0,
             script_seconds: 0,
             latest_run: None,
+            has_finished_edit: false,
             latest_upload: None,
         }
     }
 
     fn titles(rows: &[VideoRow], indices: &[usize]) -> Vec<String> {
-        indices
-            .iter()
-            .map(|&ix| rows[ix].video.title.clone())
-            .collect()
+        indices.iter().map(|&ix| rows[ix].video.title.clone()).collect()
     }
 
     fn sorted(rows: &[VideoRow], sorts: &[SortSpec], properties: &[PropertyDef]) -> Vec<String> {
@@ -460,19 +408,12 @@ mod tests {
 
     #[test]
     fn search_matches_title_hook_and_tags_case_insensitively() {
-        let mut rows = vec![
-            row("Rust in 100 seconds", 0.0),
-            row("Desk tour", 1.0),
-            row("Vlog", 2.0),
-        ];
+        let mut rows = vec![row("Rust in 100 seconds", 0.0), row("Desk tour", 1.0), row("Vlog", 2.0)];
         rows[1].video.hook = "My MINIMAL setup".into();
         rows[2].video.tags = vec!["Travel".into(), "Japan".into()];
 
         let search = |query: &str| {
-            let filter = FilterSpec {
-                search: query.into(),
-                ..FilterSpec::default()
-            };
+            let filter = FilterSpec { search: query.into(), ..FilterSpec::default() };
             titles(&rows, &apply_filter(&rows, &filter))
         };
 
@@ -488,43 +429,27 @@ mod tests {
         let mut rows = vec![row("Kyoto vlog", 0.0), row("Kyoto food", 1.0)];
         rows[0].video.tags = vec!["travel".into()];
 
-        let filter = FilterSpec {
-            search: "kyoto TRAVEL".into(),
-            ..FilterSpec::default()
-        };
+        let filter = FilterSpec { search: "kyoto TRAVEL".into(), ..FilterSpec::default() };
         assert_eq!(titles(&rows, &apply_filter(&rows, &filter)), ["Kyoto vlog"]);
     }
 
     #[test]
     fn status_and_format_filters_combine() {
-        let mut rows = vec![
-            row("Idea long", 0.0),
-            row("Editing short", 1.0),
-            row("Editing long", 2.0),
-        ];
+        let mut rows = vec![row("Idea long", 0.0), row("Editing short", 1.0), row("Editing long", 2.0)];
         rows[0].video.status = VideoStatus::Idea;
         rows[1].video.status = VideoStatus::Editing;
         rows[1].video.format = VideoFormat::Short;
         rows[2].video.status = VideoStatus::Editing;
 
-        let filter = FilterSpec {
-            statuses: vec![VideoStatus::Editing],
-            ..FilterSpec::default()
-        };
-        assert_eq!(
-            titles(&rows, &apply_filter(&rows, &filter)),
-            ["Editing short", "Editing long"]
-        );
+        let filter = FilterSpec { statuses: vec![VideoStatus::Editing], ..FilterSpec::default() };
+        assert_eq!(titles(&rows, &apply_filter(&rows, &filter)), ["Editing short", "Editing long"]);
 
         let filter = FilterSpec {
             statuses: vec![VideoStatus::Editing],
             formats: vec![VideoFormat::LongForm],
             ..FilterSpec::default()
         };
-        assert_eq!(
-            titles(&rows, &apply_filter(&rows, &filter)),
-            ["Editing long"]
-        );
+        assert_eq!(titles(&rows, &apply_filter(&rows, &filter)), ["Editing long"]);
     }
 
     #[test]
@@ -532,17 +457,11 @@ mod tests {
         let mut rows = vec![row("Live", 0.0), row("Old", 1.0)];
         rows[1].video.status = VideoStatus::Archived;
 
-        let hide = FilterSpec {
-            hide_archived: true,
-            ..FilterSpec::default()
-        };
+        let hide = FilterSpec { hide_archived: true, ..FilterSpec::default() };
         assert_eq!(titles(&rows, &apply_filter(&rows, &hide)), ["Live"]);
 
-        let archived = FilterSpec {
-            hide_archived: true,
-            statuses: vec![VideoStatus::Archived],
-            ..FilterSpec::default()
-        };
+        let archived =
+            FilterSpec { hide_archived: true, statuses: vec![VideoStatus::Archived], ..FilterSpec::default() };
         assert_eq!(titles(&rows, &apply_filter(&rows, &archived)), ["Old"]);
 
         assert_eq!(apply_filter(&rows, &FilterSpec::default()).len(), 2);
@@ -550,10 +469,7 @@ mod tests {
 
     #[test]
     fn status_columns_follow_the_filter() {
-        let mut filter = FilterSpec {
-            hide_archived: true,
-            ..FilterSpec::default()
-        };
+        let mut filter = FilterSpec { hide_archived: true, ..FilterSpec::default() };
         assert!(status_visible(VideoStatus::Idea, &filter));
         assert!(!status_visible(VideoStatus::Archived, &filter));
 
@@ -576,10 +492,7 @@ mod tests {
         }
         rows[2].video.status = VideoStatus::Idea;
 
-        let sorts = [sort(
-            Column::Builtin(BuiltinField::Status),
-            SortDirection::Ascending,
-        )];
+        let sorts = [sort(Column::Builtin(BuiltinField::Status), SortDirection::Ascending)];
         assert_eq!(sorted(&rows, &sorts, &[]), ["C", "A", "B"]);
     }
 
@@ -587,14 +500,8 @@ mod tests {
     fn title_sorts_case_insensitively_in_both_directions() {
         let rows = vec![row("banana", 0.0), row("Apple", 1.0), row("cherry", 2.0)];
         let title = Column::Builtin(BuiltinField::Title);
-        assert_eq!(
-            sorted(&rows, &[sort(title, SortDirection::Ascending)], &[]),
-            ["Apple", "banana", "cherry"]
-        );
-        assert_eq!(
-            sorted(&rows, &[sort(title, SortDirection::Descending)], &[]),
-            ["cherry", "banana", "Apple"]
-        );
+        assert_eq!(sorted(&rows, &[sort(title, SortDirection::Ascending)], &[]), ["Apple", "banana", "cherry"]);
+        assert_eq!(sorted(&rows, &[sort(title, SortDirection::Descending)], &[]), ["cherry", "banana", "Apple"]);
     }
 
     #[test]
@@ -607,15 +514,9 @@ mod tests {
         rows[1].video.format = VideoFormat::Short;
 
         let status = Column::Builtin(BuiltinField::Status);
-        assert_eq!(
-            sorted(&rows, &[sort(status, SortDirection::Ascending)], &[]),
-            ["Idea", "Editing", "Published"]
-        );
+        assert_eq!(sorted(&rows, &[sort(status, SortDirection::Ascending)], &[]), ["Idea", "Editing", "Published"]);
         let format = Column::Builtin(BuiltinField::Format);
-        assert_eq!(
-            sorted(&rows, &[sort(format, SortDirection::Descending)], &[]),
-            ["Published", "Idea", "Editing"]
-        );
+        assert_eq!(sorted(&rows, &[sort(format, SortDirection::Descending)], &[]), ["Published", "Idea", "Editing"]);
     }
 
     #[test]
@@ -625,41 +526,21 @@ mod tests {
         rows[2].video.publish_date = Some(date(2026, 1, 1));
 
         let column = Column::Builtin(BuiltinField::PublishDate);
-        assert_eq!(
-            sorted(&rows, &[sort(column, SortDirection::Ascending)], &[]),
-            ["January", "March", "None"]
-        );
-        assert_eq!(
-            sorted(&rows, &[sort(column, SortDirection::Descending)], &[]),
-            ["March", "January", "None"]
-        );
+        assert_eq!(sorted(&rows, &[sort(column, SortDirection::Ascending)], &[]), ["January", "March", "None"]);
+        assert_eq!(sorted(&rows, &[sort(column, SortDirection::Descending)], &[]), ["March", "January", "None"]);
     }
 
     #[test]
     fn multi_key_sorts_apply_in_order() {
-        let mut rows = vec![
-            row("b-short", 0.0),
-            row("a-long", 1.0),
-            row("c-long", 2.0),
-            row("a-short", 3.0),
-        ];
+        let mut rows = vec![row("b-short", 0.0), row("a-long", 1.0), row("c-long", 2.0), row("a-short", 3.0)];
         rows[0].video.format = VideoFormat::Short;
         rows[3].video.format = VideoFormat::Short;
 
         let sorts = [
-            sort(
-                Column::Builtin(BuiltinField::Format),
-                SortDirection::Descending,
-            ),
-            sort(
-                Column::Builtin(BuiltinField::Title),
-                SortDirection::Ascending,
-            ),
+            sort(Column::Builtin(BuiltinField::Format), SortDirection::Descending),
+            sort(Column::Builtin(BuiltinField::Title), SortDirection::Ascending),
         ];
-        assert_eq!(
-            sorted(&rows, &sorts, &[]),
-            ["a-short", "b-short", "a-long", "c-long"]
-        );
+        assert_eq!(sorted(&rows, &sorts, &[]), ["a-short", "b-short", "a-long", "c-long"]);
     }
 
     #[test]
@@ -667,29 +548,18 @@ mod tests {
         let mut rows = vec![row("none", 0.0), row("done", 1.0), row("planning", 2.0)];
         rows[1].latest_run = Some(RunStatus::Succeeded);
         rows[2].latest_run = Some(RunStatus::Planning);
-        rows[0].latest_upload = Some(UploadStatus::Done {
-            video_id: "x".into(),
-        });
+        rows[0].latest_upload = Some(UploadStatus::Done { video_id: "x".into() });
         rows[1].latest_upload = Some(UploadStatus::Uploading { sent: 1, total: 2 });
         rows[0].script_words = 900;
         rows[1].script_words = 10;
         rows[2].script_words = 400;
 
         let edit = Column::Builtin(BuiltinField::Edit);
-        assert_eq!(
-            sorted(&rows, &[sort(edit, SortDirection::Descending)], &[]),
-            ["done", "planning", "none"]
-        );
+        assert_eq!(sorted(&rows, &[sort(edit, SortDirection::Descending)], &[]), ["done", "planning", "none"]);
         let youtube = Column::Builtin(BuiltinField::Youtube);
-        assert_eq!(
-            sorted(&rows, &[sort(youtube, SortDirection::Ascending)], &[]),
-            ["done", "none", "planning"]
-        );
+        assert_eq!(sorted(&rows, &[sort(youtube, SortDirection::Ascending)], &[]), ["done", "none", "planning"]);
         let script = Column::Builtin(BuiltinField::Script);
-        assert_eq!(
-            sorted(&rows, &[sort(script, SortDirection::Descending)], &[]),
-            ["none", "planning", "done"]
-        );
+        assert_eq!(sorted(&rows, &[sort(script, SortDirection::Descending)], &[]), ["none", "planning", "done"]);
     }
 
     #[test]
@@ -701,36 +571,19 @@ mod tests {
         rows[2].video.created_at = Utc.with_ymd_and_hms(2025, 5, 1, 0, 0, 0).unwrap();
 
         let tags = Column::Builtin(BuiltinField::Tags);
-        assert_eq!(
-            sorted(&rows, &[sort(tags, SortDirection::Ascending)], &[]),
-            ["alpha", "zeta", "untagged"]
-        );
+        assert_eq!(sorted(&rows, &[sort(tags, SortDirection::Ascending)], &[]), ["alpha", "zeta", "untagged"]);
         let updated = Column::Builtin(BuiltinField::UpdatedAt);
-        assert_eq!(
-            sorted(&rows, &[sort(updated, SortDirection::Descending)], &[])[0],
-            "zeta"
-        );
+        assert_eq!(sorted(&rows, &[sort(updated, SortDirection::Descending)], &[])[0], "zeta");
         let created = Column::Builtin(BuiltinField::CreatedAt);
-        assert_eq!(
-            sorted(&rows, &[sort(created, SortDirection::Ascending)], &[])[0],
-            "alpha"
-        );
+        assert_eq!(sorted(&rows, &[sort(created, SortDirection::Ascending)], &[])[0], "alpha");
     }
 
     #[test]
     fn custom_select_sorts_by_option_order() {
         let property = select_property(&["High", "Medium", "Low"]);
-        let mut rows = vec![
-            row("low", 0.0),
-            row("unset", 1.0),
-            row("high", 2.0),
-            row("medium", 3.0),
-        ];
+        let mut rows = vec![row("low", 0.0), row("unset", 1.0), row("high", 2.0), row("medium", 3.0)];
         let set = |row: &mut VideoRow, option: Option<&str>| {
-            row.video.properties.insert(
-                property.id,
-                PropertyValue::Select(option.map(str::to_string)),
-            );
+            row.video.properties.insert(property.id, PropertyValue::Select(option.map(str::to_string)));
         };
         set(&mut rows[0], Some("low"));
         set(&mut rows[1], None);
@@ -740,91 +593,38 @@ mod tests {
         let column = Column::Custom(property.id);
         let properties = [property.clone()];
         assert_eq!(
-            sorted(
-                &rows,
-                &[sort(column, SortDirection::Ascending)],
-                &properties
-            ),
+            sorted(&rows, &[sort(column, SortDirection::Ascending)], &properties),
             ["high", "medium", "low", "unset"]
         );
         assert_eq!(
-            sorted(
-                &rows,
-                &[sort(column, SortDirection::Descending)],
-                &properties
-            ),
+            sorted(&rows, &[sort(column, SortDirection::Descending)], &properties),
             ["low", "medium", "high", "unset"]
         );
     }
 
     #[test]
     fn custom_scalar_kinds_sort() {
-        let number = PropertyDef {
-            id: PropertyId::new(),
-            name: "Budget".into(),
-            kind: PropertyKind::Number,
-            position: 0,
-        };
-        let done = PropertyDef {
-            id: PropertyId::new(),
-            name: "Sponsored".into(),
-            kind: PropertyKind::Checkbox,
-            position: 1,
-        };
-        let shoot = PropertyDef {
-            id: PropertyId::new(),
-            name: "Shoot day".into(),
-            kind: PropertyKind::Date,
-            position: 2,
-        };
-        let note = PropertyDef {
-            id: PropertyId::new(),
-            name: "Note".into(),
-            kind: PropertyKind::Text,
-            position: 3,
-        };
+        let number =
+            PropertyDef { id: PropertyId::new(), name: "Budget".into(), kind: PropertyKind::Number, position: 0 };
+        let done =
+            PropertyDef { id: PropertyId::new(), name: "Sponsored".into(), kind: PropertyKind::Checkbox, position: 1 };
+        let shoot =
+            PropertyDef { id: PropertyId::new(), name: "Shoot day".into(), kind: PropertyKind::Date, position: 2 };
+        let note = PropertyDef { id: PropertyId::new(), name: "Note".into(), kind: PropertyKind::Text, position: 3 };
         let properties = [number.clone(), done.clone(), shoot.clone(), note.clone()];
 
         let mut rows = vec![row("a", 0.0), row("b", 1.0), row("c", 2.0)];
-        rows[0]
-            .video
-            .properties
-            .insert(number.id, PropertyValue::Number(250.0));
-        rows[1]
-            .video
-            .properties
-            .insert(number.id, PropertyValue::Number(-5.0));
-        rows[1]
-            .video
-            .properties
-            .insert(done.id, PropertyValue::Checkbox(true));
-        rows[2]
-            .video
-            .properties
-            .insert(shoot.id, PropertyValue::Date(Some(date(2026, 2, 2))));
-        rows[1]
-            .video
-            .properties
-            .insert(shoot.id, PropertyValue::Date(None));
-        rows[0]
-            .video
-            .properties
-            .insert(note.id, PropertyValue::Text("zebra".into()));
-        rows[2]
-            .video
-            .properties
-            .insert(note.id, PropertyValue::Text("Ant".into()));
-        rows[1]
-            .video
-            .properties
-            .insert(note.id, PropertyValue::Text(String::new()));
+        rows[0].video.properties.insert(number.id, PropertyValue::Number(250.0));
+        rows[1].video.properties.insert(number.id, PropertyValue::Number(-5.0));
+        rows[1].video.properties.insert(done.id, PropertyValue::Checkbox(true));
+        rows[2].video.properties.insert(shoot.id, PropertyValue::Date(Some(date(2026, 2, 2))));
+        rows[1].video.properties.insert(shoot.id, PropertyValue::Date(None));
+        rows[0].video.properties.insert(note.id, PropertyValue::Text("zebra".into()));
+        rows[2].video.properties.insert(note.id, PropertyValue::Text("Ant".into()));
+        rows[1].video.properties.insert(note.id, PropertyValue::Text(String::new()));
 
         let by = |property: &PropertyDef, direction| {
-            sorted(
-                &rows,
-                &[sort(Column::Custom(property.id), direction)],
-                &properties,
-            )
+            sorted(&rows, &[sort(Column::Custom(property.id), direction)], &properties)
         };
         assert_eq!(by(&number, SortDirection::Ascending), ["b", "a", "c"]);
         assert_eq!(by(&done, SortDirection::Descending), ["b", "a", "c"]);
@@ -835,27 +635,15 @@ mod tests {
     #[test]
     fn multi_select_sorts_by_its_best_option() {
         let mut property = select_property(&["Gear", "Travel", "Food"]);
-        property.kind = PropertyKind::MultiSelect {
-            options: property.kind.options().to_vec(),
-        };
+        property.kind = PropertyKind::MultiSelect { options: property.kind.options().to_vec() };
         let properties = [property.clone()];
 
         let mut rows = vec![row("food", 0.0), row("none", 1.0), row("travel+gear", 2.0)];
-        rows[0]
-            .video
-            .properties
-            .insert(property.id, PropertyValue::MultiSelect(vec!["food".into()]));
-        rows[2].video.properties.insert(
-            property.id,
-            PropertyValue::MultiSelect(vec!["travel".into(), "gear".into()]),
-        );
+        rows[0].video.properties.insert(property.id, PropertyValue::MultiSelect(vec!["food".into()]));
+        rows[2].video.properties.insert(property.id, PropertyValue::MultiSelect(vec!["travel".into(), "gear".into()]));
 
         assert_eq!(
-            sorted(
-                &rows,
-                &[sort(Column::Custom(property.id), SortDirection::Ascending)],
-                &properties
-            ),
+            sorted(&rows, &[sort(Column::Custom(property.id), SortDirection::Ascending)], &properties),
             ["travel+gear", "food", "none"]
         );
     }
@@ -866,10 +654,7 @@ mod tests {
         rows[1].video.status = VideoStatus::Archived;
         let mut view = view(Vec::new());
         view.filter.hide_archived = true;
-        view.sorts = vec![sort(
-            Column::Builtin(BuiltinField::Title),
-            SortDirection::Ascending,
-        )];
+        view.sorts = vec![sort(Column::Builtin(BuiltinField::Title), SortDirection::Ascending)];
 
         assert_eq!(titles(&rows, &view_rows(&rows, &view, &[])), ["a", "b"]);
     }
@@ -883,36 +668,12 @@ mod tests {
         let properties = [kept.clone(), extra.clone()];
 
         let view = view(vec![
-            ColumnLayout {
-                column: Column::Builtin(BuiltinField::Status),
-                width: 99.0,
-                visible: true,
-            },
-            ColumnLayout {
-                column: Column::Custom(deleted),
-                width: 120.0,
-                visible: true,
-            },
-            ColumnLayout {
-                column: Column::Custom(kept.id),
-                width: 160.0,
-                visible: true,
-            },
-            ColumnLayout {
-                column: Column::Builtin(BuiltinField::Title),
-                width: 320.0,
-                visible: false,
-            },
-            ColumnLayout {
-                column: Column::Builtin(BuiltinField::Status),
-                width: 10.0,
-                visible: false,
-            },
-            ColumnLayout {
-                column: Column::Builtin(BuiltinField::Tags),
-                width: 200.0,
-                visible: false,
-            },
+            ColumnLayout { column: Column::Builtin(BuiltinField::Status), width: 99.0, visible: true },
+            ColumnLayout { column: Column::Custom(deleted), width: 120.0, visible: true },
+            ColumnLayout { column: Column::Custom(kept.id), width: 160.0, visible: true },
+            ColumnLayout { column: Column::Builtin(BuiltinField::Title), width: 320.0, visible: false },
+            ColumnLayout { column: Column::Builtin(BuiltinField::Status), width: 10.0, visible: false },
+            ColumnLayout { column: Column::Builtin(BuiltinField::Tags), width: 200.0, visible: false },
         ]);
 
         let columns = resolve_columns(&view, &properties);
@@ -932,24 +693,12 @@ mod tests {
         assert_eq!(columns[1].width, 99.0, "the first duplicate wins");
         assert!(!order.contains(&Column::Custom(deleted)));
 
-        let extra_layout = columns
-            .iter()
-            .find(|layout| layout.column == Column::Custom(extra.id))
-            .unwrap();
-        assert!(
-            !extra_layout.visible,
-            "unknown custom properties start hidden"
-        );
-        let format = columns
-            .iter()
-            .find(|layout| layout.column == Column::Builtin(BuiltinField::Format))
-            .unwrap();
+        let extra_layout = columns.iter().find(|layout| layout.column == Column::Custom(extra.id)).unwrap();
+        assert!(!extra_layout.visible, "unknown custom properties start hidden");
+        let format = columns.iter().find(|layout| layout.column == Column::Builtin(BuiltinField::Format)).unwrap();
         assert!(format.visible, "unknown builtin fields start visible");
 
-        let visible: Vec<Column> = visible_columns(&view, &properties)
-            .iter()
-            .map(|l| l.column)
-            .collect();
+        let visible: Vec<Column> = visible_columns(&view, &properties).iter().map(|l| l.column).collect();
         assert!(!visible.contains(&Column::Builtin(BuiltinField::Tags)));
         assert!(!visible.contains(&Column::Custom(extra.id)));
         assert_eq!(visible[0], Column::Builtin(BuiltinField::Title));

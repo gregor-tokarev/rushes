@@ -3,12 +3,13 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::tag::Tag;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, Selectable, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Div, ElementId, InteractiveElement, Interactivity, IntoElement, ParentElement,
-    RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement, StyleRefinement, Styled,
-    TestSupportExt as _, Window, div,
+    AnyElement, App, Div, ElementId, InteractiveElement, Interactivity, IntoElement, ParentElement, RenderOnce, Role,
+    SharedString, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, TestSupportExt as _, Window, div,
+    rems,
 };
 use videocrm_core::TagColor;
 
@@ -24,11 +25,7 @@ pub struct Chip {
 
 impl Chip {
     pub fn new(label: impl Into<SharedString>, color: TagColor) -> Self {
-        Self {
-            label: label.into(),
-            color,
-            dot: false,
-        }
+        Self { label: label.into(), color, dot: false }
     }
 
     /// Lead the label with a dot in the chip's color, the way workflow
@@ -49,9 +46,7 @@ impl RenderOnce for Chip {
             .gap_1()
             .flex_shrink_0()
             .min_w_0()
-            .when(self.dot, |this| {
-                this.child(div().size_1p5().rounded_full().bg(colors.dot))
-            })
+            .when(self.dot, |this| this.child(div().size_1p5().rounded_full().bg(colors.dot)))
             .child(div().min_w_0().truncate().child(self.label))
     }
 }
@@ -69,10 +64,7 @@ pub struct CellButton {
 
 impl CellButton {
     pub fn new(id: impl Into<ElementId>) -> Self {
-        Self {
-            base: div().id(id),
-            open: false,
-        }
+        Self { base: div().id(id), open: false }
     }
 }
 
@@ -136,11 +128,7 @@ impl RenderOnce for CellButton {
 /// and the [`CellButton`] inside it fills the cell. Content that should keep
 /// its natural width, such as a lone [`Chip`], goes in an `h_flex` first.
 pub fn cell_slot(content: impl IntoElement) -> Div {
-    v_flex()
-        .size_full()
-        .min_w_0()
-        .justify_center()
-        .child(content)
+    v_flex().size_full().min_w_0().justify_center().child(content)
 }
 
 /// Read-only cell content, such as script stats or pipeline chips.
@@ -150,6 +138,34 @@ pub fn cell_slot(content: impl IntoElement) -> Div {
 /// editable ones and with the column header.
 pub fn static_cell(content: impl IntoElement) -> Div {
     h_flex().min_w_0().px_1().child(content)
+}
+
+/// One line of chips in a table cell. Chips that do not fit wrap onto lines
+/// the cell clips, so they are hidden whole instead of cut mid-word; a lone
+/// chip wider than the cell ends in an ellipsis. The cell's popover lists
+/// every value.
+pub fn chip_line(chips: impl IntoIterator<Item = AnyElement>) -> Div {
+    h_flex()
+        .flex_1()
+        .min_w_0()
+        .h(rems(1.25))
+        .flex_wrap()
+        .gap_1()
+        .overflow_hidden()
+        .children(chips.into_iter().map(|chip| div().min_w_0().child(chip)))
+}
+
+/// A muted icon whose tooltip explains a newer attempt the cell does not show,
+/// such as a failed upload of a video that is already on YouTube.
+pub fn attempt_hint(id: ElementId, icon: IconName, tooltip: SharedString, cx: &App) -> impl IntoElement {
+    div()
+        .id(id)
+        .test_support()
+        .flex_shrink_0()
+        .role(Role::Image)
+        .aria_label(tooltip.clone())
+        .child(muted_icon(icon, cx))
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
 }
 
 /// A small count on a toolbar trigger, e.g. the number of active filters.
@@ -168,14 +184,10 @@ pub fn count_badge(count: usize, cx: &App) -> Div {
 
 /// Muted placeholder for an empty cell value.
 pub fn empty_value(cx: &App) -> Div {
-    div()
-        .text_color(cx.theme().muted_foreground.opacity(0.6))
-        .child("—")
+    div().text_color(cx.theme().muted_foreground.opacity(0.6)).child("—")
 }
 
 /// A small icon in the muted foreground, for labels and metadata.
 pub fn muted_icon(icon: IconName, cx: &App) -> Icon {
-    Icon::new(icon)
-        .xsmall()
-        .text_color(cx.theme().muted_foreground)
+    Icon::new(icon).xsmall().text_color(cx.theme().muted_foreground)
 }

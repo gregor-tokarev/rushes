@@ -19,17 +19,18 @@ use gpui_kit::component::table::{Column as TableColumn, TableDelegate, TableStat
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight,
-    InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, WeakEntity, Window, div, px,
+    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight, InteractiveElement as _,
+    IntoElement, ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
+    TestSupportExt as _, WeakEntity, Window, div, px,
 };
+use videocrm_core::input::normalize_link;
 use videocrm_core::{
-    BuiltinField, Column, ColumnLayout, PropertyDef, PropertyKind, PropertyValue, SortDirection,
-    SortSpec, VideoFormat, VideoId, VideoRow, VideoStatus,
+    BuiltinField, Column, ColumnLayout, PropertyDef, PropertyKind, PropertyValue, RunStatus, SortDirection, SortSpec,
+    UploadStatus, VideoFormat, VideoId, VideoRow, VideoStatus, YoutubeState,
 };
 
-use super::colors::{format_color, free_tag_color, run_status_color, upload_status_color};
-use super::elements::{CellButton, Chip, cell_slot, empty_value, muted_icon, static_cell};
+use super::colors::{format_color, free_tag_color, run_status_color, youtube_color};
+use super::elements::{CellButton, Chip, attempt_hint, cell_slot, chip_line, empty_value, muted_icon, static_cell};
 use super::format;
 use super::icons::column_icon;
 use super::panel::{CELL_EDITOR_CONTEXT, CellRef, DatabasePanel, TEXT_ENTRY_CONTEXT};
@@ -92,11 +93,7 @@ pub(crate) struct VideoTable {
 
 impl VideoTable {
     pub fn new(panel: WeakEntity<DatabasePanel>, editors: CellEditors) -> Self {
-        Self {
-            panel,
-            editors,
-            model: TableModel::default(),
-        }
+        Self { panel, editors, model: TableModel::default() }
     }
 
     pub fn set_model(&mut self, model: TableModel) {
@@ -109,17 +106,8 @@ impl VideoTable {
         self.model.columns.get(col_ix).map(|layout| layout.column)
     }
 
-    fn render_cell(
-        &self,
-        row: &VideoRow,
-        column: Column,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> AnyElement {
-        let cell = CellRef {
-            video: row.video.id,
-            column,
-        };
+    fn render_cell(&self, row: &VideoRow, column: Column, window: &mut Window, cx: &mut App) -> AnyElement {
+        let cell = CellRef { video: row.video.id, column };
         if self.model.editing == Some(cell) {
             return self.render_inline_editor(cell, window, cx);
         }
@@ -132,37 +120,21 @@ impl VideoTable {
                 BuiltinField::Format => self.render_format(video.id, video.format),
                 BuiltinField::PublishDate => self.render_date(cell, video.publish_date, cx),
                 BuiltinField::Tags => self.render_tags(video.id, &video.tags, cx),
-                BuiltinField::Script => static_cell(
-                    match format::script_summary(row.script_words, row.script_seconds) {
+                BuiltinField::Script => {
+                    static_cell(match format::script_summary(row.script_words, row.script_seconds) {
                         Some(summary) => muted_text(summary, cx),
                         None => empty_value(cx),
-                    },
-                )
-                .into_any_element(),
-                BuiltinField::Edit => static_cell(match row.latest_run {
-                    Some(run) => Chip::new(run.label(), run_status_color(run))
-                        .dot(true)
-                        .into_any_element(),
-                    None => empty_value(cx).into_any_element(),
-                })
-                .into_any_element(),
-                BuiltinField::Youtube => static_cell(match &row.latest_upload {
-                    Some(upload) => Chip::new(format::upload(upload), upload_status_color(upload))
-                        .dot(true)
-                        .into_any_element(),
-                    None => empty_value(cx).into_any_element(),
-                })
-                .into_any_element(),
-                BuiltinField::CreatedAt => static_cell(muted_text(
-                    format::timestamp(video.created_at, self.model.now),
-                    cx,
-                ))
-                .into_any_element(),
-                BuiltinField::UpdatedAt => static_cell(muted_text(
-                    format::timestamp(video.updated_at, self.model.now),
-                    cx,
-                ))
-                .into_any_element(),
+                    })
+                    .into_any_element()
+                }
+                BuiltinField::Edit => self.render_edit(row, cx),
+                BuiltinField::Youtube => self.render_youtube(row, cx),
+                BuiltinField::CreatedAt => {
+                    static_cell(muted_text(format::timestamp(video.created_at, self.model.now), cx)).into_any_element()
+                }
+                BuiltinField::UpdatedAt => {
+                    static_cell(muted_text(format::timestamp(video.updated_at, self.model.now), cx)).into_any_element()
+                }
             },
             Column::Custom(property) => {
                 let Some(def) = self.model.properties.iter().find(|def| def.id == property) else {
@@ -176,14 +148,15 @@ impl VideoTable {
     fn render_title(&self, row: &VideoRow, cx: &mut App) -> AnyElement {
         let video = &row.video;
         let id = video.id;
-        // The title text opens the page on the first click and keeps the
-        // second one of a double-click from also renaming the video.
-        let open = {
+        // A click on the title text opens the page once a double-click can no
+        // longer follow; a double-click anywhere in the cell renames instead.
+        let open_soon = {
             let panel = self.panel.clone();
             move |event: &ClickEvent, _: &mut Window, cx: &mut App| {
-                cx.stop_propagation();
+                // The second click of a double-click goes on to the cell.
                 if event.click_count() == 1 {
-                    _ = panel.update(cx, |panel, cx| panel.open_video(id, cx));
+                    cx.stop_propagation();
+                    _ = panel.update(cx, |panel, cx| panel.open_video_after_click(id, cx));
                 }
             }
         };
@@ -191,18 +164,22 @@ impl VideoTable {
             let panel = self.panel.clone();
             move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
                 if event.click_count() == 2 {
-                    let cell = CellRef {
-                        video: id,
-                        column: Column::Builtin(BuiltinField::Title),
-                    };
+                    let cell = CellRef { video: id, column: Column::Builtin(BuiltinField::Title) };
                     _ = panel.update(cx, |panel, cx| panel.start_editing(cell, window, cx));
                 }
             }
         };
+        let open = {
+            let panel = self.panel.clone();
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                cx.stop_propagation();
+                _ = panel.update(cx, |panel, cx| panel.open_video(id, cx));
+            }
+        };
         let title = video.title.trim();
 
-        // The Open button overlays the end of the title instead of taking
-        // room from it, the way Notion shows it on hover.
+        // The Open button overlays the end of the title on an opaque surface
+        // instead of taking room from it, the way Notion shows it on hover.
         h_flex()
             .id(element_id("title", id))
             .group("video-title")
@@ -220,31 +197,105 @@ impl VideoTable {
                     .truncate()
                     .font_weight(FontWeight::MEDIUM)
                     .cursor_pointer()
-                    .hover(|this| this.underline())
                     .map(|this| {
                         if title.is_empty() {
-                            this.text_color(cx.theme().muted_foreground)
-                                .child("Untitled")
+                            this.text_color(cx.theme().muted_foreground).child("Untitled")
                         } else {
                             this.child(title.to_string())
                         }
                     })
-                    .on_click(open.clone()),
+                    .on_click(open_soon),
             )
             .child(
-                Button::new(element_id("open", id))
-                    .xsmall()
-                    .outline()
-                    .icon(IconName::PanelRightOpen)
-                    .label("Open")
+                div()
                     .absolute()
                     .right_0()
                     .top_0p5()
+                    .pl_1()
+                    .rounded(cx.theme().radius)
+                    .bg(cx.theme().background)
                     .invisible()
                     .group_hover("video-title", |this| this.visible())
-                    .on_click(move |event, window, cx| open(event, window, cx)),
+                    .child(
+                        Button::new(element_id("open", id))
+                            .xsmall()
+                            .outline()
+                            .icon(IconName::PanelRightOpen)
+                            .label("Open")
+                            .on_click(open),
+                    ),
             )
             .into_any_element()
+    }
+
+    /// The AI edit state: a finished cut stays "Done" when a later attempt
+    /// failed or was cancelled; that attempt is a hint beside it.
+    fn render_edit(&self, row: &VideoRow, cx: &mut App) -> AnyElement {
+        let Some(status) = row.edit_status() else {
+            return static_cell(empty_value(cx)).into_any_element();
+        };
+        static_cell(
+            h_flex()
+                .id(element_id("edit", row.video.id))
+                .test_support()
+                .aria_label(status.label())
+                .gap_1()
+                .min_w_0()
+                .child(Chip::new(status.label(), run_status_color(status)).dot(true))
+                .when_some(row.newer_edit_attempt(), |this, attempt| {
+                    this.child(attempt_hint(
+                        element_id("edit-attempt", row.video.id),
+                        attempt_icon(attempt == RunStatus::Failed),
+                        format!("Latest edit: {}", attempt.label()).into(),
+                        cx,
+                    ))
+                }),
+        )
+        .into_any_element()
+    }
+
+    /// Where the video is on YouTube, with a button to open it there; before
+    /// that, the latest upload attempt. A newer attempt for a video that is
+    /// already on YouTube is a hint beside it.
+    fn render_youtube(&self, row: &VideoRow, cx: &mut App) -> AnyElement {
+        let Some(state) = row.youtube_state() else {
+            return static_cell(empty_value(cx)).into_any_element();
+        };
+        let id = row.video.id;
+        let scheduled = format::is_scheduled(row.video.publish.publish_at, self.model.now);
+        let link = match state {
+            YoutubeState::Live(link) => normalize_link(&link.url),
+            YoutubeState::Upload(_) => None,
+        };
+        let label = format::youtube(state, scheduled);
+        static_cell(
+            h_flex()
+                .id(element_id("youtube", id))
+                .test_support()
+                .aria_label(label.clone())
+                .gap_1()
+                .min_w_0()
+                .child(Chip::new(label, youtube_color(state, scheduled)).dot(true))
+                .when_some(row.newer_upload_attempt(), |this, attempt| {
+                    this.child(attempt_hint(
+                        element_id("youtube-attempt", id),
+                        attempt_icon(matches!(attempt, UploadStatus::Failed { .. })),
+                        format!("Latest upload: {}", format::upload(attempt)).into(),
+                        cx,
+                    ))
+                })
+                .when_some(link, |this, url| {
+                    this.child(
+                        Button::new(element_id("open-youtube", id))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::ExternalLink)
+                            .tooltip("Open on YouTube")
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    )
+                }),
+        )
+        .into_any_element()
     }
 
     fn render_status(&self, id: VideoId, current: VideoStatus) -> AnyElement {
@@ -256,13 +307,11 @@ impl VideoTable {
                 VideoStatus::ALL.into_iter().fold(menu, |menu, status| {
                     let panel = panel.clone();
                     menu.item(
-                        PopupMenuItem::element(move |_, _| {
-                            Chip::new(status.label(), status.color()).dot(true)
-                        })
-                        .checked(status == current)
-                        .on_click(move |_, _, cx| {
-                            _ = panel.update(cx, |panel, cx| panel.set_status(id, status, cx));
-                        }),
+                        PopupMenuItem::element(move |_, _| Chip::new(status.label(), status.color()).dot(true))
+                            .checked(status == current)
+                            .on_click(move |_, _, cx| {
+                                _ = panel.update(cx, |panel, cx| panel.set_status(id, status, cx));
+                            }),
                     )
                 })
             })
@@ -278,15 +327,12 @@ impl VideoTable {
                 VideoFormat::ALL.into_iter().fold(menu, |menu, format| {
                     let panel = panel.clone();
                     menu.item(
-                        PopupMenuItem::element(move |_, _| {
-                            Chip::new(format.label(), format_color(format))
-                        })
-                        .checked(format == current)
-                        .on_click(move |_, _, cx| {
-                            _ = panel.update(cx, |panel, cx| {
-                                panel.update_video(id, |video| video.format = format, cx)
-                            });
-                        }),
+                        PopupMenuItem::element(move |_, _| Chip::new(format.label(), format_color(format)))
+                            .checked(format == current)
+                            .on_click(move |_, _, cx| {
+                                _ = panel
+                                    .update(cx, |panel, cx| panel.update_video(id, |video| video.format = format, cx));
+                            }),
                     )
                 })
             })
@@ -294,15 +340,12 @@ impl VideoTable {
     }
 
     fn render_date(&self, cell: CellRef, value: Option<NaiveDate>, cx: &mut App) -> AnyElement {
-        let trigger = CellButton::new(element_id(
-            &format!("date-{}", column_key(cell.column)),
-            cell.video,
-        ))
-        .mx_neg_1()
-        .child(match value {
-            Some(date) => div().child(format::date(date, self.model.today())),
-            None => empty_value(cx),
-        });
+        let trigger = CellButton::new(element_id(&format!("date-{}", column_key(cell.column)), cell.video))
+            .mx_neg_1()
+            .child(match value {
+                Some(date) => div().child(format::date(date, self.model.today())),
+                None => empty_value(cx),
+            });
 
         let calendar = self.editors.calendar.clone();
         let clear = self.panel.clone();
@@ -314,49 +357,35 @@ impl VideoTable {
             }
         };
 
-        Popover::new(element_id(
-            &format!("date-popover-{}", column_key(cell.column)),
-            cell.video,
-        ))
-        .open(self.model.date_target == Some(cell))
-        .on_open_change(on_open_change)
-        .trigger(trigger)
-        .content(move |_, _, _| {
-            let clear = clear.clone();
-            v_flex()
-                .gap_2()
-                .child(Calendar::new(&calendar).small())
-                .when(value.is_some(), |this| {
+        Popover::new(element_id(&format!("date-popover-{}", column_key(cell.column)), cell.video))
+            .open(self.model.date_target == Some(cell))
+            .on_open_change(on_open_change)
+            .trigger(trigger)
+            .content(move |_, _, _| {
+                let clear = clear.clone();
+                v_flex().gap_2().child(Calendar::new(&calendar).small()).when(value.is_some(), |this| {
                     this.child(
-                        Button::new("clear-date")
-                            .ghost()
-                            .small()
-                            .icon(IconName::X)
-                            .label("Clear date")
-                            .on_click(move |_, window, cx| {
-                                _ = clear
-                                    .update(cx, |panel, cx| panel.set_date(cell, None, window, cx));
-                            }),
+                        Button::new("clear-date").ghost().small().icon(IconName::X).label("Clear date").on_click(
+                            move |_, window, cx| {
+                                _ = clear.update(cx, |panel, cx| panel.set_date(cell, None, window, cx));
+                            },
+                        ),
                     )
                 })
-        })
-        .into_any_element()
+            })
+            .into_any_element()
     }
 
     fn render_tags(&self, id: VideoId, tags: &[String], cx: &mut App) -> AnyElement {
-        let trigger = CellButton::new(element_id("tags", id))
-            .mx_neg_1()
-            .map(|this| {
-                if tags.is_empty() {
-                    this.child(empty_value(cx))
-                } else {
-                    this.children(tags.iter().map(|tag| {
-                        div()
-                            .flex_shrink_0()
-                            .child(Chip::new(tag.clone(), free_tag_color(tag)))
-                    }))
-                }
-            });
+        let trigger = CellButton::new(element_id("tags", id)).mx_neg_1().map(|this| {
+            if tags.is_empty() {
+                this.child(empty_value(cx))
+            } else {
+                this.child(chip_line(
+                    tags.iter().map(|tag| Chip::new(tag.clone(), free_tag_color(tag)).into_any_element()),
+                ))
+            }
+        });
 
         let on_open_change = {
             let panel = self.panel.clone();
@@ -408,19 +437,13 @@ impl VideoTable {
                     Some(PropertyValue::Url(url)) => url.trim().to_string(),
                     _ => String::new(),
                 };
-                let Some(target) = format::link_target(&url) else {
+                let Some(target) = normalize_link(&url) else {
                     return self.editable_text(cell, url, false, cx);
                 };
                 h_flex()
                     .size_full()
                     .gap_1()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .child(self.editable_text(cell, url, false, cx)),
-                    )
+                    .child(div().flex_1().min_w_0().h_full().child(self.editable_text(cell, url, false, cx)))
                     .child(
                         Button::new(element_id(&format!("open-url-{}", property), id))
                             .ghost()
@@ -433,9 +456,7 @@ impl VideoTable {
             }
             PropertyKind::Select { options } => {
                 let current = match value {
-                    Some(PropertyValue::Select(Some(option))) => {
-                        options.iter().find(|o| &o.id == option)
-                    }
+                    Some(PropertyValue::Select(Some(option))) => options.iter().find(|o| &o.id == option),
                     _ => None,
                 };
                 let options = options.clone();
@@ -452,9 +473,8 @@ impl VideoTable {
                             let panel = panel.clone();
                             move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                                 let value = PropertyValue::Select(value.clone());
-                                _ = panel.update(cx, |panel, cx| {
-                                    panel.set_property_value(id, property, Some(value), cx)
-                                });
+                                _ = panel
+                                    .update(cx, |panel, cx| panel.set_property_value(id, property, Some(value), cx));
                             }
                         };
                         let menu = options.iter().fold(menu, |menu, option| {
@@ -465,14 +485,12 @@ impl VideoTable {
                                     .on_click(set(Some(option.id.clone()))),
                             )
                         });
-                        menu.when(options.is_empty(), |menu| menu.label("No options yet"))
-                            .when(selected.is_some(), |menu| {
-                                menu.separator().item(
-                                    PopupMenuItem::new("Clear")
-                                        .icon(IconName::X)
-                                        .on_click(set(None)),
-                                )
-                            })
+                        menu.when(options.is_empty(), |menu| menu.label("No options yet")).when(
+                            selected.is_some(),
+                            |menu| {
+                                menu.separator().item(PopupMenuItem::new("Clear").icon(IconName::X).on_click(set(None)))
+                            },
+                        )
                     })
                     .into_any_element()
             }
@@ -484,22 +502,11 @@ impl VideoTable {
                 let chips: Vec<AnyElement> = options
                     .iter()
                     .filter(|option| selected.contains(&option.id))
-                    .map(|option| {
-                        div()
-                            .flex_shrink_0()
-                            .child(Chip::new(option.name.clone(), option.color))
-                            .into_any_element()
-                    })
+                    .map(|option| Chip::new(option.name.clone(), option.color).into_any_element())
                     .collect();
-                let trigger = CellButton::new(element_id(&format!("multi-{}", property), id))
-                    .mx_neg_1()
-                    .map(|this| {
-                        if chips.is_empty() {
-                            this.child(empty_value(cx))
-                        } else {
-                            this.children(chips)
-                        }
-                    });
+                let trigger = CellButton::new(element_id(&format!("multi-{}", property), id)).mx_neg_1().map(|this| {
+                    if chips.is_empty() { this.child(empty_value(cx)) } else { this.child(chip_line(chips)) }
+                });
                 let options = options.clone();
                 let panel = self.panel.clone();
                 Popover::new(element_id(&format!("multi-popover-{}", property), id))
@@ -521,14 +528,9 @@ impl VideoTable {
                                             panel.toggle_multi_option(id, property, &option_id, cx)
                                         });
                                     })
-                                    .child(
-                                        h_flex()
-                                            .child(Chip::new(option.name.clone(), option.color)),
-                                    )
+                                    .child(h_flex().child(Chip::new(option.name.clone(), option.color)))
                             }))
-                            .when(options.is_empty(), |this| {
-                                this.child(muted_text("No options yet", cx))
-                            })
+                            .when(options.is_empty(), |this| this.child(muted_text("No options yet", cx)))
                     })
                     .into_any_element()
             }
@@ -543,48 +545,35 @@ impl VideoTable {
                 let checked = matches!(value, Some(PropertyValue::Checkbox(true)));
                 let panel = self.panel.clone();
                 h_flex()
-                    .child(
-                        Checkbox::new(element_id(&format!("checkbox-{}", property), id))
-                            .checked(checked)
-                            .on_click(move |checked, _, cx| {
-                                let value = PropertyValue::Checkbox(*checked);
-                                _ = panel.update(cx, |panel, cx| {
-                                    panel.set_property_value(id, property, Some(value), cx)
-                                });
-                            }),
-                    )
+                    .child(Checkbox::new(element_id(&format!("checkbox-{}", property), id)).checked(checked).on_click(
+                        move |checked, _, cx| {
+                            let value = PropertyValue::Checkbox(*checked);
+                            _ = panel.update(cx, |panel, cx| panel.set_property_value(id, property, Some(value), cx));
+                        },
+                    ))
                     .into_any_element()
             }
         }
     }
 
     /// Text that turns into an inline editor when clicked.
-    fn editable_text(
-        &self,
-        cell: CellRef,
-        text: String,
-        align_right: bool,
-        cx: &mut App,
-    ) -> AnyElement {
+    fn editable_text(&self, cell: CellRef, text: String, align_right: bool, cx: &mut App) -> AnyElement {
         let panel = self.panel.clone();
-        CellButton::new(element_id(
-            &format!("text-{}", column_key(cell.column)),
-            cell.video,
-        ))
-        .mx_neg_1()
-        .when(align_right, |this| this.justify_end())
-        .map(|this| {
-            if text.is_empty() {
-                this.child(empty_value(cx))
-            } else {
-                this.child(div().min_w_0().truncate().child(text))
-            }
-        })
-        .on_click(move |_, window, cx| {
-            _ = panel.update(cx, |panel, cx| panel.start_editing(cell, window, cx));
-        })
-        .text_color(cx.theme().foreground)
-        .into_any_element()
+        CellButton::new(element_id(&format!("text-{}", column_key(cell.column)), cell.video))
+            .mx_neg_1()
+            .when(align_right, |this| this.justify_end())
+            .map(|this| {
+                if text.is_empty() {
+                    this.child(empty_value(cx))
+                } else {
+                    this.child(div().min_w_0().truncate().child(text))
+                }
+            })
+            .on_click(move |_, window, cx| {
+                _ = panel.update(cx, |panel, cx| panel.start_editing(cell, window, cx));
+            })
+            .text_color(cx.theme().foreground)
+            .into_any_element()
     }
 
     fn render_inline_editor(&self, cell: CellRef, _: &mut Window, _: &mut App) -> AnyElement {
@@ -601,12 +590,7 @@ impl VideoTable {
                     .flex()
                     .items_center()
                     .mx_neg_1()
-                    .child(
-                        Input::new(&self.editors.cell_input)
-                            .id("cell-input")
-                            .small()
-                            .w_full(),
-                    ),
+                    .child(Input::new(&self.editors.cell_input).id("cell-input").small().w_full()),
             )
             .into_any_element()
     }
@@ -644,18 +628,11 @@ impl TableDelegate for VideoTable {
             .min_width(px(MIN_COLUMN_WIDTH))
             .movable(false)
             .selectable(false)
-            .when(column == Column::Builtin(BuiltinField::Title), |this| {
-                this.fixed_left()
-            })
+            .when(column == Column::Builtin(BuiltinField::Title), |this| this.fixed_left())
             .when(is_number, |this| this.text_right())
     }
 
-    fn render_th(
-        &mut self,
-        col_ix: usize,
-        _: &mut Window,
-        cx: &mut Context<TableState<Self>>,
-    ) -> impl IntoElement {
+    fn render_th(&mut self, col_ix: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
         let Some(column) = self.column_at(col_ix) else {
             let panel = self.panel.clone();
             return Button::new("add-property")
@@ -673,22 +650,13 @@ impl TableDelegate for VideoTable {
 
         let properties = self.model.properties.clone();
         let name = column_name(column, &properties).unwrap_or_default();
-        let sort = self
-            .model
-            .sorts
-            .iter()
-            .find(|sort| sort.column == column)
-            .map(|sort| sort.direction);
+        let sort = self.model.sorts.iter().find(|sort| sort.column == column).map(|sort| sort.direction);
         let panel = self.panel.clone();
         cell_slot(
             CellButton::new(SharedString::from(format!("column-{}", column_key(column))))
                 .mx_neg_1()
                 .text_color(cx.theme().muted_foreground)
-                .child(
-                    Icon::new(column_icon(column, &properties))
-                        .xsmall()
-                        .flex_shrink_0(),
-                )
+                .child(Icon::new(column_icon(column, &properties)).xsmall().flex_shrink_0())
                 .child(div().min_w_0().truncate().child(name))
                 .when_some(sort, |this, direction| {
                     this.child(
@@ -706,12 +674,7 @@ impl TableDelegate for VideoTable {
         .into_any_element()
     }
 
-    fn render_tr(
-        &mut self,
-        row_ix: usize,
-        _: &mut Window,
-        _: &mut Context<TableState<Self>>,
-    ) -> Stateful<Div> {
+    fn render_tr(&mut self, row_ix: usize, _: &mut Window, _: &mut Context<TableState<Self>>) -> Stateful<Div> {
         match self.model.rows.get(row_ix) {
             Some(row) => div().id(element_id("video-row", row.video.id)),
             None => div().id(("video-row", row_ix)),
@@ -725,8 +688,7 @@ impl TableDelegate for VideoTable {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let (Some(row), Some(column)) = (self.model.rows.get(row_ix), self.column_at(col_ix))
-        else {
+        let (Some(row), Some(column)) = (self.model.rows.get(row_ix), self.column_at(col_ix)) else {
             return div().into_any_element();
         };
         cell_slot(self.render_cell(row, column, window, cx)).into_any_element()
@@ -745,11 +707,7 @@ impl TableDelegate for VideoTable {
         }
     }
 
-    fn render_empty(
-        &mut self,
-        _: &mut Window,
-        cx: &mut Context<TableState<Self>>,
-    ) -> impl IntoElement {
+    fn render_empty(&mut self, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
         render_empty_state(self.model.empty, &self.panel, cx)
     }
 }
@@ -761,30 +719,22 @@ pub(crate) fn video_menu(
     renamable: bool,
     panel: &WeakEntity<DatabasePanel>,
 ) -> PopupMenu {
-    let command =
-        |run: fn(&mut DatabasePanel, VideoId, &mut Window, &mut Context<DatabasePanel>)| {
-            let panel = panel.clone();
-            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                _ = panel.update(cx, |panel, cx| run(panel, id, window, cx));
-            }
-        };
+    let command = |run: fn(&mut DatabasePanel, VideoId, &mut Window, &mut Context<DatabasePanel>)| {
+        let panel = panel.clone();
+        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            _ = panel.update(cx, |panel, cx| run(panel, id, window, cx));
+        }
+    };
     menu.item(
         PopupMenuItem::new("Open")
             .icon(IconName::PanelRightOpen)
             .on_click(command(|panel, id, _, cx| panel.open_video(id, cx))),
     )
     .when(renamable, |menu| {
-        menu.item(
-            PopupMenuItem::new("Rename")
-                .icon(IconName::Pencil)
-                .on_click(command(|panel, id, window, cx| {
-                    let cell = CellRef {
-                        video: id,
-                        column: Column::Builtin(BuiltinField::Title),
-                    };
-                    panel.start_editing(cell, window, cx);
-                })),
-        )
+        menu.item(PopupMenuItem::new("Rename").icon(IconName::Pencil).on_click(command(|panel, id, window, cx| {
+            let cell = CellRef { video: id, column: Column::Builtin(BuiltinField::Title) };
+            panel.start_editing(cell, window, cx);
+        })))
     })
     .item(
         PopupMenuItem::new("Duplicate")
@@ -795,9 +745,7 @@ pub(crate) fn video_menu(
     .item(
         PopupMenuItem::new("Delete…")
             .icon(IconName::Trash)
-            .on_click(command(|panel, id, window, cx| {
-                panel.confirm_delete_videos(vec![id], window, cx)
-            })),
+            .on_click(command(|panel, id, window, cx| panel.confirm_delete_videos(vec![id], window, cx))),
     )
 }
 
@@ -816,31 +764,21 @@ fn column_menu(
         }
     };
     let sort = |direction| {
-        command(Rc::new(
-            move |panel: &mut DatabasePanel, _: &mut Window, cx: &mut Context<DatabasePanel>| {
-                panel.sort_by(column, direction, cx)
-            },
-        ))
+        command(Rc::new(move |panel: &mut DatabasePanel, _: &mut Window, cx: &mut Context<DatabasePanel>| {
+            panel.sort_by(column, direction, cx)
+        }))
     };
 
     let menu = menu
+        .item(PopupMenuItem::new("Sort ascending").icon(IconName::ArrowUp).on_click(sort(SortDirection::Ascending)))
         .item(
-            PopupMenuItem::new("Sort ascending")
-                .icon(IconName::ArrowUp)
-                .on_click(sort(SortDirection::Ascending)),
-        )
-        .item(
-            PopupMenuItem::new("Sort descending")
-                .icon(IconName::ArrowDown)
-                .on_click(sort(SortDirection::Descending)),
+            PopupMenuItem::new("Sort descending").icon(IconName::ArrowDown).on_click(sort(SortDirection::Descending)),
         );
     let menu = menu.when(column != Column::Builtin(BuiltinField::Title), |menu| {
         menu.separator().item(
             PopupMenuItem::new("Hide")
                 .icon(IconName::EyeOff)
-                .on_click(command(Rc::new(move |panel, _, cx| {
-                    panel.set_column_visible(column, false, cx)
-                }))),
+                .on_click(command(Rc::new(move |panel, _, cx| panel.set_column_visible(column, false, cx)))),
         )
     });
 
@@ -848,37 +786,21 @@ fn column_menu(
         return menu;
     };
     let has_options = properties.iter().any(|def| {
-        def.id == property
-            && matches!(
-                def.kind,
-                PropertyKind::Select { .. } | PropertyKind::MultiSelect { .. }
-            )
+        def.id == property && matches!(def.kind, PropertyKind::Select { .. } | PropertyKind::MultiSelect { .. })
     });
     let edit = |mode: PropertyEditorMode| {
-        command(Rc::new(move |panel, window, cx| {
-            panel.open_property_editor(Some(property), mode, window, cx)
-        }))
+        command(Rc::new(move |panel, window, cx| panel.open_property_editor(Some(property), mode, window, cx)))
     };
     menu.separator()
-        .item(
-            PopupMenuItem::new("Rename…")
-                .icon(IconName::Pencil)
-                .on_click(edit(PropertyEditorMode::Rename)),
-        )
+        .item(PopupMenuItem::new("Rename…").icon(IconName::Pencil).on_click(edit(PropertyEditorMode::Rename)))
         .when(has_options, |menu| {
-            menu.item(
-                PopupMenuItem::new("Edit options…")
-                    .icon(IconName::List)
-                    .on_click(edit(PropertyEditorMode::Edit)),
-            )
+            menu.item(PopupMenuItem::new("Edit options…").icon(IconName::List).on_click(edit(PropertyEditorMode::Edit)))
         })
         .separator()
         .item(
-            PopupMenuItem::new("Delete property…")
-                .icon(IconName::Trash)
-                .on_click(command(Rc::new(move |panel, window, cx| {
-                    panel.confirm_delete_property(property, window, cx)
-                }))),
+            PopupMenuItem::new("Delete property…").icon(IconName::Trash).on_click(command(Rc::new(
+                move |panel, window, cx| panel.confirm_delete_property(property, window, cx),
+            ))),
         )
 }
 
@@ -923,74 +845,48 @@ fn tags_editor(
     v_flex()
         .w_64()
         .gap_2()
-        .child(
-            div()
-                .key_context(TEXT_ENTRY_CONTEXT)
-                .child(Input::new(input).id("tag-input").small()),
-        )
+        .child(div().key_context(TEXT_ENTRY_CONTEXT).child(Input::new(input).id("tag-input").small()))
         .when(!tags.is_empty(), |this| {
-            this.child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .children(tags.iter().map(|tag| tag_button(tag, true))),
-            )
+            this.child(h_flex().flex_wrap().gap_1().children(tags.iter().map(|tag| tag_button(tag, true))))
         })
         .when(!suggestions.is_empty(), |this| {
-            this.child(muted_text("Suggestions", cx).text_xs()).child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .children(suggestions.into_iter().map(|tag| tag_button(tag, false))),
-            )
+            this.child(muted_text("Suggestions", cx).text_xs())
+                .child(h_flex().flex_wrap().gap_1().children(suggestions.into_iter().map(|tag| tag_button(tag, false))))
         })
         .into_any_element()
 }
 
 /// The empty state of the table and the board.
-pub(crate) fn render_empty_state(
-    reason: EmptyReason,
-    panel: &WeakEntity<DatabasePanel>,
-    cx: &App,
-) -> AnyElement {
+pub(crate) fn render_empty_state(reason: EmptyReason, panel: &WeakEntity<DatabasePanel>, cx: &App) -> AnyElement {
     let panel = panel.clone();
     let (icon, title, description, action) = match reason {
         EmptyReason::NoVideos => (
             IconName::Clapperboard,
             "No videos yet",
             "Plan your first video: add an idea, then move it through scripting, filming and editing.",
-            Button::new("empty-new-video")
-                .primary()
-                .small()
-                .icon(IconName::Plus)
-                .label("New video")
-                .on_click(move |_, _, cx| {
-                    _ = panel.update(cx, |panel, cx| panel.create_video(None, cx));
-                }),
+            Button::new("empty-new-video").primary().small().icon(IconName::Plus).label("New video").on_click(
+                move |_, _, cx| {
+                    _ = panel.update(cx, |panel, cx| panel.create_video_in_view(cx));
+                },
+            ),
         ),
         EmptyReason::Search => (
             IconName::SearchX,
             "No videos match",
             "Try another search.",
-            Button::new("empty-clear-search")
-                .outline()
-                .small()
-                .label("Clear search")
-                .on_click(move |_, window, cx| {
-                    _ = panel.update(cx, |panel, cx| panel.clear_search(window, cx));
-                }),
+            Button::new("empty-clear-search").outline().small().label("Clear search").on_click(move |_, window, cx| {
+                _ = panel.update(cx, |panel, cx| panel.clear_search(window, cx));
+            }),
         ),
         EmptyReason::Filter => (
             IconName::SearchX,
             "No videos match",
             "Remove some filters to see more videos.",
-            Button::new("empty-clear-filters")
-                .outline()
-                .small()
-                .label("Clear filters")
-                .on_click(move |_, window, cx| {
+            Button::new("empty-clear-filters").outline().small().label("Clear filters").on_click(
+                move |_, window, cx| {
                     _ = panel.update(cx, |panel, cx| panel.clear_filters(window, cx));
-                }),
+                },
+            ),
         ),
     };
 
@@ -1002,27 +898,16 @@ pub(crate) fn render_empty_state(
         .justify_center()
         .gap_2()
         .py_8()
-        .child(
-            Icon::new(icon)
-                .size_8()
-                .text_color(cx.theme().muted_foreground.opacity(0.7)),
-        )
-        .child(
-            div()
-                .text_base()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(title),
-        )
-        .child(
-            div()
-                .max_w_80()
-                .text_sm()
-                .text_center()
-                .text_color(cx.theme().muted_foreground)
-                .child(description),
-        )
+        .child(Icon::new(icon).size_8().text_color(cx.theme().muted_foreground.opacity(0.7)))
+        .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(title))
+        .child(div().max_w_80().text_sm().text_center().text_color(cx.theme().muted_foreground).child(description))
         .child(div().pt_2().child(action))
         .into_any_element()
+}
+
+/// The hint icon of a newer attempt: a warning when it failed.
+fn attempt_icon(failed: bool) -> IconName {
+    if failed { IconName::CircleAlert } else { IconName::Info }
 }
 
 /// The video's emoji, or a neutral page glyph when it has none.
@@ -1032,20 +917,12 @@ pub(crate) fn video_icon(icon: Option<&str>, cx: &App) -> Div {
     let slot = h_flex().w_5().h_5().flex_shrink_0().justify_center();
     match icon.map(str::trim).filter(|icon| !icon.is_empty()) {
         Some(emoji) => slot.child(emoji.to_string()),
-        None => slot.child(
-            Icon::new(IconName::FileText)
-                .small()
-                .text_color(cx.theme().muted_foreground),
-        ),
+        None => slot.child(Icon::new(IconName::FileText).small().text_color(cx.theme().muted_foreground)),
     }
 }
 
 pub(crate) fn muted_text(text: impl Into<SharedString>, cx: &App) -> Div {
-    div()
-        .min_w_0()
-        .truncate()
-        .text_color(cx.theme().muted_foreground)
-        .child(text.into())
+    div().min_w_0().truncate().text_color(cx.theme().muted_foreground).child(text.into())
 }
 
 /// A stable element id for a part of one video's row or card.
