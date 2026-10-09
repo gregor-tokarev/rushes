@@ -1,6 +1,7 @@
 // Local stand-ins for Google sign-in and the YouTube Data API.
 //   npm start   (or scripts/emulators.sh from the repository root)
 // Ports default to 4002 (Google) and 4020 (YouTube); tests override them through env.
+// GOOGLE_EMULATOR_URL makes the YouTube emulator accept tokens of another Google emulator.
 import { defineConfig } from "emulate";
 import { createYoutubeEmulator } from "./youtube.ts";
 
@@ -25,7 +26,7 @@ export default defineConfig({
       },
     },
     youtube: {
-      emulator: createYoutubeEmulator({ googleUrl }),
+      emulator: createYoutubeEmulator({ googleUrl: process.env.GOOGLE_EMULATOR_URL || googleUrl }),
       port: youtubePort,
       baseUrl: `http://${host}:${youtubePort}`,
     },
