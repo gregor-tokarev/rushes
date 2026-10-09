@@ -16,8 +16,8 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Div, ElementId, Entity, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, Window, div, px, rems,
+    IntoElement, ParentElement as _, Render, ScrollHandle, ScrollWheelEvent, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px, rems,
 };
 use videocrm_core::{PipelineRun, RunId, RunStatus};
 use videocrm_pipeline::{MediaInfo, probe_media};
@@ -29,7 +29,7 @@ use super::timeline::{LogEvent, PhaseKind, TimelineItem, fold_timeline};
 use crate::route::VideoTab;
 use crate::state::AppState;
 
-/// Distance from the end within which the timeline keeps following new events.
+/// Distance from the end within which scrolling down resumes following new events.
 const FOLLOW_SLACK: f32 = 48.;
 
 /// What the feedback box is for.
@@ -63,6 +63,9 @@ pub(crate) struct RunView {
     /// Log length `items` was folded from.
     folded_len: usize,
     scroll: ScrollHandle,
+    /// Keep the newest events in view while the agent works. Scrolling up stops it;
+    /// scrolling back to the end resumes it.
+    follow: bool,
     output: Option<OutputFacts>,
     output_task: Option<Task<()>>,
     action_error: Option<SharedString>,
@@ -87,6 +90,7 @@ impl RunView {
             items: Vec::new(),
             folded_len: 0,
             scroll: ScrollHandle::new(),
+            follow: false,
             output: None,
             output_task: None,
             action_error: None,
@@ -116,10 +120,8 @@ impl RunView {
         self.scroll = ScrollHandle::new();
         if let Some(id) = run_id {
             self.service.update(cx, |service, cx| service.load_timeline(id, cx));
-            if self.live(cx).is_some() {
-                self.scroll.scroll_to_bottom();
-            }
         }
+        self.follow = self.live(cx).is_some();
         self.sync(cx);
     }
 
@@ -138,20 +140,13 @@ impl RunView {
         let timeline_len = self.service.read(cx).timeline(id).len();
         let live = self.live(cx).is_some();
         if timeline_len != self.folded_len {
-            let at_end = {
-                let max = self.scroll.max_offset().y;
-                max <= px(0.) || self.scroll.offset().y <= -max + px(FOLLOW_SLACK)
-            };
             self.items = fold_timeline(self.service.read(cx).timeline(id));
             self.folded_len = timeline_len;
-            if live && at_end {
-                self.scroll.scroll_to_bottom();
-            }
         }
 
         if live && self.ticker.is_none() {
             // A phase just started: show what the agent does next.
-            self.scroll.scroll_to_bottom();
+            self.follow = true;
             self.ticker = Some(cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(Duration::from_secs(1)).await;
@@ -253,6 +248,16 @@ impl RunView {
             }
             state.open_video(video_id, VideoTab::Publish, cx);
         });
+    }
+
+    /// Wheel input on the timeline: up stops following new events, down to the end resumes.
+    fn on_timeline_scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window) {
+        if event.delta.pixel_delta(window.line_height()).y > px(0.) {
+            self.follow = false;
+        } else {
+            let max = self.scroll.max_offset().y;
+            self.follow = self.scroll.offset().y <= -max + px(FOLLOW_SLACK);
+        }
     }
 
     fn toggle_row(&mut self, seq: u32, cx: &mut Context<Self>) {
@@ -589,6 +594,9 @@ impl RunView {
                     .max_h(rems(30.))
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
+                    .on_scroll_wheel(
+                        cx.listener(|this, event: &ScrollWheelEvent, window, _| this.on_timeline_scroll(event, window)),
+                    )
                     .rounded(theme.radius_lg)
                     .border_1()
                     .border_color(theme.border)
@@ -752,6 +760,11 @@ impl Render for RunView {
             return div();
         };
         let live = self.live(cx);
+        if live.is_some() && self.follow {
+            // Rows such as Markdown messages settle their height a frame late, so the
+            // end is re-applied every frame rather than once per event.
+            self.scroll.scroll_to_bottom();
+        }
         let stepper = self.render_stepper(&run, cx).into_any_element();
         let state_card = match (live, run.status) {
             (Some(live), _) => Some(self.render_live(live, cx)),
