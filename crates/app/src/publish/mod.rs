@@ -1,35 +1,23 @@
 //! YouTube: account connection, publish form, uploads. Owned by the publish workstream.
+//!
+//! [`YoutubeService`] is the one owner of the connection and of upload jobs; the
+//! views read it and call its methods. Blocking network work runs on worker
+//! threads (sign-in, uploads) or the background executor (short API calls).
+
+mod chapters;
+mod rules;
+mod service;
+mod transfer;
+mod upload;
 
 use gpui_kit::*;
 use videocrm_core::VideoId;
 
-use crate::state::AppState;
-
-/// App-wide YouTube connection: settings -> client, OAuth sign-in, credentials, uploads.
-pub struct YoutubeService {
-    state: Entity<AppState>,
-}
-
-struct GlobalYoutubeService(Entity<YoutubeService>);
-
-impl Global for GlobalYoutubeService {}
-
-impl YoutubeService {
-    /// Creates the service and registers it globally. Call once at startup, after
-    /// `AppState::set_global`.
-    pub fn init(state: Entity<AppState>, cx: &mut App) {
-        let service = cx.new(|_| YoutubeService { state });
-        cx.set_global(GlobalYoutubeService(service));
-    }
-
-    pub fn global(cx: &App) -> Entity<YoutubeService> {
-        cx.global::<GlobalYoutubeService>().0.clone()
-    }
-
-    pub fn state(&self) -> &Entity<AppState> {
-        &self.state
-    }
-}
+pub use chapters::{CHAPTERS_HEADING, Chapter, chapters, chapters_text, insert_chapters};
+pub use rules::{BlockingReason, CATEGORIES, Category, blocking_reasons, tags_length};
+pub use service::{Connection, YoutubeEvent, YoutubeService, backend_config};
+pub use transfer::Transfer;
+pub use upload::{INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, UploadError};
 
 /// The Publish tab of a video page.
 pub struct PublishPanel {

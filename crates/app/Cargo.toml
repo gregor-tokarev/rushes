@@ -7,10 +7,12 @@ publish.workspace = true
 
 [dependencies]
 chrono = "0.4"
+futures = "0.3"
 gpui-kit.workspace = true
 videocrm-core = { path = "../core" }
 videocrm-pipeline = { path = "../pipeline" }
 videocrm-youtube = { path = "../youtube" }
+ureq = "3"
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

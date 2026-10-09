@@ -308,6 +308,9 @@ fn signs_in_and_reads_the_channel() {
 
     let account = Account::new(&user, Some(&channel), client.config());
     assert!(account.backend.starts_with("Emulator (127.0.0.1:"));
+    assert_eq!(account.channel_handle.as_deref(), Some("@creator"));
+    assert_eq!(account.channel_thumbnail, channel.thumbnail_url);
+    assert_eq!(account.video_count, Some(0));
     let dir = tempfile::tempdir().unwrap();
     let store = CredentialStore::new(dir.path().join("credentials.json"));
     let login = SavedLogin {
