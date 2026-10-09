@@ -5,23 +5,27 @@
 mod document;
 mod emoji;
 mod properties;
+mod saves;
+
+use std::collections::HashMap;
 
 use chrono::Utc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::input::{Enter, Input, InputEvent, InputState, Position, Textarea, TextareaState};
+use gpui_kit::component::input::{Enter, Input, InputEvent, InputState, MoveDown, Position, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Sizable as _, Size, StyledExt as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, Focusable as _, FontWeight,
-    InteractiveElement as _, IntoElement, ParentElement as _, Rems, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _, Window, div, rems,
+    Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, Focusable as _, FontWeight, Global,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Rems, Render,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _,
+    Window, div, point, px, rems,
 };
 use videocrm_core::{DocumentKind, Video, VideoId};
 
@@ -31,16 +35,24 @@ use crate::route::{Route, VideoTab};
 use crate::shell::elements::empty_state;
 use crate::state::{AppEvent, AppState};
 
-pub use document::{DocumentTab, SAVE_DELAY, ScriptRail, ScriptStats};
+pub use document::{DocumentTab, PathPurpose, SAVE_DELAY, ScriptRail, ScriptStats};
 pub use properties::PropertiesPanel;
+pub use saves::{DocumentSaves, SAVE_RETRY_DELAY};
 
 /// Leading and trailing inset of the page column, matching the document
 /// editor's gutters so headers line up with the script's text.
 const COLUMN_INSET: Rems = Rems(3.5);
 /// The editor's text width plus both gutters.
 const COLUMN_MAX_WIDTH: Rems = Rems(46. + 2. * COLUMN_INSET.0);
-/// Narrower windows leave the script rail out so the script keeps its width.
+/// Narrower windows leave the script rail out so the script keeps its width;
+/// its content moves to the script menu next to the tabs.
 const RAIL_MIN_WINDOW_WIDTH: Rems = Rems(72.);
+/// Width of the script rail. Wide windows keep this lane free on every tab,
+/// so switching tabs never moves the header or the tab strip.
+const RAIL_WIDTH: Rems = Rems(16.);
+/// The tab strip's index among the scrolled page's children: header,
+/// properties, tab strip, tab content, page end.
+const TAB_STRIP_ITEM: usize = 2;
 
 pub struct VideoPage {
     state: Entity<AppState>,
@@ -55,12 +67,33 @@ pub struct VideoPage {
     footage: Option<Entity<AiEditPanel>>,
     publish: Option<Entity<PublishPanel>>,
     scroll: ScrollHandle,
+    /// How far each tab was scrolled when it was left, restored when it is shown again.
+    scrolled: HashMap<VideoTab, Pixels>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A pending request to show a tab of a video from its first section.
+#[derive(Default)]
+struct TabReveal(Option<(VideoId, VideoTab)>);
+
+impl Global for TabReveal {}
+
+/// Opens `tab` of a video scrolled so that the tab strip is at the top of the
+/// page and the tab's first section is in view, whatever the tab was
+/// scrolled to before. For actions that send the creator to a tab to act
+/// there, such as "Go to Publish".
+pub fn open_tab_at_top(id: VideoId, tab: VideoTab, cx: &mut App) {
+    cx.set_global(TabReveal(Some((id, tab))));
+    AppState::global(cx).update(cx, |state, cx| state.open_video(id, tab, cx));
 }
 
 impl VideoPage {
     pub fn new(video_id: VideoId, tab: VideoTab, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = AppState::global(cx);
+        let saves = DocumentSaves::global(cx);
+        if !cx.has_global::<TabReveal>() {
+            cx.set_global(TabReveal::default());
+        }
         let video = state.read(cx).video(video_id).cloned();
         let title = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -81,17 +114,37 @@ impl VideoPage {
                     this.sync_header(window, cx);
                 }
             }),
-            cx.subscribe(&title, |this, _, event: &InputEvent, cx| {
+            cx.subscribe_in(&title, window, |this, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Blur) {
                     this.commit_title(cx);
+                    this.sync_header(window, cx);
                 }
             }),
-            cx.subscribe(&hook, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+            cx.subscribe_in(&hook, window, |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Blur => this.commit_hook(cx),
+                // The hook is one line: Enter continues in the document below it.
+                InputEvent::PressEnter { .. } => {
                     this.commit_hook(cx);
+                    this.focus_document_start(window, cx);
                 }
+                _ => {}
             }),
             cx.observe(&state, |_, _, cx| cx.notify()),
+            cx.observe(&saves, |_, _, cx| cx.notify()),
+            cx.observe_global::<TabReveal>(|this, cx| {
+                if take_tab_reveal(this.video_id, this.tab, cx) {
+                    this.reveal_tab_strip();
+                    cx.notify();
+                }
+            }),
+            // The page writes its own edits when the app quits: the save queue
+            // writes what it holds then, and the page's last keystrokes must be in it.
+            cx.on_app_quit(|this, cx| {
+                this.flush(cx);
+                let saves = DocumentSaves::global(cx);
+                saves.update(cx, |saves, cx| saves.write_now(cx));
+                async {}
+            }),
         ];
         let mut page = Self {
             state: state.clone(),
@@ -106,10 +159,14 @@ impl VideoPage {
             footage: None,
             publish: None,
             scroll: ScrollHandle::new(),
+            scrolled: HashMap::new(),
             _subscriptions: subscriptions,
         };
         if video.is_some() {
             page.ensure_tab(window, cx);
+            if take_tab_reveal(video_id, tab, cx) {
+                page.reveal_tab_strip();
+            }
             let focus_script = state.update(cx, |state, _| state.take_script_focus(video_id));
             if focus_script && let Some(script) = page.script.clone() {
                 window.defer(cx, move |window, cx| script.update(cx, |script, cx| script.focus_start(window, cx)));
@@ -134,20 +191,66 @@ impl VideoPage {
         self.notes.as_ref()
     }
 
-    pub fn set_tab(&mut self, tab: VideoTab, window: &mut Window, cx: &mut Context<Self>) {
-        if tab == self.tab {
-            return;
-        }
-        self.flush(cx);
-        self.tab = tab;
-        self.ensure_tab(window, cx);
+    pub fn properties(&self) -> &Entity<PropertiesPanel> {
+        &self.properties
+    }
+
+    pub fn title_field(&self) -> &Entity<TextareaState> {
+        &self.title
+    }
+
+    /// The page's scroll position: how far it is scrolled down.
+    pub fn scroll_top(&self) -> Pixels {
+        -self.scroll.offset().y
+    }
+
+    /// Scrolls the page down by `distance` from the top, e.g. to restore a position.
+    pub fn set_scroll_top(&mut self, distance: Pixels, cx: &mut Context<Self>) {
+        self.scroll.set_offset(point(px(0.), -distance));
         cx.notify();
     }
 
-    /// Saves pending edits of the title, hook and documents.
+    /// Where the tab strip starts, as a scroll position that puts it at the top.
+    pub fn tab_strip_top(&self) -> Pixels {
+        self.scroll
+            .bounds_for_item(TAB_STRIP_ITEM)
+            .map_or(Pixels::ZERO, |strip| (strip.top() - self.scroll.bounds().top()).max(Pixels::ZERO))
+    }
+
+    /// Shows `tab`. Each tab keeps its own scroll position; a tab shown for
+    /// the first time, or one that was left above its content, opens where
+    /// the tab strip stays put, so the strip doesn't move under the pointer.
+    pub fn set_tab(&mut self, tab: VideoTab, window: &mut Window, cx: &mut Context<Self>) {
+        let reveal = take_tab_reveal(self.video_id, tab, cx);
+        if tab != self.tab {
+            self.flush(cx);
+            let scrolled = self.scroll_top();
+            self.scrolled.insert(self.tab, scrolled);
+            self.tab = tab;
+            self.ensure_tab(window, cx);
+            let strip = self.tab_strip_top();
+            let target = match self.scrolled.get(&tab) {
+                Some(saved) if *saved > strip => *saved,
+                _ => scrolled.min(strip),
+            };
+            self.scroll.set_offset(point(px(0.), -target));
+        }
+        if reveal {
+            self.reveal_tab_strip();
+        }
+        cx.notify();
+    }
+
+    /// Scrolls the tab strip to the top of the page on the next layout.
+    fn reveal_tab_strip(&mut self) {
+        self.scroll.scroll_to_top_of_item(TAB_STRIP_ITEM);
+    }
+
+    /// Saves pending edits of the title, hook, properties and documents.
     pub fn flush(&mut self, cx: &mut Context<Self>) {
         self.commit_title(cx);
         self.commit_hook(cx);
+        self.properties.update(cx, |properties, cx| properties.flush(cx));
         for document in [&self.script, &self.notes].into_iter().flatten() {
             document.update(cx, |document, cx| document.flush(cx));
         }
@@ -181,6 +284,21 @@ impl VideoPage {
         }
     }
 
+    /// The document the current tab edits, if it is Script or Notes.
+    fn document(&self) -> Option<&Entity<DocumentTab>> {
+        match self.tab {
+            VideoTab::Script => self.script.as_ref(),
+            VideoTab::Notes => self.notes.as_ref(),
+            VideoTab::Footage | VideoTab::Publish => None,
+        }
+    }
+
+    fn focus_document_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(document) = self.document().cloned() {
+            document.update(cx, |document, cx| document.focus_start(window, cx));
+        }
+    }
+
     fn video<'a>(&self, cx: &'a App) -> Option<&'a Video> {
         self.state.read(cx).video(self.video_id)
     }
@@ -195,9 +313,14 @@ impl VideoPage {
         }
     }
 
+    /// Saves the typed title. An emptied title is not saved, as the New video
+    /// dialog requires one; the field shows the stored title again.
     fn commit_title(&mut self, cx: &mut Context<Self>) {
         // Titles are one line; pasted line breaks become spaces.
         let title = self.title.read(cx).value().split_whitespace().collect::<Vec<_>>().join(" ");
+        if title.is_empty() {
+            return;
+        }
         self.edit(cx, |video| video.title = title);
     }
 
@@ -229,6 +352,25 @@ impl VideoPage {
             let end = input.value().chars().count() as u32;
             input.set_cursor_position(Position::new(0, end), window, cx);
         });
+    }
+
+    /// Down in the one-line hook continues in the document below it.
+    fn on_hook_down(&mut self, _: &MoveDown, window: &mut Window, cx: &mut Context<Self>) {
+        if self.document().is_none() {
+            return;
+        }
+        cx.stop_propagation();
+        self.commit_hook(cx);
+        self.focus_document_start(window, cx);
+    }
+
+    /// A click in the space below a document puts the caret after its last
+    /// block, like a click right under it.
+    fn on_page_end_click(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(document) = self.document().cloned() else { return };
+        cx.stop_propagation();
+        window.prevent_default();
+        document.update(cx, |document, cx| document.focus_end(window, cx));
     }
 
     fn open_tab(&mut self, tab: VideoTab, cx: &mut Context<Self>) {
@@ -379,19 +521,40 @@ impl VideoPage {
                             .font_weight(FontWeight::BOLD),
                     ),
             )
-            .child(
+            .child(div().capture_action(cx.listener(Self::on_hook_down)).child(
                 Input::new(&self.hook).id("page-hook").appearance(false).px_0().text_color(cx.theme().muted_foreground),
-            )
+            ))
     }
 
-    fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_tabs(&self, wide: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = VideoTab::ALL.iter().position(|tab| *tab == self.tab).unwrap_or(0);
+        // Without the rail, its content is one menu away next to the tabs.
+        let script_menu = self.script.as_ref().filter(|_| !wide && self.tab == VideoTab::Script);
+        let unsaved = [&self.script, &self.notes].into_iter().flatten().any(|tab| tab.read(cx).is_save_failing(cx));
         TabBar::new("video-tabs")
             .underline()
             .w_full()
             .selected_index(selected)
             .children(VideoTab::ALL.iter().map(|tab| Tab::new().label(tab.label())))
-            .suffix(self.render_page_menu(cx))
+            .suffix(
+                h_flex()
+                    .gap_1()
+                    .when(unsaved, |this| {
+                        this.child(
+                            h_flex()
+                                .id("not-saved")
+                                .test_support()
+                                .gap_1()
+                                .px_2()
+                                .text_xs()
+                                .text_color(cx.theme().warning)
+                                .child(Icon::new(IconName::CircleAlert).xsmall())
+                                .child("Not saved — retrying"),
+                        )
+                    })
+                    .when_some(script_menu, |this, script| this.child(document::script_menu_button(script, cx)))
+                    .child(self.render_page_menu(cx)),
+            )
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
                 if let Some(tab) = VideoTab::ALL.get(*ix) {
                     this.open_tab(*tab, cx);
@@ -437,6 +600,16 @@ impl VideoPage {
     }
 }
 
+/// Whether someone asked to show `tab` of `video` from the top; asking clears
+/// a matching request.
+fn take_tab_reveal(video: VideoId, tab: VideoTab, cx: &mut App) -> bool {
+    let requested = cx.try_global::<TabReveal>().and_then(|reveal| reveal.0) == Some((video, tab));
+    if requested {
+        cx.set_global(TabReveal(None));
+    }
+    requested
+}
+
 /// A video title for confirmation copy, with a placeholder for untitled videos.
 fn display_title(title: &str) -> &str {
     let title = title.trim();
@@ -446,37 +619,61 @@ fn display_title(title: &str) -> &str {
 impl Render for VideoPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(video) = self.video(cx).cloned() else { return self.render_missing(cx) };
-        let column = || v_flex().w_full().max_w(COLUMN_MAX_WIDTH).px(COLUMN_INSET);
+        let column = || v_flex().flex_none().w_full().max_w(COLUMN_MAX_WIDTH).px(COLUMN_INSET);
         let wide = window.viewport_size().width >= RAIL_MIN_WINDOW_WIDTH.to_pixels(window.rem_size());
-        let show_rail = wide && self.tab == VideoTab::Script && self.script.is_some();
+        let rail = self.rail.clone().filter(|_| wide && self.tab == VideoTab::Script);
+        let has_document = self.document().is_some();
 
-        h_flex()
+        div()
+            .relative()
             .size_full()
-            .items_stretch()
             .child(
-                div()
+                // The page scrolls as a whole; its direct children are the
+                // items `TAB_STRIP_ITEM` counts.
+                v_flex()
                     .id("video-page-scroll")
-                    .relative()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
+                    .test_support()
+                    .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .items_center()
-                            .pt_12()
-                            .pb_24()
-                            .child(column().child(self.render_header(&video, cx)))
-                            .child(column().pt_4().child(self.properties.clone()))
-                            .child(column().pt_6().child(self.render_tabs(cx)))
-                            .child(div().w_full().pt_4().flex().justify_center().child(self.render_content())),
-                    )
-                    .vertical_scrollbar(&self.scroll),
+                    .items_center()
+                    .pt_12()
+                    .when(wide, |this| this.pr(RAIL_WIDTH))
+                    .child(column().child(self.render_header(&video, cx)))
+                    .child(column().pt_4().child(self.properties.clone()))
+                    .child(column().pt_6().child(self.render_tabs(wide, cx)))
+                    .child(div().flex_none().w_full().pt_4().flex().justify_center().child(self.render_content()))
+                    .child(div().id("page-end").test_support().w_full().flex_1().min_h_24().when(
+                        has_document,
+                        |this| {
+                            this.cursor_text().on_mouse_down(MouseButton::Left, cx.listener(Self::on_page_end_click))
+                        },
+                    )),
             )
-            .when_some(self.rail.clone().filter(|_| show_rail), |this, rail| {
-                this.child(div().flex_none().w_64().h_full().border_l_1().border_color(cx.theme().border).child(rail))
+            .child(
+                // The scrollbar sits against the rail when it is shown.
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .right(if rail.is_some() { RAIL_WIDTH } else { Rems(0.) })
+                    .child(Scrollbar::vertical(&self.scroll).id("video-page-scrollbar").viewport_from_layout()),
+            )
+            .when_some(rail, |this, rail| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right_0()
+                        .w(RAIL_WIDTH)
+                        .occlude()
+                        .border_l_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().background)
+                        .child(rail),
+                )
             })
             .into_any_element()
     }

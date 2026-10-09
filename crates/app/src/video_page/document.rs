@@ -1,25 +1,32 @@
 //! A video's Script or Notes document in the block editor, saved shortly after
-//! the last edit, plus the Script tab's rail: stats, outline and Markdown.
+//! the last edit, plus the Script tab's rail: stats, Markdown and outline.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, WindowExt as _, v_flex};
+use gpui_kit::component::dialog::DialogFooter;
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::menu::DropdownMenu as _;
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AppContext as _, ClipboardItem, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, PathPromptOptions, Rems, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Window, div,
+    Anchor, App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
+    IntoElement, ParentElement as _, PathPromptOptions, Rems, Render, ScrollHandle, SharedString, Styled as _,
+    Subscription, Task, TestSupportExt as _, Window, div,
 };
 use videocrm_core::document::{
-    DEFAULT_WPM, OutlineItem, estimated_runtime_secs, format_runtime, from_markdown, outline, spoken_word_count,
-    teleprompter_text, to_markdown,
+    DEFAULT_WPM, OutlineItem, estimated_runtime_secs, from_markdown, outline, spoken_word_count, teleprompter_text,
+    to_markdown,
 };
-use videocrm_core::{Block, BlockId, BlockKind, DocumentKind, VideoId};
+use videocrm_core::input::{PathInputError, display_user_path, expand_user_path};
+use videocrm_core::{Block, BlockId, BlockKind, DocumentId, DocumentKind, VideoId, media};
 
+use super::saves::DocumentSaves;
+use crate::database::format;
 use crate::editor::{DocumentEditor, DocumentEditorEvent};
 use crate::shell::elements::{RowButton, empty_state, section_label};
 use crate::state::AppState;
@@ -48,17 +55,56 @@ impl ScriptStats {
             outline: outline(blocks),
         }
     }
+
+    /// Spoken words with thousands grouped, as the database's Script column shows them.
+    pub fn words_label(&self) -> String {
+        format::group_thousands(self.words as u64)
+    }
+
+    /// Estimated runtime; an empty script takes no time, rather than about none.
+    pub fn runtime_label(&self) -> String {
+        match self.seconds {
+            0 => format::runtime(0),
+            seconds => format!("~{}", format::runtime(seconds)),
+        }
+    }
+
+    /// One line for narrow windows, e.g. "1,240 words · ~8m 16s".
+    pub fn summary(&self) -> String {
+        match self.words {
+            0 => "No spoken words yet".to_string(),
+            1 => format!("1 word · {}", self.runtime_label()),
+            _ => format!("{} words · {}", self.words_label(), self.runtime_label()),
+        }
+    }
 }
 
-/// One document of a video in a [`DocumentEditor`]. Edits are saved
-/// [`SAVE_DELAY`] after the last change, or at once by [`Self::flush`].
+type TabCommand = fn(&mut DocumentTab, &mut Window, &mut Context<DocumentTab>);
+
+/// The script's text commands, shown in the rail and, in narrow windows, in
+/// the script menu next to the tabs.
+const SCRIPT_COMMANDS: [(&str, IconName, &str, TabCommand); 3] = [
+    ("copy-teleprompter", IconName::Copy, "Copy teleprompter text", DocumentTab::copy_teleprompter_text),
+    ("export-markdown", IconName::FileDown, "Export Markdown…", DocumentTab::export_markdown),
+    ("import-markdown", IconName::FileUp, "Import Markdown…", DocumentTab::import_markdown),
+];
+
+/// One document of a video in a [`DocumentEditor`]. Edits are handed to
+/// [`DocumentSaves`] [`SAVE_DELAY`] after the last change, or at once by
+/// [`Self::flush`].
 pub struct DocumentTab {
     state: Entity<AppState>,
+    saves: Entity<DocumentSaves>,
     video_id: VideoId,
     kind: DocumentKind,
+    document_id: Option<DocumentId>,
     scroll: ScrollHandle,
     editor: Option<Entity<DocumentEditor>>,
+    /// A Tab stop in front of the editor: Tab from the controls above puts
+    /// the caret in the first block.
+    entry: FocusHandle,
     stats: ScriptStats,
+    /// Edits not yet handed to the save queue.
     dirty: bool,
     save: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -79,12 +125,17 @@ impl DocumentTab {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let saves = DocumentSaves::global(cx);
+        let entry = cx.focus_handle().tab_stop(true);
         let mut tab = Self {
             state: AppState::global(cx),
+            saves,
             video_id,
             kind,
+            document_id: None,
             scroll,
             editor: None,
+            entry,
             stats: ScriptStats::default(),
             dirty: false,
             save: None,
@@ -95,11 +146,18 @@ impl DocumentTab {
     }
 
     /// (Re)loads the document; a failure leaves the tab in its error state.
+    /// An edit still waiting in the save queue wins over the stored text.
     pub fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (video_id, kind) = (self.video_id, self.kind);
-        let Some(document) = self.state.update(cx, |state, cx| state.ensure_document(video_id, kind, cx)) else {
+        let Some(stored) = self.state.update(cx, |state, cx| state.ensure_document(video_id, kind, cx)) else {
             return;
         };
+        let mut document = self.saves.read(cx).pending(stored.id).unwrap_or(stored);
+        // The caret needs a block to go to.
+        if document.blocks.is_empty() {
+            document.blocks.push(Block::paragraph(""));
+        }
+        self.document_id = Some(document.id);
         self.stats = ScriptStats::of(&document.blocks);
         let scroll = self.scroll.clone();
         let editor = cx.new(|cx| {
@@ -107,11 +165,15 @@ impl DocumentTab {
             editor.set_scroll_handle(scroll);
             editor
         });
-        self._subscriptions = vec![cx.subscribe(&editor, |this, _, event: &DocumentEditorEvent, cx| {
-            if *event == DocumentEditorEvent::Changed {
-                this.on_changed(cx);
-            }
-        })];
+        self._subscriptions = vec![
+            cx.subscribe(&editor, |this, _, event: &DocumentEditorEvent, cx| {
+                if *event == DocumentEditorEvent::Changed {
+                    this.on_changed(cx);
+                }
+            }),
+            cx.on_focus(&self.entry, window, |this, window, cx| this.focus_start(window, cx)),
+            cx.observe(&self.saves, |_, _, cx| cx.notify()),
+        ];
         self.editor = Some(editor);
         cx.notify();
     }
@@ -122,6 +184,11 @@ impl DocumentTab {
 
     pub fn stats(&self) -> &ScriptStats {
         &self.stats
+    }
+
+    /// Whether the last attempt to save this document failed; it is retried.
+    pub fn is_save_failing(&self, cx: &App) -> bool {
+        self.document_id.is_some_and(|id| self.saves.read(cx).is_failing(id))
     }
 
     fn on_changed(&mut self, cx: &mut Context<Self>) {
@@ -140,7 +207,8 @@ impl DocumentTab {
         cx.notify();
     }
 
-    /// Saves pending edits now. Edits of a video that was deleted meanwhile are dropped.
+    /// Hands pending edits to the save queue now, which writes them in the
+    /// background. Edits of a video that was deleted meanwhile are dropped.
     pub fn flush(&mut self, cx: &mut Context<Self>) {
         self.save = None;
         if !self.dirty {
@@ -152,13 +220,21 @@ impl DocumentTab {
             return;
         }
         let document = editor.read(cx).document(cx);
-        self.state.update(cx, |state, cx| state.save_document(document, cx));
+        self.saves.update(cx, |saves, cx| saves.save(document, cx));
     }
 
     /// Puts the caret at the start of the document.
     pub fn focus_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(editor) = &self.editor {
             editor.update(cx, |editor, cx| editor.focus_first(window, cx));
+        }
+    }
+
+    /// Puts the caret on an empty line after the last block, as a click below
+    /// the document does.
+    pub fn focus_end(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = &self.editor {
+            editor.update(cx, |editor, cx| editor.focus_end(window, cx));
         }
     }
 
@@ -193,16 +269,11 @@ impl DocumentTab {
                 Ok(Ok(None)) | Err(_) => return,
                 Ok(Err(error)) => {
                     eprintln!("videocrm: save dialog failed: {error}");
-                    _ = this.update(cx, |this, cx| this.report("Couldn’t open the save dialog.".into(), cx));
+                    _ = this.update_in(cx, |this, window, cx| this.prompt_for_path(PathPurpose::Export, window, cx));
                     return;
                 }
             };
-            let target = path.clone();
-            let written = cx.background_spawn(async move { std::fs::write(&target, markdown) }).await;
-            _ = this.update_in(cx, |this, window, cx| match written {
-                Ok(()) => window.push_notification(format!("Exported to {}.", file_name(&path)), cx),
-                Err(error) => this.report(format!("Couldn’t write {}: {error}", path.display()), cx),
-            });
+            _ = this.update_in(cx, |this, window, cx| this.write_markdown(path, markdown, window, cx));
         })
         .detach();
     }
@@ -223,50 +294,139 @@ impl DocumentTab {
                 Ok(Ok(None)) | Err(_) => return,
                 Ok(Err(error)) => {
                     eprintln!("videocrm: file dialog failed: {error}");
-                    _ = this.update(cx, |this, cx| this.report("Couldn’t open the file dialog.".into(), cx));
+                    _ = this.update_in(cx, |this, window, cx| this.prompt_for_path(PathPurpose::Import, window, cx));
                     return;
                 }
             };
-            let source = path.clone();
-            let read = cx.background_spawn(async move { std::fs::read_to_string(&source) }).await;
-            _ = this.update_in(cx, |this, window, cx| match read {
-                Ok(markdown) => this.confirm_import(&path, from_markdown(&markdown), window, cx),
-                Err(error) => this.report(format!("Couldn’t read {}: {error}", path.display()), cx),
+            _ = this.update_in(cx, |this, window, cx| this.read_markdown(path, window, cx));
+        })
+        .detach();
+    }
+
+    /// Writes the document as Markdown to `path` off the UI thread and says
+    /// where it went. A typed path may name a folder that doesn't exist yet,
+    /// such as the video's media folder before its first use.
+    fn write_markdown(&mut self, path: PathBuf, markdown: String, window: &mut Window, cx: &mut Context<Self>) {
+        let target = path.clone();
+        let written = cx.background_spawn(async move {
+            if let Some(folder) = target.parent() {
+                std::fs::create_dir_all(folder)?;
+            }
+            std::fs::write(&target, markdown)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let written = written.await;
+            _ = this.update_in(cx, |this, window, cx| match written {
+                Ok(()) => window.push_notification(format!("Exported to {}.", display_user_path(&path)), cx),
+                Err(error) => this.report(format!("Couldn’t write {}: {error}", display_user_path(&path)), cx),
             });
         })
         .detach();
+    }
+
+    /// Reads a Markdown file off the UI thread, then asks how to import it.
+    fn read_markdown(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let source = path.clone();
+        let read = cx.background_spawn(async move { std::fs::read_to_string(&source) });
+        cx.spawn_in(window, async move |this, cx| {
+            let read = read.await;
+            _ = this.update_in(cx, |this, window, cx| match read {
+                Ok(markdown) => this.confirm_import(&path, from_markdown(&markdown), window, cx),
+                Err(error) => this.report(format!("Couldn’t read {}: {error}", display_user_path(&path)), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Asks for a path when the system file chooser is unavailable. Export
+    /// suggests a file in the video's media folder.
+    pub fn prompt_for_path(&mut self, purpose: PathPurpose, window: &mut Window, cx: &mut Context<Self>) {
+        let suggested = match purpose {
+            PathPurpose::Export => display_user_path(&self.fallback_export_path(cx)),
+            PathPurpose::Import => String::new(),
+        };
+        let form = cx.new(|cx| PathForm::new(suggested, window, cx));
+        let input = form.read(cx).input.clone();
+        let tab = cx.weak_entity();
+        let markdown = to_markdown(&self.blocks(cx));
+        let width = window.rem_size() * 30.;
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (form, tab, markdown) = (form.clone(), tab.clone(), markdown.clone());
+            let (description, ok) = match purpose {
+                PathPurpose::Export => (
+                    "Your system has no file chooser (on Linux it comes from xdg-desktop-portal). Type where to save the Markdown file instead.",
+                    "Export",
+                ),
+                PathPurpose::Import => (
+                    "Your system has no file chooser (on Linux it comes from xdg-desktop-portal). Type the path of the Markdown file to import instead.",
+                    "Import",
+                ),
+            };
+            alert
+                .title("Couldn’t open the file chooser")
+                .description(description)
+                .width(width)
+                .child(form.clone())
+                .confirm()
+                .ok_text(ok)
+                .on_ok(move |_, window, cx| {
+                    let Some(path) = form.update(cx, |form, cx| form.path(cx)) else { return false };
+                    let markdown = markdown.clone();
+                    _ = tab.update(cx, |tab, cx| match purpose {
+                        PathPurpose::Export => tab.write_markdown(path, markdown, window, cx),
+                        PathPurpose::Import => tab.read_markdown(path, window, cx),
+                    });
+                    true
+                })
+        });
+        input.update(cx, |input, cx| input.focus(window, cx));
     }
 
     /// Asks whether imported blocks go after the document or replace it.
     pub fn confirm_import(&mut self, path: &Path, blocks: Vec<Block>, window: &mut Window, cx: &mut Context<Self>) {
         let title: SharedString = format!("Import “{}”?", file_name(path)).into();
         let tab = cx.weak_entity();
-        let replace_blocks = blocks.clone();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let (append_tab, replace_tab) = (tab.clone(), tab.clone());
-            let (append_blocks, replace_blocks) = (blocks.clone(), replace_blocks.clone());
-            dialog
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let import = |replace: bool| {
+                let (tab, blocks) = (tab.clone(), blocks.clone());
+                move |window: &mut Window, cx: &mut App| {
+                    _ = tab.update(cx, |tab, cx| tab.apply_import(blocks.clone(), replace, window, cx));
+                }
+            };
+            let (append, append_on_enter, replace) = (import(false), import(false), import(true));
+            alert
                 .title(title.clone())
-                .child("Append adds it after the last block. Replace removes the current text, which can’t be undone.")
+                .description(
+                    "Append adds it after the last block. Replace removes the current text, which can’t be undone.",
+                )
                 .footer(
                     DialogFooter::new()
-                        .child(DialogClose::new().child(Button::new("import-cancel").outline().label("Cancel")))
+                        // The irreversible choice stands apart from the default one.
                         .child(
                             Button::new("import-replace")
                                 .outline()
                                 .with_variant(ButtonVariant::Danger)
                                 .label("Replace")
                                 .on_click(move |_, window, cx| {
-                                    let blocks = replace_blocks.clone();
-                                    _ = replace_tab.update(cx, |tab, cx| tab.apply_import(blocks, true, window, cx));
+                                    replace(window, cx);
                                     window.close_dialog(cx);
                                 }),
                         )
-                        .child(DialogAction::new().child(Button::new("import-append").primary().label("Append"))),
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("import-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("import-append").primary().label("Append").on_click(
+                            move |_, window, cx| {
+                                append(window, cx);
+                                window.close_dialog(cx);
+                            },
+                        )),
                 )
                 .on_ok(move |_, window, cx| {
-                    let blocks = append_blocks.clone();
-                    _ = append_tab.update(cx, |tab, cx| tab.apply_import(blocks, false, window, cx));
+                    append_on_enter(window, cx);
                     true
                 })
         });
@@ -306,12 +466,31 @@ impl DocumentTab {
             .or_else(dirs_home)
             .unwrap_or_else(|| PathBuf::from("."));
         let title = video.map(|video| video.title.trim()).filter(|title| !title.is_empty()).unwrap_or("Untitled");
-        let kind = match self.kind {
+        (directory, format!("{} – {}.md", sanitize_file_name(title), self.kind_name()))
+    }
+
+    /// `<media folder>/<slug>.md`, offered when no file chooser is available.
+    fn fallback_export_path(&self, cx: &Context<Self>) -> PathBuf {
+        let state = self.state.read(cx);
+        let Some(video) = state.video(self.video_id) else {
+            return dirs_home().unwrap_or_default().join(format!("{}.md", self.kind_name()));
+        };
+        let name = media::video_folder_name(video);
+        let folder = video.folder.clone().unwrap_or_else(|| state.settings().resolved_media_root().join(&name));
+        let slug = name.strip_suffix(&format!("-{}", video.id.short())).unwrap_or(&name);
+        let file = match self.kind {
+            DocumentKind::Script => format!("{slug}.md"),
+            _ => format!("{slug}-{}.md", self.kind_name()),
+        };
+        folder.join(file)
+    }
+
+    fn kind_name(&self) -> &'static str {
+        match self.kind {
             DocumentKind::Script => "script",
             DocumentKind::Notes => "notes",
             DocumentKind::Custom => "document",
-        };
-        (directory, format!("{} – {kind}.md", sanitize_file_name(title)))
+        }
     }
 
     fn report(&self, message: String, cx: &mut Context<Self>) {
@@ -337,7 +516,11 @@ fn sanitize_file_name(name: &str) -> String {
 impl Render for DocumentTab {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         match &self.editor {
-            Some(editor) => div().w_full().child(editor.clone()).into_any_element(),
+            Some(editor) => div()
+                .w_full()
+                .child(div().id("document-entry").size_0().track_focus(&self.entry))
+                .child(editor.clone())
+                .into_any_element(),
             None => v_flex()
                 .w_full()
                 .py_8()
@@ -360,7 +543,92 @@ impl Render for DocumentTab {
     }
 }
 
-/// The Script tab's rail: spoken length, cues, outline and Markdown actions.
+/// What a typed path is for when the system file chooser is unavailable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathPurpose {
+    Export,
+    Import,
+}
+
+/// The path field of the file chooser fallback.
+struct PathForm {
+    input: Entity<InputState>,
+    error: Option<SharedString>,
+    _subscription: Subscription,
+}
+
+impl PathForm {
+    fn new(path: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("~/Videos/VideoCRM/script.md").default_value(path));
+        let subscription =
+            cx.subscribe(&input, |this: &mut Self, _, event: &gpui_kit::component::input::InputEvent, cx| {
+                if matches!(event, gpui_kit::component::input::InputEvent::Change) && this.error.take().is_some() {
+                    cx.notify();
+                }
+            });
+        Self { input, error: None, _subscription: subscription }
+    }
+
+    /// The typed path made absolute, or `None` after showing why it can't be used.
+    fn path(&mut self, cx: &mut Context<Self>) -> Option<PathBuf> {
+        match expand_user_path(&self.input.read(cx).value()) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                self.error = Some(match error {
+                    PathInputError::Empty => "Enter a file path.".into(),
+                    PathInputError::Relative => "Use a full path, like ~/Videos/script.md.".into(),
+                    PathInputError::NoHome => error.to_string().into(),
+                });
+                cx.notify();
+                None
+            }
+        }
+    }
+}
+
+impl Render for PathForm {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex().gap_1().child(Input::new(&self.input).id("markdown-path")).when_some(
+            self.error.clone(),
+            |this, error| {
+                this.child(
+                    div().id("markdown-path-error").test_support().text_sm().text_color(cx.theme().danger).child(error),
+                )
+            },
+        )
+    }
+}
+
+/// Adds the script's text commands and outline to `menu`, for narrow windows
+/// where the rail is hidden.
+pub fn script_menu(menu: PopupMenu, tab: &Entity<DocumentTab>, cx: &App) -> PopupMenu {
+    let stats = tab.read(cx).stats().clone();
+    let cues = format!("{} B-roll · {} on-screen cues", stats.broll_cues, stats.onscreen_cues);
+    let menu = SCRIPT_COMMANDS.iter().fold(menu.label(cues).separator(), |menu, (_, icon, label, run)| {
+        let (tab, run) = (tab.clone(), *run);
+        menu.item(
+            PopupMenuItem::new(*label)
+                .icon(Icon::new(*icon))
+                .on_click(move |_, window, cx| tab.update(cx, |tab, cx| run(tab, window, cx))),
+        )
+    });
+    if stats.outline.is_empty() {
+        return menu;
+    }
+    let top_level = stats.outline.iter().map(|item| item.level).min().unwrap_or(1);
+    stats.outline.into_iter().fold(menu.separator().label("Outline"), |menu, item| {
+        let (tab, id) = (tab.clone(), item.block_id);
+        let indent = "   ".repeat(usize::from(item.level - top_level));
+        menu.item(
+            PopupMenuItem::new(format!("{indent}{}", item.text))
+                .on_click(move |_, window, cx| tab.update(cx, |tab, cx| tab.focus_block(id, window, cx))),
+        )
+    })
+}
+
+/// The Script tab's rail: spoken length, cues, Markdown actions and outline.
+/// Only the outline scrolls, so the actions stay put however long it gets.
 pub struct ScriptRail {
     tab: Entity<DocumentTab>,
     _subscription: Subscription,
@@ -386,35 +654,33 @@ impl Render for ScriptRail {
         let top_level = stats.outline.iter().map(|item| item.level).min().unwrap_or(1);
         let outline: Vec<RowButton> = stats
             .outline
-            .into_iter()
+            .iter()
             .map(|item| {
                 let tab = tab.clone();
                 let id = item.block_id;
-                RowButton::new(SharedString::from(format!("outline-{id}")), item.text)
+                RowButton::new(SharedString::from(format!("outline-{id}")), item.text.clone())
                     .indent(Rems(0.75 * f32::from(item.level - top_level)))
                     .muted(item.level > top_level)
                     .on_click(move |_, window, cx| tab.update(cx, |tab, cx| tab.focus_block(id, window, cx)))
             })
             .collect();
-        let action = |id: &'static str,
-                      icon: IconName,
-                      label: &'static str,
-                      run: fn(&mut DocumentTab, &mut Window, &mut Context<DocumentTab>)| {
-            let tab = self.tab.clone();
-            RowButton::new(id, label)
-                .icon(icon)
+        let actions = SCRIPT_COMMANDS.iter().map(|(id, icon, label, run)| {
+            let (tab, run) = (self.tab.clone(), *run);
+            RowButton::new(*id, *label)
+                .icon(*icon)
                 .on_click(move |_, window, cx| tab.update(cx, |tab, cx| run(tab, window, cx)))
-        };
+        });
 
         v_flex()
             .id("script-rail")
+            .test_support()
             .size_full()
-            .overflow_y_scroll()
-            .px_4()
-            .py_6()
+            .pt_6()
             .gap_6()
             .child(
                 v_flex()
+                    .flex_none()
+                    .px_4()
                     .gap_3()
                     .child(section_label("Script", cx))
                     .child(
@@ -422,8 +688,8 @@ impl Render for ScriptRail {
                             .grid()
                             .grid_cols(2)
                             .gap_4()
-                            .child(stat(stats.words.to_string(), "spoken words", cx))
-                            .child(stat(format!("~{}", format_runtime(stats.seconds)), "runtime", cx))
+                            .child(stat(stats.words_label(), "spoken words", cx))
+                            .child(stat(stats.runtime_label(), "runtime", cx))
                             .child(stat(stats.broll_cues.to_string(), "B-roll cues", cx))
                             .child(stat(stats.onscreen_cues.to_string(), "on-screen cues", cx)),
                     )
@@ -434,42 +700,71 @@ impl Render for ScriptRail {
                             .child(format!("Runtime at {DEFAULT_WPM} words per minute.")),
                     ),
             )
-            .child(v_flex().gap_2().child(section_label("Outline", cx)).map(|this| {
-                if outline.is_empty() {
-                    this.child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Headings in the script show up here."),
-                    )
-                } else {
-                    this.child(v_flex().mx_neg_2().gap_1().children(outline))
-                }
-            }))
             .child(
-                v_flex().gap_2().child(section_label("Script text", cx)).child(
-                    v_flex()
-                        .mx_neg_2()
-                        .gap_1()
-                        .child(action(
-                            "copy-teleprompter",
-                            IconName::Copy,
-                            "Copy teleprompter text",
-                            DocumentTab::copy_teleprompter_text,
-                        ))
-                        .child(action(
-                            "export-markdown",
-                            IconName::FileDown,
-                            "Export Markdown…",
-                            DocumentTab::export_markdown,
-                        ))
-                        .child(action(
-                            "import-markdown",
-                            IconName::FileUp,
-                            "Import Markdown…",
-                            DocumentTab::import_markdown,
-                        )),
-                ),
+                v_flex()
+                    .flex_none()
+                    .px_4()
+                    .gap_2()
+                    .child(section_label("Script text", cx))
+                    .child(v_flex().mx_neg_2().gap_1().children(actions)),
             )
+            .child(v_flex().flex_1().min_h_0().gap_2().child(div().px_4().child(section_label("Outline", cx))).map(
+                |this| {
+                    if outline.is_empty() {
+                        this.child(
+                            div()
+                                .px_4()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Headings in the script show up here."),
+                        )
+                    } else {
+                        this.child(
+                            v_flex()
+                                .id("script-outline")
+                                .flex_1()
+                                .min_h_0()
+                                .px_2()
+                                .pb_6()
+                                .gap_1()
+                                .children(outline)
+                                .overflow_y_scrollbar(),
+                        )
+                    }
+                },
+            ))
+    }
+}
+
+/// A one-line summary of the script with its stats, commands and outline in a
+/// menu: the rail's content where the window is too narrow for the rail.
+pub fn script_menu_button(tab: &Entity<DocumentTab>, cx: &App) -> impl IntoElement {
+    let summary = tab.read(cx).stats().summary();
+    let tab = tab.clone();
+    Button::new("script-menu")
+        .ghost()
+        .small()
+        .label(summary)
+        .dropdown_caret(true)
+        .tooltip("Script stats, Markdown and outline")
+        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
+            script_menu(menu.max_h(window.rem_size() * 28.).scrollable(true), &tab, cx)
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stats_read_like_the_database() {
+        let stats = ScriptStats { words: 4177, seconds: 1671, ..ScriptStats::default() };
+        assert_eq!(stats.words_label(), "4,177");
+        assert_eq!(stats.runtime_label(), "~27m 51s");
+        assert_eq!(stats.summary(), "4,177 words · ~27m 51s");
+
+        let empty = ScriptStats::default();
+        assert_eq!(empty.runtime_label(), "0s");
+        assert_eq!(empty.summary(), "No spoken words yet");
     }
 }
