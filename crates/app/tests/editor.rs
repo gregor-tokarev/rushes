@@ -45,10 +45,7 @@ impl Fixture {
         cx.update(gpui_kit::init);
         let (window, editor) = cx.update(|cx| {
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                    Default::default(),
-                    size(px(1000.), px(900.)),
-                ))),
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(Default::default(), size(px(1000.), px(900.))))),
                 ..Default::default()
             };
             gpui_kit::open_window(options, cx, |window, cx| {
@@ -62,10 +59,8 @@ impl Fixture {
         let events = Rc::new(RefCell::new(Vec::new()));
         let sink = events.clone();
         cx.update(|cx| {
-            cx.subscribe(&editor, move |_, event: &DocumentEditorEvent, _| {
-                sink.borrow_mut().push(event.clone())
-            })
-            .detach()
+            cx.subscribe(&editor, move |_, event: &DocumentEditorEvent, _| sink.borrow_mut().push(event.clone()))
+                .detach()
         });
         let fixture = Self { window, editor, events };
         fixture.step(cx, |window, cx| window.render_frame(cx));
@@ -126,11 +121,14 @@ impl Fixture {
         self.events.borrow().iter().filter(|event| **event == DocumentEditorEvent::Changed).count()
     }
 
+    fn label(&self, cx: &mut TestAppContext, target: ElementId) -> Option<String> {
+        cx.update_window(self.window, |_, window, _| window.find(target).label().map(str::to_string))
+            .expect("window is open")
+    }
+
     fn is_visible(&self, cx: &mut TestAppContext, target: ElementId) -> bool {
-        cx.update_window(self.window, |_, window, _| {
-            window.try_find(target).is_some_and(|found| found.visible())
-        })
-        .expect("window is open")
+        cx.update_window(self.window, |_, window, _| window.try_find(target).is_some_and(|found| found.visible()))
+            .expect("window is open")
     }
 }
 
@@ -392,7 +390,7 @@ fn multi_line_paste_creates_blocks(cx: &mut TestAppContext) {
     let f = Fixture::new(cx, vec![paragraph("")]);
     f.focus_first(cx);
     cx.write_to_clipboard(ClipboardItem::new_string(
-        "# Plan\n- shoot\n1. edit\n[ ] upload\n> quote\nnotes".into(),
+        "# Plan\n- shoot\n1. edit\n- [ ] upload\n\n> quote\n\nnotes".into(),
     ));
     f.press(cx, &["secondary-v"]);
     assert_eq!(
@@ -453,11 +451,7 @@ fn block_menu_duplicates_and_deletes(cx: &mut TestAppContext) {
     f.step(cx, |window, cx| window.within("popup-menu").click(2usize, cx));
     assert_eq!(
         f.summary(cx),
-        owned(&[
-            (BlockKind::Paragraph, "keep"),
-            (BlockKind::Paragraph, "keep"),
-            (BlockKind::Paragraph, "other")
-        ])
+        owned(&[(BlockKind::Paragraph, "keep"), (BlockKind::Paragraph, "keep"), (BlockKind::Paragraph, "other")])
     );
 
     f.hover(cx, target.id);
@@ -570,11 +564,7 @@ fn pasted_dividers_and_code_keep_their_own_blocks(cx: &mut TestAppContext) {
     f.press(cx, &["secondary-v"]);
     assert_eq!(
         f.summary(cx),
-        owned(&[
-            (BlockKind::Paragraph, "abc"),
-            (BlockKind::Code, "let x = 1;"),
-            (BlockKind::Paragraph, "def"),
-        ])
+        owned(&[(BlockKind::Paragraph, "abc"), (BlockKind::Code, "let x = 1;"), (BlockKind::Paragraph, "def"),])
     );
 
     let f = Fixture::new(cx, vec![paragraph("")]);
@@ -624,4 +614,130 @@ fn focus_on_the_editor_itself_leaves_no_block_focused(cx: &mut TestAppContext) {
     f.step(cx, |window, cx| window.click_at(part(ids[0], "row"), point(row.size.width - px(8.), px(8.)), cx));
     assert_eq!(f.focused(cx), None);
     assert_eq!(f.events.borrow().last(), Some(&DocumentEditorEvent::FocusChanged(None)));
+}
+
+#[gpui_kit::test]
+fn pasting_the_markdown_export_restores_callouts_and_cues(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![paragraph("")]);
+    f.focus_first(cx);
+    let exported = videocrm_core::document::to_markdown(&[
+        block(BlockKind::Heading2, "Setup"),
+        block(BlockKind::Callout, "Pin the Rust version before recording."),
+        block(BlockKind::BRoll, "Slow pan across the desk"),
+        block(BlockKind::OnScreen, "rustup default 1.80"),
+        block(BlockKind::Quote, "A quote stays a quote."),
+        paragraph("Spoken line."),
+    ]);
+    // A GitHub note spanning two lines is one callout.
+    let pasted = format!("{exported}\n> [!NOTE]\n> GitHub style note that spans\n> two lines.\n");
+    cx.write_to_clipboard(ClipboardItem::new_string(pasted));
+    f.press(cx, &["secondary-v"]);
+    assert_eq!(
+        f.summary(cx),
+        owned(&[
+            (BlockKind::Heading2, "Setup"),
+            (BlockKind::Callout, "Pin the Rust version before recording."),
+            (BlockKind::BRoll, "Slow pan across the desk"),
+            (BlockKind::OnScreen, "rustup default 1.80"),
+            (BlockKind::Quote, "A quote stays a quote."),
+            (BlockKind::Paragraph, "Spoken line."),
+            (BlockKind::Callout, "GitHub style note that spans\ntwo lines."),
+        ])
+    );
+}
+
+#[gpui_kit::test]
+fn typing_a_callout_marker_after_the_quote_shortcut_makes_a_cue(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![paragraph(""), paragraph(""), paragraph("")]);
+    f.focus_first(cx);
+    // Typed as a person types: the quote shortcut fires after "> ".
+    for (ix, (marker, text)) in
+        [("[!broll] ", "Slow pan across the desk"), ("[!onscreen] ", "Subscribe"), ("[!note] ", "Not read out")]
+            .into_iter()
+            .enumerate()
+    {
+        if ix > 0 {
+            f.press(cx, &["down"]);
+        }
+        f.type_text(cx, "> ");
+        f.type_text(cx, marker);
+        f.type_text(cx, text);
+    }
+    assert_eq!(
+        f.summary(cx),
+        owned(&[
+            (BlockKind::BRoll, "Slow pan across the desk"),
+            (BlockKind::OnScreen, "Subscribe"),
+            (BlockKind::Callout, "Not read out"),
+        ])
+    );
+}
+
+#[gpui_kit::test]
+fn enter_with_no_slash_results_starts_a_new_block(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![paragraph("")]);
+    f.focus_first(cx);
+    f.type_text(cx, "/");
+    f.type_text(cx, "zzq");
+    assert!(f.is_visible(cx, "slash-menu".into()), "the menu shows No results");
+    f.press(cx, &["enter"]);
+    assert!(!f.is_visible(cx, "slash-menu".into()));
+    f.type_text(cx, "after");
+    assert_eq!(f.summary(cx), owned(&[(BlockKind::Paragraph, "/zzq"), (BlockKind::Paragraph, "after")]));
+}
+
+#[gpui_kit::test]
+fn an_empty_document_shows_its_hint_without_focus(cx: &mut TestAppContext) {
+    let lone = paragraph("");
+    let f = Fixture::new(cx, vec![lone.clone()]);
+    assert_eq!(f.focused(cx), None);
+    assert_eq!(f.label(cx, part(lone.id, "text")).as_deref(), Some("Start writing, or type '/' for commands"));
+
+    // A click on the empty area below writes into that paragraph.
+    f.click(cx, "document-end".into());
+    assert_eq!(f.focused(cx), Some(lone.id));
+    f.type_text(cx, "Hello");
+    assert_eq!(f.summary(cx), owned(&[(BlockKind::Paragraph, "Hello")]));
+
+    // Once the document has more, an empty paragraph is just a blank line.
+    let blank = paragraph("");
+    let f = Fixture::new(cx, vec![paragraph("Intro"), blank.clone()]);
+    assert_eq!(f.label(cx, part(blank.id, "text")), None);
+}
+
+#[gpui_kit::test]
+fn template_guidance_shows_until_the_creator_writes(cx: &mut TestAppContext) {
+    let guided = Block::guided(BlockKind::Paragraph, "Lead with the end result.");
+    let bullet = Block::guided(BlockKind::Bulleted, "Prerequisite: tool or account viewers need");
+    let f = Fixture::new(cx, vec![block(BlockKind::Heading2, "Hook"), guided.clone(), bullet.clone()]);
+    assert_eq!(f.label(cx, part(guided.id, "text")).as_deref(), Some("Lead with the end result."));
+    assert_eq!(f.label(cx, part(bullet.id, "text")).as_deref(), Some("Prerequisite: tool or account viewers need"));
+
+    f.click(cx, part(guided.id, "text"));
+    assert_eq!(f.focused(cx), Some(guided.id));
+    f.type_text(cx, "This is the finished desk.");
+    let blocks = f.blocks(cx);
+    assert_eq!(blocks[1].text, "This is the finished desk.");
+    assert_eq!(blocks[1].guidance(), None, "written text replaces the guidance");
+    assert_eq!(blocks[2].guidance(), Some("Prerequisite: tool or account viewers need"));
+}
+
+#[gpui_kit::test]
+fn links_open_only_as_web_or_mail_addresses(cx: &mut TestAppContext) {
+    let bare = paragraph("[channel](youtube.com/@mychannel) for more");
+    let local = paragraph("[docs](file:///home/me/.bashrc) for more");
+    let f = Fixture::new(cx, vec![bare.clone(), local.clone()]);
+
+    f.step(cx, |window, cx| window.click_at(part(bare.id, "text"), point(px(4.), px(8.)), cx));
+    assert_eq!(cx.opened_url().as_deref(), Some("https://youtube.com/@mychannel"));
+    assert!(!f.is_visible(cx, "notification".into()));
+
+    f.step(cx, |window, cx| window.click_at(part(local.id, "text"), point(px(4.), px(8.)), cx));
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://youtube.com/@mychannel"),
+        "a file link is never handed to the system"
+    );
+    assert!(f.is_visible(cx, "notification".into()), "a short notice explains why");
+    assert_eq!(f.focused(cx), None, "the click does not start editing either");
 }

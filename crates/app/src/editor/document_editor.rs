@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui_kit::component::input::{
-    Backspace, Delete, Enter, Escape, IndentInline, InputEvent, MoveDown, MoveLeft, MoveRight, MoveUp,
-    OutdentInline, Paste, TextareaState,
+    Backspace, Delete, Enter, Escape, IndentInline, InputEvent, MoveDown, MoveLeft, MoveRight, MoveUp, OutdentInline,
+    Paste, TextareaState,
 };
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::{
@@ -22,7 +22,7 @@ use videocrm_core::{Block, BlockId, BlockKind, Document};
 use self::geometry::Geometry;
 use super::blocks::{self, Merge};
 use super::inline::{Marker, toggle_marker};
-use super::markdown::{Shortcut, detect_shortcut, is_list, parse_blocks};
+use super::markdown::{Shortcut, detect_quote_marker, detect_shortcut, is_list, parse_pasted};
 use super::slash::{self, BlockType};
 use super::{
     ClearBlockSelection, DeleteSelectedBlock, InsertParagraphBelow, OpenBlockMenu, SelectNextBlock,
@@ -287,21 +287,16 @@ impl DocumentEditor {
 
     /// The input of a text block, created on first use and synchronized
     /// with the block's text and kind.
-    fn input(
-        &mut self,
-        id: BlockId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<TextareaState>> {
+    fn input(&mut self, id: BlockId, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<TextareaState>> {
         let block = &self.document.blocks[self.index(id)?];
-        let placeholder = render::placeholder(block.kind);
+        let placeholder = render::input_placeholder(block, self.document.blocks.len() == 1);
         if let Some(input) = self.inputs.get(&id) {
             let text = block.text.clone();
             input.state.update(cx, |state, cx| {
                 if state.value().as_ref() != text {
                     state.set_value(text, window, cx);
                 }
-                state.set_placeholder(placeholder, window, cx);
+                state.set_placeholder(placeholder.clone(), window, cx);
             });
             return Some(input.state.clone());
         }
@@ -396,10 +391,14 @@ impl DocumentEditor {
         self.geometry.borrow_mut().request_reveal();
         self.update_slash(ix, &previous, cursor);
         let block = &self.document.blocks[ix];
-        if self.slash.is_none()
-            && block.kind == BlockKind::Paragraph
-            && let Some(shortcut) = detect_shortcut(&block.text, cursor)
-        {
+        let shortcut = match block.kind {
+            _ if self.slash.is_some() => None,
+            BlockKind::Paragraph => detect_shortcut(&block.text, cursor),
+            // `> [!broll] ` typed in one go: the quote shortcut fires first.
+            BlockKind::Quote => detect_quote_marker(&block.text, cursor),
+            _ => None,
+        };
+        if let Some(shortcut) = shortcut {
             self.apply_shortcut(ix, shortcut, window, cx);
         }
         self.changed(cx);
@@ -512,15 +511,16 @@ impl DocumentEditor {
     fn on_enter(&mut self, action: &Enter, window: &mut Window, cx: &mut Context<Self>) {
         let Some((ix, input)) = self.editing(window, cx) else { return };
         if self.slash_is_open(ix) {
-            cx.stop_propagation();
-            let chosen =
-                self.slash.as_ref().and_then(|menu| menu.items().get(menu.selected).map(|ty| ty.kind));
-            match chosen {
-                Some(kind) => self.choose_slash_item(kind, window, cx),
-                None => self.slash = None,
+            let chosen = self.slash.as_ref().and_then(|menu| menu.items().get(menu.selected).map(|ty| ty.kind));
+            if let Some(kind) = chosen {
+                cx.stop_propagation();
+                self.choose_slash_item(kind, window, cx);
+                cx.notify();
+                return;
             }
+            // Nothing to choose: close the menu and let Enter be Enter.
+            self.slash = None;
             cx.notify();
-            return;
         }
         let kind = self.document.blocks[ix].kind;
         if action.secondary {
@@ -700,8 +700,9 @@ impl DocumentEditor {
         }
     }
 
-    /// Multi-line plain text becomes one block per line; single lines and
-    /// code blocks use the input's own paste.
+    /// Multi-line text is read like an imported Markdown file, so callouts,
+    /// cues and the app's own export paste back as the blocks they were;
+    /// single lines and code blocks use the input's own paste.
     fn on_paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         let Some((ix, input)) = self.editing(window, cx) else { return };
         if self.document.blocks[ix].kind == BlockKind::Code {
@@ -711,7 +712,7 @@ impl DocumentEditor {
         if !pasted.trim_end().contains('\n') {
             return;
         }
-        let mut pasted = parse_blocks(&pasted);
+        let mut pasted = parse_pasted(&pasted);
         if pasted.is_empty() {
             return;
         }
@@ -813,12 +814,7 @@ impl DocumentEditor {
         }
     }
 
-    fn insert_below_selected(
-        &mut self,
-        _: &InsertParagraphBelow,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn insert_below_selected(&mut self, _: &InsertParagraphBelow, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = self.selected.and_then(|id| self.index(id)) {
             self.insert_after(ix, Block::paragraph(""), window, cx);
         }
@@ -833,13 +829,7 @@ impl DocumentEditor {
 
     // Block commands, shared by the block menu, the gutter and the keyboard.
 
-    fn insert_after(
-        &mut self,
-        ix: usize,
-        block: Block,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> BlockId {
+    fn insert_after(&mut self, ix: usize, block: Block, window: &mut Window, cx: &mut Context<Self>) -> BlockId {
         let id = block.id;
         self.document.blocks.insert(ix + 1, block);
         self.focus_block(id, Caret::Start, window, cx);
@@ -872,8 +862,7 @@ impl DocumentEditor {
 
     fn move_block_by(&mut self, id: BlockId, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.index(id) else { return };
-        let Some(target) = ix.checked_add_signed(delta).filter(|target| *target < self.document.blocks.len())
-        else {
+        let Some(target) = ix.checked_add_signed(delta).filter(|target| *target < self.document.blocks.len()) else {
             return;
         };
         let before = if delta > 0 { target + 1 } else { target };
@@ -913,13 +902,7 @@ impl DocumentEditor {
         self.changed(cx);
     }
 
-    fn open_block_menu(
-        &mut self,
-        id: BlockId,
-        position: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_block_menu(&mut self, id: BlockId, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.index(id) else { return };
         let editor = cx.entity().downgrade();
         let target = render::MenuTarget {
@@ -950,8 +933,7 @@ impl DocumentEditor {
             cx.notify();
         });
         self.slash = None;
-        self.block_menu =
-            Some(BlockMenu { block: id, menu, position, restore_focus, _subscription: subscription });
+        self.block_menu = Some(BlockMenu { block: id, menu, position, restore_focus, _subscription: subscription });
         cx.notify();
     }
 
@@ -1010,9 +992,7 @@ fn on_edge_line(input: &Entity<TextareaState>, edge: Edge, cx: &App) -> bool {
     };
     let laid_out = (state.range_to_bounds(&(cursor..cursor)), state.range_to_bounds(&(reference..reference)));
     match (laid_out, state.line_height()) {
-        ((Some(caret), Some(reference)), Some(line_height)) => {
-            (caret.top() - reference.top()).abs() < line_height / 2.
-        }
+        ((Some(caret), Some(reference)), Some(line_height)) => (caret.top() - reference.top()).abs() < line_height / 2.,
         _ => {
             let text = state.value();
             match edge {

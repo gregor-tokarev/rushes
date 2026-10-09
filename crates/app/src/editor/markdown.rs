@@ -1,6 +1,8 @@
-//! Block-level Markdown: shortcuts typed at the start of a block and
-//! multi-line plain text pasted into the editor.
+//! Block-level Markdown: shortcuts typed at the start of a block, and
+//! multi-line text pasted into the editor, which is read like an imported
+//! Markdown file ([`from_markdown`]).
 
+use videocrm_core::document::{from_markdown, quote_marker};
 use videocrm_core::{Block, BlockKind};
 
 use super::blocks::MAX_INDENT;
@@ -37,89 +39,29 @@ pub fn detect_shortcut(text: &str, cursor: usize) -> Option<Shortcut> {
 
 /// `1. `, `12. `: digits followed by a dot and a space.
 fn is_ordered_marker(typed: &str) -> bool {
-    typed.strip_suffix(". ").is_some_and(|digits| {
-        !digits.is_empty() && digits.len() <= 3 && digits.bytes().all(|b| b.is_ascii_digit())
-    })
+    typed
+        .strip_suffix(". ")
+        .is_some_and(|digits| !digits.is_empty() && digits.len() <= 3 && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Splits pasted plain text into blocks, one per non-empty line, recognising
-/// headings, lists, to-dos, quotes, B-roll / on-screen cues (`> [!broll]`),
-/// dividers and fenced code. Leading indentation nests list items.
-pub fn parse_blocks(text: &str) -> Vec<Block> {
-    let mut blocks = Vec::new();
-    let mut code: Option<Vec<&str>> = None;
-    for line in text.lines() {
-        if let Some(lines) = code.as_mut() {
-            if line.trim_start().starts_with("```") {
-                blocks.push(Block::new(BlockKind::Code, lines.join("\n")));
-                code = None;
-            } else {
-                lines.push(line);
-            }
-            continue;
-        }
-        if line.trim_start().starts_with("```") {
-            code = Some(Vec::new());
-            continue;
-        }
-        if !line.trim().is_empty() {
-            blocks.push(parse_line(line));
-        }
-    }
-    if let Some(lines) = code {
-        blocks.push(Block::new(BlockKind::Code, lines.join("\n")));
+/// Detects a callout-style marker (`[!note] `, `[!broll] `, `[!onscreen] `)
+/// just typed at the start of a quote: the syntax Markdown files use for
+/// callouts and cues, typed after the `> ` shortcut.
+pub fn detect_quote_marker(text: &str, cursor: usize) -> Option<Shortcut> {
+    let marker = text.get(..cursor)?.strip_suffix(' ')?;
+    let (kind, len) = quote_marker(marker)?;
+    (len == marker.len()).then_some(Shortcut { kind, checked: false, marker_len: cursor })
+}
+
+/// Pasted text as blocks, read exactly like an imported Markdown file, so
+/// the app's own export pastes back unchanged. List nesting is capped at the
+/// editor's deepest level.
+pub fn parse_pasted(text: &str) -> Vec<Block> {
+    let mut blocks = from_markdown(text);
+    for block in &mut blocks {
+        block.indent = block.indent.min(MAX_INDENT);
     }
     blocks
-}
-
-fn parse_line(line: &str) -> Block {
-    let content = line.trim_start();
-    let leading = &line[..line.len() - content.len()];
-    let width: usize = leading.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum();
-    let indent = (width / 2).min(MAX_INDENT as usize) as u8;
-    let content = content.trim_end();
-
-    let (kind, checked, text) = classify(content);
-    let mut block = Block::new(kind, text);
-    block.checked = checked;
-    if is_list(kind) {
-        block.indent = indent;
-    }
-    block
-}
-
-fn classify(content: &str) -> (BlockKind, bool, &str) {
-    const PREFIXES: [(&str, BlockKind, bool); 15] = [
-        ("### ", BlockKind::Heading3, false),
-        ("## ", BlockKind::Heading2, false),
-        ("# ", BlockKind::Heading1, false),
-        ("- [ ] ", BlockKind::Todo, false),
-        ("- [x] ", BlockKind::Todo, true),
-        ("- [X] ", BlockKind::Todo, true),
-        ("[ ] ", BlockKind::Todo, false),
-        ("[x] ", BlockKind::Todo, true),
-        ("> [!broll] ", BlockKind::BRoll, false),
-        ("> [!onscreen] ", BlockKind::OnScreen, false),
-        ("> ", BlockKind::Quote, false),
-        ("- ", BlockKind::Bulleted, false),
-        ("* ", BlockKind::Bulleted, false),
-        ("+ ", BlockKind::Bulleted, false),
-        ("!! ", BlockKind::Callout, false),
-    ];
-    if matches!(content, "---" | "***" | "___") {
-        return (BlockKind::Divider, false, "");
-    }
-    for (prefix, kind, checked) in PREFIXES {
-        if let Some(text) = content.strip_prefix(prefix) {
-            return (kind, checked, text);
-        }
-    }
-    if let Some((digits, text)) = content.split_once(". ")
-        && is_ordered_marker(&content[..digits.len() + 2])
-    {
-        return (BlockKind::Numbered, false, text);
-    }
-    (BlockKind::Paragraph, false, content)
 }
 
 pub fn is_list(kind: BlockKind) -> bool {
@@ -132,8 +74,7 @@ mod tests {
 
     #[test]
     fn detects_shortcuts_ending_at_the_caret() {
-        let kind =
-            |text: &str, cursor| detect_shortcut(text, cursor).map(|s| (s.kind, s.checked, s.marker_len));
+        let kind = |text: &str, cursor| detect_shortcut(text, cursor).map(|s| (s.kind, s.checked, s.marker_len));
         assert_eq!(kind("# ", 2), Some((BlockKind::Heading1, false, 2)));
         assert_eq!(kind("## Title", 3), Some((BlockKind::Heading2, false, 3)));
         assert_eq!(kind("### ", 4), Some((BlockKind::Heading3, false, 4)));
@@ -161,9 +102,23 @@ mod tests {
     }
 
     #[test]
-    fn parses_pasted_lines_into_blocks() {
-        let blocks = parse_blocks(
-            "# Title\n\nIntro with **bold**\n- one\n  - nested\n1. first\n- [x] done\n[ ] open\n> quoted\n> [!broll] Drone shot\n---\n",
+    fn detects_callout_markers_typed_into_a_quote() {
+        let kind = |text: &str, cursor| detect_quote_marker(text, cursor).map(|s| (s.kind, s.marker_len));
+        assert_eq!(kind("[!broll] ", 9), Some((BlockKind::BRoll, 9)));
+        assert_eq!(kind("[!onscreen] Subscribe", 12), Some((BlockKind::OnScreen, 12)));
+        assert_eq!(kind("[!note] ", 8), Some((BlockKind::Callout, 8)));
+        assert_eq!(kind("[!NOTE] ", 8), Some((BlockKind::Callout, 8)));
+        assert_eq!(kind("[!broll]", 8), None, "not before the space");
+        assert_eq!(kind("[!broll] Slow pan", 17), None);
+        assert_eq!(kind("[!quote] ", 9), None);
+    }
+
+    #[test]
+    fn pastes_markdown_like_an_import() {
+        let blocks = parse_pasted(
+            "# Title\n\nIntro with **bold**\n\n- one\n  - nested\n1. first\n- [x] done\n\n> quoted\n\n\
+             > [!note] Pin the Rust version\n\n> [!NOTE]\n> GitHub style note that spans\n> two lines.\n\n\
+             > [!broll] Drone shot\n\n> [!onscreen] Subscribe\n\n---\n",
         );
         let summary: Vec<_> = blocks.iter().map(|b| (b.kind, b.text.as_str(), b.indent, b.checked)).collect();
         assert_eq!(
@@ -175,9 +130,11 @@ mod tests {
                 (BlockKind::Bulleted, "nested", 1, false),
                 (BlockKind::Numbered, "first", 0, false),
                 (BlockKind::Todo, "done", 0, true),
-                (BlockKind::Todo, "open", 0, false),
                 (BlockKind::Quote, "quoted", 0, false),
+                (BlockKind::Callout, "Pin the Rust version", 0, false),
+                (BlockKind::Callout, "GitHub style note that spans\ntwo lines.", 0, false),
                 (BlockKind::BRoll, "Drone shot", 0, false),
+                (BlockKind::OnScreen, "Subscribe", 0, false),
                 (BlockKind::Divider, "", 0, false),
             ]
         );
@@ -185,7 +142,7 @@ mod tests {
 
     #[test]
     fn keeps_fenced_code_together() {
-        let blocks = parse_blocks("before\n```rust\nfn main() {\n    run();\n}\n```\nafter");
+        let blocks = parse_pasted("before\n```rust\nfn main() {\n    run();\n}\n```\nafter");
         let summary: Vec<_> = blocks.iter().map(|b| (b.kind, b.text.as_str())).collect();
         assert_eq!(
             summary,
@@ -199,9 +156,8 @@ mod tests {
 
     #[test]
     fn caps_indent_and_handles_crlf() {
-        let blocks = parse_blocks("- a\r\n\t\t\t- deep\r\n");
-        assert_eq!(blocks[0].text, "a");
-        assert_eq!(blocks[1].text, "deep");
-        assert_eq!(blocks[1].indent, MAX_INDENT);
+        let blocks = parse_pasted("- a\r\n  - b\r\n    - c\r\n      - d\r\n        - deep\r\n");
+        let indents: Vec<_> = blocks.iter().map(|b| (b.text.as_str(), b.indent)).collect();
+        assert_eq!(indents, [("a", 0), ("b", 1), ("c", 2), ("d", 3), ("deep", MAX_INDENT)]);
     }
 }
