@@ -22,7 +22,16 @@ pub(super) struct Geometry {
     rem_size: Pixels,
     rows: HashMap<BlockId, Row>,
     /// Scroll the focused block into view after the next layout.
-    reveal: bool,
+    reveal: Option<Reveal>,
+}
+
+/// How a pending reveal brings the focused block into view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reveal {
+    /// The least scrolling that shows the block, as for the caret while typing.
+    Nearest,
+    /// The block at the top of the viewport, as for a table of contents.
+    Top,
 }
 
 #[derive(Clone, Copy)]
@@ -47,11 +56,18 @@ pub(super) fn fingerprint(block: &Block, number: usize) -> u64 {
 
 impl Geometry {
     pub fn request_reveal(&mut self) {
-        self.reveal = true;
+        if self.reveal != Some(Reveal::Top) {
+            self.reveal = Some(Reveal::Nearest);
+        }
+    }
+
+    /// Scrolls the focused block to the top of the viewport after the next layout.
+    pub fn request_reveal_at_top(&mut self) {
+        self.reveal = Some(Reveal::Top);
     }
 
     pub fn cancel_reveal(&mut self) {
-        self.reveal = false;
+        self.reveal = None;
     }
 
     /// Where the row was drawn in the last frame, in window coordinates.
@@ -106,16 +122,21 @@ impl Geometry {
             window.refresh();
         }
 
-        if std::mem::take(&mut self.reveal)
+        if let Some(reveal) = self.reveal.take()
             && let Some(scroll) = scroll
             && let Some(row) = focused.and_then(|id| self.rows.get(&id))
         {
             let margin = rem_size * 2.;
             let mut offset = scroll.offset();
-            if row.bounds.bottom() + margin > viewport.bottom() {
-                offset.y -= row.bounds.bottom() + margin - viewport.bottom();
-            } else if row.bounds.top() - margin < viewport.top() {
-                offset.y = (offset.y + viewport.top() - row.bounds.top() + margin).min(Pixels::ZERO);
+            let to_top =
+                (offset.y + viewport.top() - row.bounds.top() + margin).min(Pixels::ZERO);
+            match reveal {
+                Reveal::Top => offset.y = to_top,
+                Reveal::Nearest if row.bounds.bottom() + margin > viewport.bottom() => {
+                    offset.y -= row.bounds.bottom() + margin - viewport.bottom();
+                }
+                Reveal::Nearest if row.bounds.top() - margin < viewport.top() => offset.y = to_top,
+                Reveal::Nearest => {}
             }
             if offset != scroll.offset() {
                 scroll.set_offset(offset);

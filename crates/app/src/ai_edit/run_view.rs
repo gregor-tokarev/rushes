@@ -269,8 +269,9 @@ impl RunView {
                 video.publish.file = Some(output);
                 state.update_video(video, cx);
             }
-            state.open_video(video_id, VideoTab::Publish, cx);
         });
+        // The Publish tab opens on its first card, wherever it was scrolled to before.
+        crate::video_page::open_tab_at_top(video_id, VideoTab::Publish, cx);
     }
 
     fn toggle_row(&mut self, seq: u32, cx: &mut Context<Self>) {
