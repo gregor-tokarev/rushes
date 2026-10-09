@@ -14,7 +14,7 @@ use gpui_kit::{
     Styled as _, Subscription, Window, div,
 };
 use videocrm_core::settings::EditPreferences;
-use videocrm_core::{DocumentKind, PipelineRun, RunId, VideoId};
+use videocrm_core::{DocumentKind, PipelineRun, RunId, RunStatus, VideoId};
 
 use super::brief::{COLOR_GRADES, color_grade_label, default_brief, with_preferences};
 use super::doctor::DoctorChecklist;
@@ -201,14 +201,14 @@ impl AiEditPanel {
         let now = Utc::now();
         let history = selected.and_then(|id| runs.iter().find(|run| run.id == id)).map(|run| {
             let label = format!("{} · {}", format::started(run.created_at, now), run.status.label());
-            let entries: Vec<(RunId, String, bool)> = runs
+            let entries: Vec<HistoryEntry> = runs
                 .iter()
-                .map(|run| {
-                    let mut label = format!("{} — {}", format::started(run.created_at, now), run.status.label());
-                    if let Some(cost) = run.cost_usd {
-                        label.push_str(&format!(" — {}", format::cost(cost)));
-                    }
-                    (run.id, label, Some(run.id) == selected)
+                .map(|run| HistoryEntry {
+                    id: run.id,
+                    status: run.status,
+                    started: format::started(run.created_at, now),
+                    cost: run.cost_usd.map(format::cost),
+                    selected: Some(run.id) == selected,
                 })
                 .collect();
             let panel = cx.weak_entity();
@@ -220,13 +220,16 @@ impl AiEditPanel {
                 .dropdown_caret(true)
                 .dropdown_menu(move |mut menu, _, _| {
                     menu = menu.label("Edits of this video");
-                    for (id, label, checked) in &entries {
-                        let (id, panel) = (*id, panel.clone());
-                        menu = menu.item(PopupMenuItem::new(label.clone()).checked(*checked).on_click(
-                            move |_, window, cx| {
-                                _ = panel.update(cx, |panel, cx| panel.select_run(id, window, cx));
-                            },
-                        ));
+                    for entry in &entries {
+                        let (id, panel) = (entry.id, panel.clone());
+                        let item = entry.clone();
+                        menu = menu.item(
+                            PopupMenuItem::element(move |_, cx| item.render(cx)).checked(entry.selected).on_click(
+                                move |_, window, cx| {
+                                    _ = panel.update(cx, |panel, cx| panel.select_run(id, window, cx));
+                                },
+                            ),
+                        );
                     }
                     menu
                 })
@@ -398,6 +401,34 @@ impl AiEditPanel {
             .when_some(self.start_error.clone(), |this, error| {
                 this.child(div().text_sm().text_color(theme.danger).child(error))
             })
+    }
+}
+
+/// One run in the history menu.
+#[derive(Clone)]
+struct HistoryEntry {
+    id: RunId,
+    status: RunStatus,
+    started: String,
+    cost: Option<String>,
+    selected: bool,
+}
+
+impl HistoryEntry {
+    fn render(&self, cx: &App) -> Div {
+        let muted = cx.theme().muted_foreground;
+        h_flex()
+            .w_full()
+            .gap_3()
+            .text_sm()
+            .child(
+                h_flex()
+                    .w_32()
+                    .flex_shrink_0()
+                    .child(Chip::new(self.status.label(), run_status_color(self.status)).dot(true)),
+            )
+            .child(div().flex_1().child(self.started.clone()))
+            .child(div().w_12().text_right().text_color(muted).children(self.cost.clone()))
     }
 }
 

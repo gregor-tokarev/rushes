@@ -112,11 +112,15 @@ impl RunView {
         self.output_task = None;
         self.action_error = None;
         self.notes.update(cx, |notes, cx| notes.set_value("", window, cx));
+        // A finished run reads from the start; a live one follows its newest events.
+        self.scroll = ScrollHandle::new();
         if let Some(id) = run_id {
             self.service.update(cx, |service, cx| service.load_timeline(id, cx));
+            if self.live(cx).is_some() {
+                self.scroll.scroll_to_bottom();
+            }
         }
         self.sync(cx);
-        self.scroll.scroll_to_bottom();
     }
 
     fn run<'a>(&self, cx: &'a App) -> Option<&'a PipelineRun> {
@@ -132,6 +136,7 @@ impl RunView {
     fn sync(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.run_id else { return };
         let timeline_len = self.service.read(cx).timeline(id).len();
+        let live = self.live(cx).is_some();
         if timeline_len != self.folded_len {
             let at_end = {
                 let max = self.scroll.max_offset().y;
@@ -139,13 +144,14 @@ impl RunView {
             };
             self.items = fold_timeline(self.service.read(cx).timeline(id));
             self.folded_len = timeline_len;
-            if at_end {
+            if live && at_end {
                 self.scroll.scroll_to_bottom();
             }
         }
 
-        let live = self.live(cx).is_some();
         if live && self.ticker.is_none() {
+            // A phase just started: show what the agent does next.
+            self.scroll.scroll_to_bottom();
             self.ticker = Some(cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(Duration::from_secs(1)).await;
@@ -426,7 +432,7 @@ impl RunView {
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
                                 .child(Icon::new(IconName::Check).xsmall())
-                                .child("Upload file"),
+                                .child("Set as the upload file"),
                         )
                     }),
             )

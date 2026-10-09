@@ -106,7 +106,7 @@ impl PipelinesPage {
                     .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(title)),
             )
             .child(
-                div()
+                h_flex()
                     .w_32()
                     .flex_shrink_0()
                     .child(Chip::new(run.status.label(), run_status_color(run.status)).dot(true)),

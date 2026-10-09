@@ -14,17 +14,14 @@ icon_assets!(
         Brain,
         CircleStop,
         Clapperboard,
-        FileCode,
+        Clock,
         FilePen,
         FilePlus,
         Film,
         Image,
-        Import,
-        KeyRound,
         Layers,
         ListTodo,
         MessageSquare,
-        Pencil,
         RotateCcw,
         ShieldAlert,
         Sparkles,
@@ -79,5 +76,22 @@ pub(crate) fn tool_icon(name: &str) -> IconName {
         "TodoWrite" => IconName::ListTodo,
         "WebFetch" | "WebSearch" => IconName::Globe,
         _ => IconName::Wrench,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_and_media_icons_resolve_over_the_default_set() {
+        let assets = WithAiEditIcons(gpui_kit::assets::Assets);
+        let tools = ["Bash", "Read", "Write", "Edit", "Glob", "Skill", "Agent", "TodoWrite", "WebFetch", "Mystery"];
+        let kinds = [MediaKind::Video, MediaKind::Audio, MediaKind::Image];
+        let icons = tools.map(tool_icon).into_iter().chain(kinds.map(media_icon));
+        for icon in icons {
+            let path = icon.path();
+            assert!(assets.load(&path).unwrap().is_some(), "{path} is not served");
+        }
     }
 }
