@@ -10,77 +10,84 @@
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, h_flex, v_flex};
 use gpui_kit::{
-    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, px,
-    size,
+    App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, px, rems, size,
 };
 use videocrm::editor::{DocumentEditor, DocumentEditorEvent};
 use videocrm_core::{Block, BlockKind, Document, DocumentId, DocumentKind, VideoId};
 
 struct Demo {
+    title: SharedString,
     editor: Entity<DocumentEditor>,
+    scroll: ScrollHandle,
     edits: usize,
+    status: SharedString,
     _subscription: Subscription,
 }
 
 impl Demo {
     fn new(document: Document, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let editor = cx.new(|cx| DocumentEditor::new(document, window, cx));
+        let title = document.title.clone().into();
+        let scroll = ScrollHandle::new();
+        let editor = cx.new(|cx| {
+            let mut editor = DocumentEditor::new(document, window, cx);
+            editor.set_scroll_handle(scroll.clone());
+            editor
+        });
         let subscription = cx.subscribe(&editor, |this, _, event, cx| {
             if *event == DocumentEditorEvent::Changed {
                 this.edits += 1;
+                this.status = status(&this.editor, this.edits, cx);
                 cx.notify();
             }
         });
-        Self { editor, edits: 0, _subscription: subscription }
+        let status = status(&editor, 0, cx);
+        Self { title, editor, scroll, edits: 0, status, _subscription: subscription }
     }
+}
+
+/// Status line for the bottom bar, recomputed when the document changes.
+fn status(editor: &Entity<DocumentEditor>, edits: usize, cx: &App) -> SharedString {
+    let document = editor.read(cx).document(cx);
+    let words: usize = document.blocks.iter().map(|block| block.text.split_whitespace().count()).sum();
+    let edits = if edits == 0 { "No changes".to_owned() } else { format!("{edits} edits") };
+    format!("{} blocks · {words} words · {edits}", document.blocks.len()).into()
 }
 
 impl Render for Demo {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let document = self.editor.read(cx).document(cx);
-        let words: usize = document.blocks.iter().map(|block| block.text.split_whitespace().count()).sum();
-        let status: SharedString = format!(
-            "{} blocks · {} words · {}",
-            document.blocks.len(),
-            words,
-            if self.edits == 0 { "No changes".to_owned() } else { format!("{} edits", self.edits) }
-        )
-        .into();
+        let header = v_flex().w_full().items_center().child(
+            v_flex()
+                .w_full()
+                .max_w(rems(46.))
+                .gap_1()
+                .child(div().text_3xl().font_weight(FontWeight::BOLD).child(self.title.clone()))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("Script · Long-form · Scripting"),
+                ),
+        );
 
         v_flex()
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(
-                div().id("page").flex_1().min_h_0().overflow_y_scrollbar().child(
-                    v_flex()
-                        .w_full()
-                        .pt_16()
-                        .child(
-                            v_flex().w_full().items_center().child(
-                                v_flex()
-                                    .w_full()
-                                    .max_w(gpui_kit::rems(46.))
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_3xl()
-                                            .font_weight(gpui_kit::FontWeight::BOLD)
-                                            .child(document.title),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(theme.muted_foreground)
-                                            .child("Script · Long-form · Scripting"),
-                                    ),
-                            ),
-                        )
-                        .child(div().h_6())
-                        .child(self.editor.clone()),
-                ),
+                div()
+                    .id("page")
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(
+                        v_flex().w_full().pt_16().child(header).child(div().h_6()).child(self.editor.clone()),
+                    )
+                    .vertical_scrollbar(&self.scroll),
             )
             .child(
                 h_flex()
@@ -91,7 +98,7 @@ impl Render for Demo {
                     .border_color(theme.border)
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(status),
+                    .child(self.status.clone()),
             )
     }
 }

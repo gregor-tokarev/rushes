@@ -10,22 +10,21 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, Side, Sizable as _, ThemeStyled as _, h_flex, v_flex};
 use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, DragMoveEvent, ElementId, FontStyle,
-    FontWeight, HighlightStyle, InteractiveElement as _, InteractiveText, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement as _, Rems, Render, SharedString, StatefulInteractiveElement as _,
-    StrikethroughStyle, Styled as _, StyledText, TestSupportExt as _, UnderlineStyle, WeakEntity, Window,
-    anchored, deferred, div, prelude::FluentBuilder as _, px, rems,
+    Anchor, AnyElement, App, AppContext as _, Bounds, ClickEvent, Context, DragMoveEvent, ElementId,
+    FontStyle, FontWeight, HighlightStyle, InteractiveElement as _, InteractiveText, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Rems, Render, SharedString,
+    StatefulInteractiveElement as _, StrikethroughStyle, Styled as _, StyledText, TestSupportExt as _,
+    UnderlineStyle, WeakEntity, Window, anchored, deferred, div, prelude::FluentBuilder as _, px, rems,
 };
 use videocrm_core::{Block, BlockId, BlockKind};
 
+use super::geometry::{self, RenderedRow};
 use super::{BlockMenu, DocumentEditor, DraggedBlock, DropTarget, SlashMenu};
 use crate::editor::blocks::{self, number_label};
 use crate::editor::inline::RichText;
 use crate::editor::palette::EditorPalette;
 use crate::editor::slash::BLOCK_TYPES;
 
-/// Group name shared by block rows so the gutter shows on row hover.
-const ROW_GROUP: &str = "document-block";
 /// Width of the gutter holding the add button and drag handle. The same
 /// space is reserved on the trailing side so text stays centered.
 const GUTTER: Rems = Rems(3.5);
@@ -122,13 +121,45 @@ impl Render for DocumentEditor {
             dragging: cx.has_active_drag(),
         };
         let numbers = blocks::numbering(&self.document.blocks);
+        // Blocks that must stay interactive even when far from the viewport.
+        let pinned = [
+            row.editing,
+            self.focused,
+            self.hovered,
+            self.selected,
+            self.block_menu.as_ref().map(|menu| menu.block),
+            self.slash.as_ref().map(|menu| menu.block),
+            self.drop_target.map(|target| target.block),
+        ];
+        let rem_size = window.rem_size();
+        let geometry = self.geometry.borrow();
+        let mut rendered = Vec::with_capacity(self.document.blocks.len());
         let rows: Vec<AnyElement> = self
             .document
             .blocks
             .iter()
             .zip(&numbers)
-            .map(|(block, number)| self.render_block(block, *number, &row, window, cx))
+            .map(|(block, number)| {
+                let fingerprint = geometry::fingerprint(block, *number);
+                let spacer = (!pinned.contains(&Some(block.id)))
+                    .then(|| geometry.spacer_height(block.id, fingerprint, rem_size))
+                    .flatten();
+                rendered.push(RenderedRow { id: block.id, fingerprint, spacer: spacer.is_some() });
+                match spacer {
+                    Some(height) => div().w_full().h(height).into_any_element(),
+                    None => self.render_block(block, *number, &row, window, cx),
+                }
+            })
             .collect();
+        drop(geometry);
+        let record = {
+            let geometry = self.geometry.clone();
+            let scroll = self.scroll_handle.clone();
+            let focused = self.focused;
+            move |bounds: Vec<Bounds<Pixels>>, window: &mut Window, _: &mut App| {
+                geometry.borrow_mut().record(&rendered, &bounds, focused, scroll.as_ref(), window)
+            }
+        };
 
         v_flex()
             .id("document-editor")
@@ -157,12 +188,27 @@ impl Render for DocumentEditor {
             .flex_1()
             .items_center()
             .text_color(row.palette.text)
-            .child(v_flex().w_full().max_w(Rems(TEXT_WIDTH.0 + 2. * GUTTER.0)).children(rows).child(
-                div().id("document-end").test_support().w_full().min_h(rems(6.)).cursor_text().on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, window, cx| this.focus_end(window, cx)),
-                ),
-            ))
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(Rems(TEXT_WIDTH.0 + 2. * GUTTER.0))
+                    .children(rows)
+                    .on_children_prepainted(record)
+                    .child(
+                        div()
+                            .id("document-end")
+                            .test_support()
+                            .w_full()
+                            .min_h(rems(6.))
+                            .cursor_text()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                    this.focus_end(window, cx)
+                                }),
+                            ),
+                    ),
+            )
             .when_some(self.block_menu.as_ref(), |this, menu| this.child(render_block_menu(menu)))
     }
 }
@@ -180,6 +226,13 @@ impl DocumentEditor {
         let metrics = Metrics::of(block.kind);
         let menu_open = self.block_menu.as_ref().is_some_and(|menu| menu.block == id);
         let highlighted = menu_open || self.selected == Some(id);
+        // Only the hovered row builds its gutter buttons; with hundreds of
+        // blocks, hidden buttons on every row dominate the frame time.
+        let gutter = if menu_open || self.hovered == Some(id) {
+            self.render_gutter(block, metrics, cx).into_any_element()
+        } else {
+            div().flex_none().w(GUTTER).into_any_element()
+        };
         let drop_after =
             self.drop_target.filter(|target| row.dragging && target.block == id).map(|target| target.after);
         let indent = if crate::editor::markdown::is_list(block.kind) { block.indent } else { 0 };
@@ -209,15 +262,15 @@ impl DocumentEditor {
         h_flex()
             .id(block_element_id(id, "row"))
             .test_support()
-            .group(ROW_GROUP)
             .relative()
             .w_full()
             .items_start()
             .pt(metrics.space_above)
             .pb(Rems(0.125))
-            .child(self.render_gutter(block, metrics, menu_open, cx))
+            .child(gutter)
             .child(content)
             .child(div().flex_none().w(GUTTER))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| this.set_hovered(id, *hovered, cx)))
             .on_drag_move(cx.listener(move |this, event: &DragMoveEvent<DraggedBlock>, _, cx| {
                 if !event.bounds.contains(&event.event.position) {
                     return;
@@ -247,14 +300,8 @@ impl DocumentEditor {
             .into_any_element()
     }
 
-    /// The add button and drag handle, revealed while the row is hovered.
-    fn render_gutter(
-        &self,
-        block: &Block,
-        metrics: Metrics,
-        menu_open: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    /// The add button and drag handle of a hovered row.
+    fn render_gutter(&self, block: &Block, metrics: Metrics, cx: &mut Context<Self>) -> impl IntoElement {
         let id = block.id;
         let label: SharedString = match block.text.lines().next().filter(|line| !line.trim().is_empty()) {
             Some(line) => line.chars().take(60).collect::<String>().into(),
@@ -281,8 +328,6 @@ impl DocumentEditor {
             .pr_1()
             .gap_0p5()
             .justify_end()
-            .opacity(if menu_open { 1. } else { 0. })
-            .group_hover(ROW_GROUP, |style| style.opacity(1.))
             .child(
                 Button::new(block_element_id(id, "add"))
                     .ghost()

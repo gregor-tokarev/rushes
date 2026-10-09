@@ -92,6 +92,11 @@ impl Fixture {
         self.step(cx, |window, cx| window.click(target, cx));
     }
 
+    /// Hovers a block so its gutter (add button and handle) is shown.
+    fn hover(&self, cx: &mut TestAppContext, id: BlockId) {
+        self.step(cx, |window, cx| window.hover(part(id, "row"), cx));
+    }
+
     fn focus_first(&self, cx: &mut TestAppContext) {
         let editor = self.editor.clone();
         self.step(cx, |window, cx| editor.update(cx, |editor, cx| editor.focus_first(window, cx)));
@@ -307,6 +312,8 @@ fn slash_menu_keyboard_selection_and_dismissal(cx: &mut TestAppContext) {
 fn gutter_plus_adds_a_block_with_the_menu_open(cx: &mut TestAppContext) {
     let first = paragraph("first");
     let f = Fixture::new(cx, vec![first.clone()]);
+    assert!(!f.is_visible(cx, part(first.id, "add")), "the gutter shows on hover only");
+    f.hover(cx, first.id);
     f.click(cx, part(first.id, "add"));
     assert!(f.is_visible(cx, "slash-menu".into()));
     f.type_text(cx, "todo");
@@ -417,6 +424,7 @@ fn dragging_a_handle_reorders_blocks(cx: &mut TestAppContext) {
     let blocks = vec![paragraph("a"), paragraph("b"), paragraph("c")];
     let ids: Vec<_> = blocks.iter().map(|block| block.id).collect();
     let f = Fixture::new(cx, blocks);
+    f.hover(cx, ids[2]);
     f.step(cx, |window, cx| window.drag_to(part(ids[2], "handle"), part(ids[0], "row"), cx));
     let texts: Vec<_> = f.blocks(cx).into_iter().map(|block| block.text).collect();
     assert_eq!(texts, ["c", "a", "b"]);
@@ -426,6 +434,7 @@ fn dragging_a_handle_reorders_blocks(cx: &mut TestAppContext) {
 fn block_menu_duplicates_and_deletes(cx: &mut TestAppContext) {
     let target = paragraph("keep");
     let f = Fixture::new(cx, vec![target.clone(), paragraph("other")]);
+    f.hover(cx, target.id);
     f.click(cx, part(target.id, "handle"));
     assert!(f.is_visible(cx, "popup-menu".into()));
     // Items: Turn into, separator, Duplicate, Move up, Move down, separator, Delete.
@@ -439,6 +448,7 @@ fn block_menu_duplicates_and_deletes(cx: &mut TestAppContext) {
         ])
     );
 
+    f.hover(cx, target.id);
     f.click(cx, part(target.id, "handle"));
     f.step(cx, |window, cx| window.within("popup-menu").click(6usize, cx));
     assert_eq!(f.summary(cx), owned(&[(BlockKind::Paragraph, "keep"), (BlockKind::Paragraph, "other")]));

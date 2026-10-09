@@ -1,9 +1,12 @@
 //! The document editor entity: block state, keyboard behavior and commands.
 //! Presentation lives in [`render`].
 
+mod geometry;
 mod render;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use gpui_kit::component::input::{
     Backspace, Delete, Enter, Escape, IndentInline, InputEvent, MoveDown, MoveLeft, MoveRight, MoveUp,
@@ -12,10 +15,11 @@ use gpui_kit::component::input::{
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::{
     App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Point,
-    SharedString, Subscription, Window,
+    ScrollHandle, SharedString, Subscription, Window,
 };
 use videocrm_core::{Block, BlockId, BlockKind, Document};
 
+use self::geometry::Geometry;
 use super::blocks::{self, Merge};
 use super::inline::{Marker, toggle_marker};
 use super::markdown::{Shortcut, detect_shortcut, is_list, parse_blocks};
@@ -53,6 +57,12 @@ pub struct DocumentEditor {
     slash: Option<SlashMenu>,
     block_menu: Option<BlockMenu>,
     drop_target: Option<DropTarget>,
+    /// Row under the pointer; only it shows the gutter buttons.
+    hovered: Option<BlockId>,
+    /// Row measurements from the last frame, written during prepaint.
+    geometry: Rc<RefCell<Geometry>>,
+    /// The owner's scroll container, used to keep the caret in view.
+    scroll_handle: Option<ScrollHandle>,
     focus_handle: FocusHandle,
     _focus_out: Subscription,
 }
@@ -131,6 +141,9 @@ impl DocumentEditor {
             slash: None,
             block_menu: None,
             drop_target: None,
+            hovered: None,
+            geometry: Rc::default(),
+            scroll_handle: None,
             focus_handle,
             _focus_out: focus_out,
         }
@@ -165,6 +178,12 @@ impl DocumentEditor {
             self.focus_handle.focus(window, cx);
         }
         cx.notify();
+    }
+
+    /// Shares the scroll handle of the container the editor is placed in, so
+    /// keyboard navigation and typing keep the focused block visible.
+    pub fn set_scroll_handle(&mut self, handle: ScrollHandle) {
+        self.scroll_handle = Some(handle);
     }
 
     /// The block with keyboard focus, if the editor has focus.
@@ -290,6 +309,7 @@ impl DocumentEditor {
         });
         self.selected = None;
         self.set_focused(Some(id), cx);
+        self.geometry.borrow_mut().request_reveal();
         cx.notify();
     }
 
@@ -298,6 +318,7 @@ impl DocumentEditor {
         self.slash = None;
         self.focus_handle.focus(window, cx);
         self.set_focused(Some(id), cx);
+        self.geometry.borrow_mut().request_reveal();
         cx.notify();
     }
 
@@ -342,6 +363,7 @@ impl DocumentEditor {
             return;
         }
         let previous = std::mem::replace(&mut self.document.blocks[ix].text, text);
+        self.geometry.borrow_mut().request_reveal();
         self.update_slash(ix, &previous, cursor);
         let block = &self.document.blocks[ix];
         if self.slash.is_none()
@@ -873,6 +895,14 @@ impl DocumentEditor {
         cx.notify();
     }
 
+    fn set_hovered(&mut self, id: BlockId, hovered: bool, cx: &mut Context<Self>) {
+        let next = if hovered { Some(id) } else { self.hovered.filter(|current| *current != id) };
+        if self.hovered != next {
+            self.hovered = next;
+            cx.notify();
+        }
+    }
+
     /// Writes a block's model text into its input after a structural edit.
     fn sync_input(&mut self, id: BlockId, window: &mut Window, cx: &mut Context<Self>) {
         if self.inputs.contains_key(&id) {
@@ -880,10 +910,12 @@ impl DocumentEditor {
         }
     }
 
-    /// Focuses the block under a click on its rendered text.
+    /// Focuses the block under a click on its rendered text. The block is
+    /// already where the pointer is, so the page does not scroll.
     fn click_text(&mut self, id: BlockId, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.block_menu = None;
         self.focus_block(id, Caret::At(offset), window, cx);
+        self.geometry.borrow_mut().cancel_reveal();
     }
 }
 
