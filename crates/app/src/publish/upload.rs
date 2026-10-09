@@ -193,8 +193,9 @@ impl YoutubeService {
             return Err(UploadError::Blocked(vec![BlockingReason::NotConnected]));
         };
         let total = file_len(&job.file).ok_or(UploadError::Blocked(vec![BlockingReason::FileMissing]))?;
-        self.spawn_transfer(id, client, job.file, total, Request::Resume(session_url), cx);
-        self.update_job(id, cx, |job| job.status = UploadStatus::Uploading { sent: 0, total });
+        if self.spawn_transfer(id, client, job.file, total, Request::Resume(session_url), cx) {
+            self.update_job(id, cx, |job| job.status = UploadStatus::Uploading { sent: 0, total });
+        }
         Ok(())
     }
 
@@ -206,6 +207,7 @@ impl YoutubeService {
         }
     }
 
+    /// Starts the worker thread; `false` (with the job marked failed) when it couldn't start.
     fn spawn_transfer(
         &mut self,
         id: UploadId,
@@ -214,7 +216,7 @@ impl YoutubeService {
         total: u64,
         request: Request,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let cancel = Arc::new(AtomicBool::new(false));
         let (sender, mut messages) = mpsc::unbounded();
         let worker = (client.clone(), cancel.clone());
@@ -225,7 +227,7 @@ impl YoutubeService {
             self.update_job(id, cx, |job| {
                 job.status = UploadStatus::Failed { error: format!("Couldn't start the upload: {error}.") }
             });
-            return;
+            return false;
         }
         self.active.insert(id, ActiveUpload { cancel, client, transfer: Transfer::new(total) });
         cx.spawn(async move |this, cx| {
@@ -238,6 +240,7 @@ impl YoutubeService {
         .detach();
         cx.emit(YoutubeEvent::UploadsChanged);
         cx.notify();
+        true
     }
 
     fn on_upload_message(&mut self, id: UploadId, message: UploadMessage, cx: &mut Context<Self>) {
@@ -275,10 +278,12 @@ impl YoutubeService {
 
     fn on_upload_failed(&mut self, id: UploadId, error: &YoutubeError, cx: &mut Context<Self>) {
         let message = sentence(&error.to_string());
-        let expired = matches!(error, YoutubeError::SessionExpired);
+        // An expired session, or one the current connection refuses to use (another
+        // backend's after a switch) or a changed file, can't take the rest of the file.
+        let session_unusable = matches!(error, YoutubeError::SessionExpired | YoutubeError::InvalidInput(_));
         self.update_job(id, cx, |job| {
             job.status = UploadStatus::Failed { error: message.clone() };
-            if expired {
+            if session_unusable {
                 job.session_url = None;
             }
         });
@@ -323,12 +328,16 @@ impl YoutubeService {
         let title = self.video_title(id, cx);
         let url: SharedString = uploaded.url.clone().into();
         push_notification(cx, move || {
-            Notification::success(format!("“{title}”")).title("Uploaded to YouTube").action(move |_, _, _| {
-                let url = url.clone();
-                Button::new("open-upload-on-youtube")
-                    .label("Open on YouTube")
-                    .on_click(move |_, _, cx| cx.open_url(&url))
-            })
+            Notification::success(format!("“{title}”"))
+                .title("Uploaded to YouTube")
+                .action(move |_, _, _| {
+                    let url = url.clone();
+                    Button::new("open-upload-on-youtube")
+                        .label("Open on YouTube")
+                        .on_click(move |_, _, cx| cx.open_url(&url))
+                })
+                // The Upload card and the Uploads page keep the link; the toast need not stay.
+                .autohide(true)
         });
 
         if let Some(thumbnail) = thumbnail {

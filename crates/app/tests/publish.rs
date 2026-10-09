@@ -216,6 +216,41 @@ fn a_cancelled_upload_resumes_where_youtube_stopped(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_session_the_connection_cannot_use_is_not_offered_again(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Keychron Q1 Max review", |video| {
+        video.publish.file = Some(file.clone());
+    });
+    // Cancelled while VideoCRM talked to another YouTube server, before a backend switch.
+    let job = UploadJob {
+        id: UploadId::new(),
+        video_id,
+        file,
+        status: UploadStatus::Cancelled,
+        session_url: Some("http://127.0.0.1:1/upload/youtube/v3/videos?uploadType=resumable&upload_id=old".into()),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    workspace.insert_jobs(cx, &[&job]);
+    let service = workspace.restart(cx);
+    assert!(service.read_with(cx, |s, _| s.is_connected() && s.is_resumable(s.job(job.id).unwrap())));
+
+    service.update(cx, |service, cx| service.resume_upload(job.id, cx)).unwrap();
+    let failed = wait_until(cx, "the refused resume", |cx| {
+        service.read_with(cx, |s, _| {
+            s.job(job.id).filter(|job| matches!(job.status, UploadStatus::Failed { .. })).cloned()
+        })
+    });
+    assert_eq!(failed.session_url, None, "the session is dropped");
+    assert!(!service.read_with(cx, |s, _| s.is_resumable(&failed)), "Resume is not offered again");
+    assert_eq!(workspace.stored_jobs(cx)[0].session_url, None);
+    assert!(emulators.uploads().is_empty());
+}
+
+#[gpui_kit::test]
 fn refuses_uploads_that_youtube_would_reject(cx: &mut TestAppContext) {
     let workspace = Workspace::open(cx, YoutubeBackend::default());
     let service = workspace.service.clone();

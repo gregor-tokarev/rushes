@@ -9,8 +9,9 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::group_box::{GroupBox, GroupBoxVariants as _};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Size, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, Size, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClipboardItem, Div, ElementId, Entity, FontWeight, Hsla, InteractiveElement as _, IntoElement,
@@ -320,8 +321,13 @@ impl RenderOnce for ConnectionPanel {
                                         .icon(IconName::Copy)
                                         .small()
                                         .outline()
-                                        .on_click(move |_, _, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(url.to_string()))
+                                        .on_click(move |_, window, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(url.to_string()));
+                                            let copied = Notification::success(
+                                                "Open it in a browser on this computer to finish signing in.",
+                                            )
+                                            .title("Sign-in link copied");
+                                            window.push_notification(copied, cx);
                                         }),
                                 )
                             })
@@ -341,8 +347,9 @@ impl RenderOnce for ConnectionPanel {
             }
             Connection::Disconnected => {
                 let action = match (&config_problem, self.manage) {
-                    // The settings form right below is where the problem gets fixed.
-                    (Some(_), true) => None,
+                    // The settings form right below is where the problem gets fixed. The
+                    // button waits there, so the form doesn't jump down once it is usable.
+                    (Some(_), true) => Some(connect.primary().disabled(true)),
                     (Some(_), false) => Some(open_settings),
                     (None, _) => Some(connect.primary()),
                 };

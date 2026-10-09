@@ -91,8 +91,12 @@ impl YoutubeSettings {
         let mut subscriptions = vec![
             cx.observe(&service, |_, _, cx| cx.notify()),
             cx.subscribe_in(&state, window, Self::on_app_event),
-            // Leaving the page must not lose the last edits.
+            // Leaving the page or quitting must not lose the last edits.
             cx.on_release(|this, cx| this.save_pending(cx)),
+            cx.on_app_quit(|this, cx| {
+                this.save_pending(cx);
+                async {}
+            }),
         ];
         for field in [&client_id, &client_secret, &google_url, &youtube_url] {
             subscriptions.push(cx.subscribe(field, |this, _, event: &InputEvent, cx| {
