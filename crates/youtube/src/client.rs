@@ -31,13 +31,16 @@ pub struct YoutubeClient {
     pub(crate) config: YoutubeConfig,
     pub(crate) agent: Agent,
     credentials: Mutex<Credentials>,
+    /// Held for the whole refresh round trip so concurrent 401s refresh only once,
+    /// while `credentials` stays readable.
+    refreshing: Mutex<()>,
     on_refresh: RefreshCallback,
     pub(crate) upload: UploadOptions,
 }
 
 impl YoutubeClient {
-    /// `on_refresh` receives every refreshed token set so the app can persist it. It
-    /// runs while the client's token lock is held: don't call back into the client.
+    /// `on_refresh` receives every refreshed token set, in order, so the app can
+    /// persist it. It runs on the thread that refreshed, before the new token is used.
     pub fn new(
         config: YoutubeConfig,
         credentials: Credentials,
@@ -47,6 +50,7 @@ impl YoutubeClient {
             config,
             agent: http::agent(),
             credentials: Mutex::new(credentials),
+            refreshing: Mutex::new(()),
             on_refresh: Box::new(on_refresh),
             upload: UploadOptions::default(),
         }
@@ -210,7 +214,7 @@ impl YoutubeClient {
         if response.status() != StatusCode::UNAUTHORIZED {
             return Ok(response);
         }
-        match self.refresh_rejected(&token)? {
+        match self.refresh_replacing(&token)? {
             Some(token) => Ok(send(&token)?),
             None => Ok(response),
         }
@@ -224,32 +228,35 @@ impl YoutubeClient {
     }
 
     fn access_token(&self) -> Result<String> {
-        let mut credentials = self.lock_credentials();
-        if credentials.expires_within(REFRESH_MARGIN) && credentials.refresh_token.is_some() {
-            self.refresh_locked(&mut credentials)?;
+        let current = self.credentials();
+        if current.refresh_token.is_some()
+            && current.expires_within(REFRESH_MARGIN)
+            && let Some(token) = self.refresh_replacing(&current.access_token)?
+        {
+            return Ok(token);
         }
-        Ok(credentials.access_token.clone())
+        Ok(current.access_token)
     }
 
-    /// New token after `rejected` got a 401, unless another thread already refreshed.
-    /// `None` when there is no refresh token to try.
-    fn refresh_rejected(&self, rejected: &str) -> Result<Option<String>> {
-        let mut credentials = self.lock_credentials();
-        if credentials.access_token != rejected {
-            return Ok(Some(credentials.access_token.clone()));
+    /// Refreshes `stale` unless another thread already replaced it, and returns the
+    /// token to use. `None` when there is no refresh token.
+    fn refresh_replacing(&self, stale: &str) -> Result<Option<String>> {
+        let _refreshing = self
+            .refreshing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = self.credentials();
+        if current.access_token != stale {
+            return Ok(Some(current.access_token));
         }
-        if credentials.refresh_token.is_none() {
+        if current.refresh_token.is_none() {
             return Ok(None);
         }
-        self.refresh_locked(&mut credentials)?;
-        Ok(Some(credentials.access_token.clone()))
-    }
-
-    fn refresh_locked(&self, credentials: &mut Credentials) -> Result<()> {
-        let fresh = oauth::refresh_with(&self.agent, &self.config, credentials)?;
+        let fresh = oauth::refresh_with(&self.agent, &self.config, &current)?;
         (self.on_refresh)(&fresh);
-        *credentials = fresh;
-        Ok(())
+        let token = fresh.access_token.clone();
+        *self.lock_credentials() = fresh;
+        Ok(Some(token))
     }
 }
 
