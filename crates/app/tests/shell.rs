@@ -437,6 +437,24 @@ fn the_title_and_hook_save_on_enter(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn deleting_a_video_with_unsaved_edits_leaves_quietly(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
+    let first = app.script_first_block(cx);
+    app.click(cx, block_part(first, "text"));
+    app.type_text(cx, "Unsaved words");
+
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| state.update(cx, |state, cx| state.delete_videos(&[id], cx)));
+    assert_eq!(app.route(cx), Route::default());
+    assert!(cx.read(|cx| app.state.read(cx).rows().is_empty()));
+    let notifications =
+        cx.update_window(app.window, |_, window, cx| window.notifications(cx).len()).expect("window is open");
+    assert_eq!(notifications, 0);
+}
+
+#[gpui_kit::test]
 fn errors_become_notifications(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, true, &[]);
     let state = app.state.clone();

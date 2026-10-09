@@ -140,14 +140,17 @@ impl DocumentTab {
         cx.notify();
     }
 
-    /// Saves pending edits now.
+    /// Saves pending edits now. Edits of a video that was deleted meanwhile are dropped.
     pub fn flush(&mut self, cx: &mut Context<Self>) {
         self.save = None;
         if !self.dirty {
             return;
         }
-        let Some(editor) = &self.editor else { return };
         self.dirty = false;
+        let Some(editor) = &self.editor else { return };
+        if self.state.read(cx).video(self.video_id).is_none() {
+            return;
+        }
         let document = editor.read(cx).document(cx);
         self.state.update(cx, |state, cx| state.save_document(document, cx));
     }
