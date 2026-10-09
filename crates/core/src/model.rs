@@ -23,9 +23,12 @@ macro_rules! id_type {
                 Self(Uuid::now_v7())
             }
 
-            /// First 8 hex characters, used in folder names and compact UI.
+            /// Last 8 hex characters, used in folder names and compact UI. These
+            /// are random bits; the leading ones of a UUID v7 are a timestamp
+            /// that ids created within about a minute share.
             pub fn short(&self) -> String {
-                self.0.simple().to_string()[..8].to_string()
+                let simple = self.0.simple().to_string();
+                simple[simple.len() - 8..].to_string()
             }
         }
 
