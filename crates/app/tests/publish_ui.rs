@@ -100,6 +100,15 @@ fn the_publish_form_saves_metadata_and_explains_what_blocks_the_upload(cx: &mut 
     assert_eq!(publish.privacy, Privacy::Private);
     assert!(publish.publish_at.is_some_and(|at| at > Utc::now()), "scheduled in the future");
     assert!(publish.made_for_kids);
+
+    // Not scheduled after all: the earlier choice comes back.
+    window(cx, handle, |window, cx| {
+        window.click("publish-schedule", cx);
+        assert_eq!(window.within("publish-privacy").find(2usize).checked(), Some(true));
+    });
+    settle(cx);
+    let publish = workspace.video(cx, video_id).publish;
+    assert_eq!((publish.privacy, publish.publish_at), (Privacy::Public, None));
 }
 
 #[gpui_kit::test]

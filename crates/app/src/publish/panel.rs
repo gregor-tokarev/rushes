@@ -106,6 +106,8 @@ pub struct PublishPanel {
     thumbnail_size: Option<(PathBuf, Option<u64>)>,
     /// Chapter list from the script, `None` when the script has no Heading 2.
     chapters: Option<String>,
+    /// Who could watch before "Schedule" forced private, restored when it is turned off.
+    unscheduled_privacy: Option<Privacy>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -196,6 +198,7 @@ impl PublishPanel {
             file: None,
             thumbnail_size: None,
             chapters: None,
+            unscheduled_privacy: None,
             _subscriptions: subscriptions,
         };
         panel.refresh_chapters(cx);
@@ -285,6 +288,8 @@ impl PublishPanel {
             self.schedule.update(cx, |picker, cx| picker.set_date_time(local_time(at), window, cx));
         }
         self.draft = publish;
+        // The privacy to restore belonged to the replaced settings.
+        self.unscheduled_privacy = None;
         if file_changed {
             self.refresh_file(cx);
         }
@@ -460,9 +465,13 @@ impl PublishPanel {
             self.draft.publish_at =
                 Some(picked.filter(|at| *at > Utc::now()).unwrap_or_else(|| default_schedule(&video)));
             // YouTube publishes scheduled videos by turning them public; until then they are private.
+            self.unscheduled_privacy = Some(self.draft.privacy);
             self.draft.privacy = Privacy::Private;
         } else {
             self.draft.publish_at = None;
+            if let Some(privacy) = self.unscheduled_privacy.take() {
+                self.draft.privacy = privacy;
+            }
         }
         self.schedule_save(cx);
     }
