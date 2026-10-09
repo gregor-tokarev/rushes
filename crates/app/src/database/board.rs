@@ -131,7 +131,7 @@ impl DatabasePanel {
             .flex_shrink_0()
             .min_h_0()
             .rounded(cx.theme().radius_lg)
-            .bg(colors.background.opacity(0.35))
+            .bg(colors.tint)
             .child(
                 h_flex()
                     .flex_shrink_0()

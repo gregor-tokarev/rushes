@@ -18,6 +18,8 @@ pub struct TagColors {
     pub foreground: Hsla,
     /// Stronger mid-tone for dots and small indicators.
     pub dot: Hsla,
+    /// A faint wash for large areas, such as a board column.
+    pub tint: Hsla,
 }
 
 /// Colors of `color` in the active theme.
@@ -35,12 +37,14 @@ pub fn tag_colors(color: TagColor, cx: &App) -> TagColors {
             background: tone(if neutral { 700 } else { 900 }, 0.6),
             foreground: tone(100, 0.8),
             dot: tone(400, 1.0),
+            tint: tone(if neutral { 700 } else { 900 }, 0.5).opacity(0.18),
         }
     } else {
         TagColors {
             background: tone(if neutral { 200 } else { 100 }, 0.75),
             foreground: tone(900, 0.7),
             dot: tone(500, 1.0),
+            tint: tone(if neutral { 200 } else { 100 }, 0.75).opacity(0.35),
         }
     }
 }
