@@ -950,3 +950,52 @@ fn a_command_named_in_full_beats_a_loosely_matching_video(cx: &mut TestAppContex
     let desk = app.video_id(cx, "My 2026 Desk Setup: Everything That Survived");
     assert_eq!(app.route(cx), Route::Video { id: desk, tab: VideoTab::Script });
 }
+
+#[gpui_kit::test]
+fn an_edit_waiting_for_approval_stands_out(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    let now = chrono::Utc::now();
+    let mut run = videocrm_core::PipelineRun {
+        id: videocrm_core::RunId::new(),
+        video_id: id,
+        status: videocrm_core::RunStatus::Planning,
+        brief: String::new(),
+        footage_dir: app._media.path().to_path_buf(),
+        session_id: None,
+        summary: None,
+        output: None,
+        error: None,
+        cost_usd: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let set_run = |app: &Fixture, cx: &mut TestAppContext, run: &videocrm_core::PipelineRun, insert: bool| {
+        let (state, mut run) = (app.state.clone(), run.clone());
+        app.step(cx, move |_, cx| {
+            state.update(cx, |state, cx| {
+                {
+                    let store = state.store();
+                    let mut store = store.lock().expect("store lock");
+                    if insert { store.insert_run(&run) } else { store.update_run(&mut run) }.expect("save run");
+                }
+                state.reload(cx);
+            })
+        });
+    };
+    set_run(&app, cx, &run, true);
+    assert!(!app.has(cx, "pipelines-awaiting"));
+    let notifications = |cx: &mut TestAppContext| {
+        cx.update_window(app.window, |_, window, cx| window.notifications(cx).len()).expect("window is open")
+    };
+    assert_eq!(notifications(cx), 0);
+
+    run.status = videocrm_core::RunStatus::AwaitingApproval;
+    set_run(&app, cx, &run, false);
+    assert!(app.has(cx, "pipelines-awaiting"));
+    assert_eq!(app.label_of(cx, "pipelines-awaiting".into()).as_deref(), Some("1 waiting for approval"));
+    assert_eq!(notifications(cx), 1);
+
+    app.click(cx, "review-strategy");
+    assert_eq!(app.route(cx), Route::Video { id, tab: VideoTab::Footage });
+}

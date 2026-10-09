@@ -6,13 +6,14 @@ use gpui_kit::component::button::Button;
 use gpui_kit::component::sidebar::{
     Sidebar, SidebarCollapsible, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem,
 };
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Collapsible, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Context, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Role, SharedString,
     StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
 };
-use videocrm_core::{UploadStatus, VideoId, ViewKind};
+use videocrm_core::{RunStatus, UploadStatus, VideoId, ViewKind};
 
 use super::elements::shortcut_hint;
 use super::{NewVideo, OpenCommandPalette, Workspace};
@@ -128,6 +129,45 @@ fn count_badge(count: usize, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
+/// The Pipelines row's counts: edits waiting for the creator's approval stand
+/// out from the ones still working on their own.
+fn pipeline_badges(running: usize, awaiting: usize, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    h_flex()
+        .gap_1()
+        .when(awaiting > 0, |this| {
+            let waiting: SharedString = format!("{awaiting} waiting for approval").into();
+            this.child(
+                div()
+                    .id("pipelines-awaiting")
+                    .test_support()
+                    .aria_label(waiting.clone())
+                    .px_1p5()
+                    .rounded_full()
+                    .text_xs()
+                    .font_medium()
+                    .bg(theme.warning)
+                    .text_color(theme.warning_foreground)
+                    .tooltip(move |window, cx| Tooltip::new(waiting.clone()).build(window, cx))
+                    .child(awaiting.to_string()),
+            )
+        })
+        .when(running > 0, |this| this.child(count_badge(running, cx)))
+        .into_any_element()
+}
+
+/// The Pipelines row's name for assistive technology, with its counts.
+fn pipelines_label(running: usize, awaiting: usize) -> SharedString {
+    let mut parts = vec!["Pipelines".to_string()];
+    if running > 0 {
+        parts.push(format!("{running} running"));
+    }
+    if awaiting > 0 {
+        parts.push(format!("{awaiting} waiting for approval"));
+    }
+    parts.join(", ").into()
+}
+
 impl Workspace {
     pub(super) fn render_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
@@ -141,6 +181,8 @@ impl Workspace {
             _ => None,
         };
         let active_runs = state.rows().iter().filter(|row| row.latest_run.is_some_and(|run| run.is_active())).count();
+        let awaiting_runs =
+            state.rows().iter().filter(|row| row.latest_run == Some(RunStatus::AwaitingApproval)).count();
         let active_uploads = state
             .rows()
             .iter()
@@ -201,8 +243,11 @@ impl Workspace {
             .child(
                 SidebarMenuItem::new("Pipelines")
                     .icon(Icon::new(IconName::WandSparkles))
+                    .accessibility_label(pipelines_label(active_runs, awaiting_runs))
                     .active(route == Route::Pipelines)
-                    .when(active_runs > 0, |this| this.suffix(move |_, cx| count_badge(active_runs, cx)))
+                    .when(active_runs + awaiting_runs > 0, |this| {
+                        this.suffix(move |_, cx| pipeline_badges(active_runs, awaiting_runs, cx))
+                    })
                     .on_click(navigate(Route::Pipelines)),
             )
             .child(

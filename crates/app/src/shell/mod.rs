@@ -12,6 +12,8 @@ mod startup;
 mod theme;
 mod title_bar;
 
+use std::collections::HashSet;
+
 use chrono::{Local, NaiveDate};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::notification::Notification;
@@ -19,10 +21,11 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, Window
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    KeyBinding, ParentElement as _, Render, Styled as _, Subscription, TestSupportExt as _, Window, actions, div,
+    KeyBinding, ParentElement as _, Render, SharedString, Styled as _, Subscription, TestSupportExt as _, Window,
+    actions, div,
 };
 use videocrm_core::settings::ThemeMode;
-use videocrm_core::{VideoRow, VideoStatus, ViewId};
+use videocrm_core::{RunStatus, VideoId, VideoRow, VideoStatus, ViewId};
 
 use crate::ai_edit::PipelinesPage;
 use crate::database::{DatabaseEvent, DatabasePanel};
@@ -126,6 +129,9 @@ pub struct Workspace {
     sidebar_collapsed: bool,
     /// The page the main area showed after the last route change.
     shown: Option<Page>,
+    /// Videos whose latest AI edit waits for approval, as of the last data
+    /// change; `None` until the first, which only records them.
+    awaiting_approval: Option<HashSet<VideoId>>,
     /// The theme mode last applied, so unrelated settings changes leave the theme alone.
     theme_mode: ThemeMode,
     focus_handle: FocusHandle,
@@ -175,6 +181,7 @@ impl Workspace {
             palette,
             sidebar_collapsed: false,
             shown: None,
+            awaiting_approval: None,
             theme_mode,
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
@@ -263,7 +270,39 @@ impl Workspace {
     fn sync_data(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let (rows, properties, views) = (state.rows().to_vec(), state.properties().to_vec(), state.views().to_vec());
+        self.announce_strategies(&rows, window, cx);
         self.database.update(cx, |panel, cx| panel.set_data(rows, properties, views, window, cx));
+    }
+
+    /// Tells the creator when an AI edit starts waiting for their approval,
+    /// unless they are already looking at it.
+    fn announce_strategies(&mut self, rows: &[VideoRow], window: &mut Window, cx: &mut Context<Self>) {
+        let awaiting: HashSet<VideoId> = rows
+            .iter()
+            .filter(|row| row.latest_run == Some(RunStatus::AwaitingApproval))
+            .map(|row| row.video.id)
+            .collect();
+        let Some(previous) = self.awaiting_approval.replace(awaiting.clone()) else { return };
+        let route = self.state.read(cx).route().clone();
+        for row in rows.iter().filter(|row| awaiting.contains(&row.video.id) && !previous.contains(&row.video.id)) {
+            let id = row.video.id;
+            if route == (Route::Video { id, tab: VideoTab::Footage }) {
+                continue;
+            }
+            let title = sidebar::display_title(&row.video.title);
+            let notification = Notification::info("Review the plan, then approve it or ask for changes.")
+                .title(format!("Edit strategy ready for “{title}”"))
+                .id1::<RunStatus>(SharedString::from(id.to_string()))
+                .action(move |_, _, cx| {
+                    Button::new("review-strategy").small().label("Review").on_click(cx.listener(
+                        move |notification, _, window, cx| {
+                            notification.dismiss(window, cx);
+                            AppState::global(cx).update(cx, |state, cx| state.open_video(id, VideoTab::Footage, cx));
+                        },
+                    ))
+                });
+            window.push_notification(notification, cx);
+        }
     }
 
     /// Points the main area at the current route, creating the page it needs.
