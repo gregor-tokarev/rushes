@@ -7,16 +7,16 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Div, Entity, FontWeight, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Window, div,
+    AnyElement, App, AppContext as _, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, TestSupportExt as _, Window, div,
 };
 use videocrm_core::settings::EditPreferences;
-use videocrm_core::{DocumentKind, PipelineRun, RunId, RunStatus, VideoId};
+use videocrm_core::{Block, DocumentKind, PipelineRun, RunId, RunStatus, Video, VideoId};
 
-use super::brief::{BriefDraft, COLOR_GRADES, color_grade_label, default_brief, with_preferences};
+use super::brief::{BriefDraft, COLOR_GRADES, brief_source, color_grade_label, default_brief, with_preferences};
 use super::doctor::DoctorChecklist;
 use super::footage::{FootageCard, FootageChanged};
 use super::format;
@@ -24,7 +24,7 @@ use super::run_view::RunView;
 use super::service::PipelineService;
 use crate::database::Chip;
 use crate::database::colors::run_status_color;
-use crate::state::AppState;
+use crate::state::{AppEvent, AppState};
 
 /// The "Footage & AI edit" tab of a video page: the raw takes, the edit brief, and
 /// the video's AI edits with the selected one in detail.
@@ -36,6 +36,13 @@ pub struct AiEditPanel {
     service: Entity<PipelineService>,
     footage: Entity<FootageCard>,
     brief: Entity<TextareaState>,
+    /// The creator changed the brief by hand. Until then it follows the video: title,
+    /// hook, script and standing instructions.
+    brief_edited: bool,
+    /// What the brief was drafted from ([`brief_source`]).
+    brief_source: String,
+    /// The video changed after the creator edited the brief.
+    brief_stale: bool,
     target_length: Entity<InputState>,
     preferences: EditPreferences,
     auto_approve: bool,
@@ -70,6 +77,18 @@ impl AiEditPanel {
         let subscriptions = vec![
             cx.observe_in(&service, window, |this, _, window, cx| this.on_runs_changed(window, cx)),
             cx.observe(&state, |_, _, cx| cx.notify()),
+            cx.subscribe_in(&state, window, |this, _, event: &AppEvent, window, cx| {
+                if matches!(event, AppEvent::DataChanged | AppEvent::SettingsChanged) {
+                    this.follow_video(window, cx);
+                }
+            }),
+            cx.subscribe(&brief, |this, _, event: &InputEvent, cx| {
+                // `set_value` emits nothing, so a change is the creator typing.
+                if matches!(event, InputEvent::Change) && !this.brief_edited {
+                    this.brief_edited = true;
+                    cx.notify();
+                }
+            }),
             cx.subscribe(&footage, |_, _, _: &FootageChanged, cx| cx.notify()),
             cx.subscribe_in(&target_length, window, |this, input, event, window, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -82,6 +101,8 @@ impl AiEditPanel {
                     brief: this.brief.read(cx).value().to_string(),
                     preferences: this.preferences.clone(),
                     auto_approve: this.auto_approve,
+                    edited: this.brief_edited,
+                    source: this.brief_source.clone(),
                 };
                 let video_id = this.video_id;
                 this.service.update(cx, |service, _| service.keep_draft(video_id, draft));
@@ -97,6 +118,9 @@ impl AiEditPanel {
             service,
             footage,
             brief,
+            brief_edited: false,
+            brief_source: String::new(),
+            brief_stale: false,
             target_length,
             preferences,
             auto_approve,
@@ -107,8 +131,14 @@ impl AiEditPanel {
             _subscriptions: subscriptions,
         };
         match draft {
-            Some(draft) => panel.brief.update(cx, |input, cx| input.set_value(draft.brief, window, cx)),
-            None => panel.reset_brief(window, cx),
+            // A brief the creator wrote stays; one they did not follows what changed meanwhile.
+            Some(draft) if draft.edited => {
+                panel.brief.update(cx, |input, cx| input.set_value(draft.brief, window, cx));
+                panel.brief_edited = true;
+                panel.brief_source = draft.source;
+                panel.follow_video(window, cx);
+            }
+            _ => panel.reset_brief(window, cx),
         }
         panel.run_view.update(cx, |view, cx| view.set_run(latest, window, cx));
         panel
@@ -118,19 +148,47 @@ impl AiEditPanel {
         self.video_id
     }
 
-    /// Replaces the brief with the default for the video, its script and the preferences.
-    fn reset_brief(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The video, its script and the standing instructions a brief is drafted from.
+    fn brief_inputs(&self, cx: &App) -> Option<(Video, Vec<Block>, String)> {
         let state = self.state.read(cx);
-        let Some(video) = state.video(self.video_id).cloned() else { return };
+        let video = state.video(self.video_id).cloned()?;
         let script = state
             .documents(self.video_id)
             .into_iter()
             .find(|document| document.kind == DocumentKind::Script)
             .map(|document| document.blocks)
             .unwrap_or_default();
-        let extra = state.settings().pipeline.extra_instructions.clone();
+        Some((video, script, state.settings().pipeline.extra_instructions.clone()))
+    }
+
+    /// Replaces the brief with the default for the video, its script and the
+    /// preferences; from then on it follows them again.
+    fn reset_brief(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((video, script, extra)) = self.brief_inputs(cx) else { return };
         let brief = default_brief(&video, &script, &self.preferences, &extra);
         self.brief.update(cx, |input, cx| input.set_value(brief, window, cx));
+        self.brief_source = brief_source(&video, &script, &extra);
+        self.brief_edited = false;
+        self.brief_stale = false;
+        cx.notify();
+    }
+
+    /// Drafts the brief again when what it was drafted from changed, unless the creator
+    /// edited it; then it only notes that it is out of date.
+    fn follow_video(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((video, script, extra)) = self.brief_inputs(cx) else { return };
+        let source = brief_source(&video, &script, &extra);
+        if source == self.brief_source {
+            return;
+        }
+        if self.brief_edited {
+            if !self.brief_stale {
+                self.brief_stale = true;
+                cx.notify();
+            }
+        } else {
+            self.reset_brief(window, cx);
+        }
     }
 
     /// Rewrites the preferences list of the brief, keeping the creator's other edits.
@@ -333,7 +391,21 @@ impl AiEditPanel {
                             .on_click(cx.listener(|this, _, window, cx| this.reset_brief(window, cx))),
                     ),
             )
-            .child(Textarea::new(&self.brief))
+            .when(self.brief_stale, |this| {
+                this.child(
+                    h_flex()
+                        .id("brief-stale")
+                        .test_support()
+                        .gap_2()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(Icon::new(IconName::Info).small())
+                        .child(
+                            "The video or its script changed since you edited this brief. Reset it to draft it again.",
+                        ),
+                )
+            })
+            .child(div().id("brief").test_support().child(Textarea::new(&self.brief)))
             .child(
                 h_flex()
                     .flex_wrap()

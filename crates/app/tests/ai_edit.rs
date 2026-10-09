@@ -28,7 +28,7 @@ use videocrm::ai_edit::{
 };
 use videocrm::route::{Route, VideoTab};
 use videocrm::state::{AppEvent, AppState};
-use videocrm_core::{NewVideo, PipelineRun, RunId, RunStatus, Store, VideoId, VideoStatus};
+use videocrm_core::{Block, DocumentKind, NewVideo, PipelineRun, RunId, RunStatus, Store, VideoId, VideoStatus};
 use videocrm_pipeline::AgentEvent;
 
 const TIMEOUT: Duration = Duration::from_secs(90);
@@ -1047,6 +1047,71 @@ fn the_brief_form_survives_leaving_the_video(cx: &mut TestAppContext) {
     assert!(run.brief.contains("- Burn subtitles into the render."), "{}", run.brief);
     assert_eq!(run.status, RunStatus::Rendering, "the strategy review stays skipped");
     fx.wait_for_status(cx, id, RunStatus::Succeeded);
+}
+
+#[gpui_kit::test]
+fn the_brief_follows_the_video_until_the_creator_edits_it(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let video = fx.video;
+    let write_script = |cx: &mut TestAppContext, text: &str| {
+        cx.update(|cx| {
+            fx.state.update(cx, |state, cx| {
+                let mut script = state.ensure_document(video, DocumentKind::Script, cx).expect("script");
+                script.blocks = vec![Block::paragraph(text)];
+                state.save_document(script, cx);
+            })
+        });
+        cx.run_until_parked();
+    };
+    let start = |cx: &mut TestAppContext, window: AnyWindowHandle| -> String {
+        wait_for_window(cx, window, "the composer", |window, _| shows(window, "ai-edit-start"));
+        click(cx, window, "ai-edit-start");
+        let id = latest_run(cx, &fx).expect("the panel started a run");
+        let brief = fx.run(cx, id).brief;
+        fx.wait_for_status(cx, id, RunStatus::AwaitingApproval);
+        click(cx, window, "ai-edit-new");
+        brief
+    };
+    write_script(cx, "The template's opening.");
+    let panel =
+        move |window: &mut Window, cx: &mut App| -> AnyView { cx.new(|cx| AiEditPanel::new(video, window, cx)).into() };
+    let (window, page) = open_host(cx, panel);
+    let service = fx.service.clone();
+    wait_until(cx, "requirement check", |cx| service.read(cx).doctor().is_some_and(|doctor| doctor.ready()));
+
+    // The script changes while the tab is open, the hook while the page is closed.
+    write_script(cx, "Creators who film with one camera.");
+    close(cx, &page);
+    cx.update(|cx| {
+        fx.state.update(cx, |state, cx| {
+            let mut changed = state.video(video).unwrap().clone();
+            changed.hook = "One camera is enough.".into();
+            state.update_video(changed, cx);
+        })
+    });
+    show(cx, window, &page, panel);
+    let brief = start(cx, window);
+    assert!(brief.contains("Creators who film with one camera.") && !brief.contains("template's"), "{brief}");
+    assert!(brief.contains("Hook: One camera is enough."), "{brief}");
+
+    // Once the creator edits it, the brief keeps their words and says it is out of date.
+    wait_for_window(cx, window, "the composer", |window, _| shows(window, "brief"));
+    click(cx, window, "brief");
+    cx.update_window(window, |_, window, cx| window.input("Keep my words. ", cx)).unwrap();
+    write_script(cx, "A newer line.");
+    wait_for_window(cx, window, "the notice", |window, _| shows(window, "brief-stale"));
+    let brief = start(cx, window);
+    assert!(brief.contains("Keep my words.") && !brief.contains("A newer line."), "{brief}");
+
+    // Reset drafts it from the video again.
+    wait_for_window(cx, window, "the composer", |window, _| shows(window, "brief-reset"));
+    click(cx, window, "brief-reset");
+    assert!(!cx.update_window(window, |_, window, _| shows(window, "brief-stale")).unwrap());
+    let brief = start(cx, window);
+    assert!(brief.contains("A newer line.") && !brief.contains("Keep my words."), "{brief}");
 }
 
 #[gpui_kit::test]
