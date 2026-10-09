@@ -264,7 +264,9 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   missing only once the background check finds it gone.
 - The file menu offers the AI edit outputs (`final.mp4`, then `preview.mp4`), then the
   footage videos, then **Choose file…** (`cx.prompt_for_paths`; on Linux that needs the
-  desktop portal, and its absence is reported). The list refreshes when the window is
+  desktop portal). When no file chooser opens, "Couldn't open the file chooser" asks for
+  the path instead (`~` expands; the file must exist, and be a JPG, PNG, GIF or BMP for the
+  thumbnail). Files can also be dropped on the Video file and Thumbnail cards. The list refreshes when the window is
   activated again. Size, duration and resolution come from `videocrm_pipeline::probe_media`
   on the background executor.
 

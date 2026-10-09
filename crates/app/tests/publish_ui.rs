@@ -11,8 +11,8 @@ use chrono::Utc;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Entity, Render, TestAppContext, Window, WindowBounds, WindowOptions,
-    px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Entity, ExternalPaths, FileDropEvent, PlatformInput, Render,
+    TestAppContext, Window, WindowBounds, WindowOptions, px, size,
 };
 use publish_support::{Emulators, Workspace, wait_until};
 use serde_json::json;
@@ -737,4 +737,39 @@ fn the_done_card_shows_what_youtube_has_and_what_did_not_work(cx: &mut TestAppCo
         assert!(window.find("thumbnail-not-set").visible());
         assert!(window.find("publish-next-upload-note").visible());
     });
+}
+
+/// Drops `paths` from the file manager onto the element `id`.
+fn drop_files(window: &mut Window, id: &'static str, paths: Vec<std::path::PathBuf>, cx: &mut App) {
+    let position = window.find(id).bounds().center();
+    let paths = ExternalPaths(paths.into());
+    window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Entered { position, paths }), cx);
+    window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Submit { position }), cx);
+}
+
+#[gpui_kit::test]
+fn files_dropped_on_the_cards_become_the_video_and_thumbnail(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |_| {});
+    let take = publish_support::video_file(workspace.dir.path(), "take1.mov");
+    let image = publish_support::png_file(workspace.dir.path(), "thumbnail.png");
+    let notes = workspace.dir.path().join("notes.txt");
+    std::fs::write(&notes, "not an image").unwrap();
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    // Without a working file chooser (no desktop portal), dropping is the way in.
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        drop_files(window, "video-file-drop", vec![take.clone()], cx);
+        window.render_frame(cx);
+        drop_files(window, "thumbnail-drop", vec![notes.clone()], cx);
+        // Not an image: refused with a note, nothing is stored.
+        assert_eq!(window.notifications(cx).len(), 1);
+        window.clear_notifications(cx);
+        window.render_frame(cx);
+        drop_files(window, "thumbnail-drop", vec![image.clone()], cx);
+    });
+    settle(cx);
+    let publish = workspace.video(cx, video_id).publish;
+    assert_eq!(publish.file, Some(take));
+    assert_eq!(publish.thumbnail, Some(image));
 }
