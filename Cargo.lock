@@ -7512,9 +7512,15 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "videocrm"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
+ "futures",
  "gpui-kit",
+ "serde_json",
+ "sha2 0.10.9",
  "tempfile",
+ "ureq",
+ "url",
  "videocrm-core",
  "videocrm-pipeline",
  "videocrm-youtube",

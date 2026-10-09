@@ -21,6 +21,12 @@ pub struct Account {
     /// `None` when the Google account has no YouTube channel.
     pub channel_id: Option<String>,
     pub channel_title: Option<String>,
+    /// Handle such as `@creator`.
+    pub channel_handle: Option<String>,
+    pub channel_thumbnail: Option<String>,
+    /// `None` when the channel hides its subscriber count.
+    pub subscriber_count: Option<u64>,
+    pub video_count: Option<u64>,
     /// [`YoutubeConfig::backend_label`] of the backend the tokens belong to.
     pub backend: String,
 }
@@ -33,6 +39,10 @@ impl Account {
             picture: user.picture.clone(),
             channel_id: channel.map(|channel| channel.id.clone()),
             channel_title: channel.map(|channel| channel.title.clone()),
+            channel_handle: channel.and_then(|channel| channel.custom_url.clone()),
+            channel_thumbnail: channel.and_then(|channel| channel.thumbnail_url.clone()),
+            subscriber_count: channel.and_then(|channel| channel.subscriber_count),
+            video_count: channel.map(|channel| channel.video_count),
             backend: config.backend_label(),
         }
     }
@@ -170,6 +180,10 @@ mod tests {
             picture: None,
             channel_id: Some("UC123".into()),
             channel_title: Some("Demo Creator".into()),
+            channel_handle: Some("@creator".into()),
+            channel_thumbnail: None,
+            subscriber_count: Some(42),
+            video_count: Some(7),
             backend: "Google".into(),
         };
         let login = SavedLogin {
@@ -226,6 +240,22 @@ mod tests {
             writer.join().unwrap();
         }
         assert!(store.load().unwrap().is_some());
+    }
+
+    #[test]
+    fn loads_accounts_saved_without_channel_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let json = r#"{"credentials": {"access_token": "a", "refresh_token": null,
+            "expires_at": "2026-01-01T00:00:00Z", "scope": "openid", "id_token": null},
+            "account": {"email": "a@b.c", "name": null, "picture": null, "channel_id": "UC1",
+            "channel_title": "Demo", "backend": "Google"}}"#;
+        fs::write(&path, json).unwrap();
+        let account = CredentialStore::new(path).load().unwrap().unwrap().account.unwrap();
+        assert_eq!(account.channel_title.as_deref(), Some("Demo"));
+        assert_eq!(account.channel_handle, None);
+        assert_eq!(account.subscriber_count, None);
+        assert_eq!(account.video_count, None);
     }
 
     #[test]
