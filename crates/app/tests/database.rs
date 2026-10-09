@@ -697,3 +697,39 @@ fn clearing_a_search_without_matches_keeps_the_view(cx: &mut TestAppContext) {
             .is_some_and(|view| view.filter.hide_archived)
     }));
 }
+
+#[gpui_kit::test]
+fn a_typed_option_is_kept_without_pressing_enter(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    db.step(cx, |window, cx| window.click("properties", cx));
+    db.step(cx, |window, cx| window.click("new-property", cx));
+    db.step(cx, |window, cx| {
+        window.click("property-name", cx);
+        window.input("Sponsor", cx);
+    });
+    // Text, Number, Select, …
+    db.press_and_release(cx, "property-kind");
+    db.step(cx, |window, cx| {
+        window.within("popup-menu").click(2usize, cx)
+    });
+    db.step(cx, |window, cx| {
+        window.click("new-option", cx);
+        window.input("NordVPN", cx);
+        window.press("enter", cx);
+    });
+    db.step(cx, |window, cx| window.input("Brilliant", cx));
+    db.step(cx, |window, cx| window.click("property-commit", cx));
+
+    let events = db.take_events();
+    let Some(DatabaseEvent::CreateProperty(property)) = events.first() else {
+        panic!("expected CreateProperty first, got {events:?}");
+    };
+    let names: Vec<&str> = property
+        .kind
+        .options()
+        .iter()
+        .map(|option| option.name.as_str())
+        .collect();
+    assert_eq!(names, ["NordVPN", "Brilliant"]);
+}
