@@ -111,7 +111,10 @@ All calls block; run them on a background thread and stream progress back to the
    tokens survive restarts. The client refreshes 60 s before expiry and once after a
    `401`.
 3. `Account::new(&client.userinfo()?, client.my_channel().ok().as_ref(), client.config())`
-   and `CredentialStore::save` persist the login (`credentials.json`, mode 0600).
+   and `CredentialStore::save` persist the login (`credentials.json`, mode 0600). The
+   account carries the email, name and picture plus the channel's id, title, handle,
+   thumbnail, subscriber count (`None` when hidden) and public video count; files saved
+   before those fields existed still load.
 4. `upload_video(path, &metadata, &mut progress, &cancel)`: store the `session_url` from
    `UploadProgress::Started`. After a cancel, crash or network failure,
    `resume_upload(session_url, path, ...)` continues from the bytes YouTube already has
@@ -124,6 +127,120 @@ All calls block; run them on a background thread and stream progress back to the
    grant, or a `403 insufficientPermissions` because a YouTube scope was unticked);
    `quotaExceeded`, `uploadLimitExceeded` and `insufficientPermissions` errors have
    user-facing messages.
+
+## In the app
+
+`crates/app/src/publish/` owns everything YouTube in the UI. Other modules use its public
+views and the `YoutubeService` global.
+
+| Piece | File | What it does |
+|---|---|---|
+| `YoutubeService` | `service.rs`, `upload.rs` | Global entity (`YoutubeService::init(state, cx)`, `YoutubeService::global(cx)`): connection, credentials, upload jobs |
+| `PublishPanel::new(video_id, window, cx)` | `panel.rs` | Publish tab of a video page |
+| `UploadsPage::new(window, cx)` | `uploads_page.rs` | All upload jobs, newest first |
+| `YoutubeSettings::new(window, cx)` | `settings.rs` | YouTube section of Settings and onboarding |
+| `AccountBadge::new(window, cx)` | `badge.rs` | Sidebar footer account; click opens `Route::Settings` |
+| rules, chapters, progress maths | `rules.rs`, `chapters.rs`, `transfer.rs` | Pure functions, unit tested |
+
+The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `ListOrdered`,
+`CloudUpload`, `CirclePlay`, `CirclePause`, ...): the application registers
+`gpui_kit::assets::AllAssets`, which serves the whole Lucide catalog.
+
+### Connection
+
+- The backend comes from `AppSettings.youtube` through `publish::backend_config`: Google
+  needs both client fields; the emulator falls back to the default URLs for empty fields;
+  `VIDEOCRM_GOOGLE_URL` / `VIDEOCRM_YOUTUBE_URL` override both (the settings section says
+  so). The service re-reads it on `AppEvent::SettingsChanged`; a different backend signs
+  out, because tokens belong to the backend that issued them (`Account::backend`).
+- `connection()` is `Disconnected | Connecting { authorize_url } | Connected(Account) |
+  Failed(message)`; the service emits `YoutubeEvent::ConnectionChanged` and notifies on
+  every change. `connect` runs `begin_authorization` and the wait on a `youtube-sign-in`
+  thread, opens the consent page with `cx.open_url` and exposes the URL for **Copy link**;
+  `cancel` sets the wait's cancel flag.
+- The sign-in thread only produces the client and account. The service saves the login
+  when it accepts the result, so a cancelled or superseded sign-in leaves no file behind.
+  Refreshed tokens go to the file only while that sign-in lasts: a request still running
+  after **Disconnect** cannot write the tokens back.
+- At startup the saved login is restored without network access, then the account is read
+  again in the background (it is also re-read after each upload finishes processing) so
+  the subscriber and video counts stay current. Rejected tokens (`needs_sign_in`) turn the
+  connection into `Failed("YouTube needs you to connect the account again.")`.
+- The channel picture is downloaded once per URL into `<data dir>/avatars/` for the
+  account card and the sidebar badge; without it the avatar shows initials.
+- `disconnect` cancels running uploads (they stay resumable), removes the credentials file
+  and revokes the grant in the background.
+
+### Uploads
+
+- `start_upload(video_id, cx)` checks `blocking_reasons` first: connected, a video file that
+  exists, title 1–100 characters without `<` or `>` (empty falls back to the video
+  title), description up to 5,000 bytes, tags up to 500 characters counted the way
+  YouTube does (commas between tags, quotes around tags with spaces), and a schedule only
+  for private videos and in the future. The Publish tab lists the same reasons under the
+  disabled **Upload to YouTube** button.
+- Each attempt is an `UploadJob` in the store: `Pending` → `Uploading { sent, total }`
+  (written in 10 % steps, so the videos table and a crash show roughly how far it got) →
+  `Processing { video_id }` → `Done`, or `Failed` / `Cancelled`. The session URL is stored
+  as soon as YouTube opens the session.
+- The transfer runs on a `youtube-upload` thread. Progress reaches the UI at most ten
+  times a second (`transfer::Throttle`); `Transfer` averages the speed over the last five
+  seconds and derives the time left.
+- After the bytes arrive the video gets `video.youtube = YoutubeLink { .. }` and its status
+  becomes `Scheduled` (with a publish time), `Published` (public or unlisted) or stays as
+  it was (private). The custom thumbnail is set next; a failure there is a warning
+  notification, not a failed upload. `get_video` is polled every 5 s for about two minutes
+  to report processing → ready.
+- `cancel_upload` stops at the next chunk read and keeps the session; `resume_upload`
+  continues from the offset YouTube reports. At startup, jobs a previous run left
+  `Pending` or `Uploading` become `Failed { "Interrupted — you can resume" }` (resumable
+  when a session URL was stored) and jobs left `Processing` become `Done`.
+
+### Publish tab
+
+- Form edits are saved into `video.publish` 500 ms after the last change (and when the tab
+  closes). Changes made elsewhere, such as "Use for upload" in AI edit, replace the form
+  unless it has unsaved edits.
+- **Insert chapters from script** turns the Script document's Heading 2 blocks into a
+  `Chapters:` list with timestamps from the spoken words before each heading
+  (`videocrm_core::document`, 150 wpm). YouTube wants the first chapter at 0:00 and none
+  shorter than 10 s, so spoken words before the first heading become "Intro" and shorter
+  sections give their slot to the next heading. Inserting again replaces the earlier list.
+  The timestamps are estimates; the button says so.
+- **Schedule** forces private (YouTube makes the video public at the publish time) and
+  restores the earlier visibility when turned off.
+- The file menu offers the AI edit outputs (`final.mp4`, then `preview.mp4`), then the
+  footage videos, then **Choose file…** (`cx.prompt_for_paths`; on Linux that needs the
+  desktop portal, and its absence is reported). The list refreshes when the window is
+  activated again. Size, duration and resolution come from `videocrm_pipeline::probe_media`
+  on the background executor.
+
+### Trying it
+
+```bash
+scripts/emulators.sh &        # Google on :4002, YouTube on :4020
+VIDEOCRM_DATA_DIR=$(mktemp -d) cargo run -p videocrm --example publish_demo [-- --dark] [--video <title>]
+```
+
+`publish_demo` mounts the Publish tab, the Uploads page, the YouTube settings and the badge
+on a sample workspace (emulator backend by default). Without a browser, use **Copy link**
+and finish the consent with any HTTP client: fetch the link, submit the account's form
+(`email` field) and follow the redirect to `127.0.0.1`.
+
+### App tests
+
+```bash
+cargo test -p videocrm --lib publish        # validation, chapters, progress and formatting
+cargo test -p videocrm --test publish       # YoutubeService against the emulators
+cargo test -p videocrm --test publish_ui    # the views in headless windows, clicks and typing
+```
+
+`tests/publish.rs` covers sign-in (consent posted like a browser), restart, disconnect,
+cancelling a sign-in, an upload verified byte for byte through `/_emulator/uploads`, a
+scheduled upload, cancel and resume, validation, interrupted-job recovery and backend
+switches. `tests/publish_ui.rs` drives the form, chapters, Uploads page, settings and badge,
+plus connect-and-upload from the Publish tab. Both start their own emulators and skip with
+a notice without Node.
 
 ## Connecting a real YouTube account
 
@@ -152,9 +269,10 @@ client in Google Cloud (free) and pastes it into VideoCRM. It takes about ten mi
    **Desktop app**, name it "VideoCRM desktop" and click **Create**. Copy the **Client ID**
    and **Client secret** (or download the JSON) right away: the console may not show the
    secret again.
-7. **Connect in VideoCRM.** Open **Settings → YouTube**, choose the Google backend, paste
-   the client ID and client secret, and click **Connect**. Your browser opens Google's
-   sign-in page:
+7. **Connect in VideoCRM.** Open **Settings → YouTube**, choose **YouTube account
+   (Google)**, paste the client ID and client secret, and click **Connect**. Your browser
+   opens Google's sign-in page (if it does not, for example on a remote machine, use
+   **Copy link** and open the link in a browser on the same computer):
    - Pick the test-user account.
    - Google warns "Google hasn't verified this app". Click **Continue**. This is expected
      for a personal OAuth client.
