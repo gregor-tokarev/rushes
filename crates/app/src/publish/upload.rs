@@ -167,6 +167,11 @@ impl YoutubeService {
         self.active.len()
     }
 
+    /// Why the custom thumbnail of a finished upload wasn't set.
+    pub fn thumbnail_problem(&self, id: UploadId) -> Option<&str> {
+        self.thumbnail_problems.get(&id).map(String::as_str)
+    }
+
     /// Processing state of a finished upload, while this run of the app follows it.
     pub fn processing(&self, id: UploadId) -> Option<ProcessingOutcome> {
         self.outcomes.get(&id).copied()
@@ -369,6 +374,7 @@ impl YoutubeService {
                 upload.cancel();
             }
             self.outcomes.remove(id);
+            self.thumbnail_problems.remove(id);
         }
         self.jobs.retain(|job| !gone.contains(&job.id));
         cx.emit(YoutubeEvent::UploadsChanged);
@@ -465,6 +471,9 @@ impl YoutubeService {
                 this.update(cx, |this, cx| {
                     let title = this.video_title(id, cx);
                     let message = describe_error(&error);
+                    // The toast goes away; the Upload card and the Uploads page keep the reason.
+                    this.thumbnail_problems.insert(id, message.clone());
+                    cx.notify();
                     push_notification(cx, move || {
                         Notification::warning(message).title(format!("The thumbnail of “{title}” wasn't set"))
                     });
@@ -491,7 +500,13 @@ impl YoutubeService {
                 // Errors are retried at the next poll: processing goes on without the app.
                 let state = cx.background_spawn(async move { client.get_video(&youtube_id) }).await;
                 let Ok(Some(info)) = state else { continue };
-                if let Some(outcome) = processed(&info) {
+                let outcome = processed(&info);
+                this.update(cx, |this, cx| {
+                    this.remote.insert(info.id.clone(), info);
+                    cx.notify();
+                })
+                .ok();
+                if let Some(outcome) = outcome {
                     this.update(cx, |this, cx| this.finish_processing(id, outcome, cx)).ok();
                     return;
                 }

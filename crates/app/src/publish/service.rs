@@ -2,7 +2,7 @@
 //! a browser sign-in produces credentials, and the credentials file keeps them (with
 //! the account) across restarts. Uploads live in `upload.rs`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, Shar
 use videocrm_core::settings::{self, YoutubeBackend};
 use videocrm_core::{Store, UploadId, UploadJob};
 use videocrm_youtube::{
-    Account, CredentialStore, Credentials, Error as YoutubeError, SavedLogin, YoutubeClient, YoutubeConfig,
+    Account, CredentialStore, Credentials, Error as YoutubeError, SavedLogin, VideoInfo, YoutubeClient, YoutubeConfig,
     begin_authorization, check_client,
 };
 
@@ -89,6 +89,11 @@ pub struct YoutubeService {
     pub(super) jobs: Vec<UploadJob>,
     pub(super) active: HashMap<UploadId, ActiveUpload>,
     pub(super) outcomes: HashMap<UploadId, ProcessingOutcome>,
+    /// Why the custom thumbnail of a finished upload wasn't set, for this run of the app.
+    pub(super) thumbnail_problems: HashMap<UploadId, String>,
+    /// What YouTube last said about uploaded videos, by YouTube video id.
+    pub(super) remote: HashMap<String, VideoInfo>,
+    remote_requests: HashSet<String>,
     _subscription: Subscription,
 }
 
@@ -219,6 +224,9 @@ impl YoutubeService {
             jobs: Vec::new(),
             active: HashMap::new(),
             outcomes: HashMap::new(),
+            thumbnail_problems: HashMap::new(),
+            remote: HashMap::new(),
+            remote_requests: HashSet::new(),
             _subscription: subscription,
         };
         service.restore_login(cx);
@@ -492,6 +500,35 @@ impl YoutubeService {
                 })
                 .ok();
             }
+        })
+        .detach();
+    }
+
+    /// What YouTube last said about an uploaded video (visibility, schedule, processing).
+    pub fn youtube_video(&self, youtube_id: &str) -> Option<&VideoInfo> {
+        self.remote.get(youtube_id)
+    }
+
+    /// Asks YouTube about an uploaded video in the background (one quota unit), so the
+    /// Publish tab shows what YouTube has rather than what was asked for.
+    pub fn refresh_youtube_video(&mut self, youtube_id: &str, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else { return };
+        if !self.remote_requests.insert(youtube_id.to_owned()) {
+            return;
+        }
+        let youtube_id = youtube_id.to_owned();
+        cx.spawn(async move |this, cx| {
+            let lookup = youtube_id.clone();
+            let info = cx.background_spawn(async move { client.get_video(&lookup) }).await;
+            this.update(cx, |this, cx| {
+                this.remote_requests.remove(&youtube_id);
+                // Offline, the stored link is what the tab shows.
+                if let Ok(Some(info)) = info {
+                    this.remote.insert(youtube_id, info);
+                    cx.notify();
+                }
+            })
+            .ok();
         })
         .detach();
     }

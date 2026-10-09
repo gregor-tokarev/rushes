@@ -215,8 +215,17 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
 - After the bytes arrive the video gets `video.youtube = YoutubeLink { .. }` and its status
   becomes `Scheduled` (with a publish time), `Published` (public or unlisted) or stays as
   it was (private). The custom thumbnail is set next; a failure there is a warning
-  notification, not a failed upload. `get_video` is polled every 5 s for about two minutes
-  to report processing → ready.
+  notification, not a failed upload, and its reason stays on the Upload card and the
+  Uploads page for the rest of the session ("Thumbnail not set"; `403 forbidden` becomes
+  `Error::ThumbnailsNotAllowed`: custom thumbnails need a channel verified at
+  youtube.com/verify). `get_video` is polled every 5 s for about two minutes to report
+  processing → ready.
+- The Upload card of an uploaded video says who can watch it as YouTube reports it
+  (`refresh_youtube_video`, one `videos.list` when the tab opens or connects, and every
+  processing poll): "Private · goes public Mon, 12 Oct at 09:00", "Unlisted", ... It links
+  to the video and to YouTube Studio, and the form says that its changes apply to the next
+  upload. There is no "update on YouTube": `videos.update` needs the broader `youtube`
+  scope, which VideoCRM does not ask for.
 - While the worker retries a passing failure, the Upload card, the Uploads page and the
   sidebar badge say so ("YouTube isn't responding · Retrying (2 of 5)…", or "Can't reach
   YouTube" when offline) until the upload gets further than before. A failure reads as a

@@ -129,6 +129,9 @@ impl UploadsPage {
             }
             (UploadStatus::Failed { error }, None) => Some(error.clone().into()),
             (UploadStatus::Processing { .. }, None) => Some("YouTube is processing the video.".into()),
+            (UploadStatus::Done { .. }, None) if let Some(problem) = service.thumbnail_problem(job.id) => {
+                Some(format!("Thumbnail not set. {problem}").into())
+            }
             (UploadStatus::Done { .. }, None) => match service.processing(job.id) {
                 Some(ProcessingOutcome::Ready) => Some("Processed and ready to watch.".into()),
                 Some(ProcessingOutcome::StillProcessing) => Some("YouTube Studio shows when processing ends.".into()),

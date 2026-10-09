@@ -626,3 +626,51 @@ fn an_expired_sign_in_names_the_account_and_offers_reconnect(cx: &mut TestAppCon
     publish_support::consent_in_browser(&url, "creator@example.com");
     wait_until(cx, "the connection", |cx| service.read_with(cx, |s, _| s.is_connected().then_some(())));
 }
+
+#[gpui_kit::test]
+fn the_done_card_shows_what_youtube_has_and_what_did_not_work(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let thumbnail = publish_support::png_file(workspace.dir.path(), "thumbnail.png");
+    let video_id = workspace.create_video(cx, "Stop Using print() to Debug Python", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.thumbnail = Some(thumbnail);
+        video.publish.privacy = Privacy::Private;
+        video.publish.publish_at = Some(Utc::now() + chrono::TimeDelta::days(2));
+    });
+    // What YouTube answers for channels that aren't phone-verified.
+    emulators.inject_fault(
+        json!({"method": "POST", "path": "/upload/youtube/v3/thumbnails/set", "status": 403, "reason": "forbidden"}),
+    );
+    let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    let youtube_id = wait_until(cx, "the processed upload", |cx| {
+        cx.executor().advance_clock(Duration::from_secs(5));
+        match service.read_with(cx, |s, _| s.job(upload).map(|job| job.status.clone())) {
+            Some(UploadStatus::Done { video_id }) => Some(video_id),
+            Some(UploadStatus::Failed { error }) => panic!("upload failed: {error}"),
+            _ => None,
+        }
+    });
+    let problem = wait_until(cx, "the thumbnail failure", |cx| {
+        service.read_with(cx, |s, _| s.thumbnail_problem(upload).map(str::to_owned))
+    });
+    assert!(problem.contains("verified channels"), "{problem}");
+
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let info = wait_until(cx, "YouTube's view of the video", |cx| {
+        service.read_with(cx, |s, _| s.youtube_video(&youtube_id).cloned())
+    });
+    assert_eq!(info.privacy, videocrm_youtube::Privacy::Private);
+    assert!(info.publish_at.is_some(), "scheduled on YouTube");
+    window(cx, handle, |window, cx| {
+        window.clear_notifications(cx);
+        window.render_frame(cx);
+        // "Private · goes public …", the lasting thumbnail note, and where edits go.
+        assert!(window.find("youtube-visibility").visible());
+        assert!(window.find("thumbnail-not-set").visible());
+        assert!(window.find("publish-next-upload-note").visible());
+    });
+}

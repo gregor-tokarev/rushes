@@ -31,7 +31,7 @@ use gpui_kit::{
 };
 use videocrm_core::document::DEFAULT_WPM;
 use videocrm_core::media::{self, MediaKind};
-use videocrm_core::{DocumentKind, Privacy, PublishSettings, UploadJob, UploadStatus, Video, VideoId};
+use videocrm_core::{DocumentKind, Privacy, PublishSettings, UploadJob, UploadStatus, Video, VideoId, VideoStatus};
 use videocrm_pipeline::MediaInfo;
 
 use super::chapters::{chapters, chapters_text, insert_chapters};
@@ -39,7 +39,7 @@ use super::rules::{
     self, BlockingReason, CATEGORIES, Category, DESCRIPTION_MAX_BYTES, TAGS_MAX_CHARS, THUMBNAIL_MAX_BYTES,
     TITLE_MAX_CHARS, tags_length,
 };
-use super::service::YoutubeService;
+use super::service::{YoutubeEvent, YoutubeService};
 use super::transfer::{format_bytes, format_duration, format_eta, format_speed};
 use super::ui::{ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, status_line};
 use super::upload::{ProcessingOutcome, UploadError};
@@ -207,6 +207,11 @@ impl PublishPanel {
         let subscriptions = vec![
             cx.subscribe_in(&state, window, Self::on_app_event),
             cx.observe(&service, |_, _, cx| cx.notify()),
+            cx.subscribe(&service, |this, _, event: &YoutubeEvent, cx| {
+                if *event == YoutubeEvent::ConnectionChanged {
+                    this.refresh_youtube_video(cx);
+                }
+            }),
             cx.subscribe(&title, |this, input, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.draft.title = input.read(cx).value().to_string();
@@ -273,7 +278,16 @@ impl PublishPanel {
         panel.refresh_choices(cx);
         panel.refresh_file(cx);
         panel.refresh_thumbnail(cx);
+        panel.refresh_youtube_video(cx);
         panel
+    }
+
+    /// Asks YouTube how the uploaded video stands, for the Upload card.
+    fn refresh_youtube_video(&mut self, cx: &mut Context<Self>) {
+        let Some(link) = self.state.read(cx).video(self.video_id).and_then(|video| video.youtube.clone()) else {
+            return;
+        };
+        self.service.update(cx, |service, cx| service.refresh_youtube_video(&link.video_id, cx));
     }
 
     pub fn video_id(&self) -> VideoId {
@@ -620,9 +634,22 @@ impl PublishPanel {
             .disabled(self.chapters.is_none())
             .when(self.chapters.is_none(), |this| this.tooltip("Add Heading 2 sections to the script first"))
             .on_click(cx.listener(|this, _, window, cx| this.insert_chapters(window, cx)));
+        let uploaded = self.state.read(cx).video(self.video_id).is_some_and(|video| video.youtube.is_some());
         v_flex()
             .gap_5()
-            .child(section_heading("Details", cx))
+            .child(v_flex().gap_1().child(section_heading("Details", cx)).when(uploaded, |this| {
+                // The form doesn't reach the uploaded video; saying so avoids edits that go nowhere.
+                this.child(
+                    div()
+                        .id("publish-next-upload-note")
+                        .child(help_text(
+                            "This video is on YouTube. Changes here apply to the next upload; change the \
+                                 uploaded one in YouTube Studio.",
+                            cx,
+                        ))
+                        .test_support(),
+                )
+            }))
             .child(
                 FieldRow::new("Title")
                     .counter(title_len, TITLE_MAX_CHARS)
@@ -860,7 +887,7 @@ impl PublishPanel {
                         (None, "Uploaded", Some("YouTube is processing the video."))
                     }
                     (false, Some(ProcessingOutcome::Ready)) => {
-                        (Some(IconName::CircleCheck), "Uploaded to YouTube", Some("Processed and ready to watch."))
+                        (Some(IconName::CircleCheck), "Uploaded to YouTube", Some("Processed and ready."))
                     }
                     (false, Some(ProcessingOutcome::StillProcessing)) => (
                         Some(IconName::CircleCheck),
@@ -869,6 +896,25 @@ impl PublishPanel {
                     ),
                     (false, None) => (Some(IconName::CircleCheck), "Uploaded to YouTube", None),
                 };
+                // Who can watch it on YouTube: what YouTube says once asked, else what was sent.
+                let visibility = self.state.read(cx).video(self.video_id).and_then(|video| {
+                    let link = video.youtube.as_ref()?;
+                    Some(match service.youtube_video(&link.video_id) {
+                        Some(info) => visibility_text(rules::core_privacy(info.privacy), info.publish_at),
+                        None => visibility_text(
+                            link.privacy,
+                            video.publish.publish_at.filter(|_| video.status == VideoStatus::Scheduled),
+                        ),
+                    })
+                });
+                let studio_url = self
+                    .state
+                    .read(cx)
+                    .video(self.video_id)
+                    .and_then(|video| video.youtube.as_ref())
+                    .map(|link| format!("https://studio.youtube.com/video/{}/edit", link.video_id));
+                let thumbnail_problem =
+                    service.thumbnail_problem(job.id).map(|problem| SharedString::from(problem.to_owned()));
                 v_flex()
                     .gap_3()
                     .child(
@@ -881,17 +927,53 @@ impl PublishPanel {
                             }))
                             .child(
                                 v_flex()
+                                    .min_w_0()
                                     .gap_0p5()
                                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(headline))
+                                    .when_some(visibility, |this, visibility| {
+                                        this.child(
+                                            div()
+                                                .id("youtube-visibility")
+                                                .child(help_text(visibility, cx))
+                                                .test_support(),
+                                        )
+                                    })
                                     .when_some(detail, |this, detail| this.child(help_text(detail, cx))),
                             ),
                     )
+                    .when_some(thumbnail_problem, |this, problem| {
+                        this.child(
+                            div()
+                                .id("thumbnail-not-set")
+                                .child(status_line(
+                                    IconName::TriangleAlert,
+                                    theme.warning,
+                                    "Thumbnail not set",
+                                    Some(problem),
+                                    cx,
+                                ))
+                                // Tests check that the note stays on the card.
+                                .test_support(),
+                        )
+                    })
                     .child(
                         h_flex()
                             .flex_wrap()
                             .gap_x_4()
                             .gap_y_2()
                             .when_some(youtube_url.clone(), |this, url| this.child(open_link(url)))
+                            .when_some(studio_url, |this, url| {
+                                this.child(
+                                    div().text_sm().child(
+                                        Link::new("open-in-studio").href(url).child(
+                                            h_flex()
+                                                .gap_1()
+                                                .child("YouTube Studio")
+                                                .child(Icon::new(IconName::ExternalLink).xsmall()),
+                                        ),
+                                    ),
+                                )
+                            })
                             .child(
                                 Button::new("upload-again")
                                     .label("Upload again…")
@@ -1211,6 +1293,14 @@ fn render_blockers(reasons: &[BlockingReason], cx: &App) -> impl IntoElement {
         .test_support()
 }
 
+/// `Private · goes public Mon, 12 Oct at 09:00`, or just who can watch.
+fn visibility_text(privacy: Privacy, publish_at: Option<DateTime<Utc>>) -> String {
+    match publish_at.filter(|at| privacy == Privacy::Private && *at > Utc::now()) {
+        Some(at) => format!("Private · goes public {}", at.with_timezone(&Local).format("%a, %-d %b at %H:%M")),
+        None => privacy.label().to_owned(),
+    }
+}
+
 /// "Uploads as unlisted." / "Publishes Fri, 10 Oct at 09:00."
 fn upload_summary(video: &Video) -> String {
     match video.publish.publish_at {
@@ -1286,6 +1376,16 @@ fn utc_time(local: chrono::NaiveDateTime) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_done_card_says_who_can_watch() {
+        let monday = Utc::now() + TimeDelta::days(2);
+        let scheduled = visibility_text(Privacy::Private, Some(monday));
+        assert!(scheduled.starts_with("Private · goes public "), "{scheduled}");
+        assert_eq!(visibility_text(Privacy::Unlisted, None), "Unlisted");
+        // Once the time has passed, YouTube made it public; until asked, private is all we know.
+        assert_eq!(visibility_text(Privacy::Private, Some(Utc::now() - TimeDelta::days(1))), "Private");
+    }
 
     #[test]
     fn saving_keeps_fields_changed_elsewhere() {
