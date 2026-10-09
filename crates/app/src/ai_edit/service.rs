@@ -140,10 +140,11 @@ impl Global for GlobalPipelineService {}
 
 impl PipelineService {
     /// Creates the service and registers it globally. Call once at startup, after
-    /// `AppState::set_global`.
+    /// `AppState::set_global` and before anything shows run state.
     ///
-    /// Runs a previous session left working are marked failed ([`INTERRUPTED`]); they
-    /// can be continued when the agent session is known.
+    /// Runs a previous session left working are marked failed ([`INTERRUPTED`]), and
+    /// the video rows (whose latest run they may be) are reloaded; they can be
+    /// continued when the agent session is known.
     pub fn init(state: Entity<AppState>, cx: &mut App) {
         let service = cx.new(|cx| {
             let subscriptions = vec![
@@ -170,8 +171,10 @@ impl PipelineService {
                 drafts: HashMap::new(),
                 _subscriptions: subscriptions,
             };
-            if let Err(error) = service.recover_interrupted(cx) {
-                service.report(error, cx);
+            match service.recover_interrupted(cx) {
+                Ok(true) => service.state.update(cx, |state, cx| state.reload(cx)),
+                Ok(false) => {}
+                Err(error) => service.report(error, cx),
             }
             service.reload_runs(cx);
             service.refresh_doctor(cx);
@@ -650,16 +653,19 @@ impl PipelineService {
         }
     }
 
-    fn recover_interrupted(&mut self, cx: &mut Context<Self>) -> Result<(), StoreError> {
+    /// Marks the runs a previous session left working failed; returns whether there were any.
+    fn recover_interrupted(&mut self, cx: &mut Context<Self>) -> Result<bool, StoreError> {
         self.with_store(cx, |store| {
+            let mut recovered = false;
             for mut run in store.list_runs(None)? {
                 if run.status.is_active() {
                     run.status = RunStatus::Failed;
                     run.error = Some(INTERRUPTED.to_owned());
                     store.update_run(&mut run)?;
+                    recovered = true;
                 }
             }
-            Ok(())
+            Ok(recovered)
         })
     }
 

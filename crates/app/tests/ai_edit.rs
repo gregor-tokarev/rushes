@@ -586,6 +586,39 @@ fn startup_marks_interrupted_runs_failed_and_they_can_continue(cx: &mut TestAppC
 }
 
 #[gpui_kit::test]
+fn video_rows_show_interrupted_runs_as_failed_from_the_start(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().unwrap();
+    let video = videocrm_core::Video::new("Quit while planning");
+    store.insert_video(&video).unwrap();
+    let now = Utc::now();
+    let run = PipelineRun {
+        id: RunId::new(),
+        video_id: video.id,
+        status: RunStatus::Planning,
+        brief: String::new(),
+        footage_dir: PathBuf::from("/nonexistent"),
+        session_id: Some("s".into()),
+        summary: None,
+        output: None,
+        error: None,
+        cost_usd: None,
+        created_at: now,
+        updated_at: now,
+    };
+    store.insert_run(&run).unwrap();
+    // The rows are read before the service starts, as at app startup.
+    let state = cx.new(|_| AppState::new(store).expect("app state"));
+    assert_eq!(cx.read(|cx| state.read(cx).row(video.id).unwrap().latest_run), Some(RunStatus::Planning));
+
+    cx.update(|cx| {
+        AppState::set_global(state.clone(), cx);
+        PipelineService::init(state.clone(), cx);
+    });
+    let row = cx.read(|cx| state.read(cx).row(video.id).cloned().unwrap());
+    assert_eq!(row.latest_run, Some(RunStatus::Failed), "no edit shows as running after a restart");
+}
+
+#[gpui_kit::test]
 fn the_requirement_check_passes_with_the_fake_agent(cx: &mut TestAppContext) {
     let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
     let service = fx.service.clone();
