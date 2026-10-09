@@ -153,8 +153,12 @@ impl VideoPage {
         }
     }
 
-    /// Creates the content of the current tab the first time it is shown.
+    /// Creates the content of the current tab the first time it is shown. A
+    /// deleted video (reached through history) gets none.
     fn ensure_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.video(cx).is_none() {
+            return;
+        }
         let id = self.video_id;
         match self.tab {
             VideoTab::Script if self.script.is_none() => {

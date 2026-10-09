@@ -440,6 +440,22 @@ fn the_title_and_hook_save_on_enter(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn tabs_of_a_deleted_video_create_nothing(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| state.update(cx, |state, cx| state.delete_videos(&[id], cx)));
+
+    // History can still point at the deleted video's tabs.
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Notes });
+    assert!(app.has(cx, "video-missing"));
+    let notifications =
+        cx.update_window(app.window, |_, window, cx| window.notifications(cx).len()).expect("window is open");
+    assert_eq!(notifications, 0);
+}
+
+#[gpui_kit::test]
 fn deleting_a_video_with_unsaved_edits_leaves_quietly(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, true, &["Desk setup tour"]);
     let id = app.video_id(cx, "Desk setup tour");
