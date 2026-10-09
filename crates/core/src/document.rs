@@ -18,9 +18,10 @@
 //! | Paragraph   | plain text, blocks separated by blank lines |
 //!
 //! Text lines that would otherwise read as markup are escaped with a leading
-//! backslash. Normalisations: empty paragraphs are dropped, newlines in
-//! headings become spaces, and blank lines inside a paragraph or list item
-//! split it into separate blocks.
+//! backslash. Normalisations: empty paragraphs and empty blocks that only show
+//! template guidance ([`Block::guidance`]) are dropped, newlines in headings
+//! become spaces, and blank lines inside a paragraph or list item split it
+//! into separate blocks.
 
 use std::borrow::Cow;
 
@@ -118,7 +119,7 @@ pub fn to_markdown(blocks: &[Block]) -> String {
     let mut previous_was_list = false;
 
     for block in blocks {
-        if block.kind == BlockKind::Paragraph && block.text.trim().is_empty() {
+        if (block.kind == BlockKind::Paragraph && block.text.trim().is_empty()) || block.guidance().is_some() {
             continue;
         }
         let is_list = is_list_kind(block.kind);
@@ -357,18 +358,29 @@ fn unescape(text: &str) -> &str {
     }
 }
 
-/// Callout-style marker (`[!broll] text`) on the first line of a quote. GitHub
-/// alert names (`[!NOTE]`, `[!TIP]`, ...) import as callouts.
-fn quote_kind(first_line: &str) -> (BlockKind, &str) {
-    let marker = first_line.strip_prefix("[!").and_then(|rest| rest.split_once(']'));
-    let Some((name, rest)) = marker else { return (BlockKind::Quote, unescape(first_line)) };
+/// The block kind a callout-style marker at the start of a quote's text
+/// selects, with the marker's length: `[!note]` is a callout, `[!broll]` a
+/// B-roll cue, `[!onscreen]` an on-screen cue, and GitHub alert names
+/// (`[!NOTE]`, `[!TIP]`, ...) are callouts too. The editor uses it for the
+/// same syntax typed into a quote.
+pub fn quote_marker(text: &str) -> Option<(BlockKind, usize)> {
+    let (name, _) = text.strip_prefix("[!")?.split_once(']')?;
     let kind = match name.to_ascii_lowercase().as_str() {
         "broll" | "b-roll" => BlockKind::BRoll,
         "onscreen" | "on-screen" => BlockKind::OnScreen,
         "note" | "tip" | "info" | "important" | "warning" | "caution" => BlockKind::Callout,
-        _ => return (BlockKind::Quote, first_line),
+        _ => return None,
     };
-    (kind, unescape(rest.trim_start()))
+    Some((kind, "[!".len() + name.len() + "]".len()))
+}
+
+/// Callout-style marker (`[!broll] text`) on the first line of a quote.
+fn quote_kind(first_line: &str) -> (BlockKind, &str) {
+    match quote_marker(first_line) {
+        Some((kind, len)) => (kind, unescape(first_line[len..].trim_start())),
+        None if first_line.starts_with("[!") => (BlockKind::Quote, first_line),
+        None => (BlockKind::Quote, unescape(first_line)),
+    }
 }
 
 fn is_quote_like(kind: BlockKind) -> bool {
@@ -901,6 +913,29 @@ mod tests {
         let flat: Vec<_> = items.iter().map(|i| (i.level, i.text.as_str())).collect();
         assert_eq!(flat, [(1, "Hook"), (2, "Step 1"), (3, "Detail")]);
         assert_eq!(items[1].block_id, blocks[2].id);
+    }
+
+    #[test]
+    fn template_guidance_is_not_script() {
+        let blocks = vec![
+            block(BlockKind::Heading2, "Hook"),
+            Block::guided(BlockKind::Paragraph, "Lead with the end result."),
+            Block::guided(BlockKind::Bulleted, "Prerequisite"),
+            Block { text: "Written over the guidance.".into(), ..Block::guided(BlockKind::Paragraph, "Explain why.") },
+        ];
+        assert_eq!(spoken_word_count(&blocks), 4);
+        assert_eq!(teleprompter_text(&blocks), "Written over the guidance.");
+        assert_eq!(to_markdown(&blocks), "## Hook\n\nWritten over the guidance.\n");
+    }
+
+    #[test]
+    fn reads_callout_markers() {
+        assert_eq!(quote_marker("[!broll] Slow pan"), Some((BlockKind::BRoll, 8)));
+        assert_eq!(quote_marker("[!NOTE]"), Some((BlockKind::Callout, 7)));
+        assert_eq!(quote_marker("[!on-screen] Subscribe"), Some((BlockKind::OnScreen, 12)));
+        assert_eq!(quote_marker("[!quote] text"), None);
+        assert_eq!(quote_marker("[!note"), None);
+        assert_eq!(quote_marker("plain"), None);
     }
 
     #[test]

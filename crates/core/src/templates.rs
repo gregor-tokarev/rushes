@@ -1,9 +1,10 @@
 //! Script templates for new videos.
 //!
 //! Each template is a skeleton of sections (headings) with spoken paragraphs,
-//! B-roll and on-screen cues, and a production checklist. Placeholder guidance
-//! is written in italics so it reads as "replace me" in the editor; the
-//! video's hook and title are filled in where they belong.
+//! B-roll and on-screen cues, and a production checklist. Guidance for the
+//! creator is the placeholder of an empty block ([`Block::guided`]): the editor
+//! shows it until the creator writes there, and it never counts as script.
+//! The video's hook and title are filled in where they belong.
 
 use serde::{Deserialize, Serialize};
 
@@ -60,7 +61,7 @@ impl TemplateKind {
 pub fn script_template(kind: TemplateKind, video: &Video) -> Vec<Block> {
     let hook = |guidance: &str| {
         let hook = video.hook.trim();
-        if hook.is_empty() { p(guidance) } else { p(hook) }
+        if hook.is_empty() { guide(guidance) } else { p(hook) }
     };
     let title_card = if video.title.trim().is_empty() { "Title card".to_string() } else { video.title.clone() };
 
@@ -69,88 +70,90 @@ pub fn script_template(kind: TemplateKind, video: &Video) -> Vec<Block> {
         TemplateKind::Tutorial => vec![
             h2("Hook · 0:00–0:20"),
             hook(
-                "*Lead with the end result. Example: “This is the finished setup, and in the next ten minutes \
-                 you'll build it yourself.”*",
+                "Lead with the end result. Example: “This is the finished setup, and in the next ten minutes \
+                 you'll build it yourself.”",
             ),
             broll("Show the finished result first: 3–5 seconds of the end state."),
             onscreen(&title_card),
             h2("Intro · who this is for"),
-            p("*Who is this for, and what do they need before starting? One or two sentences, then move on.*"),
-            bullet("*Prerequisite: tool, account or version viewers need*"),
-            bullet("*Prerequisite: knowledge you assume*"),
+            guide("Who is this for, and what do they need before starting? One or two sentences, then move on."),
+            guide_bullet("Prerequisite: tool, account or version viewers need"),
+            guide_bullet("Prerequisite: knowledge you assume"),
             h2("Step 1 · set up"),
-            p("*Explain why this step matters before showing how. One idea per step.*"),
+            guide("Explain why this step matters before showing how. One idea per step."),
             broll("Screen recording of step 1, zoomed to the relevant area."),
             onscreen("Step 1 — short label"),
             h2("Step 2 · build"),
-            p("*Show the core of the technique. Narrate decisions, not keystrokes.*"),
+            guide("Show the core of the technique. Narrate decisions, not keystrokes."),
             broll("Screen recording of step 2; punch in on the key change."),
             onscreen("Step 2 — short label"),
             h2("Step 3 · finish and verify"),
-            p("*Prove it works: run it, show the result and connect it back to the hook.*"),
+            guide("Prove it works: run it, show the result and connect it back to the hook."),
             h2("Common mistakes"),
-            bullet("*The mistake viewers hit most often, and the fix*"),
-            bullet("*A second gotcha (check comments on similar videos)*"),
+            guide_bullet("The mistake viewers hit most often, and the fix"),
+            guide_bullet("A second gotcha (check comments on similar videos)"),
             h2("Recap & call to action"),
-            p("*Recap each step in one sentence, then point to one next video: “If you want to go further, \
-                 watch this one next.”*"),
+            guide(
+                "Recap each step in one sentence, then point to one next video: “If you want to go further, \
+                 watch this one next.”",
+            ),
             onscreen("End screen: next video + subscribe"),
         ],
         TemplateKind::Review => vec![
             h2("Hook · the verdict tease"),
             hook(
-                "*Open with a strong opinion or a surprising result: “I used this every day for a month, and \
-                 one thing completely changed my mind.”*",
+                "Open with a strong opinion or a surprising result: “I used this every day for a month, and \
+                 one thing completely changed my mind.”",
             ),
             broll("Hero shot of the product on the desk, slow push-in."),
             onscreen(&title_card),
             h2("Context"),
-            p("*Why you bought it or were sent it, what it costs and what it competes with.*"),
+            guide("Why you bought it or were sent it, what it costs and what it competes with."),
             callout("Disclose sponsorships, affiliate links and loaner units here."),
             onscreen("Price · key specs · release date"),
             h2("First impressions & design"),
-            p("*Build quality, size, what's in the box. Keep it brief: viewers came for the verdict.*"),
+            guide("Build quality, size, what's in the box. Keep it brief: viewers came for the verdict."),
             broll("Unboxing and macro detail shots."),
             h2("Real-world use"),
-            p("*How it performed in your actual workflow. Use specific numbers and moments, not adjectives.*"),
+            guide("How it performed in your actual workflow. Use specific numbers and moments, not adjectives."),
             broll("Product in use; side-by-side with the main competitor."),
             h2("What I don't like"),
-            bullet("*The biggest drawback and who it affects*"),
-            bullet("*A second drawback, or what you'd change*"),
+            guide_bullet("The biggest drawback and who it affects"),
+            guide_bullet("A second drawback, or what you'd change"),
             h2("Who should buy it"),
-            p("*Recommend it for one kind of person, steer another away, and name the alternative.*"),
+            guide("Recommend it for one kind of person, steer another away, and name the alternative."),
             h2("Verdict & call to action"),
-            p("*One-sentence verdict, then point to the comparison or long-term follow-up video.*"),
+            guide("One-sentence verdict, then point to the comparison or long-term follow-up video."),
             onscreen("Verdict · links in the description"),
         ],
         TemplateKind::Vlog => vec![
             h2("Cold open"),
-            hook("*Drop viewers into the most interesting moment of the day, then cut to the intro.*"),
+            hook("Drop viewers into the most interesting moment of the day, then cut to the intro."),
             broll("The moment itself: handheld, natural sound."),
             h2("Intro"),
-            p("*Where you are, what today is about, and the question this video answers.*"),
+            guide("Where you are, what today is about, and the question this video answers."),
             onscreen(&title_card),
             h2("Beat 1 · the setup"),
-            p("*Set up the goal or the problem for the day.*"),
+            guide("Set up the goal or the problem for the day."),
             broll("Establishing shots: location, weather, people."),
             h2("Beat 2 · the turn"),
-            p("*Something doesn't go to plan. This is the story, so slow down here.*"),
+            guide("Something doesn't go to plan. This is the story, so slow down here."),
             broll("Reaction shots and details that show the change."),
             h2("Beat 3 · the payoff"),
-            p("*How it resolved and what you learned.*"),
+            guide("How it resolved and what you learned."),
             broll("Closing shot: sunset, timelapse or walking away from camera."),
             h2("Outro"),
-            p("*Reflect in one or two sentences and tease the next video.*"),
+            guide("Reflect in one or two sentences and tease the next video."),
         ],
         TemplateKind::Short => vec![
             h2("Hook · 0–3s"),
-            hook("*One line that stops the scroll.*"),
+            hook("One line that stops the scroll."),
             onscreen(&title_card),
             h2("Payoff · 3–45s"),
-            p("*Deliver one idea fast. Cut every word that doesn't move it forward.*"),
+            guide("Deliver one idea fast. Cut every word that doesn't move it forward."),
             broll("Fast cuts every 1–2 seconds, framed vertically."),
             h2("Loop · 45–55s"),
-            p("*End on a line that flows back into the hook so the Short loops.*"),
+            guide("End on a line that flows back into the hook so the Short loops."),
         ],
     };
 
@@ -195,6 +198,16 @@ pub(crate) fn bullet(text: &str) -> Block {
     Block::new(BlockKind::Bulleted, text)
 }
 
+/// An empty paragraph showing `guidance` until the creator writes there.
+fn guide(guidance: &str) -> Block {
+    Block::guided(BlockKind::Paragraph, guidance)
+}
+
+/// An empty bullet showing `guidance` until the creator writes there.
+fn guide_bullet(guidance: &str) -> Block {
+    Block::guided(BlockKind::Bulleted, guidance)
+}
+
 pub(crate) fn callout(text: &str) -> Block {
     Block::new(BlockKind::Callout, text)
 }
@@ -214,7 +227,9 @@ pub(crate) fn todo(text: &str) -> Block {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{DEFAULT_WPM, estimated_runtime_secs, outline, spoken_word_count};
+    use crate::document::{
+        DEFAULT_WPM, estimated_runtime_secs, outline, spoken_word_count, teleprompter_text, to_markdown,
+    };
 
     fn count(blocks: &[Block], kind: BlockKind) -> usize {
         blocks.iter().filter(|block| block.kind == kind).count()
@@ -242,12 +257,17 @@ mod tests {
         for kind in TemplateKind::ALL.into_iter().filter(|kind| *kind != TemplateKind::Blank) {
             let blocks = script_template(kind, &video);
             assert!(outline(&blocks).len() >= 3, "{kind:?} has sections");
-            assert!(spoken_word_count(&blocks) > 0, "{kind:?} has spoken text");
+            assert!(
+                blocks.iter().any(|block| block.kind == BlockKind::Paragraph && block.guidance().is_some()),
+                "{kind:?} has guided paragraphs to write the script in"
+            );
             assert!(count(&blocks, BlockKind::BRoll) >= 1, "{kind:?} has B-roll cues");
             assert!(count(&blocks, BlockKind::OnScreen) >= 1, "{kind:?} has on-screen cues");
             assert!(count(&blocks, BlockKind::Todo) >= 4, "{kind:?} has a checklist");
             assert_eq!(blocks[0].kind, BlockKind::Heading2, "{kind:?} opens with the hook section");
-            assert!(blocks.iter().all(|block| !block.text.trim().is_empty() || block.kind == BlockKind::Divider));
+            assert!(blocks.iter().all(|block| {
+                !block.text.trim().is_empty() || block.kind == BlockKind::Divider || block.guidance().is_some()
+            }));
             let ids: std::collections::HashSet<_> = blocks.iter().map(|block| block.id).collect();
             assert_eq!(ids.len(), blocks.len(), "{kind:?} block ids are unique");
         }
@@ -258,11 +278,33 @@ mod tests {
         let mut video = Video::new("I tried every keyboard switch");
         let blocks = script_template(TemplateKind::Review, &video);
         assert!(blocks.iter().any(|b| b.kind == BlockKind::OnScreen && b.text == "I tried every keyboard switch"));
-        assert!(blocks[1].text.starts_with('*'), "placeholder guidance without a hook");
+        assert_eq!(blocks[1].text, "", "without a hook the paragraph only shows guidance");
+        assert!(blocks[1].guidance().is_some_and(|guidance| guidance.starts_with("Open with")));
 
         video.hook = "  Ninety switches, one winner.  ".into();
         let blocks = script_template(TemplateKind::Review, &video);
         assert_eq!((blocks[1].kind, blocks[1].text.as_str()), (BlockKind::Paragraph, "Ninety switches, one winner."));
+    }
+
+    #[test]
+    fn guidance_is_never_part_of_the_script() {
+        for kind in TemplateKind::ALL {
+            let blocks = script_template(kind, &Video::new("Unwritten"));
+            assert_eq!(spoken_word_count(&blocks), 0, "{kind:?} guidance is not spoken");
+            assert_eq!(teleprompter_text(&blocks), "", "{kind:?} guidance is not read out");
+            let markdown = to_markdown(&blocks);
+            for guidance in blocks.iter().filter_map(Block::guidance) {
+                assert!(!markdown.contains(guidance), "{kind:?} exports {guidance:?}");
+            }
+        }
+
+        // Written text replaces the guidance everywhere.
+        let mut blocks = script_template(TemplateKind::Vlog, &Video::new("Written"));
+        let guided = blocks.iter().position(|block| block.guidance().is_some()).unwrap();
+        blocks[guided].text = "We got lost in Osaka.".into();
+        assert_eq!(blocks[guided].guidance(), None);
+        assert_eq!(spoken_word_count(&blocks), 5);
+        assert_eq!(teleprompter_text(&blocks), "We got lost in Osaka.");
     }
 
     #[test]

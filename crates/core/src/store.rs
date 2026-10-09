@@ -127,7 +127,8 @@ impl Store {
     }
 
     /// All videos in manual order with script stats (from the first Script
-    /// document) and the latest run / upload status, in one query.
+    /// document), the latest run / upload status and whether an edit ever
+    /// finished, in one query.
     pub fn list_video_rows(&self) -> StoreResult<Vec<VideoRow>> {
         let sql = format!(
             "SELECT {VIDEO_COLUMNS},
@@ -135,13 +136,15 @@ impl Store {
                  ORDER BY d.position, d.id LIMIT 1) AS script_words,
                 (SELECT r.status FROM pipeline_runs r WHERE r.video_id = videos.id
                  ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS latest_run,
+                EXISTS (SELECT 1 FROM pipeline_runs r WHERE r.video_id = videos.id AND r.status = ?2)
+                    AS has_finished_edit,
                 (SELECT u.status FROM uploads u WHERE u.video_id = videos.id
                  ORDER BY u.created_at DESC, u.id DESC LIMIT 1) AS latest_upload
              FROM videos ORDER BY position, created_at"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt
-            .query_map([DocumentKind::Script], |row| {
+            .query_map(params![DocumentKind::Script, RunStatus::Succeeded], |row| {
                 let script_words = row.get::<_, Option<i64>>("script_words")?.unwrap_or(0);
                 let script_words = usize::try_from(script_words).unwrap_or(0);
                 Ok(VideoRow {
@@ -149,6 +152,7 @@ impl Store {
                     script_words,
                     script_seconds: document::runtime_secs_for_words(script_words, DEFAULT_WPM),
                     latest_run: row.get("latest_run")?,
+                    has_finished_edit: row.get("has_finished_edit")?,
                     latest_upload: row.get::<_, Option<Json<UploadStatus>>>("latest_upload")?.map(Json::into_inner),
                 })
             })?
@@ -717,7 +721,7 @@ fn default_views() -> [DatabaseView; 2] {
             layout(Format, 120.0, true),
             layout(PublishDate, 140.0, true),
             layout(Tags, 200.0, true),
-            layout(Script, 130.0, true),
+            layout(Script, 170.0, true),
             layout(Edit, 140.0, true),
             layout(Youtube, 130.0, true),
             layout(CreatedAt, 150.0, false),

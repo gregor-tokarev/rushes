@@ -597,15 +597,30 @@ pub struct Block {
     /// Nesting level for list items (0 = top level).
     #[serde(default)]
     pub indent: u8,
+    /// Template guidance shown in place of the text while the block is empty
+    /// ("Lead with the end result…"). It is never part of the script: not
+    /// spoken, not exported and not copied as teleprompter text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
 }
 
 impl Block {
     pub fn new(kind: BlockKind, text: impl Into<String>) -> Self {
-        Self { id: BlockId::new(), kind, text: text.into(), checked: false, indent: 0 }
+        Self { id: BlockId::new(), kind, text: text.into(), checked: false, indent: 0, placeholder: None }
     }
 
     pub fn paragraph(text: impl Into<String>) -> Self {
         Self::new(BlockKind::Paragraph, text)
+    }
+
+    /// An empty block that shows `guidance` until the creator writes in it.
+    pub fn guided(kind: BlockKind, guidance: impl Into<String>) -> Self {
+        Self { placeholder: Some(guidance.into()), ..Self::new(kind, "") }
+    }
+
+    /// The template guidance to show: set, and the block still has no text.
+    pub fn guidance(&self) -> Option<&str> {
+        self.placeholder.as_deref().filter(|_| self.text.trim().is_empty())
     }
 }
 
@@ -727,6 +742,53 @@ pub struct VideoRow {
     pub script_words: usize,
     /// Estimated spoken runtime of the script in seconds.
     pub script_seconds: u32,
+    /// Status of the most recent AI edit run.
     pub latest_run: Option<RunStatus>,
+    /// Whether any AI edit run of the video succeeded, i.e. it has a finished cut.
+    pub has_finished_edit: bool,
+    /// Status of the most recent upload attempt.
     pub latest_upload: Option<UploadStatus>,
+}
+
+/// Where a video stands on YouTube, as the database shows it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum YoutubeState<'a> {
+    /// The video is on YouTube.
+    Live(&'a YoutubeLink),
+    /// Not on YouTube: the latest upload attempt.
+    Upload(&'a UploadStatus),
+}
+
+impl VideoRow {
+    /// The AI edit state to show: the latest run, except that a failed or
+    /// cancelled retry does not hide an earlier edit that finished.
+    pub fn edit_status(&self) -> Option<RunStatus> {
+        match self.latest_run {
+            Some(RunStatus::Failed | RunStatus::Cancelled) if self.has_finished_edit => Some(RunStatus::Succeeded),
+            latest => latest,
+        }
+    }
+
+    /// The latest run when [`Self::edit_status`] shows an earlier, finished one instead.
+    pub fn newer_edit_attempt(&self) -> Option<RunStatus> {
+        self.latest_run.filter(|latest| Some(*latest) != self.edit_status())
+    }
+
+    /// The video's YouTube link when it is on YouTube, otherwise the latest
+    /// upload attempt; `None` when it was never uploaded.
+    pub fn youtube_state(&self) -> Option<YoutubeState<'_>> {
+        match (&self.video.youtube, &self.latest_upload) {
+            (Some(link), _) => Some(YoutubeState::Live(link)),
+            (None, Some(upload)) => Some(YoutubeState::Upload(upload)),
+            (None, None) => None,
+        }
+    }
+
+    /// The latest upload attempt when [`Self::youtube_state`] shows the video
+    /// already on YouTube and that attempt has not ended there (it is still
+    /// running, failed or was cancelled).
+    pub fn newer_upload_attempt(&self) -> Option<&UploadStatus> {
+        self.video.youtube.as_ref()?;
+        self.latest_upload.as_ref().filter(|upload| !matches!(upload, UploadStatus::Done { .. }))
+    }
 }
