@@ -1,6 +1,7 @@
 //! Domain model, persistence and document logic for VideoCRM.
 
 pub mod document;
+pub mod input;
 pub mod media;
 pub mod model;
 mod sample;
