@@ -40,7 +40,13 @@ impl Demo {
             }
         });
         let subscription = cx.subscribe_in(&panel, window, Self::on_database_event);
-        Self { panel, rows, properties, views, _subscription: subscription }
+        Self {
+            panel,
+            rows,
+            properties,
+            views,
+            _subscription: subscription,
+        }
     }
 
     /// Plays the app shell: persist the change, then hand the data back.
@@ -70,7 +76,9 @@ impl Demo {
                     row.video = video.clone();
                 }
             }
-            DatabaseEvent::DeleteVideos(ids) => self.rows.retain(|row| !ids.contains(&row.video.id)),
+            DatabaseEvent::DeleteVideos(ids) => {
+                self.rows.retain(|row| !ids.contains(&row.video.id))
+            }
             DatabaseEvent::DuplicateVideo(id) => {
                 if let Some(original) = self.rows.iter().find(|row| row.video.id == *id).cloned() {
                     let mut copy = original.video.clone();
@@ -102,12 +110,22 @@ impl Demo {
             DatabaseEvent::CreateView(view) => self.views.push(view.clone()),
             DatabaseEvent::DeleteView(id) => self.views.retain(|view| view.id != *id),
         }
-        let (rows, properties, views) = (self.rows.clone(), self.properties.clone(), self.views.clone());
-        panel.update(cx, |panel, cx| panel.set_data(rows, properties, views, window, cx));
+        let (rows, properties, views) = (
+            self.rows.clone(),
+            self.properties.clone(),
+            self.views.clone(),
+        );
+        panel.update(cx, |panel, cx| {
+            panel.set_data(rows, properties, views, window, cx)
+        });
     }
 
     fn next_position(&self) -> f64 {
-        self.rows.iter().map(|row| row.video.position).fold(0.0, f64::max) + 1.0
+        self.rows
+            .iter()
+            .map(|row| row.video.position)
+            .fold(0.0, f64::max)
+            + 1.0
     }
 }
 
@@ -123,7 +141,12 @@ impl Render for Demo {
                     .pt_6()
                     .pb_2()
                     .gap_1()
-                    .child(div().text_2xl().font_weight(FontWeight::BOLD).child("🎬 Videos"))
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_weight(FontWeight::BOLD)
+                            .child("🎬 Videos"),
+                    )
                     .child(
                         div()
                             .text_sm()
@@ -161,7 +184,12 @@ fn main() {
         });
 }
 
-fn row(video: Video, script_words: usize, latest_run: Option<RunStatus>, latest_upload: Option<UploadStatus>) -> VideoRow {
+fn row(
+    video: Video,
+    script_words: usize,
+    latest_run: Option<RunStatus>,
+    latest_upload: Option<UploadStatus>,
+) -> VideoRow {
     VideoRow {
         video,
         script_words,
@@ -172,7 +200,11 @@ fn row(video: Video, script_words: usize, latest_run: Option<RunStatus>, latest_
 }
 
 fn option(id: &str, name: &str, color: TagColor) -> SelectOption {
-    SelectOption { id: id.into(), name: name.into(), color }
+    SelectOption {
+        id: id.into(),
+        name: name.into(),
+        color,
+    }
 }
 
 /// A dozen videos at every stage, three custom properties and two views.
@@ -273,7 +305,10 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
             tags: &["Coding", "Tools"],
             words: 180,
             run: Some(RunStatus::Succeeded),
-            upload: Some(UploadStatus::Uploading { sent: 61, total: 100 }),
+            upload: Some(UploadStatus::Uploading {
+                sent: 61,
+                total: 100,
+            }),
             priority: Some("high"),
             platforms: &["tiktok", "instagram"],
             thumbnail: true,
@@ -321,7 +356,9 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
             tags: &["Rust", "Shorts"],
             words: 160,
             run: Some(RunStatus::Succeeded),
-            upload: Some(UploadStatus::Done { video_id: "dQw4w9WgXcQ".into() }),
+            upload: Some(UploadStatus::Done {
+                video_id: "dQw4w9WgXcQ".into(),
+            }),
             priority: None,
             platforms: &["tiktok", "instagram", "x"],
             thumbnail: true,
@@ -385,7 +422,9 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
             tags: &["Channel"],
             words: 1500,
             run: Some(RunStatus::Succeeded),
-            upload: Some(UploadStatus::Done { video_id: "a1b2c3d4e5f".into() }),
+            upload: Some(UploadStatus::Done {
+                video_id: "a1b2c3d4e5f".into(),
+            }),
             priority: None,
             platforms: &[],
             thumbnail: true,
@@ -437,7 +476,8 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
             video.publish_date = sample.publish;
             video.tags = sample.tags.iter().map(|tag| tag.to_string()).collect();
             video.position = ix as f64;
-            video.created_at = now - Duration::days(sample.age_days) - Duration::hours(ix as i64 * 3);
+            video.created_at =
+                now - Duration::days(sample.age_days) - Duration::hours(ix as i64 * 3);
             video.updated_at = now - Duration::hours(ix as i64 * 7 + 1);
             let mut properties = BTreeMap::new();
             if let Some(level) = sample.priority {
@@ -446,7 +486,9 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
             if !sample.platforms.is_empty() {
                 properties.insert(
                     platforms.id,
-                    PropertyValue::MultiSelect(sample.platforms.iter().map(|id| id.to_string()).collect()),
+                    PropertyValue::MultiSelect(
+                        sample.platforms.iter().map(|id| id.to_string()).collect(),
+                    ),
                 );
             }
             properties.insert(thumbnail.id, PropertyValue::Checkbox(sample.thumbnail));
@@ -455,7 +497,11 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
         })
         .collect();
 
-    let layout = |column: Column, width: f32, visible: bool| ColumnLayout { column, width, visible };
+    let layout = |column: Column, width: f32, visible: bool| ColumnLayout {
+        column,
+        width,
+        visible,
+    };
     let builtin = |field: BuiltinField| Column::Builtin(field);
     let table = DatabaseView {
         id: ViewId::new(),
@@ -477,7 +523,10 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
             layout(builtin(BuiltinField::CreatedAt), 120.0, false),
         ],
         sorts: Vec::new(),
-        filter: FilterSpec { hide_archived: true, ..FilterSpec::default() },
+        filter: FilterSpec {
+            hide_archived: true,
+            ..FilterSpec::default()
+        },
         position: 0,
     };
     let board = DatabaseView {
@@ -486,9 +535,16 @@ fn sample_data() -> (Vec<VideoRow>, Vec<PropertyDef>, Vec<DatabaseView>) {
         kind: ViewKind::Board,
         columns: Vec::new(),
         sorts: Vec::new(),
-        filter: FilterSpec { hide_archived: true, ..FilterSpec::default() },
+        filter: FilterSpec {
+            hide_archived: true,
+            ..FilterSpec::default()
+        },
         position: 1,
     };
 
-    (rows, vec![priority, platforms, thumbnail], vec![table, board])
+    (
+        rows,
+        vec![priority, platforms, thumbnail],
+        vec![table, board],
+    )
 }

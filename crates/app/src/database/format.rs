@@ -7,7 +7,11 @@ use videocrm_core::UploadStatus;
 pub fn script_summary(words: usize, seconds: u32) -> Option<String> {
     (words > 0).then(|| {
         let unit = if words == 1 { "word" } else { "words" };
-        format!("{} {unit} · {}", group_thousands(words as u64), runtime(seconds))
+        format!(
+            "{} {unit} · {}",
+            group_thousands(words as u64),
+            runtime(seconds)
+        )
     })
 }
 
@@ -98,7 +102,10 @@ mod tests {
 
     #[test]
     fn script_summary_reads_like_prose() {
-        assert_eq!(script_summary(1240, 496).as_deref(), Some("1,240 words · 8m 16s"));
+        assert_eq!(
+            script_summary(1240, 496).as_deref(),
+            Some("1,240 words · 8m 16s")
+        );
         assert_eq!(script_summary(1, 1).as_deref(), Some("1 word · 1s"));
         assert_eq!(script_summary(0, 0), None);
     }
@@ -128,7 +135,10 @@ mod tests {
         assert_eq!(date(day(10, 10), today), "Tomorrow");
         assert_eq!(date(day(10, 8), today), "Yesterday");
         assert_eq!(date(day(3, 4), today), "Mar 4");
-        assert_eq!(date(NaiveDate::from_ymd_opt(2027, 1, 2).unwrap(), today), "Jan 2, 2027");
+        assert_eq!(
+            date(NaiveDate::from_ymd_opt(2027, 1, 2).unwrap(), today),
+            "Jan 2, 2027"
+        );
     }
 
     #[test]
@@ -143,8 +153,22 @@ mod tests {
 
     #[test]
     fn uploads_show_progress() {
-        assert_eq!(upload(&UploadStatus::Uploading { sent: 42, total: 100 }), "Uploading 42%");
-        assert_eq!(upload(&UploadStatus::Uploading { sent: 0, total: 0 }), "Uploading");
-        assert_eq!(upload(&UploadStatus::Done { video_id: "abc".into() }), "Uploaded");
+        assert_eq!(
+            upload(&UploadStatus::Uploading {
+                sent: 42,
+                total: 100
+            }),
+            "Uploading 42%"
+        );
+        assert_eq!(
+            upload(&UploadStatus::Uploading { sent: 0, total: 0 }),
+            "Uploading"
+        );
+        assert_eq!(
+            upload(&UploadStatus::Done {
+                video_id: "abc".into()
+            }),
+            "Uploaded"
+        );
     }
 }

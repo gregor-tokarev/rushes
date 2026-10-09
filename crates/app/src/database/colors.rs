@@ -92,9 +92,12 @@ pub fn upload_status_color(status: &UploadStatus) -> TagColor {
 /// everywhere without storing a color for it.
 pub fn free_tag_color(tag: &str) -> TagColor {
     // FNV-1a over the lowercase bytes: stable across runs and platforms.
-    let hash = tag.to_lowercase().bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-    });
+    let hash = tag
+        .to_lowercase()
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
     TagColor::ALL[(hash % TagColor::ALL.len() as u64) as usize]
 }
 
@@ -106,11 +109,15 @@ mod tests {
     fn free_tag_colors_are_stable_and_case_insensitive() {
         assert_eq!(free_tag_color("Tutorial"), free_tag_color("tutorial"));
         assert_eq!(free_tag_color("gear"), free_tag_color("gear"));
-        let spread: std::collections::HashSet<TagColor> =
-            ["rust", "gear", "travel", "vlog", "review", "setup", "japan", "ai"]
-                .iter()
-                .map(|tag| free_tag_color(tag))
-                .collect();
-        assert!(spread.len() > 3, "tags should not collapse onto a few colors");
+        let spread: std::collections::HashSet<TagColor> = [
+            "rust", "gear", "travel", "vlog", "review", "setup", "japan", "ai",
+        ]
+        .iter()
+        .map(|tag| free_tag_color(tag))
+        .collect();
+        assert!(
+            spread.len() > 3,
+            "tags should not collapse onto a few colors"
+        );
     }
 }

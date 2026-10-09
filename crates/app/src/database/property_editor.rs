@@ -5,18 +5,20 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Div, Entity, FontWeight, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, WeakEntity, Window, div,
+    App, AppContext as _, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window, div,
 };
 use videocrm_core::{PropertyDef, PropertyId, PropertyKind, SelectOption, TagColor};
 
 use super::colors::tag_colors;
 use super::elements::Chip;
 use super::icons::kind_icon;
-use super::panel::DatabasePanel;
+use super::panel::{DatabasePanel, TEXT_ENTRY_CONTEXT};
 
 /// What the property dialog edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,8 +35,12 @@ pub(crate) enum PropertyEditorMode {
 const KINDS: [fn() -> PropertyKind; 7] = [
     || PropertyKind::Text,
     || PropertyKind::Number,
-    || PropertyKind::Select { options: Vec::new() },
-    || PropertyKind::MultiSelect { options: Vec::new() },
+    || PropertyKind::Select {
+        options: Vec::new(),
+    },
+    || PropertyKind::MultiSelect {
+        options: Vec::new(),
+    },
     || PropertyKind::Date,
     || PropertyKind::Checkbox,
     || PropertyKind::Url,
@@ -68,14 +74,19 @@ impl PropertyEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let current_name = existing.as_ref().map(|def| def.name.clone()).unwrap_or_default();
+        let current_name = existing
+            .as_ref()
+            .map(|def| def.name.clone())
+            .unwrap_or_default();
         let name = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Property name")
                 .default_value(current_name)
         });
         let new_option = cx.new(|cx| InputState::new(window, cx).placeholder("Add an option…"));
-        let kind = existing.as_ref().map_or(PropertyKind::Text, |def| def.kind.clone());
+        let kind = existing
+            .as_ref()
+            .map_or(PropertyKind::Text, |def| def.kind.clone());
         let options = kind
             .options()
             .iter()
@@ -85,15 +96,19 @@ impl PropertyEditor {
                 name: cx.new(|cx| InputState::new(window, cx).default_value(option.name.clone())),
             })
             .collect();
-        let subscriptions = vec![cx.subscribe_in(&new_option, window, |this, input, event: &InputEvent, window, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
-                let name = input.read(cx).value().trim().to_string();
-                if !name.is_empty() {
-                    input.update(cx, |input, cx| input.set_value("", window, cx));
-                    this.add_option(name, window, cx);
+        let subscriptions = vec![cx.subscribe_in(
+            &new_option,
+            window,
+            |this, input, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    let name = input.read(cx).value().trim().to_string();
+                    if !name.is_empty() {
+                        input.update(cx, |input, cx| input.set_value("", window, cx));
+                        this.add_option(name, window, cx);
+                    }
                 }
-            }
-        })];
+            },
+        )];
 
         Self {
             mode,
@@ -109,15 +124,19 @@ impl PropertyEditor {
     }
 
     /// Opens `editor` in a dialog; committing hands the property to `panel`.
-    pub fn open(editor: Entity<Self>, panel: WeakEntity<DatabasePanel>, window: &mut Window, cx: &mut App) {
+    pub fn open(
+        editor: Entity<Self>,
+        panel: WeakEntity<DatabasePanel>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let mode = editor.read(cx).mode;
         let (title, commit) = match mode {
             PropertyEditorMode::Create => ("New property", "Create"),
             PropertyEditorMode::Rename => ("Rename property", "Rename"),
             PropertyEditorMode::Edit => ("Edit property", "Save"),
         };
-        editor.read(cx).name.clone().update(cx, |input, cx| input.focus(window, cx));
-
+        let name = editor.read(cx).name.clone();
         window.open_dialog(cx, move |dialog, window, _| {
             let editor = editor.clone();
             let panel = panel.clone();
@@ -127,8 +146,14 @@ impl PropertyEditor {
                 .child(editor.clone())
                 .footer(
                     DialogFooter::new()
-                        .child(DialogClose::new().child(Button::new("property-cancel").outline().label("Cancel")))
-                        .child(DialogAction::new().child(Button::new("property-commit").primary().label(commit))),
+                        .child(
+                            DialogClose::new()
+                                .child(Button::new("property-cancel").outline().label("Cancel")),
+                        )
+                        .child(
+                            DialogAction::new()
+                                .child(Button::new("property-commit").primary().label(commit)),
+                        ),
                 )
                 .on_ok(move |_, _, cx| match editor.read(cx).build(cx) {
                     Ok(def) => {
@@ -144,6 +169,8 @@ impl PropertyEditor {
                     }
                 })
         });
+        // Opening the dialog focuses the dialog itself; the name comes first.
+        name.update(cx, |input, cx| input.focus(window, cx));
     }
 
     /// The property the form describes, or what to fix first.
@@ -157,7 +184,11 @@ impl PropertyEditor {
             .iter()
             .filter_map(|draft| {
                 let name = draft.name.read(cx).value().trim().to_string();
-                (!name.is_empty()).then(|| SelectOption { id: draft.id.clone(), name, color: draft.color })
+                (!name.is_empty()).then(|| SelectOption {
+                    id: draft.id.clone(),
+                    name,
+                    color: draft.color,
+                })
             })
             .collect();
         let kind = match &self.kind {
@@ -166,8 +197,17 @@ impl PropertyEditor {
             kind => kind.clone(),
         };
         Ok(match &self.existing {
-            Some(existing) => PropertyDef { name, kind, ..existing.clone() },
-            None => PropertyDef { id: PropertyId::new(), name, kind, position: self.position },
+            Some(existing) => PropertyDef {
+                name,
+                kind,
+                ..existing.clone()
+            },
+            None => PropertyDef {
+                id: PropertyId::new(),
+                name,
+                kind,
+                position: self.position,
+            },
         })
     }
 
@@ -185,12 +225,19 @@ impl PropertyEditor {
 
     fn render_kind_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let editor = cx.weak_entity();
+        let current = self.kind.label();
+        // Icon and label form one child so the caret's `justify_between`
+        // keeps them at the leading edge.
         Button::new("property-kind")
             .outline()
-            .small()
             .w_full()
-            .icon(kind_icon(&self.kind))
-            .label(self.kind.label())
+            .accessibility_label(self.kind.label())
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Icon::new(kind_icon(&self.kind)).small())
+                    .child(self.kind.label()),
+            )
             .dropdown_caret(true)
             .disabled(self.existing.is_some())
             .dropdown_menu(move |menu, _, _| {
@@ -198,13 +245,18 @@ impl PropertyEditor {
                     let kind = kind();
                     let editor = editor.clone();
                     let chosen = kind.clone();
-                    menu.item(PopupMenuItem::new(kind.label()).icon(kind_icon(&kind)).on_click(move |_, _, cx| {
-                        let kind = chosen.clone();
-                        _ = editor.update(cx, |editor, cx| {
-                            editor.kind = kind;
-                            cx.notify();
-                        });
-                    }))
+                    menu.item(
+                        PopupMenuItem::new(kind.label())
+                            .icon(kind_icon(&kind))
+                            .checked(kind.label() == current)
+                            .on_click(move |_, _, cx| {
+                                let kind = chosen.clone();
+                                _ = editor.update(cx, |editor, cx| {
+                                    editor.kind = kind;
+                                    cx.notify();
+                                });
+                            }),
+                    )
                 })
             })
     }
@@ -230,20 +282,25 @@ impl PropertyEditor {
                                 TagColor::ALL.into_iter().fold(menu, |menu, color| {
                                     let editor = color_editor.clone();
                                     menu.item(
-                                        PopupMenuItem::element(move |_, _| Chip::new(color.label(), color))
-                                            .on_click(move |_, _, cx| {
+                                        PopupMenuItem::element(move |_, _| {
+                                            Chip::new(color.label(), color)
+                                        })
+                                        .on_click(
+                                            move |_, _, cx| {
                                                 _ = editor.update(cx, |editor, cx| {
-                                                    if let Some(draft) = editor.options.get_mut(ix) {
+                                                    if let Some(draft) = editor.options.get_mut(ix)
+                                                    {
                                                         draft.color = color;
                                                         cx.notify();
                                                     }
                                                 });
-                                            }),
+                                            },
+                                        ),
                                     )
                                 })
                             }),
                     )
-                    .child(div().flex_1().child(Input::new(&draft.name).small()))
+                    .child(div().flex_1().child(Input::new(&draft.name)))
                     .child(
                         Button::new(("option-remove", ix))
                             .ghost()
@@ -261,17 +318,23 @@ impl PropertyEditor {
                     )
             }))
             .child(
-                Input::new(&self.new_option)
-                    .id("new-option")
-                    .small()
-                    .prefix(Icon::new(IconName::Plus).xsmall().text_color(cx.theme().muted_foreground)),
+                div().key_context(TEXT_ENTRY_CONTEXT).child(
+                    Input::new(&self.new_option).id("new-option").prefix(
+                        Icon::new(IconName::Plus)
+                            .xsmall()
+                            .text_color(cx.theme().muted_foreground),
+                    ),
+                ),
             )
     }
 }
 
 impl Render for PropertyEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_options = matches!(self.kind, PropertyKind::Select { .. } | PropertyKind::MultiSelect { .. });
+        let has_options = matches!(
+            self.kind,
+            PropertyKind::Select { .. } | PropertyKind::MultiSelect { .. }
+        );
         v_flex()
             .gap_4()
             .child(
@@ -281,11 +344,17 @@ impl Render for PropertyEditor {
                     .child(Input::new(&self.name).id("property-name")),
             )
             .when(self.mode != PropertyEditorMode::Rename, |this| {
-                this.child(v_flex().gap_1p5().child(field_label("Type", cx)).child(self.render_kind_picker(cx)))
+                this.child(
+                    v_flex()
+                        .gap_1p5()
+                        .child(field_label("Type", cx))
+                        .child(self.render_kind_picker(cx)),
+                )
             })
-            .when(has_options && self.mode != PropertyEditorMode::Rename, |this| {
-                this.child(self.render_options(cx))
-            })
+            .when(
+                has_options && self.mode != PropertyEditorMode::Rename,
+                |this| this.child(self.render_options(cx)),
+            )
             .when_some(self.error.clone(), |this, error| {
                 this.child(div().text_sm().text_color(cx.theme().danger).child(error))
             })

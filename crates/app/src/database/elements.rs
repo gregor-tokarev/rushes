@@ -3,12 +3,12 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{ActiveTheme as _, Icon, Selectable, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, Icon, Selectable, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Div, ElementId, InteractiveElement, Interactivity, IntoElement,
-    ParentElement, RenderOnce, SharedString, Stateful, StatefulInteractiveElement, StyleRefinement,
-    Styled, Window, div,
+    AnyElement, App, Div, ElementId, InteractiveElement, Interactivity, IntoElement, ParentElement,
+    RenderOnce, SharedString, Stateful, StatefulInteractiveElement, StyleRefinement, Styled,
+    Window, div,
 };
 use videocrm_core::TagColor;
 
@@ -24,7 +24,11 @@ pub struct Chip {
 
 impl Chip {
     pub fn new(label: impl Into<SharedString>, color: TagColor) -> Self {
-        Self { label: label.into(), color, dot: false }
+        Self {
+            label: label.into(),
+            color,
+            dot: false,
+        }
     }
 
     /// Lead the label with a dot in the chip's color, the way workflow
@@ -45,7 +49,9 @@ impl RenderOnce for Chip {
             .gap_1()
             .flex_shrink_0()
             .min_w_0()
-            .when(self.dot, |this| this.child(div().size_1p5().rounded_full().bg(colors.dot)))
+            .when(self.dot, |this| {
+                this.child(div().size_1p5().rounded_full().bg(colors.dot))
+            })
             .child(div().min_w_0().truncate().child(self.label))
     }
 }
@@ -63,7 +69,10 @@ pub struct CellButton {
 
 impl CellButton {
     pub fn new(id: impl Into<ElementId>) -> Self {
-        Self { base: div().id(id), open: false }
+        Self {
+            base: div().id(id),
+            open: false,
+        }
     }
 }
 
@@ -107,7 +116,8 @@ impl RenderOnce for CellButton {
             .flex()
             .items_center()
             .gap_1()
-            .size_full()
+            .w_full()
+            .min_h_6()
             .min_w_0()
             .overflow_hidden()
             .px_2()
@@ -117,12 +127,44 @@ impl RenderOnce for CellButton {
     }
 }
 
+/// The slot every table cell and header renders into: full width, content
+/// vertically centered.
+///
+/// A flex column, so a popup trigger's container stretches across the cell
+/// and the [`CellButton`] inside it fills the cell. Content that should keep
+/// its natural width, such as a lone [`Chip`], goes in an `h_flex` first.
+pub fn cell_slot(content: impl IntoElement) -> Div {
+    v_flex()
+        .size_full()
+        .min_w_0()
+        .justify_center()
+        .child(content)
+}
+
+/// A small count on a toolbar trigger, e.g. the number of active filters.
+pub fn count_badge(count: usize, cx: &App) -> Div {
+    h_flex()
+        .h_4()
+        .min_w_4()
+        .px_1()
+        .justify_center()
+        .rounded_full()
+        .text_xs()
+        .bg(cx.theme().primary)
+        .text_color(cx.theme().primary_foreground)
+        .child(count.to_string())
+}
+
 /// Muted placeholder for an empty cell value.
 pub fn empty_value(cx: &App) -> Div {
-    div().text_color(cx.theme().muted_foreground.opacity(0.6)).child("—")
+    div()
+        .text_color(cx.theme().muted_foreground.opacity(0.6))
+        .child("—")
 }
 
 /// A small icon in the muted foreground, for labels and metadata.
 pub fn muted_icon(icon: IconName, cx: &App) -> Icon {
-    Icon::new(icon).xsmall().text_color(cx.theme().muted_foreground)
+    Icon::new(icon)
+        .xsmall()
+        .text_color(cx.theme().muted_foreground)
 }

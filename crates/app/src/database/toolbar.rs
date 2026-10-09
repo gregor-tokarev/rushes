@@ -23,14 +23,18 @@ use videocrm_core::{
 };
 
 use super::colors::format_color;
-use super::elements::Chip;
+use super::elements::{Chip, count_badge};
 use super::icons::{column_icon, view_icon};
 use super::panel::DatabasePanel;
 use super::property_editor::PropertyEditorMode;
 use super::query::{active_filter_count, column_name, resolve_columns};
 
 impl DatabasePanel {
-    pub(super) fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_toolbar(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let view = self.active_view().cloned();
         let panel = cx.weak_entity();
         h_flex()
@@ -54,7 +58,11 @@ impl DatabasePanel {
                     .id("database-search")
                     .small()
                     .w_48()
-                    .prefix(Icon::new(IconName::Search).xsmall().text_color(cx.theme().muted_foreground))
+                    .prefix(
+                        Icon::new(IconName::Search)
+                            .xsmall()
+                            .text_color(cx.theme().muted_foreground),
+                    )
                     .cleanable(true),
             )
             .child(
@@ -69,8 +77,11 @@ impl DatabasePanel {
 
     fn render_view_tabs(&self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panel = cx.weak_entity();
-        let views: Vec<(ViewId, String, ViewKind)> =
-            self.views().iter().map(|view| (view.id, view.name.clone(), view.kind)).collect();
+        let views: Vec<(ViewId, String, ViewKind)> = self
+            .views()
+            .iter()
+            .map(|view| (view.id, view.name.clone(), view.kind))
+            .collect();
         let view_ids: Vec<ViewId> = views.iter().map(|(id, ..)| *id).collect();
         let can_delete = views.len() > 1;
 
@@ -80,8 +91,8 @@ impl DatabasePanel {
             .when_some(self.active_index(), |this, ix| this.selected_index(ix))
             .children(views.into_iter().map(|(id, name, kind)| {
                 Tab::new()
+                    .prefix(Icon::new(view_icon(kind)).xsmall())
                     .label(name)
-                    .icon(Icon::new(view_icon(kind)))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, _, _, _| this.menu_view = Some(id)),
@@ -104,7 +115,9 @@ impl DatabasePanel {
                     .min_w_0()
                     .child(tabs)
                     .context_menu(move |menu, _, cx| {
-                        let target = menu_panel.upgrade().and_then(|panel| panel.read(cx).menu_view);
+                        let target = menu_panel
+                            .upgrade()
+                            .and_then(|panel| panel.read(cx).menu_view);
                         match target {
                             Some(id) => view_menu(menu, id, can_delete, &menu_panel),
                             None => menu,
@@ -133,41 +146,60 @@ impl DatabasePanel {
                         let add = |kind: ViewKind| {
                             let panel = panel.clone();
                             move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut App| {
-                                _ = panel.update(cx, |panel, cx| panel.create_view(kind, window, cx));
+                                _ = panel
+                                    .update(cx, |panel, cx| panel.create_view(kind, window, cx));
                             }
                         };
                         menu.label("Add a view")
-                            .item(PopupMenuItem::new("Table").icon(view_icon(ViewKind::Table)).on_click(add(ViewKind::Table)))
-                            .item(PopupMenuItem::new("Board").icon(view_icon(ViewKind::Board)).on_click(add(ViewKind::Board)))
+                            .item(
+                                PopupMenuItem::new("Table")
+                                    .icon(view_icon(ViewKind::Table))
+                                    .on_click(add(ViewKind::Table)),
+                            )
+                            .item(
+                                PopupMenuItem::new("Board")
+                                    .icon(view_icon(ViewKind::Board))
+                                    .on_click(add(ViewKind::Board)),
+                            )
                     })
             })
     }
 
-    pub(super) fn open_rename_view(&mut self, id: ViewId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(name) = self.views().iter().find(|view| view.id == id).map(|view| view.name.clone()) else {
+    pub(super) fn open_rename_view(
+        &mut self,
+        id: ViewId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self
+            .views()
+            .iter()
+            .find(|view| view.id == id)
+            .map(|view| view.name.clone())
+        else {
             return;
         };
         let input = self.view_name.clone();
-        input.update(cx, |input, cx| {
-            input.set_value(name, window, cx);
-            input.focus(window, cx);
-        });
+        input.update(cx, |input, cx| input.set_value(name, window, cx));
         let panel = cx.weak_entity();
+        let dialog_input = input.clone();
         window.open_dialog(cx, move |dialog, window, _| {
             let panel = panel.clone();
-            let input = input.clone();
+            let input = dialog_input.clone();
             dialog
                 .title("Rename view")
                 .width(window.rem_size() * 24.)
                 .child(Input::new(&input).id("view-name"))
                 .footer(
                     gpui_kit::component::dialog::DialogFooter::new()
-                        .child(gpui_kit::component::dialog::DialogClose::new().child(
-                            Button::new("cancel-rename-view").outline().label("Cancel"),
-                        ))
-                        .child(gpui_kit::component::dialog::DialogAction::new().child(
-                            Button::new("save-view-name").primary().label("Rename"),
-                        )),
+                        .child(
+                            gpui_kit::component::dialog::DialogClose::new()
+                                .child(Button::new("cancel-rename-view").outline().label("Cancel")),
+                        )
+                        .child(
+                            gpui_kit::component::dialog::DialogAction::new()
+                                .child(Button::new("save-view-name").primary().label("Rename")),
+                        ),
                 )
                 .on_ok(move |_, _, cx| {
                     let name = input.read(cx).value().to_string();
@@ -175,10 +207,21 @@ impl DatabasePanel {
                     true
                 })
         });
+        input.update(cx, |input, cx| input.focus(window, cx));
     }
 
-    pub(super) fn confirm_delete_view(&mut self, id: ViewId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(name) = self.views().iter().find(|view| view.id == id).map(|view| view.name.clone()) else {
+    pub(super) fn confirm_delete_view(
+        &mut self,
+        id: ViewId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self
+            .views()
+            .iter()
+            .find(|view| view.id == id)
+            .map(|view| view.name.clone())
+        else {
             return;
         };
         let panel = cx.weak_entity();
@@ -198,12 +241,21 @@ impl DatabasePanel {
     }
 }
 
-fn view_menu(menu: PopupMenu, id: ViewId, can_delete: bool, panel: &WeakEntity<DatabasePanel>) -> PopupMenu {
+fn view_menu(
+    menu: PopupMenu,
+    id: ViewId,
+    can_delete: bool,
+    panel: &WeakEntity<DatabasePanel>,
+) -> PopupMenu {
     let rename = panel.clone();
     let delete = panel.clone();
-    menu.item(PopupMenuItem::new("Rename…").icon(IconName::Pencil).on_click(move |_, window, cx| {
-        _ = rename.update(cx, |panel, cx| panel.open_rename_view(id, window, cx));
-    }))
+    menu.item(
+        PopupMenuItem::new("Rename…")
+            .icon(IconName::Pencil)
+            .on_click(move |_, window, cx| {
+                _ = rename.update(cx, |panel, cx| panel.open_rename_view(id, window, cx));
+            }),
+    )
     .separator()
     .item(
         PopupMenuItem::new("Delete view…")
@@ -230,17 +282,8 @@ fn section_label(label: &'static str, cx: &App) -> Div {
 
 fn filter_popover(filter: &FilterSpec, panel: &WeakEntity<DatabasePanel>, cx: &App) -> AnyElement {
     let count = active_filter_count(filter);
-    let trigger = toolbar_button("filter", IconName::ListFilter, "Filter").when(count > 0, |this| {
-        this.child(
-            div()
-                .px_1p5()
-                .rounded_full()
-                .text_xs()
-                .bg(cx.theme().primary)
-                .text_color(cx.theme().primary_foreground)
-                .child(count.to_string()),
-        )
-    });
+    let trigger = toolbar_button("filter", IconName::ListFilter, "Filter")
+        .when(count > 0, |this| this.child(count_badge(count, cx)));
     let filter = filter.clone();
     let panel = panel.clone();
 
@@ -251,7 +294,9 @@ fn filter_popover(filter: &FilterSpec, panel: &WeakEntity<DatabasePanel>, cx: &A
             let edit = |change: fn(&mut FilterSpec, usize), ix: usize| {
                 let panel = panel.clone();
                 move |_: &bool, _: &mut Window, cx: &mut App| {
-                    _ = panel.update(cx, |panel, cx| panel.update_view(|view| change(&mut view.filter, ix), cx));
+                    _ = panel.update(cx, |panel, cx| {
+                        panel.update_view(|view| change(&mut view.filter, ix), cx)
+                    });
                 }
             };
             v_flex()
@@ -262,31 +307,48 @@ fn filter_popover(filter: &FilterSpec, panel: &WeakEntity<DatabasePanel>, cx: &A
                     v_flex()
                         .gap_1p5()
                         .child(section_label("Status", cx))
-                        .children(VideoStatus::ALL.into_iter().enumerate().map(|(ix, status)| {
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    Checkbox::new(SharedString::from(format!("filter-status-{}", status.label())))
-                                        .checked(filter.statuses.contains(&status))
-                                        .on_click(edit(toggle_status, ix)),
-                                )
-                                .child(Chip::new(status.label(), status.color()).dot(true))
-                        })),
+                        .children(
+                            VideoStatus::ALL
+                                .into_iter()
+                                .enumerate()
+                                .map(|(ix, status)| {
+                                    Checkbox::new(SharedString::from(format!(
+                                        "filter-status-{}",
+                                        status.label()
+                                    )))
+                                    .accessibility_label(status.label())
+                                    .checked(filter.statuses.contains(&status))
+                                    .on_click(edit(toggle_status, ix))
+                                    .child(
+                                        h_flex().child(
+                                            Chip::new(status.label(), status.color()).dot(true),
+                                        ),
+                                    )
+                                }),
+                        ),
                 )
                 .child(
                     v_flex()
                         .gap_1p5()
                         .child(section_label("Format", cx))
-                        .children(VideoFormat::ALL.into_iter().enumerate().map(|(ix, format)| {
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    Checkbox::new(SharedString::from(format!("filter-format-{}", format.label())))
-                                        .checked(filter.formats.contains(&format))
-                                        .on_click(edit(toggle_format, ix)),
-                                )
-                                .child(Chip::new(format.label(), format_color(format)))
-                        })),
+                        .children(
+                            VideoFormat::ALL
+                                .into_iter()
+                                .enumerate()
+                                .map(|(ix, format)| {
+                                    Checkbox::new(SharedString::from(format!(
+                                        "filter-format-{}",
+                                        format.label()
+                                    )))
+                                    .accessibility_label(format.label())
+                                    .checked(filter.formats.contains(&format))
+                                    .on_click(edit(toggle_format, ix))
+                                    .child(
+                                        h_flex()
+                                            .child(Chip::new(format.label(), format_color(format))),
+                                    )
+                                }),
+                        ),
                 )
                 .child(
                     Switch::new("filter-hide-archived")
@@ -305,13 +367,17 @@ fn filter_popover(filter: &FilterSpec, panel: &WeakEntity<DatabasePanel>, cx: &A
                 .when(active_filter_count(&filter) > 0, |this| {
                     let panel = panel.clone();
                     this.child(
-                        Button::new("filter-clear")
-                            .ghost()
-                            .small()
-                            .label("Clear filters")
-                            .on_click(move |_, window, cx| {
-                                _ = panel.update(cx, |panel, cx| panel.clear_filters(window, cx));
-                            }),
+                        h_flex().child(
+                            Button::new("filter-clear")
+                                .ghost()
+                                .small()
+                                .icon(IconName::X)
+                                .label("Clear filters")
+                                .on_click(move |_, window, cx| {
+                                    _ = panel
+                                        .update(cx, |panel, cx| panel.clear_filters(window, cx));
+                                }),
+                        ),
                     )
                 })
         })
@@ -344,12 +410,16 @@ fn sort_popover(
     cx: &App,
 ) -> AnyElement {
     let sorts = view.sorts.clone();
-    let columns: Vec<Column> = resolve_columns(view, properties).into_iter().map(|layout| layout.column).collect();
+    let columns: Vec<Column> = resolve_columns(view, properties)
+        .into_iter()
+        .map(|layout| layout.column)
+        .collect();
     let properties: Vec<PropertyDef> = properties.to_vec();
     let panel = panel.clone();
-    let trigger = toolbar_button("sort", IconName::ArrowUpDown, "Sort").when(!sorts.is_empty(), |this| {
-        this.text_color(cx.theme().primary)
-    });
+    let trigger = toolbar_button("sort", IconName::ArrowUpDown, "Sort")
+        .when(!sorts.is_empty(), |this| {
+            this.child(count_badge(sorts.len(), cx))
+        });
 
     Popover::new("sort-popover")
         .anchor(Anchor::TopRight)
@@ -358,11 +428,16 @@ fn sort_popover(
             let edit = |change: SortsEdit| {
                 let panel = panel.clone();
                 move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
-                    _ = panel.update(cx, |panel, cx| panel.update_view(|view| change(&mut view.sorts), cx));
+                    _ = panel.update(cx, |panel, cx| {
+                        panel.update_view(|view| change(&mut view.sorts), cx)
+                    });
                 }
             };
-            let unused: Vec<Column> =
-                columns.iter().copied().filter(|column| !sorts.iter().any(|sort| sort.column == *column)).collect();
+            let unused: Vec<Column> = columns
+                .iter()
+                .copied()
+                .filter(|column| !sorts.iter().any(|sort| sort.column == *column))
+                .collect();
 
             v_flex()
                 .id("sort-content")
@@ -393,19 +468,34 @@ fn sort_popover(
                                 .label(label)
                                 .dropdown_caret(true)
                                 .dropdown_menu(move |menu, _, _| {
-                                    choices.iter().fold(menu.max_h(gpui_kit::px(320.)).scrollable(true), |menu, column| {
-                                        let column = *column;
-                                        let panel = picker_panel.clone();
-                                        menu.item(
-                                            PopupMenuItem::new(column_name(column, &picker_properties).unwrap_or_default())
+                                    choices.iter().fold(
+                                        menu.max_h(gpui_kit::px(320.)).scrollable(true),
+                                        |menu, column| {
+                                            let column = *column;
+                                            let panel = picker_panel.clone();
+                                            menu.item(
+                                                PopupMenuItem::new(
+                                                    column_name(column, &picker_properties)
+                                                        .unwrap_or_default(),
+                                                )
                                                 .icon(column_icon(column, &picker_properties))
                                                 .on_click(move |_, _, cx| {
                                                     _ = panel.update(cx, |panel, cx| {
-                                                        panel.update_view(|view| set_sort_column(&mut view.sorts, ix, column), cx)
+                                                        panel.update_view(
+                                                            |view| {
+                                                                set_sort_column(
+                                                                    &mut view.sorts,
+                                                                    ix,
+                                                                    column,
+                                                                )
+                                                            },
+                                                            cx,
+                                                        )
                                                     });
                                                 }),
-                                        )
-                                    })
+                                            )
+                                        },
+                                    )
                                 }),
                         )
                         .child(
@@ -454,7 +544,10 @@ fn sort_popover(
                                 .disabled(unused.is_empty())
                                 .on_click(edit(Box::new(move |sorts| {
                                     if let Some(column) = unused.first() {
-                                        sorts.push(SortSpec { column: *column, direction: SortDirection::Ascending });
+                                        sorts.push(SortSpec {
+                                            column: *column,
+                                            direction: SortDirection::Ascending,
+                                        });
                                     }
                                 }))),
                         )
@@ -498,7 +591,11 @@ fn properties_popover(
 
     Popover::new("properties-popover")
         .anchor(Anchor::TopRight)
-        .trigger(toolbar_button("properties", IconName::SlidersHorizontal, "Properties"))
+        .trigger(toolbar_button(
+            "properties",
+            IconName::SlidersHorizontal,
+            "Properties",
+        ))
         .content(move |_, _, cx| {
             let popover = cx.entity();
             v_flex()
@@ -513,36 +610,57 @@ fn properties_popover(
                     h_flex()
                         .gap_2()
                         .py_0p5()
-                        .child(Icon::new(column_icon(column, &properties)).xsmall().text_color(cx.theme().muted_foreground))
-                        .child(div().flex_1().min_w_0().truncate().text_sm().child(column_name(column, &properties).unwrap_or_default()))
                         .child(
-                            Switch::new(SharedString::from(format!("show-{}", super::table::column_key(column))))
-                                .small()
-                                .checked(layout.visible)
-                                .disabled(is_title)
-                                .on_click(move |visible: &bool, _, cx| {
+                            Icon::new(column_icon(column, &properties))
+                                .xsmall()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .child(column_name(column, &properties).unwrap_or_default()),
+                        )
+                        .child(
+                            Switch::new(SharedString::from(format!(
+                                "show-{}",
+                                super::table::column_key(column)
+                            )))
+                            .small()
+                            .checked(layout.visible)
+                            .disabled(is_title)
+                            .on_click(
+                                move |visible: &bool, _, cx| {
                                     let visible = *visible;
-                                    _ = panel.update(cx, |panel, cx| panel.set_column_visible(column, visible, cx));
-                                }),
+                                    _ = panel.update(cx, |panel, cx| {
+                                        panel.set_column_visible(column, visible, cx)
+                                    });
+                                },
+                            ),
                         )
                 }))
-                .child(
-                    div().pt_1().child({
-                        let panel = panel.clone();
-                        let popover = popover.clone();
-                        Button::new("new-property")
-                            .ghost()
-                            .small()
-                            .icon(IconName::Plus)
-                            .label("New property…")
-                            .on_click(move |_, window, cx| {
-                                popover.update(cx, |popover, cx| popover.dismiss(window, cx));
-                                _ = panel.update(cx, |panel, cx| {
-                                    panel.open_property_editor(None, PropertyEditorMode::Create, window, cx)
-                                });
-                            })
-                    }),
-                )
+                .child(h_flex().pt_1().child({
+                    let panel = panel.clone();
+                    let popover = popover.clone();
+                    Button::new("new-property")
+                        .ghost()
+                        .small()
+                        .icon(IconName::Plus)
+                        .label("New property…")
+                        .on_click(move |_, window, cx| {
+                            popover.update(cx, |popover, cx| popover.dismiss(window, cx));
+                            _ = panel.update(cx, |panel, cx| {
+                                panel.open_property_editor(
+                                    None,
+                                    PropertyEditorMode::Create,
+                                    window,
+                                    cx,
+                                )
+                            });
+                        })
+                }))
         })
         .into_any_element()
 }
@@ -556,11 +674,23 @@ mod tests {
         let title = Column::Builtin(BuiltinField::Title);
         let status = Column::Builtin(BuiltinField::Status);
         let mut sorts = vec![
-            SortSpec { column: title, direction: SortDirection::Ascending },
-            SortSpec { column: status, direction: SortDirection::Descending },
+            SortSpec {
+                column: title,
+                direction: SortDirection::Ascending,
+            },
+            SortSpec {
+                column: status,
+                direction: SortDirection::Descending,
+            },
         ];
         set_sort_column(&mut sorts, 1, title);
-        assert_eq!(sorts, vec![SortSpec { column: title, direction: SortDirection::Ascending }]);
+        assert_eq!(
+            sorts,
+            vec![SortSpec {
+                column: title,
+                direction: SortDirection::Ascending
+            }]
+        );
     }
 
     #[test]
