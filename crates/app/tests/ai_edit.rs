@@ -23,8 +23,8 @@ use gpui_kit::{
 };
 use tempfile::TempDir;
 use videocrm::ai_edit::{
-    AiEditPanel, AiSettings, INTERRUPTED, LogEvent, PhaseKind, PhaseStarted, PipelineService, PipelinesPage, RunError,
-    TimelineEntry, split_failure,
+    AiEditPanel, AiSettings, INTERRUPTED, LogEvent, MarkerKind, PhaseKind, PhaseStarted, PipelineService,
+    PipelinesPage, RunError, RunMarker, TimelineEntry, split_failure,
 };
 use videocrm::route::{Route, VideoTab};
 use videocrm::state::{AppEvent, AppState};
@@ -240,6 +240,19 @@ fn phases(events: &[TimelineEntry]) -> Vec<(PhaseKind, Option<String>)> {
         .iter()
         .filter_map(|entry| match &entry.event {
             LogEvent::Phase(started) => Some((started.phase, started.text.clone())),
+            LogEvent::Agent(_) | LogEvent::Marker(_) => None,
+        })
+        .collect()
+}
+
+/// The markers in a run's log, with whether each phase was a retry.
+fn markers(events: &[TimelineEntry]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            LogEvent::Phase(started) if started.retry => Some(format!("retry {:?}", started.phase)),
+            LogEvent::Phase(started) => Some(format!("{:?}", started.phase)),
+            LogEvent::Marker(RunMarker { kind }) => Some(format!("{kind:?}")),
             LogEvent::Agent(_) => None,
         })
         .collect()
@@ -462,6 +475,7 @@ fn cancel_stops_the_agent_and_its_children(cx: &mut TestAppContext) {
     assert!(live.cancelling);
     let cancelled = fx.wait_for_status(cx, id, RunStatus::Cancelled);
     assert_eq!(cancelled.error, None);
+    assert_eq!(markers(&fx.stored_events(cx, id)), ["Plan", "Cancelled"], "the log says where it stopped");
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while !pids.iter().all(|pid| process_gone(*pid)) {
@@ -517,7 +531,7 @@ fn a_failing_agent_fails_the_run_with_its_stderr(cx: &mut TestAppContext) {
     assert_eq!(fx.run(cx, id).status, RunStatus::Planning);
     assert_eq!(fx.run(cx, id).error, None);
     fx.wait_for_status(cx, id, RunStatus::Failed);
-    assert_eq!(phases(&fx.stored_events(cx, id)), [(PhaseKind::Plan, None), (PhaseKind::Plan, None)]);
+    assert_eq!(markers(&fx.stored_events(cx, id)), ["Plan", "retry Plan"]);
 }
 
 #[gpui_kit::test]
@@ -560,6 +574,7 @@ fn startup_marks_interrupted_runs_failed_and_they_can_continue(cx: &mut TestAppC
         let stored = status(cx, run.id);
         assert_eq!((stored.status, stored.error.as_deref()), (RunStatus::Failed, Some(INTERRUPTED)));
         assert_eq!(fx.run(cx, run.id).status, RunStatus::Failed);
+        assert_eq!(markers(&fx.stored_events(cx, run.id)), ["Interrupted"]);
     }
     assert_eq!(status(cx, runs[3].id).status, RunStatus::AwaitingApproval);
     assert_eq!(status(cx, runs[4].id).status, RunStatus::Succeeded);
@@ -929,6 +944,35 @@ fn requested_changes_revise_the_strategy(cx: &mut TestAppContext) {
         phases(&fx.stored_events(cx, id)),
         [(PhaseKind::Plan, None), (PhaseKind::Revise, Some("Add an end card.".into()))]
     );
+}
+
+#[gpui_kit::test]
+fn a_discarded_strategy_can_be_restored(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let id = fx.start(cx, false);
+    let video = fx.video;
+    let window = open(cx, move |window, cx| AiEditPanel::new(video, window, cx));
+    let strategy = fx.wait_for_status(cx, id, RunStatus::AwaitingApproval).summary;
+    wait_for_window(cx, window, "the strategy card", |window, _| shows(window, "run-discard"));
+
+    click(cx, window, "run-discard");
+    assert_eq!(fx.run(cx, id).status, RunStatus::Cancelled);
+    wait_for_window(cx, window, "the discarded card", |window, _| shows(window, "run-restore"));
+    assert!(!cx.update_window(window, |_, window, _| shows(window, "run-continue")).unwrap());
+
+    click(cx, window, "run-restore");
+    let restored = fx.run(cx, id);
+    assert_eq!((restored.status, restored.summary), (RunStatus::AwaitingApproval, strategy));
+    wait_for_window(cx, window, "the strategy card", |window, _| shows(window, "run-approve"));
+    assert_eq!(markers(&fx.stored_events(cx, id)), ["Plan", "Discarded", "Restored"]);
+    assert!(latest_run(cx, &fx) == Some(id) && fx.stored_run(cx, id).status == RunStatus::AwaitingApproval);
+
+    // An edit cancelled while the agent worked has no strategy to bring back.
+    let restore = cx.update(|cx| fx.service.update(cx, |service, cx| service.restore(id, cx)));
+    assert_eq!(restore, Err(RunError::NotAvailable(RunStatus::AwaitingApproval)));
 }
 
 #[gpui_kit::test]
@@ -1308,7 +1352,7 @@ fn a_short_activity_log_takes_only_the_room_it_needs(cx: &mut TestAppContext) {
         let mut store = store.lock().unwrap();
         store.insert_run(&run).unwrap();
         let events = [
-            LogEvent::Phase(PhaseStarted { phase: PhaseKind::Plan, text: None }),
+            LogEvent::Phase(PhaseStarted { phase: PhaseKind::Plan, text: None, retry: false }),
             LogEvent::Agent(AgentEvent::AssistantText { text: "Looking at the footage.".into() }),
             LogEvent::Agent(AgentEvent::ToolUse { id: "t1".into(), name: "Bash".into(), summary: "ls".into() }),
         ];

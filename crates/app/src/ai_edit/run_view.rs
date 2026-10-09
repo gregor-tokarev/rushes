@@ -18,7 +18,7 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Div, ElementId, Entity, FollowMode, FontWeight,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Div, ElementId, Entity, FollowMode, FontWeight, Hsla,
     InteractiveElement as _, IntoElement, ListAlignment, ListSizingBehavior, ListState, ParentElement as _, Pixels,
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, TestSupportExt as _,
     Window, canvas, div, list, px, rems,
@@ -29,7 +29,7 @@ use videocrm_pipeline::{MediaInfo, probe_media};
 use super::format;
 use super::icons::tool_icon;
 use super::service::{LivePhase, PipelineService, split_failure};
-use super::timeline::{LogEvent, PhaseKind, TimelineItem, fold_timeline};
+use super::timeline::{LogEvent, MarkerKind, PhaseKind, TimelineItem, fold_timeline};
 use crate::route::VideoTab;
 use crate::state::AppState;
 
@@ -298,7 +298,7 @@ impl RunView {
         self.live(cx).map(|live| live.kind).or_else(|| {
             self.service.read(cx).timeline(self.run_id?).iter().rev().find_map(|entry| match &entry.event {
                 LogEvent::Phase(started) => Some(started.phase),
-                LogEvent::Agent(_) => None,
+                LogEvent::Agent(_) | LogEvent::Marker(_) => None,
             })
         })
     }
@@ -519,13 +519,19 @@ impl RunView {
 
     fn render_failure(&self, run: &PipelineRun, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let cancelled = run.status == RunStatus::Cancelled;
+        // A discarded strategy is kept; bringing it back costs nothing.
+        let restorable = cancelled && self.service.read(cx).can_restore(run.id);
         let error = run.error.clone().unwrap_or_default();
         let (message, stderr) = split_failure(&error);
-        let (message, stderr) = (message.to_owned(), stderr.map(str::to_owned));
-        let resumable = run.session_id.is_some();
+        let message =
+            if restorable { "Restore it to approve or change it, or plan again." } else { message }.to_owned();
+        let stderr = stderr.map(str::to_owned);
+        let resumable = run.session_id.is_some() && !restorable;
         let feedback = self.render_feedback(FeedbackPurpose::Continue, window, cx);
         let theme = cx.theme();
-        let (icon, title, color) = if cancelled {
+        let (icon, title, color) = if restorable {
+            (IconName::FileText, "Strategy discarded", theme.muted_foreground)
+        } else if cancelled {
             (IconName::CircleStop, "Edit cancelled", theme.muted_foreground)
         } else {
             (IconName::CircleX, "Edit failed", theme.danger)
@@ -561,14 +567,27 @@ impl RunView {
                         })
                         .child(
                             Button::new("run-retry")
-                                .primary()
+                                .when(restorable, |button| button.outline())
+                                .when(!restorable, |button| button.primary())
                                 .small()
                                 .icon(IconName::RotateCcw)
-                                .label("Retry")
+                                .label(if restorable { "Plan again" } else { "Retry" })
                                 .on_click(
                                     cx.listener(|this, _, _, cx| this.act(cx, |service, id, cx| service.retry(id, cx))),
                                 ),
-                        ),
+                        )
+                        .when(restorable, |this| {
+                            this.child(
+                                Button::new("run-restore")
+                                    .primary()
+                                    .small()
+                                    .icon(IconName::Undo2)
+                                    .label("Restore strategy")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.act(cx, |service, id, cx| service.restore(id, cx))
+                                    })),
+                            )
+                        }),
                 )
             })
     }
@@ -694,31 +713,29 @@ impl RunView {
         let mono_font = theme.mono_font_family.clone();
         let row_id = element_id(&format!("timeline-{seq}"), run_id);
         let element = match item {
-            TimelineItem::Phase { phase, text, .. } => {
-                let label = match phase {
-                    PhaseKind::Plan => "Planning started",
-                    PhaseKind::Auto => "Edit started, strategy pre-approved",
-                    PhaseKind::Revise => "You asked for a revised strategy",
-                    PhaseKind::Approve => "You approved the strategy",
-                    PhaseKind::Feedback => "You asked for changes",
+            TimelineItem::Phase { phase, text, retry, .. } => {
+                let label = match (retry, phase) {
+                    // A retry sends the earlier text again; the creator did not write it anew.
+                    (true, _) => "Retried",
+                    (false, PhaseKind::Plan) => "Planning started",
+                    (false, PhaseKind::Auto) => "Edit started, strategy pre-approved",
+                    (false, PhaseKind::Revise) => "You asked for a revised strategy",
+                    (false, PhaseKind::Approve) => "You approved the strategy",
+                    (false, PhaseKind::Feedback) => "You asked for changes",
                 };
-                v_flex()
-                    .id(row_id)
-                    .w_full()
-                    .gap_2()
-                    .px_4()
-                    .pt_3()
-                    .pb_1()
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .child(div().flex_1().h(px(1.)).bg(border))
-                            .child(div().text_xs().text_color(muted).child(label))
-                            .child(div().flex_1().h(px(1.)).bg(border)),
-                    )
-                    .when_some(text.clone(), |this, text| {
-                        this.child(div().mx_8().px_3().py_2().rounded(radius).bg(muted_bg).text_sm().child(text))
-                    })
+                let text = text.clone().filter(|_| !retry);
+                divider(row_id, label, border, muted).when_some(text, |this, text| {
+                    this.child(div().mx_8().px_3().py_2().rounded(radius).bg(muted_bg).text_sm().child(text))
+                })
+            }
+            TimelineItem::Marker { kind, .. } => {
+                let label = match kind {
+                    MarkerKind::Cancelled => "Cancelled",
+                    MarkerKind::Interrupted => super::INTERRUPTED,
+                    MarkerKind::Discarded => "You discarded the strategy",
+                    MarkerKind::Restored => "You restored the strategy",
+                };
+                divider(row_id, label, border, muted)
             }
             TimelineItem::Message { text, .. } => {
                 // A long message (the final summary) shows its opening lines; the state
@@ -894,6 +911,17 @@ fn card_title(icon: IconName, title: &'static str, description: &'static str, cx
         v_flex()
             .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title))
             .child(div().text_xs().text_color(theme.muted_foreground).child(description)),
+    )
+}
+
+/// A timeline row that marks a turn of the run: a label between two rules.
+fn divider(id: ElementId, label: &'static str, border: Hsla, muted: Hsla) -> gpui_kit::Stateful<Div> {
+    v_flex().id(id).w_full().gap_2().px_4().pt_3().pb_1().child(
+        h_flex()
+            .gap_3()
+            .child(div().flex_1().h(px(1.)).bg(border))
+            .child(div().text_xs().text_color(muted).child(label))
+            .child(div().flex_1().h(px(1.)).bg(border)),
     )
 }
 

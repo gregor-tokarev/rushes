@@ -20,7 +20,7 @@ use videocrm_pipeline::{
 };
 
 use super::brief::BriefDraft;
-use super::timeline::{LogEvent, PhaseKind, PhaseStarted, TimelineEntry};
+use super::timeline::{LogEvent, MarkerKind, PhaseKind, PhaseStarted, RunMarker, TimelineEntry};
 use crate::state::{AppEvent, AppState};
 
 /// Error of runs a previous session left running.
@@ -314,7 +314,7 @@ impl PipelineService {
         self.mark_editing(video_id, cx);
 
         let phase = if auto_approve { PhaseKind::Auto } else { PhaseKind::Plan };
-        if let Err(error) = self.launch(id, phase, None, cx) {
+        if let Err(error) = self.launch(id, PhaseStarted { phase, text: None, retry: false }, cx) {
             if self.run(id).is_some_and(|run| run.status == RunStatus::Queued) {
                 self.finish(id, Err(error.to_string()), cx);
             }
@@ -330,7 +330,7 @@ impl PipelineService {
             return Err(RunError::NotAvailable(run.status));
         }
         let notes = notes.map(|notes| notes.trim().to_owned()).filter(|notes| !notes.is_empty());
-        self.continue_run(id, PhaseKind::Approve, notes, cx)
+        self.continue_run(id, PhaseStarted { phase: PhaseKind::Approve, text: notes, retry: false }, cx)
     }
 
     /// Sends the creator's feedback. While the strategy awaits approval this asks for a
@@ -352,7 +352,7 @@ impl PipelineService {
             },
             status => return Err(RunError::NotAvailable(status)),
         };
-        self.continue_run(id, phase, Some(message.trim().to_owned()), cx)
+        self.continue_run(id, PhaseStarted { phase, text: Some(message.trim().to_owned()), retry: false }, cx)
     }
 
     /// Runs the phase that failed or was cancelled again, resuming the agent session
@@ -364,7 +364,7 @@ impl PipelineService {
         }
         let (phase, text) =
             self.last_started(id, cx).map_or((PhaseKind::Plan, None), |started| (started.phase, started.text));
-        self.continue_run(id, phase, text, cx)
+        self.continue_run(id, PhaseStarted { phase, text, retry: true }, cx)
     }
 
     /// The marker of the phase the run started last, from its event log.
@@ -372,48 +372,63 @@ impl PipelineService {
         self.load_timeline(id, cx);
         self.timeline(id).iter().rev().find_map(|entry| match &entry.event {
             LogEvent::Phase(started) => Some(started.clone()),
-            LogEvent::Agent(_) => None,
+            LogEvent::Agent(_) | LogEvent::Marker(_) => None,
         })
+    }
+
+    /// Whether the run's strategy was discarded and can be brought back: nothing
+    /// happened to the run since. Reads the loaded event log.
+    pub fn can_restore(&self, id: RunId) -> bool {
+        let discarded = self
+            .timeline(id)
+            .last()
+            .is_some_and(|entry| matches!(&entry.event, LogEvent::Marker(RunMarker { kind: MarkerKind::Discarded })));
+        discarded && self.run(id).is_some_and(|run| run.status == RunStatus::Cancelled && run.summary.is_some())
+    }
+
+    /// Brings a discarded strategy back for approval.
+    pub fn restore(&mut self, id: RunId, cx: &mut Context<Self>) -> Result<(), RunError> {
+        let status = self.run(id).ok_or(RunError::RunNotFound)?.status;
+        self.load_timeline(id, cx);
+        if !self.can_restore(id) {
+            return Err(RunError::NotAvailable(status));
+        }
+        self.append_event(id, LogEvent::Marker(RunMarker { kind: MarkerKind::Restored }), cx);
+        self.update_run(id, cx, |run| run.status = RunStatus::AwaitingApproval);
+        self.after_status_change(cx);
+        Ok(())
     }
 
     fn last_phase(&mut self, id: RunId, cx: &mut Context<Self>) -> Option<PhaseKind> {
         self.last_started(id, cx).map(|started| started.phase)
     }
 
-    /// Stops the agent of a working run, or discards a strategy awaiting approval.
+    /// Stops the agent of a working run, or discards a strategy awaiting approval (it
+    /// can be restored; see [`Self::restore`]).
     pub fn cancel(&mut self, id: RunId, cx: &mut Context<Self>) {
         if let Some(live) = self.live.get_mut(&id) {
             live.cancel.store(true, Ordering::SeqCst);
             live.phase.cancelling = true;
             cx.notify();
         } else if self.run(id).is_some_and(|run| run.status == RunStatus::AwaitingApproval) {
+            self.load_timeline(id, cx);
+            self.append_event(id, LogEvent::Marker(RunMarker { kind: MarkerKind::Discarded }), cx);
             self.update_run(id, cx, |run| run.status = RunStatus::Cancelled);
             self.after_status_change(cx);
         }
     }
 
-    fn continue_run(
-        &mut self,
-        id: RunId,
-        phase: PhaseKind,
-        text: Option<String>,
-        cx: &mut Context<Self>,
-    ) -> Result<(), RunError> {
+    fn continue_run(&mut self, id: RunId, started: PhaseStarted, cx: &mut Context<Self>) -> Result<(), RunError> {
         let video_id = self.run(id).ok_or(RunError::RunNotFound)?.video_id;
         if self.live_run_of(video_id).is_some() {
             return Err(RunError::AlreadyRunning);
         }
-        self.launch(id, phase, text, cx)
+        self.launch(id, started, cx)
     }
 
     /// Records the phase, sets the run working and starts the agent thread.
-    fn launch(
-        &mut self,
-        id: RunId,
-        phase: PhaseKind,
-        text: Option<String>,
-        cx: &mut Context<Self>,
-    ) -> Result<(), RunError> {
+    fn launch(&mut self, id: RunId, started: PhaseStarted, cx: &mut Context<Self>) -> Result<(), RunError> {
+        let (phase, text) = (started.phase, started.text.clone());
         let run = self.run(id).ok_or(RunError::RunNotFound)?.clone();
         let settings = self.state.read(cx).settings().pipeline.clone();
         let skill_dir = settings.skill_dir.clone().or_else(default_skill_dir).ok_or(RunError::NoSkillFolder)?;
@@ -431,7 +446,7 @@ impl PipelineService {
         if phase.renders() {
             self.keep_shared_cut(run.video_id, &run.footage_dir, cx);
         }
-        self.append_event(id, LogEvent::Phase(PhaseStarted { phase, text }), cx);
+        self.append_event(id, LogEvent::Phase(started), cx);
         let status = if phase.renders() { RunStatus::Rendering } else { RunStatus::Planning };
         self.update_run(id, cx, |run| {
             run.status = status;
@@ -506,6 +521,7 @@ impl PipelineService {
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(PipelineError::Cancelled) => {
+                self.append_event(id, LogEvent::Marker(RunMarker { kind: MarkerKind::Cancelled }), cx);
                 self.update_run(id, cx, |run| run.status = RunStatus::Cancelled);
                 self.after_status_change(cx);
                 return;
@@ -634,6 +650,10 @@ impl PipelineService {
     }
 
     fn append_event(&mut self, id: RunId, event: LogEvent, cx: &mut Context<Self>) {
+        if self.run(id).is_none() {
+            // Deleted with its video; the store has nothing to append to.
+            return;
+        }
         let stored = self.with_store(cx, |store| store.append_run_event(id, &event.to_payload()));
         match stored {
             Ok(stored) => {
@@ -662,6 +682,8 @@ impl PipelineService {
                     run.status = RunStatus::Failed;
                     run.error = Some(INTERRUPTED.to_owned());
                     store.update_run(&mut run)?;
+                    let marker = LogEvent::Marker(RunMarker { kind: MarkerKind::Interrupted });
+                    store.append_run_event(run.id, &marker.to_payload())?;
                     recovered = true;
                 }
             }
