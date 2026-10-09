@@ -56,6 +56,9 @@ impl Fixture {
             })
             .expect("open test window")
         });
+        // Focus and blur callbacks only flow in an active window, as on a desktop.
+        cx.update_window(window, |_, window, _| window.activate_window()).expect("window is open");
+        cx.run_until_parked();
         let events = Rc::new(RefCell::new(Vec::new()));
         let sink = events.clone();
         cx.update(|cx| {
