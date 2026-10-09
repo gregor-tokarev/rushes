@@ -7,7 +7,7 @@ use gpui_kit::{App, Window};
 use videocrm_core::settings::ThemeMode;
 
 /// Family of the embedded UI font.
-pub const UI_FONT: &str = "Inter";
+const UI_FONT: &str = "Inter";
 
 /// Inter (SIL Open Font License, `assets/fonts/OFL.txt`) in the weights the UI
 /// uses. Embedded because the platform UI font may be a variable font whose

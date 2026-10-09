@@ -83,11 +83,7 @@ impl PropertiesPanel {
         panel
     }
 
-    pub fn is_collapsed(&self) -> bool {
-        self.collapsed
-    }
-
-    pub fn set_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+    fn set_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
         self.collapsed = collapsed;
         cx.notify();
     }
@@ -97,7 +93,7 @@ impl PropertiesPanel {
     }
 
     /// Applies `edit` to the stored video and saves it when it changed.
-    pub fn edit(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut Video)) {
+    fn edit(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut Video)) {
         let Some(mut video) = self.video(cx).cloned() else { return };
         let before = video.clone();
         edit(&mut video);
@@ -666,7 +662,7 @@ const KINDS: [(&str, IconName); 7] = [
 ];
 
 /// The New property dialog's form: name, type and, for select types, options.
-pub struct AddPropertyForm {
+struct AddPropertyForm {
     name: Entity<InputState>,
     options: Entity<InputState>,
     kind: usize,

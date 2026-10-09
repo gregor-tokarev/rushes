@@ -51,7 +51,7 @@ pub fn open_new_video_dialog(status: Option<VideoStatus>, window: &mut Window, c
 }
 
 /// The dialog's form. Created per opening; [`Self::submit`] creates the video.
-pub struct NewVideoForm {
+struct NewVideoForm {
     title: Entity<InputState>,
     hook: Entity<InputState>,
     format: VideoFormat,
@@ -66,7 +66,7 @@ pub struct NewVideoForm {
 }
 
 impl NewVideoForm {
-    pub fn new(status: VideoStatus, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(status: VideoStatus, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let title = cx.new(|cx| InputState::new(window, cx).placeholder("Video title"));
         let hook = cx.new(|cx| InputState::new(window, cx).placeholder("One-line hook — why would someone click?"));
         let publish_date = cx.new(|cx| DatePickerState::new(window, cx).date_format("%b %-d, %Y"));
@@ -96,19 +96,7 @@ impl NewVideoForm {
         }
     }
 
-    pub fn format(&self) -> VideoFormat {
-        self.format
-    }
-
-    pub fn template(&self) -> TemplateKind {
-        self.template
-    }
-
-    pub fn status(&self) -> VideoStatus {
-        self.status
-    }
-
-    pub fn set_format(&mut self, format: VideoFormat, cx: &mut Context<Self>) {
+    fn set_format(&mut self, format: VideoFormat, cx: &mut Context<Self>) {
         self.format = format;
         if !self.template_chosen {
             self.template = default_template(format);
@@ -116,19 +104,19 @@ impl NewVideoForm {
         cx.notify();
     }
 
-    pub fn set_template(&mut self, template: TemplateKind, cx: &mut Context<Self>) {
+    fn set_template(&mut self, template: TemplateKind, cx: &mut Context<Self>) {
         self.template = template;
         self.template_chosen = true;
         cx.notify();
     }
 
-    pub fn set_status(&mut self, status: VideoStatus, cx: &mut Context<Self>) {
+    fn set_status(&mut self, status: VideoStatus, cx: &mut Context<Self>) {
         self.status = status;
         cx.notify();
     }
 
     /// Creates the video and opens it. Returns whether the dialog may close.
-    pub fn submit(&mut self, _: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn submit(&mut self, _: &mut Window, cx: &mut Context<Self>) -> bool {
         let title = self.title.read(cx).value().trim().to_string();
         if title.is_empty() {
             self.error = Some("Give the video a title.".into());

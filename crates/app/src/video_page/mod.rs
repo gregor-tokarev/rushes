@@ -132,10 +132,6 @@ impl VideoPage {
         self.notes.as_ref()
     }
 
-    pub fn properties(&self) -> &Entity<PropertiesPanel> {
-        &self.properties
-    }
-
     pub fn set_tab(&mut self, tab: VideoTab, window: &mut Window, cx: &mut Context<Self>) {
         if tab == self.tab {
             return;

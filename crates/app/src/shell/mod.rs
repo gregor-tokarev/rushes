@@ -31,8 +31,8 @@ use crate::state::{AppEvent, AppState};
 use crate::video_page::VideoPage;
 use crate::wizard;
 
-pub use palette::CommandPalette;
-pub use theme::{UI_FONT, apply_theme, register_fonts};
+use palette::CommandPalette;
+pub use theme::{apply_theme, register_fonts};
 
 actions!(
     videocrm,
@@ -184,14 +184,6 @@ impl Workspace {
 
     pub fn onboarding(&self) -> Option<&Entity<Onboarding>> {
         self.onboarding.as_ref()
-    }
-
-    pub fn settings_page(&self) -> Option<&Entity<SettingsPage>> {
-        self.settings.as_ref()
-    }
-
-    pub fn palette(&self) -> &Entity<CommandPalette> {
-        &self.palette
     }
 
     /// The page the main area currently shows.

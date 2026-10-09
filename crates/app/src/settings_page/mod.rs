@@ -81,7 +81,8 @@ impl SettingsPage {
                 Ok(Ok(Some(paths))) => paths.into_iter().next(),
                 Ok(Ok(None)) | Err(_) => None,
                 Ok(Err(error)) => {
-                    let message = format!("Couldn’t open the folder picker: {error}. Type the path instead.");
+                    eprintln!("videocrm: folder picker failed: {error}");
+                    let message = "Couldn’t open the folder picker. Type the path instead.";
                     _ = this.update(cx, |this, cx| this.state.update(cx, |state, cx| state.report_error(message, cx)));
                     None
                 }

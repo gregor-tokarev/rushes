@@ -25,7 +25,7 @@ const MAX_VIDEOS: usize = 50;
 
 /// What a palette entry does when confirmed.
 #[derive(Clone, Debug, PartialEq)]
-pub enum PaletteCommand {
+enum PaletteCommand {
     OpenVideo(VideoId),
     Navigate(Route),
     /// An app action; the palette handles it like its key binding.
@@ -33,7 +33,7 @@ pub enum PaletteCommand {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PaletteAction {
+enum PaletteAction {
     NewVideo,
     OpenSettings,
     ToggleTheme,
@@ -84,10 +84,6 @@ pub struct CommandPalette {
 impl CommandPalette {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self { command: cx.new(|cx| CommandState::new(window, cx)), query: String::new() }
-    }
-
-    pub fn query(&self) -> &str {
-        &self.query
     }
 
     /// Opens the palette with an empty query. Does nothing while another dialog is open.
@@ -371,7 +367,7 @@ fn run(command: PaletteCommand, workspace: &WeakEntity<Workspace>, window: &mut 
 /// Scores `text` against `query` as a case-insensitive subsequence: matches
 /// at word starts and runs of consecutive characters score higher, gaps
 /// lower. `None` when the query does not match; an empty query matches all.
-pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
+fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
     let query: Vec<char> = query.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect();
     if query.is_empty() {
         return Some(0);

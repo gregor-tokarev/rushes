@@ -124,11 +124,6 @@ impl DocumentTab {
         &self.stats
     }
 
-    /// Whether edits are waiting to be saved.
-    pub fn is_dirty(&self) -> bool {
-        self.dirty
-    }
-
     fn on_changed(&mut self, cx: &mut Context<Self>) {
         self.dirty = true;
         self.save = Some(cx.spawn(async move |this, cx| {
@@ -194,7 +189,8 @@ impl DocumentTab {
                 Ok(Ok(Some(path))) => path,
                 Ok(Ok(None)) | Err(_) => return,
                 Ok(Err(error)) => {
-                    _ = this.update(cx, |this, cx| this.report(format!("Couldn’t open the save dialog: {error}"), cx));
+                    eprintln!("videocrm: save dialog failed: {error}");
+                    _ = this.update(cx, |this, cx| this.report("Couldn’t open the save dialog.".into(), cx));
                     return;
                 }
             };
@@ -223,7 +219,8 @@ impl DocumentTab {
                 },
                 Ok(Ok(None)) | Err(_) => return,
                 Ok(Err(error)) => {
-                    _ = this.update(cx, |this, cx| this.report(format!("Couldn’t open the file dialog: {error}"), cx));
+                    eprintln!("videocrm: file dialog failed: {error}");
+                    _ = this.update(cx, |this, cx| this.report("Couldn’t open the file dialog.".into(), cx));
                     return;
                 }
             };

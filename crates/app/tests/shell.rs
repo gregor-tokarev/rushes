@@ -11,6 +11,7 @@ use gpui_kit::{
     WindowBounds, WindowOptions, px, size,
 };
 use videocrm::ai_edit::PipelineService;
+use videocrm::onboarding::{StartChoice, Step};
 use videocrm::publish::YoutubeService;
 use videocrm::route::{Route, VideoTab};
 use videocrm::shell::{self, Page, Workspace};
@@ -275,10 +276,19 @@ fn completing_onboarding_starts_the_workspace(cx: &mut TestAppContext) {
     app.press(cx, "ctrl-k");
     assert!(!app.has_dialog(cx));
 
-    app.click(cx, "onboarding-next"); // Welcome -> Media folder
-    app.click(cx, "onboarding-next"); // Media folder -> YouTube
-    app.click(cx, "onboarding-skip"); // YouTube -> AI editing
-    app.click(cx, "onboarding-skip"); // AI editing -> Get started
+    let onboarding = cx.read(|cx| app.workspace.read(cx).onboarding().cloned().expect("onboarding"));
+    let step = |cx: &mut TestAppContext| cx.read(|cx| onboarding.read(cx).step());
+    app.click(cx, "onboarding-next");
+    assert_eq!(step(cx), Step::MediaFolder);
+    app.click(cx, "onboarding-next");
+    assert_eq!(step(cx), Step::Youtube);
+    app.click(cx, "onboarding-skip");
+    assert_eq!(step(cx), Step::AiEditing);
+    app.click(cx, "onboarding-back");
+    assert_eq!(step(cx), Step::Youtube);
+    app.click(cx, "onboarding-skip");
+    app.click(cx, "onboarding-skip");
+    assert_eq!(step(cx), Step::GetStarted);
     app.click(cx, "start-empty");
     app.click(cx, "onboarding-next");
 
@@ -295,7 +305,7 @@ fn onboarding_can_start_with_sample_videos(cx: &mut TestAppContext) {
         app.click(cx, "onboarding-next");
     }
     let onboarding = cx.read(|cx| app.workspace.read(cx).onboarding().cloned().expect("onboarding"));
-    assert_eq!(cx.read(|cx| onboarding.read(cx).choice()), videocrm::onboarding::StartChoice::SampleVideos);
+    assert_eq!(cx.read(|cx| onboarding.read(cx).choice()), StartChoice::SampleVideos);
     app.click(cx, "onboarding-next");
 
     assert!(cx.read(|cx| app.state.read(cx).settings().onboarding_completed));
