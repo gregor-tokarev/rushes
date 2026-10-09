@@ -84,7 +84,9 @@ impl AppState {
     }
 
     /// The database handle, for background work. Lock it briefly; never hold the
-    /// guard across `await` points or long operations.
+    /// guard across `await` points or long operations. Change video rows through
+    /// [`AppState::update_video`] on the foreground instead: pages save whole rows
+    /// from the cache, so a direct write is lost if an edit lands before the reload.
     pub fn store(&self) -> SharedStore {
         self.store.clone()
     }
