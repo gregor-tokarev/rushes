@@ -332,6 +332,11 @@ impl YoutubeClient {
                     return Ok(video);
                 }
                 Ok(Step::Offset(next)) => {
+                    if next >= total {
+                        return Err(Error::Protocol(format!(
+                            "the upload server holds {next} of {total} bytes but did not finish the upload"
+                        )));
+                    }
                     match offset {
                         Some(start) if next <= start => {
                             failures += 1;
