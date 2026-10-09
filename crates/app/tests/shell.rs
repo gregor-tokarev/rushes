@@ -271,6 +271,10 @@ fn completing_onboarding_starts_the_workspace(cx: &mut TestAppContext) {
     assert!(app.has(cx, "onboarding-card"));
     assert!(!app.has(cx, "sidebar-new-video"));
 
+    // The workspace's commands wait until onboarding is done.
+    app.press(cx, "ctrl-k");
+    assert!(!app.has_dialog(cx));
+
     app.click(cx, "onboarding-next"); // Welcome -> Media folder
     app.click(cx, "onboarding-next"); // Media folder -> YouTube
     app.click(cx, "onboarding-skip"); // YouTube -> AI editing

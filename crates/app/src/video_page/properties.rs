@@ -734,7 +734,8 @@ impl AddPropertyForm {
 impl Render for AddPropertyForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let form = cx.weak_entity();
-        let (label, icon) = KINDS[self.kind];
+        let current = self.kind;
+        let (label, icon) = KINDS[current];
         v_flex()
             .gap_3()
             .child(
@@ -749,17 +750,23 @@ impl Render for AddPropertyForm {
                                 .child(h_flex().gap_2().child(Icon::new(icon).small()).child(label))
                                 .dropdown_caret(true)
                                 .dropdown_menu(move |menu, _, _| {
-                                    KINDS.iter().enumerate().fold(menu, |menu, (ix, (label, icon))| {
-                                        let form = form.clone();
-                                        menu.item(PopupMenuItem::new(*label).icon(Icon::new(*icon)).on_click(
-                                            move |_, _, cx| {
-                                                _ = form.update(cx, |form, cx| {
-                                                    form.kind = ix;
-                                                    cx.notify();
-                                                });
-                                            },
-                                        ))
-                                    })
+                                    KINDS.iter().enumerate().fold(
+                                        menu.check_side(Side::Right),
+                                        |menu, (ix, (label, icon))| {
+                                            let form = form.clone();
+                                            menu.item(
+                                                PopupMenuItem::new(*label)
+                                                    .icon(Icon::new(*icon))
+                                                    .checked(ix == current)
+                                                    .on_click(move |_, _, cx| {
+                                                        _ = form.update(cx, |form, cx| {
+                                                            form.kind = ix;
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            )
+                                        },
+                                    )
                                 }),
                         ),
                     )

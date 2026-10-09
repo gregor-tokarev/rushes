@@ -227,7 +227,7 @@ fn data_folder_field() -> SettingField<SharedString> {
 }
 
 impl Render for SettingsPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        Settings::new("settings").pages(self.pages(cx))
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        Settings::new("settings").sidebar_width(window.rem_size() * 14.).pages(self.pages(cx))
     }
 }
