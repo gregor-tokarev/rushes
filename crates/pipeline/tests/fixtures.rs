@@ -130,7 +130,11 @@ fn tool_calls_are_summarised() {
                 false,
                 "take1.mp4\ntake2.mp4"
             ),
-            ("toolu_01CnuSxKSvUDTAhzERJPvHQm", false, "1\t# fake skill\n2"),
+            (
+                "toolu_01CnuSxKSvUDTAhzERJPvHQm",
+                false,
+                "1\t# fake skill\n2"
+            ),
         ]
     );
     assert!(matches!(

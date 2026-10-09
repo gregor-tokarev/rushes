@@ -140,10 +140,9 @@ pub(crate) struct Invocation {
     pub add_dirs: Vec<PathBuf>,
 }
 
-/// What a finished agent process reported.
+/// What the agent reported while it ran.
 #[derive(Debug, Default)]
 pub(crate) struct AgentRun {
-    pub status: Option<ExitStatus>,
     pub session_id: Option<String>,
     /// The final [`AgentEvent::Result`], if the agent got that far.
     pub result: Option<AgentEvent>,
@@ -180,15 +179,16 @@ enum Line {
     Stderr(String),
 }
 
-/// Runs the agent to completion, reporting every event as it arrives. Setting
-/// `cancel` terminates the agent and everything it started.
+/// Runs the agent to completion, reporting every event as it arrives, and returns
+/// its exit status with what it reported. Setting `cancel` terminates the agent and
+/// everything it started.
 pub(crate) fn run_agent(
     config: &AgentConfig,
     program: &Path,
     invocation: &Invocation,
     on_event: &mut dyn FnMut(&AgentEvent),
     cancel: &AtomicBool,
-) -> Result<AgentRun, PipelineError> {
+) -> Result<(ExitStatus, AgentRun), PipelineError> {
     let mut command = Command::new(program);
     command
         .args(config.args(invocation))
@@ -260,8 +260,7 @@ pub(crate) fn run_agent(
             Err(_) => streams_open = false,
         }
     }
-    run.status = Some(status);
-    Ok(run)
+    Ok((status, run))
 }
 
 fn spawn_reader(

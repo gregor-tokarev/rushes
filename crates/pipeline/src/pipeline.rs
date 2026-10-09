@@ -101,13 +101,9 @@ pub fn run_phase(
         resume: ctx.session_id.clone(),
         add_dirs: vec![skill_dir],
     };
-    let run = run_agent(config, &program, &invocation, on_event, cancel)?;
+    let (status, run) = run_agent(config, &program, &invocation, on_event, cancel)?;
 
     let session_id = run.session_id.or_else(|| ctx.session_id.clone());
-    let status = run
-        .status
-        .map(|status| status.to_string())
-        .unwrap_or_default();
     let failed = |message: String| PipelineError::AgentFailed {
         message,
         stderr_tail: run.stderr_tail.clone(),
@@ -124,7 +120,7 @@ pub fn run_phase(
             "the agent stopped without reporting a result ({status})"
         )));
     };
-    if !run.status.is_some_and(|status| status.success()) {
+    if !status.success() {
         return Err(failed(if is_error && !result_text.is_empty() {
             result_text
         } else {

@@ -42,7 +42,7 @@ fn footage() -> Vec<FootageFile> {
     ]
 }
 
-fn prompt(phase: Phase) -> String {
+fn prompt_for(phase: Phase) -> String {
     build_prompt(&phase, Path::new(SKILL_MD), &footage())
 }
 
@@ -50,7 +50,7 @@ const BRIEF: &str = "Tutorial: home studio on a budget.\nHook: \"You don't need 
 
 #[test]
 fn plan_prompt_asks_for_a_strategy_and_a_stop() {
-    let prompt = prompt(Phase::Plan {
+    let prompt = prompt_for(Phase::Plan {
         brief: BRIEF.to_owned(),
     });
     assert!(prompt.starts_with("VideoCRM edit request (planning phase)."));
@@ -95,7 +95,7 @@ fn plan_prompt_without_brief_or_footage() {
 
 #[test]
 fn approve_prompt_renders_and_summarises() {
-    let prompt = prompt(Phase::Approve { notes: None });
+    let prompt = prompt_for(Phase::Approve { notes: None });
     assert!(prompt.starts_with("VideoCRM edit: strategy approved (render phase)."));
     for expected in [
         "approved the edit strategy",
@@ -127,19 +127,15 @@ fn approve_prompt_renders_and_summarises() {
     );
     assert!(!blank_notes.contains("notes"));
 
-    let with_notes = prompt_with_notes("Keep the joke at 0:42.");
+    let with_notes = prompt_for(Phase::Approve {
+        notes: Some("Keep the joke at 0:42.".to_owned()),
+    });
     assert!(with_notes.contains("Their notes, to take into account:\n\nKeep the joke at 0:42."));
-}
-
-fn prompt_with_notes(notes: &str) -> String {
-    prompt(Phase::Approve {
-        notes: Some(notes.to_owned()),
-    })
 }
 
 #[test]
 fn feedback_prompt_applies_changes_and_re_renders() {
-    let prompt = prompt(Phase::Feedback {
+    let prompt = prompt_for(Phase::Feedback {
         message: "  Cut the intro to 5 seconds.\n".to_owned(),
     });
     assert!(prompt.starts_with("VideoCRM edit: feedback from the creator (revision phase)."));
@@ -160,7 +156,7 @@ fn feedback_prompt_applies_changes_and_re_renders() {
 
 #[test]
 fn auto_prompt_plans_and_renders_without_waiting() {
-    let prompt = prompt(Phase::Auto {
+    let prompt = prompt_for(Phase::Auto {
         brief: BRIEF.to_owned(),
     });
     assert!(prompt.starts_with("VideoCRM edit request (single pass, pre-approved)."));
@@ -198,6 +194,6 @@ fn prompts_are_never_mistaken_for_cli_flags() {
             brief: "-p".to_owned(),
         },
     ] {
-        assert!(!prompt(phase).starts_with('-'));
+        assert!(!prompt_for(phase).starts_with('-'));
     }
 }
