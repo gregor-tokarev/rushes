@@ -22,6 +22,7 @@ use super::geometry::{self, RenderedRow};
 use super::{BlockMenu, DocumentEditor, DraggedBlock, DropTarget, SlashMenu};
 use crate::editor::blocks::{self, number_label};
 use crate::editor::inline::RichText;
+use crate::editor::markdown::is_list;
 use crate::editor::palette::EditorPalette;
 use crate::editor::slash::BLOCK_TYPES;
 
@@ -40,7 +41,7 @@ const INDENT_STEP: Rems = Rems(1.5);
 const INPUT_WRAP_MARGIN: f32 = 10.;
 
 /// Element id of one part of a block, stable across reordering.
-pub(crate) fn block_element_id(id: BlockId, part: &'static str) -> ElementId {
+fn block_element_id(id: BlockId, part: &'static str) -> ElementId {
     ElementId::NamedChild(Arc::new(ElementId::Uuid(id.0)), part.into())
 }
 
@@ -229,13 +230,13 @@ impl DocumentEditor {
         // Only the hovered row builds its gutter buttons; with hundreds of
         // blocks, hidden buttons on every row dominate the frame time.
         let gutter = if menu_open || self.hovered == Some(id) {
-            self.render_gutter(block, metrics, cx).into_any_element()
+            self.render_gutter(block, metrics, row.palette, cx).into_any_element()
         } else {
             div().flex_none().w(GUTTER).into_any_element()
         };
         let drop_after =
             self.drop_target.filter(|target| row.dragging && target.block == id).map(|target| target.after);
-        let indent = if crate::editor::markdown::is_list(block.kind) { block.indent } else { 0 };
+        let indent = if is_list(block.kind) { block.indent } else { 0 };
 
         let content = div()
             .relative()
@@ -301,7 +302,13 @@ impl DocumentEditor {
     }
 
     /// The add button and drag handle of a hovered row.
-    fn render_gutter(&self, block: &Block, metrics: Metrics, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_gutter(
+        &self,
+        block: &Block,
+        metrics: Metrics,
+        palette: EditorPalette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let id = block.id;
         let label: SharedString = match block.text.lines().next().filter(|line| !line.trim().is_empty()) {
             Some(line) => line.chars().take(60).collect::<String>().into(),
@@ -310,7 +317,7 @@ impl DocumentEditor {
         let mut handle = Button::new(block_element_id(id, "handle"))
             .ghost()
             .xsmall()
-            .icon(Icon::new(IconName::GripVertical))
+            .icon(Icon::new(IconName::GripVertical).text_color(palette.muted))
             .tooltip("Drag to move, click for options")
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.open_block_menu(id, event.position(), window, cx)
@@ -332,7 +339,7 @@ impl DocumentEditor {
                 Button::new(block_element_id(id, "add"))
                     .ghost()
                     .xsmall()
-                    .icon(Icon::new(IconName::Plus))
+                    .icon(Icon::new(IconName::Plus).text_color(palette.muted))
                     .tooltip("Add a block below")
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.insert_with_menu(id, window, cx)
