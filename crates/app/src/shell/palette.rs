@@ -1,6 +1,8 @@
 //! The command palette: jump to a video, create one, go to a page, or run an
-//! app action. Videos are matched fuzzily against the query; the palette
-//! filters its own entries so the kit's command list only renders them.
+//! app action. Entries are matched fuzzily against the query and ranked by
+//! how well they match, across groups: a command named in full comes before a
+//! video whose title only holds the letters. The palette filters its own
+//! entries so the kit's command list only renders them.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -16,7 +18,7 @@ use videocrm_core::{VideoId, ViewKind};
 
 use super::sidebar::{display_title, video_emoji};
 use super::{NewVideo, OpenSettings, ToggleSidebar, ToggleTheme, Workspace};
-use crate::route::{Route, VideoTab};
+use crate::route::{Route, SettingsSection, VideoTab};
 use crate::state::AppState;
 use crate::wizard;
 
@@ -66,6 +68,52 @@ struct Entry {
 struct Group {
     label: &'static str,
     entries: Vec<Entry>,
+}
+
+/// How well an entry matches the query; higher is better. The tier counts
+/// first, the fuzzy score breaks ties within it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Rank {
+    tier: MatchTier,
+    score: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum MatchTier {
+    /// The query's letters in order, spread over the text.
+    Scattered,
+    /// The query inside a word.
+    Inside,
+    /// The query at the start of a word.
+    WordStart,
+    /// The text starts with the query.
+    Prefix,
+    /// The text is the query.
+    Exact,
+}
+
+/// Ranks `text` for `query`; `None` when it doesn't match. An empty query matches all equally.
+fn rank(query: &str, text: &str) -> Option<Rank> {
+    let score = fuzzy_score(query, text)?;
+    let query = query.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let tier = if query.is_empty() {
+        MatchTier::Scattered
+    } else if text == query {
+        MatchTier::Exact
+    } else if text.starts_with(&query) {
+        MatchTier::Prefix
+    } else if text
+        .match_indices(&query)
+        .any(|(ix, _)| !text[..ix].chars().next_back().is_some_and(char::is_alphanumeric))
+    {
+        MatchTier::WordStart
+    } else if text.contains(&query) {
+        MatchTier::Inside
+    } else {
+        MatchTier::Scattered
+    };
+    Some(Rank { tier, score })
 }
 
 /// Workspace facts the entries depend on, read when the palette renders.
@@ -125,7 +173,7 @@ impl CommandPalette {
         let state = AppState::global(cx);
         let state = state.read(cx);
 
-        let mut videos: Vec<(i32, Entry)> = Vec::new();
+        let mut videos: Vec<(Rank, Entry)> = Vec::new();
         let recent: Vec<VideoId> = state.recent_videos().iter().map(|video| video.id).collect();
         let mut rows: Vec<_> = state.rows().iter().map(|row| &row.video).collect();
         // Recent first, then the most recently edited.
@@ -134,9 +182,9 @@ impl CommandPalette {
         });
         for video in rows {
             let title = display_title(&video.title);
-            let Some(score) = fuzzy_score(query, &title) else { continue };
+            let Some(rank) = rank(query, &title) else { continue };
             videos.push((
-                score,
+                rank,
                 Entry {
                     label: title.into(),
                     detail: Some(video.status.label().into()),
@@ -145,8 +193,8 @@ impl CommandPalette {
                 },
             ));
         }
-        // Stable: equal scores keep the recent-first order.
-        videos.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        // Stable: equal ranks keep the recent-first order.
+        videos.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
         videos.truncate(MAX_VIDEOS);
 
         let create = vec![Entry {
@@ -206,24 +254,24 @@ impl CommandPalette {
             },
         ];
 
-        let filter = |entries: Vec<Entry>| -> Vec<Entry> {
-            let mut scored: Vec<(i32, Entry)> = entries
-                .into_iter()
-                .filter_map(|entry| fuzzy_score(query, &entry.label).map(|score| (score, entry)))
-                .collect();
-            scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
-            scored.into_iter().map(|(_, entry)| entry).collect()
+        let filter = |entries: Vec<Entry>| -> Vec<(Rank, Entry)> {
+            let mut ranked: Vec<(Rank, Entry)> =
+                entries.into_iter().filter_map(|entry| rank(query, &entry.label).map(|rank| (rank, entry))).collect();
+            ranked.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
+            ranked
         };
 
-        [
-            Group { label: "Videos", entries: videos.into_iter().map(|(_, entry)| entry).collect() },
-            Group { label: "Create", entries: filter(create) },
-            Group { label: "Go to", entries: filter(go_to) },
-            Group { label: "Actions", entries: filter(actions) },
-        ]
-        .into_iter()
-        .filter(|group| !group.entries.is_empty())
-        .collect()
+        let mut groups: Vec<(Rank, Group)> =
+            [("Videos", videos), ("Create", filter(create)), ("Go to", filter(go_to)), ("Actions", filter(actions))]
+                .into_iter()
+                .filter_map(|(label, ranked)| {
+                    let best = ranked.first()?.0;
+                    Some((best, Group { label, entries: ranked.into_iter().map(|(_, entry)| entry).collect() }))
+                })
+                .collect();
+        // The best match leads, so Enter runs it. Stable: an empty query keeps the group order.
+        groups.sort_by_key(|(best, _)| std::cmp::Reverse(*best));
+        groups.into_iter().map(|(_, group)| group).collect()
     }
 
     fn command_at(&self, index: IndexPath, snapshot: Snapshot, cx: &App) -> Option<PaletteCommand> {
@@ -353,7 +401,7 @@ fn run(command: PaletteCommand, workspace: &WeakEntity<Workspace>, window: &mut 
             window.defer(cx, |window, cx| wizard::open_new_video_dialog(None, window, cx));
         }
         PaletteCommand::Action(PaletteAction::OpenSettings) => {
-            state.update(cx, |state, cx| state.navigate(Route::Settings, cx));
+            state.update(cx, |state, cx| state.open_settings(SettingsSection::General, cx));
         }
         PaletteCommand::Action(PaletteAction::ToggleTheme) => {
             workspace.update(cx, |workspace, cx| workspace.toggle_theme(cx));
@@ -425,7 +473,21 @@ fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::fuzzy_score;
+    use super::{MatchTier, fuzzy_score, rank};
+
+    #[test]
+    fn a_name_typed_in_full_outranks_scattered_letters() {
+        let video = "My 2026 Desk Setup: Everything That Survived";
+        assert_eq!(rank("settings", video).map(|rank| rank.tier), Some(MatchTier::Scattered));
+        assert!(rank("settings", "Settings") > rank("settings", video));
+        assert_eq!(rank("set", "Settings").map(|rank| rank.tier), Some(MatchTier::Prefix));
+        assert_eq!(rank("set", video).map(|rank| rank.tier), Some(MatchTier::WordStart));
+        assert!(rank("set", "Settings") > rank("set", video));
+        assert!(rank("desk setup", video) > rank("desk setup", "Settings"));
+        assert_eq!(rank("show  sidebar", "Show sidebar").map(|rank| rank.tier), Some(MatchTier::Exact));
+        assert_eq!(rank("etup", video).map(|rank| rank.tier), Some(MatchTier::Inside));
+        assert_eq!(rank("", video), rank("", "Settings"));
+    }
 
     #[test]
     fn fuzzy_matches_subsequences_and_prefers_word_starts() {

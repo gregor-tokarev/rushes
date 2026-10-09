@@ -12,7 +12,7 @@ use gpui_kit::{
 
 use super::service::{Connection, YoutubeService};
 use super::ui::{avatar, display_name};
-use crate::route::Route;
+use crate::route::SettingsSection;
 use crate::state::AppState;
 
 /// Compact account widget for the sidebar footer: avatar + channel, or "Connect YouTube".
@@ -124,7 +124,7 @@ impl Render for AccountBadge {
             )
             .on_click(|_, _, cx| {
                 let state = AppState::global(cx);
-                state.update(cx, |state, cx| state.navigate(Route::Settings, cx));
+                state.update(cx, |state, cx| state.open_settings(SettingsSection::Youtube, cx));
             })
     }
 }

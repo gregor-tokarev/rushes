@@ -13,7 +13,7 @@ use gpui_kit::{
 use videocrm::ai_edit::PipelineService;
 use videocrm::onboarding::{StartChoice, Step};
 use videocrm::publish::YoutubeService;
-use videocrm::route::{Route, VideoTab};
+use videocrm::route::{Route, SettingsSection, VideoTab};
 use videocrm::shell::{self, Page, Workspace};
 use videocrm::state::AppState;
 use videocrm::video_page::SAVE_DELAY;
@@ -164,7 +164,7 @@ fn routes_show_their_pages(cx: &mut TestAppContext) {
     assert_eq!(app.page(cx), Page::Database);
     assert!(app.has(cx, "database-page"));
 
-    app.navigate(cx, Route::Settings);
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
     assert_eq!(app.page(cx), Page::Settings);
     assert!(app.has(cx, "settings-page"));
     assert!(!app.has(cx, "database-page"));
@@ -423,7 +423,7 @@ fn palette_actions_and_keys_toggle_the_sidebar(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, true, &[]);
     assert!(!cx.read(|cx| app.workspace.read(cx).is_sidebar_collapsed()));
 
-    app.press(cx, "ctrl-b");
+    app.press(cx, "ctrl-\\");
     assert!(cx.read(|cx| app.workspace.read(cx).is_sidebar_collapsed()));
 
     app.press(cx, "ctrl-k");
@@ -440,8 +440,8 @@ fn keys_keep_working_after_the_focused_page_goes_away(cx: &mut TestAppContext) {
     app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
     app.click(cx, "page-hook");
 
-    app.navigate(cx, Route::Settings);
-    app.press(cx, "ctrl-b");
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+    app.press(cx, "ctrl-\\");
     assert!(cx.read(|cx| app.workspace.read(cx).is_sidebar_collapsed()));
 }
 
@@ -656,4 +656,346 @@ fn importing_markdown_can_replace_the_script(cx: &mut TestAppContext) {
     assert_eq!(app.stored_first_block(cx, id, DocumentKind::Script), "Cold open");
     let words = cx.read(|cx| script.read(cx).stats().words);
     assert_eq!(words, 7);
+}
+
+#[gpui_kit::test]
+fn ctrl_b_in_the_script_makes_text_bold(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
+    let first = app.script_first_block(cx);
+    app.click(cx, block_part(first, "text"));
+    app.type_text(cx, "simple");
+    app.press(cx, "ctrl-a");
+
+    app.press(cx, "ctrl-b");
+    let text = cx.read(|cx| {
+        let page = app.workspace.read(cx).video_page().expect("video page").read(cx);
+        let editor = page.script().expect("script tab").read(cx).editor().expect("script editor");
+        editor.read(cx).document(cx).blocks[0].text.clone()
+    });
+    assert_eq!(text, "**simple**");
+    assert!(!cx.read(|cx| app.workspace.read(cx).is_sidebar_collapsed()));
+
+    // The sidebar has its own key, which works from the editor too.
+    app.press(cx, "ctrl-\\");
+    assert!(cx.read(|cx| app.workspace.read(cx).is_sidebar_collapsed()));
+}
+
+#[gpui_kit::test]
+fn app_keys_leave_component_keys_alone(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    // The editor and the database bind their keys when they are first shown.
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
+
+    let conflicts = cx.read(|cx| {
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        let mut conflicts = Vec::new();
+        // A binding without a context outranks every scoped binding of the same keys.
+        for global in keymap.bindings().filter(|binding| binding.predicate().is_none()) {
+            if !global.action().name().starts_with("videocrm::") {
+                continue;
+            }
+            for scoped in keymap.bindings().filter(|binding| binding.predicate().is_some()) {
+                if scoped.keystrokes() == global.keystrokes() {
+                    conflicts.push(format!("{} shadows {}", global.action().name(), scoped.action().name()));
+                }
+            }
+        }
+        conflicts
+    });
+    assert!(conflicts.is_empty(), "{conflicts:?}");
+}
+
+#[gpui_kit::test]
+fn the_account_badge_opens_the_youtube_settings(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    app.click(cx, "account-badge");
+    assert_eq!(app.route(cx), Route::Settings { section: SettingsSection::Youtube });
+    assert!(app.has(cx, "check-emulators"));
+
+    // The sidebar's Settings opens General; the badge switches back to YouTube.
+    app.click(cx, "sidebar-footer-0");
+    assert_eq!(app.route(cx), Route::Settings { section: SettingsSection::General });
+    assert!(!app.has(cx, "check-emulators"));
+    assert!(app.has(cx, "settings-media-root"));
+    app.click(cx, "account-badge");
+    assert!(app.has(cx, "check-emulators"));
+
+    // Back returns to the section that was open.
+    app.press(cx, "alt-left");
+    assert!(app.has(cx, "settings-media-root"));
+}
+
+#[gpui_kit::test]
+fn folder_errors_explain_themselves_and_lead_to_the_settings(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    // A media folder inside a file can never be created.
+    let file = app._media.path().join("notes.txt");
+    std::fs::write(&file, "").expect("write file");
+    let state = app.state.clone();
+    let media_root = file.join("VideoCRM");
+    app.step(cx, move |_, cx| {
+        state.update(cx, |state, cx| state.update_settings(cx, |settings| settings.media_root = Some(media_root)))
+    });
+
+    let id = create_video(&app, cx, "Folder error", TemplateKind::Blank);
+    app.step(cx, |_, _| {});
+    assert_eq!(cx.read(|cx| app.state.read(cx).video(id).and_then(|video| video.folder.clone())), None);
+    let notifications =
+        cx.update_window(app.window, |_, window, cx| window.notifications(cx).len()).expect("window is open");
+    assert_eq!(notifications, 1);
+
+    // Asking again replaces the notification instead of stacking another.
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| {
+        state.update(cx, |state, cx| state.ensure_video_folder(id, cx));
+    });
+    let notifications =
+        cx.update_window(app.window, |_, window, cx| window.notifications(cx).len()).expect("window is open");
+    assert_eq!(notifications, 1);
+
+    app.click(cx, "problem-remedy");
+    assert_eq!(app.route(cx), Route::Settings { section: SettingsSection::General });
+}
+
+/// Element id of the inline error under a media folder field.
+fn media_folder_error(field: &'static str) -> ElementId {
+    ElementId::NamedChild(Arc::new(field.into()), "error".into())
+}
+
+impl Fixture {
+    fn media_root(&self, cx: &mut TestAppContext) -> Option<std::path::PathBuf> {
+        cx.read(|cx| self.state.read(cx).settings().media_root.clone())
+    }
+
+    fn field_value(&self, cx: &mut TestAppContext, id: &'static str) -> Option<String> {
+        cx.update_window(self.window, |_, window, _| window.find(id).value().map(str::to_string))
+            .expect("window is open")
+    }
+
+    fn label_of(&self, cx: &mut TestAppContext, id: ElementId) -> Option<String> {
+        cx.update_window(self.window, |_, window, _| {
+            window.try_find(id).and_then(|found| found.label().map(str::to_string))
+        })
+        .expect("window is open")
+    }
+
+    fn replace_text(&self, cx: &mut TestAppContext, id: &'static str, text: &str) {
+        self.click(cx, id);
+        self.press(cx, "ctrl-a");
+        self.type_text(cx, text);
+    }
+}
+
+#[gpui_kit::test]
+fn the_media_folder_saves_only_folders_it_can_use(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    let before = app.media_root(cx);
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+
+    // A relative path would land under whatever folder the app was started from.
+    app.replace_text(cx, "settings-media-root", "Videos");
+    app.press(cx, "enter");
+    assert_eq!(app.media_root(cx), before);
+    let error = app.label_of(cx, media_folder_error("settings-media-root"));
+    assert_eq!(error.as_deref(), Some("Use a full path, like ~/Videos/VideoCRM or /home/you/Videos."));
+
+    // A folder that can't be created is turned down before it is saved.
+    let file = app._media.path().join("notes.txt");
+    std::fs::write(&file, "").expect("write file");
+    app.replace_text(cx, "settings-media-root", &file.join("VideoCRM").display().to_string());
+    app.press(cx, "enter");
+    assert_eq!(app.media_root(cx), before);
+    let error = app.label_of(cx, media_folder_error("settings-media-root")).unwrap_or_default();
+    assert!(error.ends_with("is a file, not a folder. Choose another folder."), "{error}");
+
+    // A usable folder is created and saved; typing cleared the error.
+    let footage = app._media.path().join("Footage");
+    app.replace_text(cx, "settings-media-root", &format!("  {}  ", footage.display()));
+    assert_eq!(app.label_of(cx, media_folder_error("settings-media-root")), None);
+    app.press(cx, "enter");
+    assert_eq!(app.media_root(cx), Some(footage.clone()));
+    assert!(footage.is_dir());
+    assert_eq!(app.field_value(cx, "settings-media-root"), Some(footage.display().to_string()));
+
+    // New videos go where the field says.
+    let id = create_video(&app, cx, "Launch day", TemplateKind::Blank);
+    let folder = cx.read(|cx| app.state.read(cx).video(id).and_then(|video| video.folder.clone()));
+    assert!(folder.is_some_and(|folder| folder.starts_with(&footage)));
+}
+
+#[gpui_kit::test]
+fn leaving_the_settings_saves_the_media_folder(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+
+    // Neither Enter nor a blur: the sidebar takes the creator elsewhere.
+    let footage = app._media.path().join("Left behind");
+    app.replace_text(cx, "settings-media-root", &footage.display().to_string());
+    app.click(cx, "sidebar-footer-0");
+    app.navigate(cx, Route::default());
+    assert_eq!(app.media_root(cx), Some(footage.clone()));
+
+    // A folder that can't be used is put back, and a notification says so.
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+    app.replace_text(cx, "settings-media-root", "relative/folder");
+    app.navigate(cx, Route::Pipelines);
+    assert_eq!(app.media_root(cx), Some(footage.clone()));
+    let notifications =
+        cx.update_window(app.window, |_, window, cx| window.notifications(cx).len()).expect("window is open");
+    assert_eq!(notifications, 1);
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+    assert_eq!(app.field_value(cx, "settings-media-root"), Some(footage.display().to_string()));
+    assert_eq!(app.label_of(cx, media_folder_error("settings-media-root")), None);
+}
+
+#[gpui_kit::test]
+fn tabbing_out_of_the_media_folder_saves_it(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    // Focus changes reach the field only while its window is active.
+    app.step(cx, |window, _| window.activate_window());
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+    let footage = app._media.path().join("Tabbed");
+    app.replace_text(cx, "settings-media-root", &footage.display().to_string());
+    app.press(cx, "tab");
+    assert_eq!(app.media_root(cx), Some(footage));
+}
+
+#[gpui_kit::test]
+fn onboarding_checks_the_media_folder_before_going_on(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, false, &[]);
+    let onboarding = cx.read(|cx| app.workspace.read(cx).onboarding().cloned().expect("onboarding"));
+    let step = |cx: &mut TestAppContext| cx.read(|cx| onboarding.read(cx).step());
+    app.click(cx, "onboarding-next");
+    assert_eq!(step(cx), Step::MediaFolder);
+
+    app.replace_text(cx, "onboarding-media-root", "Videos");
+    app.click(cx, "onboarding-next");
+    assert_eq!(step(cx), Step::MediaFolder);
+    assert!(app.label_of(cx, media_folder_error("onboarding-media-root")).is_some());
+
+    let footage = app._media.path().join("First run");
+    app.replace_text(cx, "onboarding-media-root", &footage.display().to_string());
+    app.click(cx, "onboarding-next");
+    assert_eq!(step(cx), Step::Youtube);
+    assert_eq!(app.media_root(cx), Some(footage.clone()));
+    assert!(footage.is_dir());
+}
+
+#[gpui_kit::test]
+fn history_skips_deleted_videos(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour", "Rust in 100 seconds", "Tokyo tech stores"]);
+    let (desk, rust, tokyo) = (
+        app.video_id(cx, "Desk setup tour"),
+        app.video_id(cx, "Rust in 100 seconds"),
+        app.video_id(cx, "Tokyo tech stores"),
+    );
+    let video = |id| Route::Video { id, tab: VideoTab::Script };
+    let delete = |app: &Fixture, cx: &mut TestAppContext, id: VideoId| {
+        let state = app.state.clone();
+        app.step(cx, move |_, cx| state.update(cx, |state, cx| state.delete_videos(&[id], cx)));
+    };
+    app.navigate(cx, Route::Pipelines);
+    app.navigate(cx, video(desk));
+    app.navigate(cx, video(rust));
+
+    // Deleting the open video leaves its page without keeping it in the history.
+    delete(&app, cx, rust);
+    assert_eq!(app.route(cx), Route::default());
+    app.press(cx, "alt-left");
+    assert_eq!(app.route(cx), video(desk));
+    app.press(cx, "alt-left");
+    assert_eq!(app.route(cx), Route::Pipelines);
+
+    // Pages ahead in the history go too.
+    app.press(cx, "alt-right");
+    app.navigate(cx, video(tokyo));
+    app.press(cx, "alt-left");
+    assert_eq!(app.route(cx), video(desk));
+    delete(&app, cx, tokyo);
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_forward()));
+
+    // And so do pages behind, with the repeats they leave.
+    app.navigate(cx, Route::Pipelines);
+    app.navigate(cx, Route::Uploads);
+    delete(&app, cx, desk);
+    assert_eq!(app.route(cx), Route::Uploads);
+    app.press(cx, "alt-left");
+    assert_eq!(app.route(cx), Route::Pipelines);
+    app.press(cx, "alt-left");
+    assert_eq!(app.route(cx), Route::default());
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_back()));
+}
+
+#[gpui_kit::test]
+fn a_command_named_in_full_beats_a_loosely_matching_video(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["My 2026 Desk Setup: Everything That Survived"]);
+    for query in ["settings", "set", "Sett"] {
+        app.navigate(cx, Route::default());
+        app.press(cx, "ctrl-k");
+        app.type_text(cx, query);
+        app.press(cx, "enter");
+        assert!(!app.has_dialog(cx));
+        assert_eq!(app.route(cx), Route::Settings { section: SettingsSection::General }, "query {query:?}");
+    }
+
+    // The video still wins on its own words.
+    app.navigate(cx, Route::default());
+    app.press(cx, "ctrl-k");
+    app.type_text(cx, "desk setup");
+    app.press(cx, "enter");
+    let desk = app.video_id(cx, "My 2026 Desk Setup: Everything That Survived");
+    assert_eq!(app.route(cx), Route::Video { id: desk, tab: VideoTab::Script });
+}
+
+#[gpui_kit::test]
+fn an_edit_waiting_for_approval_stands_out(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    let now = chrono::Utc::now();
+    let mut run = videocrm_core::PipelineRun {
+        id: videocrm_core::RunId::new(),
+        video_id: id,
+        status: videocrm_core::RunStatus::Planning,
+        brief: String::new(),
+        footage_dir: app._media.path().to_path_buf(),
+        session_id: None,
+        summary: None,
+        output: None,
+        error: None,
+        cost_usd: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let set_run = |app: &Fixture, cx: &mut TestAppContext, run: &videocrm_core::PipelineRun, insert: bool| {
+        let (state, mut run) = (app.state.clone(), run.clone());
+        app.step(cx, move |_, cx| {
+            state.update(cx, |state, cx| {
+                {
+                    let store = state.store();
+                    let mut store = store.lock().expect("store lock");
+                    if insert { store.insert_run(&run) } else { store.update_run(&mut run) }.expect("save run");
+                }
+                state.reload(cx);
+            })
+        });
+    };
+    set_run(&app, cx, &run, true);
+    assert!(!app.has(cx, "pipelines-awaiting"));
+    let notifications = |cx: &mut TestAppContext| {
+        cx.update_window(app.window, |_, window, cx| window.notifications(cx).len()).expect("window is open")
+    };
+    assert_eq!(notifications(cx), 0);
+
+    run.status = videocrm_core::RunStatus::AwaitingApproval;
+    set_run(&app, cx, &run, false);
+    assert!(app.has(cx, "pipelines-awaiting"));
+    assert_eq!(app.label_of(cx, "pipelines-awaiting".into()).as_deref(), Some("1 waiting for approval"));
+    assert_eq!(notifications(cx), 1);
+
+    app.click(cx, "review-strategy");
+    assert_eq!(app.route(cx), Route::Video { id, tab: VideoTab::Footage });
 }

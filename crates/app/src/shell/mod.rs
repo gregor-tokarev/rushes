@@ -7,31 +7,39 @@
 pub(crate) mod elements;
 mod palette;
 mod sidebar;
+mod signals;
+mod startup;
 mod theme;
 mod title_bar;
 
+use std::collections::HashSet;
+
 use chrono::{Local, NaiveDate};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{ActiveTheme as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    KeyBinding, ParentElement as _, Render, Styled as _, Subscription, TestSupportExt as _, Window, actions, div,
+    KeyBinding, ParentElement as _, Render, SharedString, Styled as _, Subscription, TestSupportExt as _, Window,
+    actions, div,
 };
 use videocrm_core::settings::ThemeMode;
-use videocrm_core::{VideoRow, VideoStatus, ViewId};
+use videocrm_core::{RunStatus, VideoId, VideoRow, VideoStatus, ViewId};
 
 use crate::ai_edit::PipelinesPage;
 use crate::database::{DatabaseEvent, DatabasePanel};
 use crate::onboarding::Onboarding;
 use crate::publish::{AccountBadge, UploadsPage};
-use crate::route::{Route, VideoTab};
+use crate::route::{Route, SettingsSection, VideoTab};
 use crate::settings_page::SettingsPage;
-use crate::state::{AppEvent, AppState};
+use crate::state::{AppEvent, AppState, Problem, Remedy};
 use crate::video_page::VideoPage;
 use crate::wizard;
 
 use palette::CommandPalette;
+pub use signals::on_termination_signal;
+pub use startup::{InstanceLock, StartupNotice, StartupProblem, open_startup_notice};
 pub use theme::{apply_theme, register_fonts};
 
 actions!(
@@ -60,13 +68,17 @@ const KEY_CONTEXT: &str = "Workspace";
 
 /// Binds the application's keys and the app-wide Quit. Call once at startup,
 /// after `gpui_kit::init` and before opening windows.
+///
+/// These bindings have no context, and GPUI ranks a context-free binding above
+/// every context-scoped one, so none of them may reuse a key that a component
+/// binds for itself (the editor's Ctrl+B, the table's Enter).
 pub fn init(cx: &mut App) {
     // Pending saves are written by each workspace's quit hook.
     cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
     cx.bind_keys([
         KeyBinding::new("secondary-n", NewVideo, None),
         KeyBinding::new("secondary-k", OpenCommandPalette, None),
-        KeyBinding::new("secondary-b", ToggleSidebar, None),
+        KeyBinding::new("secondary-\\", ToggleSidebar, None),
         KeyBinding::new("secondary-,", OpenSettings, None),
         KeyBinding::new("secondary-q", Quit, None),
         #[cfg(target_os = "macos")]
@@ -98,7 +110,7 @@ impl Page {
             Route::Video { .. } => Page::Video,
             Route::Pipelines => Page::Pipelines,
             Route::Uploads => Page::Uploads,
-            Route::Settings => Page::Settings,
+            Route::Settings { .. } => Page::Settings,
             Route::Onboarding => Page::Onboarding,
         }
     }
@@ -115,6 +127,11 @@ pub struct Workspace {
     account: Entity<AccountBadge>,
     palette: Entity<CommandPalette>,
     sidebar_collapsed: bool,
+    /// The page the main area showed after the last route change.
+    shown: Option<Page>,
+    /// Videos whose latest AI edit waits for approval, as of the last data
+    /// change; `None` until the first, which only records them.
+    awaiting_approval: Option<HashSet<VideoId>>,
     /// The theme mode last applied, so unrelated settings changes leave the theme alone.
     theme_mode: ThemeMode,
     focus_handle: FocusHandle,
@@ -139,6 +156,9 @@ impl Workspace {
             }),
             cx.on_app_quit(|this, cx| {
                 this.flush_pending_saves(cx);
+                if let Some(settings) = &this.settings {
+                    settings.update(cx, |settings, cx| settings.commit_before_quit(cx));
+                }
                 async {}
             }),
             // When the focused element goes away (a page left, a dialog closed
@@ -160,12 +180,23 @@ impl Workspace {
             account,
             palette,
             sidebar_collapsed: false,
+            shown: None,
+            awaiting_approval: None,
             theme_mode,
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
         workspace.sync_data(window, cx);
         workspace.sync_route(window, cx);
+        let problems = workspace.state.update(cx, |state, _| state.take_startup_problems());
+        if !problems.is_empty() {
+            // The window's notification layer exists once the window does.
+            window.defer(cx, move |window, cx| {
+                for problem in &problems {
+                    window.push_notification(problem_notification(problem), cx);
+                }
+            });
+        }
         workspace
     }
 
@@ -232,13 +263,46 @@ impl Workspace {
             AppEvent::Error(message) => {
                 window.push_notification(Notification::error(message.clone()), cx);
             }
+            AppEvent::Problem(problem) => window.push_notification(problem_notification(problem), cx),
         }
     }
 
     fn sync_data(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let (rows, properties, views) = (state.rows().to_vec(), state.properties().to_vec(), state.views().to_vec());
+        self.announce_strategies(&rows, window, cx);
         self.database.update(cx, |panel, cx| panel.set_data(rows, properties, views, window, cx));
+    }
+
+    /// Tells the creator when an AI edit starts waiting for their approval,
+    /// unless they are already looking at it.
+    fn announce_strategies(&mut self, rows: &[VideoRow], window: &mut Window, cx: &mut Context<Self>) {
+        let awaiting: HashSet<VideoId> = rows
+            .iter()
+            .filter(|row| row.latest_run == Some(RunStatus::AwaitingApproval))
+            .map(|row| row.video.id)
+            .collect();
+        let Some(previous) = self.awaiting_approval.replace(awaiting.clone()) else { return };
+        let route = self.state.read(cx).route().clone();
+        for row in rows.iter().filter(|row| awaiting.contains(&row.video.id) && !previous.contains(&row.video.id)) {
+            let id = row.video.id;
+            if route == (Route::Video { id, tab: VideoTab::Footage }) {
+                continue;
+            }
+            let title = sidebar::display_title(&row.video.title);
+            let notification = Notification::info("Review the plan, then approve it or ask for changes.")
+                .title(format!("Edit strategy ready for “{title}”"))
+                .id1::<RunStatus>(SharedString::from(id.to_string()))
+                .action(move |_, _, cx| {
+                    Button::new("review-strategy").small().label("Review").on_click(cx.listener(
+                        move |notification, _, window, cx| {
+                            notification.dismiss(window, cx);
+                            AppState::global(cx).update(cx, |state, cx| state.open_video(id, VideoTab::Footage, cx));
+                        },
+                    ))
+                });
+            window.push_notification(notification, cx);
+        }
     }
 
     /// Points the main area at the current route, creating the page it needs.
@@ -247,6 +311,14 @@ impl Workspace {
         if !matches!(route, Route::Video { .. }) {
             self.flush_pending_saves(cx);
         }
+        let page = Page::of(&route);
+        if self.shown == Some(Page::Settings)
+            && page != Page::Settings
+            && let Some(settings) = &self.settings
+        {
+            settings.update(cx, |settings, cx| settings.commit_pending(window, cx));
+        }
+        self.shown = Some(page);
         match route {
             Route::Database { view } => {
                 if let Some(view) = self.shown_view(view, cx) {
@@ -272,11 +344,10 @@ impl Workspace {
                     self.uploads = Some(cx.new(|cx| UploadsPage::new(window, cx)));
                 }
             }
-            Route::Settings => {
-                if self.settings.is_none() {
-                    self.settings = Some(cx.new(|cx| SettingsPage::new(window, cx)));
-                }
-            }
+            Route::Settings { section } => match &self.settings {
+                Some(page) => page.update(cx, |page, cx| page.open_section(section, cx)),
+                None => self.settings = Some(cx.new(|cx| SettingsPage::new(section, window, cx))),
+            },
             Route::Onboarding => {
                 if self.onboarding.is_none() {
                     self.onboarding = Some(cx.new(|cx| Onboarding::new(window, cx)));
@@ -335,7 +406,7 @@ impl Workspace {
     }
 
     fn open_settings(&mut self, _: &OpenSettings, _: &mut Window, cx: &mut Context<Self>) {
-        self.state.update(cx, |state, cx| state.navigate(Route::Settings, cx));
+        self.state.update(cx, |state, cx| state.open_settings(SettingsSection::General, cx));
     }
 
     fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -345,7 +416,7 @@ impl Workspace {
             Route::Video { .. } => self.video_page.clone().map(IntoElement::into_any_element),
             Route::Pipelines => self.pipelines.clone().map(IntoElement::into_any_element),
             Route::Uploads => self.uploads.clone().map(IntoElement::into_any_element),
-            Route::Settings => self.settings.clone().map(IntoElement::into_any_element),
+            Route::Settings { .. } => self.settings.clone().map(IntoElement::into_any_element),
             Route::Onboarding => self.onboarding.clone().map(IntoElement::into_any_element),
         };
         let page_id = match Page::of(&route) {
@@ -385,6 +456,24 @@ impl Workspace {
             .child(div().flex_1().min_h_0().child(self.database.clone()))
             .into_any_element()
     }
+}
+
+/// An error notification for `problem`, with a button for its remedy. The
+/// same problem raised again replaces the one shown instead of stacking.
+fn problem_notification(problem: &Problem) -> Notification {
+    let notification = Notification::error(problem.message().clone())
+        .title(problem.title().clone())
+        .id1::<Problem>(problem.title().clone());
+    let Some(remedy) = problem.remedy() else { return notification };
+    notification.action(move |_, _, cx| {
+        Button::new("problem-remedy").small().label(remedy.label()).on_click(cx.listener(
+            move |notification, _, window, cx| {
+                notification.dismiss(window, cx);
+                let Remedy::OpenSettings(section) = remedy;
+                AppState::global(cx).update(cx, |state, cx| state.open_settings(section, cx));
+            },
+        ))
+    })
 }
 
 /// One line under the database title: what is in production and what ships next.

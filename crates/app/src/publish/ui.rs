@@ -24,7 +24,7 @@ use super::rules::group_thousands;
 use super::service::{Connection, YoutubeService};
 use crate::database::Chip;
 use crate::database::colors::upload_status_color;
-use crate::route::Route;
+use crate::route::SettingsSection;
 use crate::state::AppState;
 
 /// Heading of a group of fields.
@@ -259,7 +259,7 @@ impl RenderOnce for ConnectionPanel {
         };
         let open_settings = Button::new("settings").label("Open settings").small().outline().on_click(|_, _, cx| {
             let state = AppState::global(cx);
-            state.update(cx, |state, cx| state.navigate(Route::Settings, cx));
+            state.update(cx, |state, cx| state.open_settings(SettingsSection::Youtube, cx));
         });
 
         let body = match service.connection().clone() {

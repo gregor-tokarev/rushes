@@ -17,7 +17,7 @@ use gpui_kit::{
     point, px, rems, size,
 };
 use videocrm::publish::{AccountBadge, PublishPanel, UploadsPage, YoutubeService, YoutubeSettings};
-use videocrm::route::{Route, VideoTab};
+use videocrm::route::{Route, SettingsSection, VideoTab};
 use videocrm::state::AppState;
 use videocrm_core::Store;
 use videocrm_core::settings::{DATA_DIR_ENV, YoutubeBackend, data_dir, database_path};
@@ -79,7 +79,7 @@ impl Render for Demo {
         let column = || v_flex().w_full().max_w(rems(53.)).px(rems(3.5));
         let main = match route {
             Route::Uploads => self.uploads.clone().into_any_element(),
-            Route::Settings => {
+            Route::Settings { .. } => {
                 let settings = self.settings.clone();
                 Settings::new("settings")
                     .sidebar_width(window.rem_size() * 14.)
@@ -138,7 +138,7 @@ impl Render for Demo {
                                 "nav-settings",
                                 "Settings",
                                 IconName::Settings,
-                                Route::Settings,
+                                Route::Settings { section: SettingsSection::Youtube },
                                 cx,
                             )),
                     )

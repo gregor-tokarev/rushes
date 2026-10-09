@@ -34,6 +34,8 @@ Long operations take a cancellation flag (`Arc<AtomicBool>`) and a progress call
 
 - Database and settings: `dirs::data_dir()/videocrm/` (`videocrm.db`, `credentials.json`).
   Overridable with env `VIDEOCRM_DATA_DIR` (used by tests and screenshots).
+  The running app holds an exclusive lock on `videocrm.lock` there; a second copy on the
+  same data dir shows "VideoCRM is already open" and quits without opening the database.
 - Media root (default `dirs::video_dir()/VideoCRM`, fallback `~/Videos/VideoCRM`):
   one folder per video `<slug>-<short id>/` containing `footage/` (raw takes).
   video-use writes all outputs to `footage/edit/` (`final.mp4`, `project.md`, ...).

@@ -144,7 +144,7 @@ fn breadcrumb(state: &gpui_kit::Entity<AppState>, cx: &App) -> Breadcrumb {
         },
         Route::Pipelines => Breadcrumb::new().child("Pipelines"),
         Route::Uploads => Breadcrumb::new().child("Uploads"),
-        Route::Settings => Breadcrumb::new().child("Settings"),
+        Route::Settings { section } => Breadcrumb::new().child("Settings").child(section.label()),
         Route::Onboarding => Breadcrumb::new().child("Welcome"),
     }
 }

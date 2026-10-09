@@ -1,152 +1,139 @@
 //! Settings page: General (theme, folders), YouTube, AI editing and About.
 //! Embeds `publish::YoutubeSettings` and `ai_edit::AiSettings` as sections.
 
-use std::path::PathBuf;
+mod media_folder;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
+use gpui_kit::component::setting::{SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
-    SharedString, Styled as _, Subscription, WeakEntity, Window, div, rems,
+    App, AppContext as _, Axis, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, rems,
 };
-use videocrm_core::media::default_media_root;
+use videocrm_core::input::display_user_path;
 use videocrm_core::settings::{ThemeMode, data_dir};
 
 use crate::ai_edit::AiSettings;
 use crate::publish::YoutubeSettings;
+use crate::route::SettingsSection;
 use crate::state::{AppEvent, AppState};
 
+pub use media_folder::{Commit, MediaFolderEvent, MediaFolderField};
+
 pub struct SettingsPage {
-    state: Entity<AppState>,
-    media_root: Entity<InputState>,
+    section: SettingsSection,
+    /// Bumped by [`SettingsPage::open_section`]: the kit's settings keep their
+    /// selected page in element state, so a new key is how a section is opened.
+    opened: usize,
+    media_folder: Entity<MediaFolderField>,
     youtube: Entity<YoutubeSettings>,
     ai: Entity<AiSettings>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl SettingsPage {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(section: SettingsSection, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = AppState::global(cx);
-        let root = state.read(cx).settings().resolved_media_root();
-        let media_root = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(default_media_root().display().to_string())
-                .default_value(root.display().to_string())
-        });
-        let subscriptions = vec![
-            cx.subscribe(&media_root, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                    this.save_media_root(cx);
-                }
-            }),
-            cx.subscribe_in(&state, window, |this, state, event: &AppEvent, window, cx| {
-                if *event == AppEvent::SettingsChanged && !this.media_root.read(cx).focus_handle(cx).is_focused(window)
-                {
-                    let root = state.read(cx).settings().resolved_media_root().display().to_string();
-                    if this.media_root.read(cx).value() != root {
-                        this.media_root.update(cx, |input, cx| input.set_value(root, window, cx));
-                    }
-                }
+        let subscriptions = vec![cx.subscribe(&state, |_, _, event: &AppEvent, cx| {
+            if *event == AppEvent::SettingsChanged {
                 cx.notify();
-            }),
-        ];
+            }
+        })];
         Self {
-            state,
-            media_root,
+            section,
+            opened: 0,
+            media_folder: cx.new(|cx| MediaFolderField::new("settings-media-root", window, cx)),
             youtube: cx.new(|cx| YoutubeSettings::new(window, cx)),
             ai: cx.new(|cx| AiSettings::new(window, cx)),
             _subscriptions: subscriptions,
         }
     }
 
-    /// Stores the media root; the platform default stays unset so it follows the platform.
-    fn save_media_root(&mut self, cx: &mut Context<Self>) {
-        let text = self.media_root.read(cx).value().trim().to_string();
-        let root = (!text.is_empty()).then(|| PathBuf::from(text)).filter(|root| *root != default_media_root());
-        self.state.update(cx, |state, cx| state.update_settings(cx, |settings| settings.media_root = root));
+    /// The section shown when the page was last opened; the creator can pick another in its list.
+    pub fn section(&self) -> SettingsSection {
+        self.section
     }
 
-    fn choose_media_root(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Choose".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let chosen = match paths.await {
-                Ok(Ok(Some(paths))) => paths.into_iter().next(),
-                Ok(Ok(None)) | Err(_) => None,
-                Ok(Err(error)) => {
-                    eprintln!("videocrm: folder picker failed: {error}");
-                    let message = "Couldn’t open the folder picker. Type the path instead.";
-                    _ = this.update(cx, |this, cx| this.state.update(cx, |state, cx| state.report_error(message, cx)));
-                    None
-                }
-            };
-            if let Some(path) = chosen {
-                _ = this.update_in(cx, |this, window, cx| {
-                    this.media_root.update(cx, |input, cx| input.set_value(path.display().to_string(), window, cx));
-                    this.save_media_root(cx);
-                });
-            }
-        })
-        .detach();
+    /// Shows `section`, replacing the page the creator picked in the list.
+    pub fn open_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        self.section = section;
+        self.opened += 1;
+        cx.notify();
     }
 
-    fn pages(&self, cx: &mut Context<Self>) -> Vec<SettingPage> {
-        let page = cx.weak_entity();
-        let media_root = self.media_root.clone();
+    pub fn media_folder(&self) -> &Entity<MediaFolderField> {
+        &self.media_folder
+    }
+
+    /// Saves edits still in a field when the page is left or the app quits: a
+    /// typed media folder that can't be used is put back, with a notification.
+    pub fn commit_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.media_folder.update(cx, |field, cx| field.commit(Commit::Revert, false, window, cx).detach());
+    }
+
+    /// Saves edits still in a field as the app quits.
+    pub fn commit_before_quit(&mut self, cx: &mut Context<Self>) {
+        self.media_folder.update(cx, |field, cx| field.commit_before_quit(cx));
+    }
+
+    fn pages(&self) -> Vec<SettingPage> {
+        let media_folder = self.media_folder.clone();
         let youtube = self.youtube.clone();
         let ai = self.ai.clone();
         vec![
-            SettingPage::new("General").icon(Icon::new(IconName::Settings2)).default_open(true).groups(vec![
-                SettingGroup::new().title("Appearance").item(
-                    SettingItem::new(
-                        "Theme",
-                        SettingField::dropdown(
-                            ThemeMode::ALL
-                                .iter()
-                                .map(|mode| (theme_key(*mode), SharedString::from(mode.label())))
-                                .collect(),
-                            |cx: &App| theme_key(AppState::global(cx).read(cx).settings().theme),
-                            |key: SharedString, cx: &mut App| {
-                                let Some(mode) = ThemeMode::ALL.into_iter().find(|mode| theme_key(*mode) == key) else {
-                                    return;
-                                };
-                                AppState::global(cx).update(cx, |state, cx| {
-                                    state.update_settings(cx, |settings| settings.theme = mode)
-                                });
-                            },
-                        ),
-                    )
-                    .description("System follows your operating system’s light or dark appearance."),
-                ),
-                SettingGroup::new().title("Storage").items(vec![
-                    SettingItem::new("Media folder", media_folder_field(media_root, page))
-                        .description("Each video gets a folder here for raw footage and AI edit outputs.")
-                        .keywords(["footage", "path"]),
-                    SettingItem::new("Data folder", data_folder_field())
-                        .description("The database and YouTube credentials. Set VIDEOCRM_DATA_DIR to move it.")
-                        .keywords(["database", "path"]),
+            SettingPage::new(SettingsSection::General.label())
+                .icon(Icon::new(IconName::Settings2))
+                .default_open(true)
+                .groups(vec![
+                    SettingGroup::new().title("Appearance").item(
+                        SettingItem::new(
+                            "Theme",
+                            SettingField::dropdown(
+                                ThemeMode::ALL
+                                    .iter()
+                                    .map(|mode| (theme_key(*mode), SharedString::from(mode.label())))
+                                    .collect(),
+                                |cx: &App| theme_key(AppState::global(cx).read(cx).settings().theme),
+                                |key: SharedString, cx: &mut App| {
+                                    let Some(mode) = ThemeMode::ALL.into_iter().find(|mode| theme_key(*mode) == key)
+                                    else {
+                                        return;
+                                    };
+                                    AppState::global(cx).update(cx, |state, cx| {
+                                        state.update_settings(cx, |settings| settings.theme = mode)
+                                    });
+                                },
+                            ),
+                        )
+                        .description("System follows your operating system’s light or dark appearance."),
+                    ),
+                    // Paths are long: their fields sit under the label at any width.
+                    SettingGroup::new().title("Storage").items(vec![
+                        SettingItem::new("Media folder", media_folder_field(media_folder))
+                            .layout(Axis::Vertical)
+                            .description("Each video gets a folder here for raw footage and AI edit outputs.")
+                            .keywords(["footage", "path"]),
+                        SettingItem::new("Data folder", data_folder_field())
+                            .layout(Axis::Vertical)
+                            .description("The database and YouTube credentials. Set VIDEOCRM_DATA_DIR to move it.")
+                            .keywords(["database", "path"]),
+                    ]),
                 ]),
-            ]),
-            SettingPage::new("YouTube").icon(Icon::new(IconName::CirclePlay)).group(
+            SettingPage::new(SettingsSection::Youtube.label()).icon(Icon::new(IconName::CirclePlay)).group(
                 SettingGroup::new().item(
                     SettingItem::render(move |_, _, _| youtube.clone()).keywords(["account", "upload", "google"]),
                 ),
             ),
-            SettingPage::new("AI editing").icon(Icon::new(IconName::WandSparkles)).group(
+            SettingPage::new(SettingsSection::AiEditing.label()).icon(Icon::new(IconName::WandSparkles)).group(
                 SettingGroup::new().item(SettingItem::render(move |_, _, _| ai.clone()).keywords([
                     "agent",
                     "claude",
                     "video-use",
                 ])),
             ),
-            SettingPage::new("About").icon(Icon::new(IconName::Info)).group(
+            SettingPage::new(SettingsSection::About.label()).icon(Icon::new(IconName::Info)).group(
                 SettingGroup::new().item(
                     SettingItem::render(|_, _, cx| {
                         v_flex()
@@ -191,31 +178,33 @@ fn theme_key(mode: ThemeMode) -> SharedString {
     mode.label().to_lowercase().into()
 }
 
-fn media_folder_field(media_root: Entity<InputState>, page: WeakEntity<SettingsPage>) -> SettingField<SharedString> {
-    SettingField::render(move |options, _, _| {
-        let page = page.clone();
-        h_flex()
-            .w_96()
-            .gap_2()
-            .child(Input::new(&media_root).id("settings-media-root").with_size(options.size()).flex_1())
-            .child(
-                Button::new("settings-choose-media-root")
-                    .outline()
-                    .with_size(options.size())
-                    .label("Choose…")
-                    .on_click(move |_, window, cx| {
-                        _ = page.update(cx, |page, cx| page.choose_media_root(window, cx));
-                    }),
-            )
-    })
+fn media_folder_field(field: Entity<MediaFolderField>) -> SettingField<SharedString> {
+    SettingField::render(move |_, _, _| div().w_full().max_w(rems(36.)).child(field.clone()))
 }
 
 fn data_folder_field() -> SettingField<SharedString> {
     SettingField::render(|options, _, cx| {
         let dir = data_dir();
+        let shown: SharedString = display_user_path(&dir).into();
         h_flex()
+            .w_full()
+            .max_w(rems(36.))
+            .min_w_0()
             .gap_2()
-            .child(div().text_sm().text_color(cx.theme().muted_foreground).child(dir.display().to_string()))
+            .child(
+                div()
+                    .id("data-folder-path")
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .tooltip({
+                        let full: SharedString = dir.display().to_string().into();
+                        move |window, cx| Tooltip::new(full.clone()).build(window, cx)
+                    })
+                    .child(shown),
+            )
             .child(
                 Button::new("open-data-folder")
                     .outline()
@@ -228,7 +217,11 @@ fn data_folder_field() -> SettingField<SharedString> {
 }
 
 impl Render for SettingsPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        Settings::new("settings").sidebar_width(window.rem_size() * 14.).pages(self.pages(cx))
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let page_ix = SettingsSection::ALL.iter().position(|section| *section == self.section).unwrap_or(0);
+        Settings::new(("settings", self.opened))
+            .default_selected_index(SelectIndex { page_ix, group_ix: None })
+            .sidebar_width(window.rem_size() * 14.)
+            .pages(self.pages())
     }
 }

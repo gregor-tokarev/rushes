@@ -19,7 +19,7 @@ use serde_json::json;
 use videocrm::publish::{
     AccountBadge, BlockingReason, CHAPTERS_HEADING, Connection, PublishPanel, UploadsPage, YoutubeSettings,
 };
-use videocrm::route::Route;
+use videocrm::route::{Route, SettingsSection};
 use videocrm_core::settings::YoutubeBackend;
 use videocrm_core::{Block, BlockKind, DocumentKind, Privacy, UploadId, UploadJob, UploadStatus, VideoId, YoutubeLink};
 use videocrm_youtube::{CredentialStore, RetryCause};
@@ -494,7 +494,10 @@ fn the_account_badge_opens_the_youtube_settings(cx: &mut TestAppContext) {
         assert_eq!(window.find("account-badge").label(), Some("Connect YouTube. Open YouTube settings"));
         window.click("account-badge", cx);
     });
-    assert_eq!(workspace.state.read_with(cx, |state, _| state.route().clone()), Route::Settings);
+    assert_eq!(
+        workspace.state.read_with(cx, |state, _| state.route().clone()),
+        Route::Settings { section: SettingsSection::Youtube }
+    );
 }
 
 #[gpui_kit::test]
