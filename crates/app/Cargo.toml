@@ -15,4 +15,9 @@ videocrm-youtube = { path = "../youtube" }
 ureq = "3"
 
 [dev-dependencies]
+base64 = "0.22"
 gpui-kit = { workspace = true, features = ["test-support"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+url = "2"
