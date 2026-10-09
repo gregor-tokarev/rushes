@@ -7516,6 +7516,7 @@ dependencies = [
  "gpui-kit",
  "videocrm-core",
  "videocrm-pipeline",
+ "videocrm-youtube",
 ]
 
 [[package]]

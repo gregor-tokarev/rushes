@@ -6,10 +6,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+chrono = "0.4"
 gpui-kit.workspace = true
 videocrm-core = { path = "../core" }
 videocrm-pipeline = { path = "../pipeline" }
+videocrm-youtube = { path = "../youtube" }
 
 [dev-dependencies]
-chrono = "0.4"
 gpui-kit = { workspace = true, features = ["test-support"] }
