@@ -1,6 +1,6 @@
 //! The footage card of the AI edit panel: the raw takes in the video's footage folder.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -16,11 +16,12 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Div, Entity, EventEmitter, ExternalPaths, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Task, TestSupportExt as _,
-    Window, div,
+    AnyElement, App, AppContext as _, ClipboardItem, Context, Div, Entity, EventEmitter, ExternalPaths, FontWeight,
+    Global, InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render, SharedString,
+    Styled as _, Task, TestSupportExt as _, Window, div,
 };
 use videocrm_core::VideoId;
+use videocrm_core::input::display_user_path;
 use videocrm_core::media::{self, MediaFile, MediaKind};
 use videocrm_pipeline::{MediaInfo, probe_media};
 
@@ -33,8 +34,17 @@ use crate::state::AppState;
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 const COPY_CHUNK: usize = 1 << 20;
 
+/// Suffix of a take that is still being copied in.
+const PARTIAL_SUFFIX: &str = ".part";
+
 /// The footage list changed (files added, removed or probed).
 pub(crate) struct FootageChanged;
+
+/// Footage folders already cleared of copies an earlier session left unfinished.
+#[derive(Default)]
+struct SweptFolders(HashSet<PathBuf>);
+
+impl Global for SweptFolders {}
 
 struct Take {
     file: MediaFile,
@@ -69,6 +79,9 @@ pub(crate) struct FootageCard {
     import: Option<Import>,
     /// What went wrong adding footage.
     error: Option<SharedString>,
+    /// The system file chooser could not open; the card shows how to add takes
+    /// without it until some arrive.
+    chooser_failed: bool,
     /// Why the folder can't be read; cleared once it can.
     list_error: Option<SharedString>,
     /// A listing (and the probes it started) is in flight.
@@ -97,13 +110,26 @@ impl FootageCard {
             probes: HashMap::new(),
             import: None,
             error: None,
+            chooser_failed: false,
             list_error: None,
             refreshing: false,
             refresh_task: None,
             _poll: poll,
         };
+        card.sweep_partial_copies(cx);
         card.refresh(cx);
         card
+    }
+
+    /// Removes the hidden `.<take>.part` files of copies an earlier session left
+    /// unfinished (it quit mid-copy). Once per folder and session, so the copy of a
+    /// card closed meanwhile keeps its file.
+    fn sweep_partial_copies(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.footage_dir(cx) else { return };
+        if !cx.default_global::<SweptFolders>().0.insert(dir.clone()) {
+            return;
+        }
+        cx.background_spawn(async move { remove_partial_copies(&dir) }).detach();
     }
 
     /// Whether the folder holds at least one video or audio take.
@@ -167,6 +193,10 @@ impl FootageCard {
         let changed = !self.loaded
             || files.len() != self.takes.len()
             || files.iter().zip(&self.takes).any(|(file, take)| *file != take.file);
+        if self.loaded && files.len() > self.takes.len() {
+            // Takes arrived without the chooser (copied into the folder or dropped).
+            self.chooser_failed = false;
+        }
         self.loaded = true;
         let mut to_probe = Vec::new();
         self.takes = files
@@ -214,20 +244,24 @@ impl FootageCard {
             prompt: Some("Add footage".into()),
         });
         cx.spawn(async move |this, cx| {
-            let paths = match picked.await {
-                Ok(Ok(Some(paths))) => paths,
-                Ok(Ok(None)) | Err(_) => return,
-                Ok(Err(error)) => {
-                    _ = this.update(cx, |this, cx| {
-                        this.error = Some(format!("Couldn't open the file picker: {error}").into());
-                        cx.notify();
-                    });
-                    return;
-                }
-            };
-            _ = this.update(cx, |this, cx| this.import(paths, cx));
+            let Ok(picked) = picked.await else { return };
+            _ = this.update(cx, |this, cx| this.on_picked(picked, cx));
         })
         .detach();
+    }
+
+    /// Imports what the file chooser returned, or explains how to add takes without it
+    /// when it could not open (no desktop portal, for example).
+    fn on_picked(&mut self, picked: gpui_kit::Result<Option<Vec<PathBuf>>>, cx: &mut Context<Self>) {
+        match picked {
+            Ok(Some(paths)) => self.import(paths, cx),
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("videocrm: file chooser failed: {error}");
+                self.chooser_failed = true;
+                cx.notify();
+            }
+        }
     }
 
     /// Copies media files into the footage folder on a background thread. Other files
@@ -236,6 +270,7 @@ impl FootageCard {
         if self.import.is_some() {
             return;
         }
+        self.chooser_failed = false;
         let (media, skipped): (Vec<PathBuf>, Vec<PathBuf>) =
             paths.into_iter().partition(|path| MediaKind::from_path(path).is_some() && path.is_file());
         if media.is_empty() {
@@ -267,7 +302,8 @@ impl FootageCard {
             let result = media.iter().enumerate().try_for_each(|(ix, source)| {
                 report(ImportMessage::File { ix, name: file_name(source) });
                 copy_into(source, &dir, &mut |bytes| report(ImportMessage::Copied(bytes)))
-                    .map_err(|error| format!("Couldn't copy {}: {error}", file_name(source)))
+                    .map(drop)
+                    .map_err(|error| format!("Couldn’t copy {}: {error}", file_name(source)))
             });
             report(ImportMessage::Done(result));
         });
@@ -303,6 +339,12 @@ impl FootageCard {
             }
         })
         .detach();
+    }
+
+    fn copy_folder_path(&mut self, cx: &mut Context<Self>) {
+        if let Some(dir) = self.footage_dir(cx) {
+            cx.write_to_clipboard(ClipboardItem::new_string(dir.display().to_string()));
+        }
     }
 
     fn open_folder(&mut self, cx: &mut Context<Self>) {
@@ -402,6 +444,72 @@ impl FootageCard {
             )
     }
 
+    /// How to add takes when the file chooser can't open.
+    fn render_chooser_failed(&self, cx: &mut Context<Self>) -> AnyElement {
+        let folder = self.footage_dir(cx).map(|dir| display_user_path(&dir)).unwrap_or_default();
+        let theme = cx.theme();
+        h_flex()
+            .id("footage-chooser-failed")
+            .test_support()
+            .items_start()
+            .gap_3()
+            .px_3()
+            .py_2p5()
+            .rounded(theme.radius_lg)
+            .bg(theme.muted)
+            .child(div().pt_0p5().child(Icon::new(IconName::Info).small().text_color(theme.muted_foreground)))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Couldn’t open the file chooser"))
+                    .child(
+                        div().text_sm().text_color(theme.muted_foreground).child(
+                            "Drop your takes on the footage list, or copy them into the video’s footage folder:",
+                        ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_color(theme.foreground)
+                            .truncate()
+                            .child(folder),
+                    )
+                    .child(
+                        h_flex()
+                            .pt_1()
+                            .gap_2()
+                            .child(
+                                Button::new("footage-copy-path")
+                                    .outline()
+                                    .small()
+                                    .icon(IconName::Copy)
+                                    .label("Copy path")
+                                    .on_click(cx.listener(|this, _, _, cx| this.copy_folder_path(cx))),
+                            )
+                            .child(
+                                Button::new("footage-open-folder-instead")
+                                    .outline()
+                                    .small()
+                                    .icon(IconName::FolderOpen)
+                                    .label("Open footage folder")
+                                    .on_click(cx.listener(|this, _, _, cx| this.open_folder(cx))),
+                            ),
+                    ),
+            )
+            .child(
+                Button::new("footage-chooser-dismiss").ghost().xsmall().icon(IconName::X).tooltip("Dismiss").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.chooser_failed = false;
+                        cx.notify();
+                    }),
+                ),
+            )
+            .into_any_element()
+    }
+
     fn render_import(&self, import: &Import, cx: &App) -> Div {
         let theme = cx.theme();
         let value =
@@ -432,6 +540,15 @@ impl Render for FootageCard {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let header = self.render_header(cx);
         let body = if self.takes.is_empty() && self.loaded { self.render_empty(cx) } else { self.render_list(cx) };
+        let chooser_failed = self.chooser_failed.then(|| self.render_chooser_failed(cx));
+        let dismiss_error = self.error.is_some().then(|| {
+            Button::new("footage-dismiss-error").ghost().xsmall().icon(IconName::X).tooltip("Dismiss").on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.error = None;
+                    cx.notify();
+                }),
+            )
+        });
         let theme = cx.theme();
         let drop_border = theme.primary;
         let drop_fill = theme.drop_target;
@@ -453,12 +570,14 @@ impl Render for FootageCard {
                     .when_some(self.import.as_ref(), |this, import| this.child(self.render_import(import, cx)))
                     .child(body),
             )
-            .children(
-                self.list_error
-                    .iter()
-                    .chain(&self.error)
-                    .map(|error| div().text_sm().text_color(theme.danger).child(error.clone())),
-            )
+            .children(chooser_failed)
+            .children(self.list_error.clone().map(|error| div().text_sm().text_color(theme.danger).child(error)))
+            .children(self.error.clone().map(|error| {
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().text_sm().text_color(theme.danger).child(error))
+                    .children(dismiss_error)
+            }))
     }
 }
 
@@ -466,14 +585,17 @@ fn file_name(path: &Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned())
 }
 
-/// Copies `source` into `dir` under a free name, reporting copied bytes. A partial
-/// copy is removed.
-fn copy_into(source: &Path, dir: &Path, progress: &mut dyn FnMut(u64)) -> io::Result<()> {
+/// Copies `source` into `dir` under a free name, reporting copied bytes. The copy is
+/// written to a hidden `.<name>.part` file and gets its name only once complete, so a
+/// copy cut short (the app quit) never shows up as a shorter take; a failed copy is
+/// removed.
+fn copy_into(source: &Path, dir: &Path, progress: &mut dyn FnMut(u64)) -> io::Result<PathBuf> {
     if source.parent() == Some(dir) {
-        return Ok(());
+        return Ok(source.to_owned());
     }
-    let (dest, mut out) = create_free(dir, source)?;
+    let partial = dir.join(format!(".{}{PARTIAL_SUFFIX}", file_name(source)));
     let result = (|| {
+        let mut out = File::create(&partial)?;
         let mut input = File::open(source)?;
         let mut buffer = vec![0; COPY_CHUNK];
         loop {
@@ -484,33 +606,110 @@ fn copy_into(source: &Path, dir: &Path, progress: &mut dyn FnMut(u64)) -> io::Re
             out.write_all(&buffer[..read])?;
             progress(read as u64);
         }
-        out.sync_all()
+        out.sync_all()?;
+        drop(out);
+        name_free(&partial, dir, source)
     })();
     if result.is_err() {
-        _ = fs::remove_file(&dest);
+        _ = fs::remove_file(&partial);
     }
     result
 }
 
-/// Creates `dir/<source name>`, or `name (2).ext`, `name (3).ext`, ... when taken.
-fn create_free(dir: &Path, source: &Path) -> io::Result<(PathBuf, File)> {
+/// Gives the finished copy `partial` the name `dir/<source name>`, or `name (2).ext`,
+/// `name (3).ext`, ... when taken; never replaces a take.
+fn name_free(partial: &Path, dir: &Path, source: &Path) -> io::Result<PathBuf> {
     let stem = source.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
     let extension = source.extension().map(|ext| format!(".{}", ext.to_string_lossy())).unwrap_or_default();
     for n in 1.. {
         let name = if n == 1 { format!("{stem}{extension}") } else { format!("{stem} ({n}){extension}") };
         let dest = dir.join(name);
-        match File::create_new(&dest) {
-            Ok(file) => return Ok((dest, file)),
+        // A hard link fails instead of replacing an existing file.
+        match fs::hard_link(partial, &dest) {
+            Ok(()) => {
+                fs::remove_file(partial)?;
+                return Ok(dest);
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
+            // A file system without hard links (exFAT, for example).
+            Err(_) if !dest.exists() => {
+                fs::rename(partial, &dest)?;
+                return Ok(dest);
+            }
+            Err(_) => continue,
         }
     }
     unreachable!("an unbounded range always yields a free name")
 }
 
+/// Removes the `.<take>.part` files of unfinished copies from `dir`.
+fn remove_partial_copies(dir: &Path) {
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') && name.ends_with(PARTIAL_SUFFIX) && entry.path().is_file() {
+            _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{Bounds, TestAppContext, WindowBounds, WindowOptions, px, size};
+    use videocrm_core::{NewVideo, Store};
+
     use super::*;
+
+    #[gpui_kit::test]
+    fn without_a_file_chooser_the_card_explains_how_to_add_takes(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let media = tempfile::tempdir().unwrap();
+        let state = cx.new(|_| AppState::new(Store::open_in_memory().unwrap()).unwrap());
+        let video = cx.update(|cx| {
+            AppState::set_global(state.clone(), cx);
+            state.update(cx, |state, cx| {
+                state.update_settings(cx, |settings| settings.media_root = Some(media.path().to_owned()));
+                state.create_video(NewVideo { title: "Desk setup".into(), ..NewVideo::default() }, cx).unwrap()
+            })
+        });
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(Default::default(), size(px(900.), px(700.))))),
+            ..WindowOptions::default()
+        };
+        let (window, card) = cx
+            .update(|cx| gpui_kit::open_window(options, cx, |_, cx| cx.new(|cx| FootageCard::new(video, cx))))
+            .unwrap();
+        let footage = cx.read(|cx| card.read(cx).footage_dir(cx)).expect("footage folder");
+        cx.run_until_parked();
+        assert!(cx.read(|cx| card.read(cx).is_loaded()));
+        let shows = |cx: &mut TestAppContext, id: &str| {
+            let id = gpui_kit::ElementId::Name(id.to_owned().into());
+            cx.update_window(window, move |_, window, cx| {
+                window.render_frame(cx);
+                window.try_find(id).is_some_and(|element| element.visible())
+            })
+            .unwrap()
+        };
+
+        cx.update(|cx| {
+            card.update(cx, |card, cx| card.on_picked(Err(io::Error::other("ZBus Error: no bus").into()), cx))
+        });
+        assert!(shows(cx, "footage-chooser-failed"));
+        assert_eq!(cx.read(|cx| card.read(cx).error.clone()), None, "the raw error is only logged");
+        cx.update_window(window, |_, window, cx| window.click("footage-copy-path", cx)).unwrap();
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(footage.display().to_string()),
+            "the folder path can be pasted into a file manager"
+        );
+
+        // Takes copied in by hand: the notice has done its job.
+        fs::create_dir_all(&footage).unwrap();
+        fs::write(footage.join("take1.mp4"), b"x").unwrap();
+        cx.update(|cx| card.update(cx, |card, cx| card.refresh(cx)));
+        cx.run_until_parked();
+        assert!(!shows(cx, "footage-chooser-failed"));
+    }
 
     #[test]
     fn imports_never_overwrite_existing_takes() {
@@ -524,15 +723,40 @@ mod tests {
         fs::write(footage.join("take1.mp4"), b"existing").unwrap();
 
         let mut copied = 0;
-        copy_into(&source, &footage, &mut |bytes| copied += bytes).unwrap();
+        let first = copy_into(&source, &footage, &mut |bytes| copied += bytes).unwrap();
         copy_into(&source, &footage, &mut |_| {}).unwrap();
         assert_eq!(copied, COPY_CHUNK as u64 + 10);
+        assert_eq!(first, footage.join("take1 (2).mp4"));
         assert_eq!(fs::read(footage.join("take1.mp4")).unwrap(), b"existing");
         assert_eq!(fs::read(footage.join("take1 (2).mp4")).unwrap().len(), COPY_CHUNK + 10);
         assert!(footage.join("take1 (3).mp4").is_file());
 
         // A file already in the folder is left alone.
         copy_into(&footage.join("take1.mp4"), &footage, &mut |_| {}).unwrap();
-        assert_eq!(fs::read_dir(&footage).unwrap().count(), 3);
+        assert_eq!(fs::read_dir(&footage).unwrap().count(), 3, "no partial copies are left behind");
+    }
+
+    #[test]
+    fn copies_are_written_under_a_hidden_name_until_complete() {
+        let root = tempfile::tempdir().unwrap();
+        let footage = root.path().join("footage");
+        fs::create_dir_all(&footage).unwrap();
+        let source = root.path().join("take2.mov");
+        fs::write(&source, vec![1u8; 3 * COPY_CHUNK]).unwrap();
+
+        let mut seen = Vec::new();
+        copy_into(&source, &footage, &mut |_| {
+            seen.push(fs::read_dir(&footage).unwrap().map(|entry| entry.unwrap().file_name()).collect::<Vec<_>>());
+        })
+        .unwrap();
+        // While copying, the folder holds only the hidden partial file.
+        assert!(seen.iter().all(|names| names == &[".take2.mov.part"]), "{seen:?}");
+        assert!(footage.join("take2.mov").is_file() && !footage.join(".take2.mov.part").exists());
+
+        // A copy an earlier session left unfinished is removed; takes stay.
+        fs::write(footage.join(".take3.mov.part"), b"half").unwrap();
+        remove_partial_copies(&footage);
+        let names: Vec<_> = fs::read_dir(&footage).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        assert_eq!(names, ["take2.mov"]);
     }
 }

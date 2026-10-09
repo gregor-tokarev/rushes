@@ -1,9 +1,11 @@
 //! A run's event log and how it folds into the timeline the panel shows.
 //!
 //! Every [`AgentEvent`] is persisted as a run event, together with a [`PhaseStarted`]
-//! marker each time the app starts a phase (with the creator's notes or feedback).
-//! [`fold_timeline`] pairs tool calls with their results and collapses noise
-//! (stderr, sub-agent lifecycle and other unknown lines) into single rows.
+//! marker each time the app starts a phase (with the creator's notes or feedback) and a
+//! [`RunMarker`] when a run stops or changes outside a phase (cancelled, interrupted,
+//! strategy discarded or restored). [`fold_timeline`] pairs tool calls with their
+//! results and collapses noise (stderr, sub-agent lifecycle and other unknown lines)
+//! into single rows.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -38,9 +40,34 @@ impl PhaseKind {
 #[serde(tag = "type", rename = "phase_started")]
 pub struct PhaseStarted {
     pub phase: PhaseKind,
-    /// The creator's notes (approve) or feedback (revise, feedback).
+    /// The creator's notes (approve) or feedback (revise, feedback). A retry sends the
+    /// text of the phase it repeats again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// The creator retried a phase that failed or was cancelled.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retry: bool,
+}
+
+/// What happened to a run outside an agent phase.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkerKind {
+    /// The creator stopped the agent.
+    Cancelled,
+    /// VideoCRM closed while the agent worked.
+    Interrupted,
+    /// The creator discarded the proposed strategy.
+    Discarded,
+    /// The creator brought a discarded strategy back.
+    Restored,
+}
+
+/// Marker the app appends to the event log when a run stops or changes outside a phase.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename = "run_marker")]
+pub struct RunMarker {
+    pub kind: MarkerKind,
 }
 
 /// One persisted run event.
@@ -49,6 +76,7 @@ pub struct PhaseStarted {
 pub enum LogEvent {
     Agent(AgentEvent),
     Phase(PhaseStarted),
+    Marker(RunMarker),
 }
 
 impl LogEvent {
@@ -90,6 +118,12 @@ pub enum TimelineItem {
         seq: u32,
         phase: PhaseKind,
         text: Option<String>,
+        retry: bool,
+    },
+    /// A run stopped or changed outside a phase.
+    Marker {
+        seq: u32,
+        kind: MarkerKind,
     },
     Message {
         seq: u32,
@@ -129,6 +163,7 @@ impl TimelineItem {
     pub fn seq(&self) -> u32 {
         match self {
             TimelineItem::Phase { seq, .. }
+            | TimelineItem::Marker { seq, .. }
             | TimelineItem::Message { seq, .. }
             | TimelineItem::Thinking { seq, .. }
             | TimelineItem::Tool { seq, .. }
@@ -156,7 +191,16 @@ pub fn fold_timeline(entries: &[TimelineEntry]) -> Vec<TimelineItem> {
         let seq = entry.seq;
         let agent = match &entry.event {
             LogEvent::Phase(started) => {
-                items.push(TimelineItem::Phase { seq, phase: started.phase, text: started.text.clone() });
+                items.push(TimelineItem::Phase {
+                    seq,
+                    phase: started.phase,
+                    text: started.text.clone(),
+                    retry: started.retry,
+                });
+                continue;
+            }
+            LogEvent::Marker(marker) => {
+                items.push(TimelineItem::Marker { seq, kind: marker.kind });
                 continue;
             }
             LogEvent::Agent(event) => event,
@@ -251,7 +295,7 @@ mod tests {
     #[test]
     fn tool_results_attach_to_their_calls() {
         let log = entries(vec![
-            LogEvent::Phase(PhaseStarted { phase: PhaseKind::Plan, text: None }),
+            LogEvent::Phase(PhaseStarted { phase: PhaseKind::Plan, text: None, retry: false }),
             agent(AgentEvent::Init { session_id: "s".into(), model: "m".into(), cwd: "/".into(), tools: vec![] }),
             tool_use("t1", "Skill", "video-use"),
             tool_use("t2", "Bash", "ffprobe take1.mp4"),
@@ -262,7 +306,7 @@ mod tests {
         assert_eq!(
             fold_timeline(&log),
             vec![
-                TimelineItem::Phase { seq: 1, phase: PhaseKind::Plan, text: None },
+                TimelineItem::Phase { seq: 1, phase: PhaseKind::Plan, text: None, retry: false },
                 TimelineItem::Tool {
                     seq: 3,
                     name: "Skill".into(),
@@ -347,7 +391,11 @@ mod tests {
     fn tool_ids_reused_by_a_later_phase_stay_apart() {
         let log = entries(vec![
             tool_use("t1", "Read", "edit/project.md"),
-            LogEvent::Phase(PhaseStarted { phase: PhaseKind::Approve, text: Some("Shorter intro".into()) }),
+            LogEvent::Phase(PhaseStarted {
+                phase: PhaseKind::Approve,
+                text: Some("Shorter intro".into()),
+                retry: false,
+            }),
             tool_result("t1", false, "late"),
             tool_use("t1", "Write", "edit/edl.json"),
             tool_result("t1", false, "written"),
@@ -362,10 +410,33 @@ mod tests {
     }
 
     #[test]
+    fn retries_and_markers_become_their_own_rows() {
+        let log = entries(vec![
+            LogEvent::Phase(PhaseStarted { phase: PhaseKind::Revise, text: Some("Shorter".into()), retry: false }),
+            LogEvent::Marker(RunMarker { kind: MarkerKind::Cancelled }),
+            LogEvent::Phase(PhaseStarted { phase: PhaseKind::Revise, text: Some("Shorter".into()), retry: true }),
+        ]);
+        assert_eq!(
+            fold_timeline(&log),
+            vec![
+                TimelineItem::Phase { seq: 1, phase: PhaseKind::Revise, text: Some("Shorter".into()), retry: false },
+                TimelineItem::Marker { seq: 2, kind: MarkerKind::Cancelled },
+                TimelineItem::Phase { seq: 3, phase: PhaseKind::Revise, text: Some("Shorter".into()), retry: true },
+            ]
+        );
+    }
+
+    #[test]
     fn log_events_round_trip_through_run_event_payloads() {
         let events = [
-            LogEvent::Phase(PhaseStarted { phase: PhaseKind::Feedback, text: Some("Cut the outro".into()) }),
-            LogEvent::Phase(PhaseStarted { phase: PhaseKind::Plan, text: None }),
+            LogEvent::Phase(PhaseStarted {
+                phase: PhaseKind::Feedback,
+                text: Some("Cut the outro".into()),
+                retry: false,
+            }),
+            LogEvent::Phase(PhaseStarted { phase: PhaseKind::Plan, text: None, retry: false }),
+            LogEvent::Phase(PhaseStarted { phase: PhaseKind::Revise, text: Some("Keep it".into()), retry: true }),
+            LogEvent::Marker(RunMarker { kind: MarkerKind::Interrupted }),
             agent(AgentEvent::AssistantText { text: "Hi".into() }),
             unknown("system/task_started"),
         ];
@@ -374,8 +445,10 @@ mod tests {
             let stored = RunEvent { run_id: videocrm_core::RunId::new(), seq, at: Utc::now(), payload };
             assert_eq!(TimelineEntry::from(stored).event, event);
         }
-        let marker = LogEvent::Phase(PhaseStarted { phase: PhaseKind::Approve, text: None }).to_payload();
+        let marker = LogEvent::Phase(PhaseStarted { phase: PhaseKind::Approve, text: None, retry: false }).to_payload();
         assert_eq!(marker, serde_json::json!({ "type": "phase_started", "phase": "approve" }));
+        let marker = LogEvent::Marker(RunMarker { kind: MarkerKind::Discarded }).to_payload();
+        assert_eq!(marker, serde_json::json!({ "type": "run_marker", "kind": "discarded" }));
 
         let garbage = RunEvent {
             run_id: videocrm_core::RunId::new(),

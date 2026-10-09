@@ -10,6 +10,17 @@ pub(crate) struct BriefDraft {
     pub brief: String,
     pub preferences: EditPreferences,
     pub auto_approve: bool,
+    /// The creator changed the brief by hand; it no longer follows the video.
+    pub edited: bool,
+    /// What the brief was drafted from; see [`brief_source`].
+    pub source: String,
+}
+
+/// What a default brief depends on besides the edit preferences (the video's title,
+/// hook and format, its script, the standing instructions), as one comparable value:
+/// the brief changes when this does.
+pub fn brief_source(video: &Video, script: &[Block], extra_instructions: &str) -> String {
+    default_brief(video, script, &EditPreferences::default(), extra_instructions)
 }
 
 /// video-use grade presets, as stored in [`EditPreferences::color_grade`], with their labels.

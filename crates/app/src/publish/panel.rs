@@ -36,7 +36,7 @@ use videocrm_core::media::{self, MediaKind};
 use videocrm_core::{
     DocumentKind, Privacy, PublishSettings, UploadJob, UploadStatus, Video, VideoFormat, VideoId, VideoStatus,
 };
-use videocrm_pipeline::MediaInfo;
+use videocrm_pipeline::{MediaInfo, kept_cuts};
 
 use super::chapters::{MIN_CHAPTERS, chapters, chapters_text, insert_chapters, timestamp};
 use super::rules::{
@@ -1481,14 +1481,10 @@ fn file_meta(size: u64, media: Option<&MediaInfo>) -> String {
     parts.join(" · ")
 }
 
-/// AI edit outputs first (final cut, then preview), then the footage videos.
+/// The cuts AI edits kept (newest first), then the footage videos.
 fn file_choices(footage_dir: &Path) -> Vec<FileChoice> {
-    let outputs = media::edit_outputs(footage_dir);
-    let mut choices: Vec<FileChoice> = [outputs.final_cut, outputs.preview]
-        .into_iter()
-        .flatten()
-        .map(|path| FileChoice { path, source: "AI edit" })
-        .collect();
+    let mut choices: Vec<FileChoice> =
+        kept_cuts(footage_dir).into_iter().map(|path| FileChoice { path, source: "AI edit" }).collect();
     // An unreadable footage folder just offers fewer choices.
     let footage = media::list_footage(footage_dir).unwrap_or_default();
     choices.extend(
@@ -1630,8 +1626,9 @@ mod tests {
     fn edit_outputs_come_before_footage() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path();
-        std::fs::create_dir_all(dir.join("edit")).unwrap();
-        for file in ["edit/preview.mp4", "edit/final.mp4", "take1.mov", "notes.txt", "voice.wav"] {
+        std::fs::create_dir_all(dir.join("edit/cuts")).unwrap();
+        let files = ["edit/cuts/final-1.mp4", "edit/cuts/final-2.mp4", "edit/preview.mp4", "take1.mov", "notes.txt"];
+        for file in files {
             std::fs::write(dir.join(file), b"x").unwrap();
         }
         let choices = file_choices(dir);
@@ -1640,8 +1637,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                ("final.mp4".to_owned(), "AI edit"),
-                ("preview.mp4".to_owned(), "AI edit"),
+                ("final-2.mp4".to_owned(), "AI edit"),
+                ("final-1.mp4".to_owned(), "AI edit"),
                 ("take1.mov".to_owned(), "Footage")
             ]
         );

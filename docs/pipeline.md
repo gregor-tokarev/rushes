@@ -47,6 +47,18 @@ let render = run_phase(&config, &ctx, Phase::Approve { notes: None }, &mut |_| {
 limit), `final_cut` / `preview` when those files exist after the phase, and `rendered`
 (final cut created or rewritten during this phase; a failed re-render leaves the old one).
 
+### Kept cuts
+
+Every render writes the same `edit/final.mp4`, so a later render (an iteration, or a new
+edit of the same footage) would overwrite a cut that an earlier edit or the upload form
+refers to. `keep_final_cut(footage_dir)` moves the fresh `edit/final.mp4` to
+`edit/cuts/final-<n>.mp4` (numbers only count up) and returns that path; `kept_cuts`
+lists them, newest first. The app keeps the cut of every successful render this way and
+stores the kept path as the run's output; before a render starts, it also moves a cut
+still referenced at the shared path (left by an earlier version) into `edit/cuts/`.
+`edit/preview.mp4`, `edit/project.md` and the transcripts stay shared: they are the
+skill's working state for the footage.
+
 ## Agent invocation
 
 ```text
@@ -95,15 +107,19 @@ nothing. Parsing never fails a run.
 ### Errors
 
 `PipelineError`: `AgentNotFound`, `SkillNotFound`, `FootageNotFound` (checked before
-spawning), `Spawn`, `Cancelled`, `AgentFailed { message, stderr_tail, session_id }` (non-zero
-exit or no result event; the session id allows a retry with `--resume`), `Io`.
+spawning), `Spawn`, `Cancelled`, `AgentFailed { message, stderr_tail, session_id, no_result }`
+(non-zero exit or no result event; the session id allows a retry with `--resume`;
+`no_result` when the agent never reported a result, which usually means the command is not
+Claude Code or could not start), `Io`.
 
 ## Requirements
 
-`doctor(&config, skill_dir)` reports each with a human-readable detail; `Doctor::ready()`
-is true when all pass. Tools are looked up on the agent's `PATH` (`config.env` first).
+`doctor(&config, skill_dir)` reports each with a plain-text detail for people (version and
+path, or what is missing); `Doctor::ready()` is true when all pass. Tools are looked up on
+the agent's `PATH` (`config.env` first).
 
-- **Agent**: Claude Code CLI (`claude --version`), logged in.
+- **Agent**: Claude Code CLI; `--version` must print `Claude Code` (any other program
+  answers `--version` too, but cannot run an edit). Login is not checked.
 - **Skill**: `SKILL.md` in the configured folder, default `~/.claude/skills/video-use`
   (symlinks resolved; the resolved folder is returned as `Doctor::skill_dir`).
 - **ffmpeg** and **ffprobe** on `PATH`.

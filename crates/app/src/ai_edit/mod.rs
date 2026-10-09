@@ -25,4 +25,6 @@ pub use panel::AiEditPanel;
 pub use pipelines_page::PipelinesPage;
 pub use service::{INTERRUPTED, LivePhase, PipelineService, RunError, split_failure};
 pub use settings::AiSettings;
-pub use timeline::{LogEvent, PhaseKind, PhaseStarted, TimelineEntry, TimelineItem, ToolOutput, fold_timeline};
+pub use timeline::{
+    LogEvent, MarkerKind, PhaseKind, PhaseStarted, RunMarker, TimelineEntry, TimelineItem, ToolOutput, fold_timeline,
+};

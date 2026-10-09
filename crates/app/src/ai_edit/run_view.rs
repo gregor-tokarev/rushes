@@ -1,8 +1,10 @@
 //! The selected run of the AI edit panel: progress, the decision it waits for, its
 //! output and the agent's activity.
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -16,10 +18,10 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Div, ElementId, Entity, FollowMode, FontWeight,
-    InteractiveElement as _, IntoElement, ListAlignment, ListSizingBehavior, ListState, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, TestSupportExt as _, Window, div,
-    list, px, rems,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Div, ElementId, Entity, FollowMode, FontWeight, Hsla,
+    InteractiveElement as _, IntoElement, ListAlignment, ListSizingBehavior, ListState, ParentElement as _, Pixels,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, TestSupportExt as _,
+    Window, canvas, div, list, px, rems,
 };
 use videocrm_core::{PipelineRun, RunId, RunStatus};
 use videocrm_pipeline::{MediaInfo, probe_media};
@@ -27,12 +29,14 @@ use videocrm_pipeline::{MediaInfo, probe_media};
 use super::format;
 use super::icons::tool_icon;
 use super::service::{LivePhase, PipelineService, split_failure};
-use super::timeline::{LogEvent, PhaseKind, TimelineItem, fold_timeline};
+use super::timeline::{LogEvent, MarkerKind, PhaseKind, TimelineItem, fold_timeline};
 use crate::route::VideoTab;
 use crate::state::AppState;
 
-/// Height of the activity box once the log outgrows it.
+/// Height of the activity box once the log outgrows it, in rems.
 const TIMELINE_HEIGHT: f32 = 30.;
+/// Space above the first and below the last row of the log, in rems.
+const TIMELINE_PADDING: f32 = 0.5;
 
 /// What the feedback box is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +72,8 @@ pub(crate) struct RunView {
     /// it follows the tail, the newest rows stay in view until the creator scrolls up;
     /// scrolling back to the end resumes following.
     rows: ListState,
+    /// The log's content height, measured after the last layout.
+    log_height: Rc<Cell<Option<Pixels>>>,
     output: Option<OutputFacts>,
     output_task: Option<Task<()>>,
     action_error: Option<SharedString>,
@@ -94,6 +100,7 @@ impl RunView {
             items: Vec::new(),
             folded_len: 0,
             rows: ListState::new(0, ListAlignment::Top, rems(TIMELINE_HEIGHT).to_pixels(window.rem_size())),
+            log_height: Rc::default(),
             output: None,
             output_task: None,
             action_error: None,
@@ -122,6 +129,7 @@ impl RunView {
         // A finished run reads from the start; a live one follows its newest events.
         self.rows.reset(0);
         self.rows.set_follow_mode(FollowMode::Normal);
+        self.log_height.set(None);
         if let Some(id) = run_id {
             self.service.update(cx, |service, cx| service.load_timeline(id, cx));
         }
@@ -278,6 +286,8 @@ impl RunView {
         if !self.expanded.remove(&seq) {
             self.expanded.insert(seq);
         }
+        // The row grows or shrinks where it is, rather than the log jumping to its end.
+        self.rows.pause_following_tail();
         if let Some(ix) = self.items.iter().position(|item| item.seq() == seq) {
             self.rows.remeasure_items(ix..ix + 1);
         }
@@ -289,7 +299,7 @@ impl RunView {
         self.live(cx).map(|live| live.kind).or_else(|| {
             self.service.read(cx).timeline(self.run_id?).iter().rev().find_map(|entry| match &entry.event {
                 LogEvent::Phase(started) => Some(started.phase),
-                LogEvent::Agent(_) => None,
+                LogEvent::Agent(_) | LogEvent::Marker(_) => None,
             })
         })
     }
@@ -299,6 +309,8 @@ impl RunView {
         let step = match run.status {
             RunStatus::Queued | RunStatus::Planning => 0,
             RunStatus::AwaitingApproval => 1,
+            // A discarded strategy is still there to review.
+            RunStatus::Cancelled if self.service.read(cx).can_restore(run.id) => 1,
             RunStatus::Rendering => 2,
             RunStatus::Succeeded => 4,
             RunStatus::Failed | RunStatus::Cancelled => {
@@ -510,13 +522,19 @@ impl RunView {
 
     fn render_failure(&self, run: &PipelineRun, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let cancelled = run.status == RunStatus::Cancelled;
+        // A discarded strategy is kept; bringing it back costs nothing.
+        let restorable = cancelled && self.service.read(cx).can_restore(run.id);
         let error = run.error.clone().unwrap_or_default();
         let (message, stderr) = split_failure(&error);
-        let (message, stderr) = (message.to_owned(), stderr.map(str::to_owned));
-        let resumable = run.session_id.is_some();
+        let message =
+            if restorable { "Restore it to approve or change it, or plan again." } else { message }.to_owned();
+        let stderr = stderr.map(str::to_owned);
+        let resumable = run.session_id.is_some() && !restorable;
         let feedback = self.render_feedback(FeedbackPurpose::Continue, window, cx);
         let theme = cx.theme();
-        let (icon, title, color) = if cancelled {
+        let (icon, title, color) = if restorable {
+            (IconName::FileText, "Strategy discarded", theme.muted_foreground)
+        } else if cancelled {
             (IconName::CircleStop, "Edit cancelled", theme.muted_foreground)
         } else {
             (IconName::CircleX, "Edit failed", theme.danger)
@@ -552,14 +570,27 @@ impl RunView {
                         })
                         .child(
                             Button::new("run-retry")
-                                .primary()
+                                .when(restorable, |button| button.outline())
+                                .when(!restorable, |button| button.primary())
                                 .small()
                                 .icon(IconName::RotateCcw)
-                                .label("Retry")
+                                .label(if restorable { "Plan again" } else { "Retry" })
                                 .on_click(
                                     cx.listener(|this, _, _, cx| this.act(cx, |service, id, cx| service.retry(id, cx))),
                                 ),
-                        ),
+                        )
+                        .when(restorable, |this| {
+                            this.child(
+                                Button::new("run-restore")
+                                    .primary()
+                                    .small()
+                                    .icon(IconName::Undo2)
+                                    .label("Restore strategy")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.act(cx, |service, id, cx| service.restore(id, cx))
+                                    })),
+                            )
+                        }),
                 )
             })
     }
@@ -591,15 +622,18 @@ impl RunView {
         )
     }
 
-    fn render_timeline(&self, live: bool, cx: &mut Context<Self>) -> Div {
+    fn render_timeline(&self, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme();
         let count = self.items.len();
+        let rem_size = window.rem_size();
         let body = if self.items.is_empty() {
-            div().px_4().py_5().text_sm().text_color(theme.muted_foreground).child(if live {
-                "Waiting for the agent…"
-            } else {
-                "No activity recorded."
-            })
+            div()
+                .px_4()
+                .py_5()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(if live { "Waiting for the agent…" } else { "No activity recorded." })
+                .into_any_element()
         } else {
             let rows = list(
                 self.rows.clone(),
@@ -608,21 +642,30 @@ impl RunView {
                     _ => div().into_any_element(),
                 }),
             )
-            .with_sizing_behavior(ListSizingBehavior::Infer)
+            // The box takes the log's measured height, up to TIMELINE_HEIGHT. The list's
+            // own `Infer` sizing measures rows at an unwrapped width, which re-pins a log
+            // with a row taller than the box to its end on every frame.
+            .with_sizing_behavior(ListSizingBehavior::Auto)
             .w_full()
-            .max_h(rems(TIMELINE_HEIGHT))
-            .py_2();
-            let log = self.rows.clone();
+            .h(self.log_box_height(rem_size))
+            .py(rems(TIMELINE_PADDING));
+            let (at_start, at_end) = log_edges(&self.rows, rems(TIMELINE_PADDING).to_pixels(rem_size));
             div()
+                .id("run-activity")
+                .test_support()
                 .relative()
-                // The page scrolls too. While the log overflows its box, the wheel moves the log alone.
-                .on_scroll_wheel(move |_, _, cx| {
-                    if log.max_offset_for_scrollbar().y > px(0.) {
+                // The page scrolls too: the wheel moves the log until it reaches its start
+                // or end, then the page.
+                .on_scroll_wheel(move |event, _, cx| {
+                    let delta = event.delta.pixel_delta(px(20.)).y;
+                    if (delta > px(0.) && !at_start) || (delta < px(0.) && !at_end) {
                         cx.stop_propagation();
                     }
                 })
                 .child(rows)
                 .child(Scrollbar::vertical(&self.rows))
+                .child(self.measure_log(rem_size))
+                .into_any_element()
         };
         v_flex()
             .gap_2()
@@ -637,6 +680,33 @@ impl RunView {
             .child(div().rounded(theme.radius_lg).border_1().border_color(theme.border).overflow_hidden().child(body))
     }
 
+    /// Height of the activity box: the log's measured content, at most TIMELINE_HEIGHT.
+    fn log_box_height(&self, rem_size: Pixels) -> Pixels {
+        let max = rems(TIMELINE_HEIGHT).to_pixels(rem_size);
+        self.log_height.get().map_or(max, |content| content.min(max))
+    }
+
+    /// Measures the log once it is laid out, and lays the view out again when the box
+    /// should take another height (rows came in, a row was expanded, another run shows).
+    fn measure_log(&self, rem_size: Pixels) -> impl IntoElement {
+        let (rows, measured) = (self.rows.clone(), self.log_height.clone());
+        let used = self.log_box_height(rem_size);
+        let max = rems(TIMELINE_HEIGHT).to_pixels(rem_size);
+        let padding = rems(TIMELINE_PADDING).to_pixels(rem_size);
+        canvas(
+            move |_, window, _| {
+                let Some(content) = log_content_height(&rows, padding) else { return };
+                measured.set(Some(content));
+                if (content.min(max) - used).abs() >= px(0.5) {
+                    window.request_animation_frame();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_0()
+    }
+
     fn render_item(&self, run_id: RunId, item: &TimelineItem, cx: &mut Context<Self>) -> AnyElement {
         let seq = item.seq();
         let expanded = self.expanded.contains(&seq);
@@ -646,35 +716,54 @@ impl RunView {
         let mono_font = theme.mono_font_family.clone();
         let row_id = element_id(&format!("timeline-{seq}"), run_id);
         let element = match item {
-            TimelineItem::Phase { phase, text, .. } => {
-                let label = match phase {
-                    PhaseKind::Plan => "Planning started",
-                    PhaseKind::Auto => "Edit started, strategy pre-approved",
-                    PhaseKind::Revise => "You asked for a revised strategy",
-                    PhaseKind::Approve => "You approved the strategy",
-                    PhaseKind::Feedback => "You asked for changes",
+            TimelineItem::Phase { phase, text, retry, .. } => {
+                let label = match (retry, phase) {
+                    // A retry sends the earlier text again; the creator did not write it anew.
+                    (true, _) => "Retried",
+                    (false, PhaseKind::Plan) => "Planning started",
+                    (false, PhaseKind::Auto) => "Edit started, strategy pre-approved",
+                    (false, PhaseKind::Revise) => "You asked for a revised strategy",
+                    (false, PhaseKind::Approve) => "You approved the strategy",
+                    (false, PhaseKind::Feedback) => "You asked for changes",
                 };
-                v_flex()
-                    .id(row_id)
-                    .w_full()
-                    .gap_2()
-                    .px_4()
-                    .pt_3()
-                    .pb_1()
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .child(div().flex_1().h(px(1.)).bg(border))
-                            .child(div().text_xs().text_color(muted).child(label))
-                            .child(div().flex_1().h(px(1.)).bg(border)),
-                    )
-                    .when_some(text.clone(), |this, text| {
-                        this.child(div().mx_8().px_3().py_2().rounded(radius).bg(muted_bg).text_sm().child(text))
-                    })
+                let text = text.clone().filter(|_| !retry);
+                divider(row_id, label, border, muted).when_some(text, |this, text| {
+                    this.child(div().mx_8().px_3().py_2().rounded(radius).bg(muted_bg).text_sm().child(text))
+                })
             }
-            TimelineItem::Message { text, .. } => row(row_id, Icon::new(IconName::Sparkles).text_color(muted)).child(
-                div().flex_1().min_w_0().child(markdown(element_id(&format!("message-{seq}"), run_id), text.clone())),
-            ),
+            TimelineItem::Marker { kind, .. } => {
+                let label = match kind {
+                    MarkerKind::Cancelled => "Cancelled",
+                    MarkerKind::Interrupted => super::INTERRUPTED,
+                    MarkerKind::Discarded => "You discarded the strategy",
+                    MarkerKind::Restored => "You restored the strategy",
+                };
+                divider(row_id, label, border, muted)
+            }
+            TimelineItem::Message { text, .. } => {
+                // A long message (the strategy, the final summary) shows its start; the
+                // state card above has it in full.
+                let preview = format::message_preview(text);
+                let body = match preview.clone() {
+                    Some(preview) if !expanded => div().line_clamp(3).text_ellipsis().child(preview).into_any_element(),
+                    _ => markdown(element_id(&format!("message-{seq}"), run_id), text.clone()).into_any_element(),
+                };
+                let toggle = preview.is_some().then(|| {
+                    Button::new(element_id(&format!("message-toggle-{seq}"), run_id))
+                        .link()
+                        .xsmall()
+                        .label(if expanded { "Show less" } else { "Show more" })
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_row(seq, cx)))
+                });
+                row(row_id, Icon::new(IconName::Sparkles).text_color(muted)).child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(body)
+                        .children(toggle.map(|toggle| h_flex().child(toggle))),
+                )
+            }
             TimelineItem::Thinking { text, .. } => {
                 let content = v_flex()
                     .flex_1()
@@ -775,7 +864,7 @@ impl Render for RunView {
             (None, RunStatus::Failed | RunStatus::Cancelled) => Some(self.render_failure(&run, window, cx)),
             (None, _) => None,
         };
-        let timeline = self.render_timeline(live.is_some(), cx);
+        let timeline = self.render_timeline(live.is_some(), window, cx);
         let error = self.action_error.clone();
         let danger = cx.theme().danger;
 
@@ -786,6 +875,29 @@ impl Render for RunView {
             .when_some(error, |this, error| this.child(div().text_sm().text_color(danger).child(error)))
             .child(timeline)
     }
+}
+
+/// The height of the log's rows plus its padding, after its last layout; `None` until
+/// the last row has been laid out.
+fn log_content_height(rows: &ListState, padding: Pixels) -> Option<Pixels> {
+    let viewport = rows.viewport_bounds();
+    let overflow = rows.max_offset_for_scrollbar().y;
+    let items = if overflow > px(0.) {
+        viewport.size.height + overflow
+    } else {
+        let last = rows.bounds_for_item(rows.item_count().checked_sub(1)?)?;
+        last.bottom() - viewport.top() - rows.scroll_px_offset_for_scrollbar().y
+    };
+    Some(items + padding * 2.)
+}
+
+/// Whether the log is scrolled to its start and to its end, after its last layout. A
+/// log that fits its box is at both.
+fn log_edges(rows: &ListState, padding: Pixels) -> (bool, bool) {
+    let scrolled = -rows.scroll_px_offset_for_scrollbar().y;
+    let end = log_content_height(rows, padding)
+        .map_or(px(0.), |content| (content - rows.viewport_bounds().size.height).max(px(0.)));
+    (scrolled <= px(0.), scrolled >= end - px(1.))
 }
 
 /// A bordered section of the run view.
@@ -800,6 +912,17 @@ fn card_title(icon: IconName, title: &'static str, description: &'static str, cx
         v_flex()
             .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title))
             .child(div().text_xs().text_color(theme.muted_foreground).child(description)),
+    )
+}
+
+/// A timeline row that marks a turn of the run: a label between two rules.
+fn divider(id: ElementId, label: &'static str, border: Hsla, muted: Hsla) -> gpui_kit::Stateful<Div> {
+    v_flex().id(id).w_full().gap_2().px_4().pt_3().pb_1().child(
+        h_flex()
+            .gap_3()
+            .child(div().flex_1().h(px(1.)).bg(border))
+            .child(div().text_xs().text_color(muted).child(label))
+            .child(div().flex_1().h(px(1.)).bg(border)),
     )
 }
 

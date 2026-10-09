@@ -17,17 +17,18 @@ use chrono::Utc;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     AnyView, AnyWindowHandle, App, AppContext as _, Bounds, Context, ElementId, Entity, ExternalPaths, FileDropEvent,
-    IntoElement, ParentElement as _, PlatformInput, Render, Styled as _, TestAppContext, Window, WindowBounds,
-    WindowOptions, div, px, size,
+    InteractiveElement as _, IntoElement, ParentElement as _, PlatformInput, Render, ScrollDelta, ScrollHandle,
+    StatefulInteractiveElement as _, Styled as _, TestAppContext, Window, WindowBounds, WindowOptions, div, point, px,
+    size,
 };
 use tempfile::TempDir;
 use videocrm::ai_edit::{
-    AiEditPanel, AiSettings, INTERRUPTED, LogEvent, PhaseKind, PipelineService, PipelinesPage, RunError, TimelineEntry,
-    split_failure,
+    AiEditPanel, AiSettings, INTERRUPTED, LogEvent, PhaseKind, PhaseStarted, PipelineService, PipelinesPage, RunError,
+    RunMarker, TimelineEntry, split_failure,
 };
 use videocrm::route::{Route, VideoTab};
 use videocrm::state::{AppEvent, AppState};
-use videocrm_core::{NewVideo, PipelineRun, RunId, RunStatus, Store, VideoId, VideoStatus};
+use videocrm_core::{Block, DocumentKind, NewVideo, PipelineRun, RunId, RunStatus, Store, VideoId, VideoStatus};
 use videocrm_pipeline::AgentEvent;
 
 const TIMEOUT: Duration = Duration::from_secs(90);
@@ -142,8 +143,14 @@ impl Fixture {
         cx.read(|cx| self.state.read(cx).video(self.video).expect("video").publish.file.clone())
     }
 
+    /// Where the agent renders.
     fn final_cut(&self) -> PathBuf {
         self.footage.join("edit").join("final.mp4")
+    }
+
+    /// Where the `n`th render of the video is kept.
+    fn cut(&self, n: u32) -> PathBuf {
+        self.footage.join("edit").join("cuts").join(format!("final-{n}.mp4"))
     }
 }
 
@@ -164,6 +171,36 @@ if [ "$LAZY_IS_ERROR" = 1 ]; then
 else
   echo '{"type":"result","subtype":"success","is_error":false,"result":"All done.","session_id":"lazy-session","total_cost_usd":0.01}'
 fi
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// An agent with a real run's log shape: a few dozen tool calls, then a final summary
+/// far taller than the activity box, then the result. It renders nothing.
+fn chatty_agent(dir: &Path) -> PathBuf {
+    let path = dir.join("chatty-agent");
+    fs::write(
+        &path,
+        r#"#!/usr/bin/env python3
+import json, sys
+def out(event):
+    event.setdefault("session_id", "chatty-session")
+    print(json.dumps(event), flush=True)
+def assistant(block):
+    out({"type": "assistant", "message": {"role": "assistant", "content": [block]}})
+out({"type": "system", "subtype": "init", "cwd": "/", "tools": ["Bash"], "model": "chatty"})
+for ix in range(30):
+    assistant({"type": "tool_use", "id": f"t{ix}", "name": "Bash", "input": {"command": f"ffprobe take{ix}.mp4"}})
+    out({"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": f"t{ix}", "content": "ok", "is_error": False}]}})
+point = "**Audio sync:** the sound drifted until it was 0.1s behind, so I rebuilt it from the `edit/` segments. "
+summary = "The final cut is rendered: **`edit/final.mp4`**, 14.6s.\n\n" + "\n\n".join(
+    f"**Section {n}:**\n" + "\n".join(f"- {point * 3}" for _ in range(4)) for n in range(4))
+assistant({"type": "text", "text": summary})
+out({"type": "result", "subtype": "success", "is_error": False, "result": summary, "total_cost_usd": 0.5})
 "#,
     )
     .unwrap();
@@ -203,6 +240,19 @@ fn phases(events: &[TimelineEntry]) -> Vec<(PhaseKind, Option<String>)> {
         .iter()
         .filter_map(|entry| match &entry.event {
             LogEvent::Phase(started) => Some((started.phase, started.text.clone())),
+            LogEvent::Agent(_) | LogEvent::Marker(_) => None,
+        })
+        .collect()
+}
+
+/// The markers in a run's log, with whether each phase was a retry.
+fn markers(events: &[TimelineEntry]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            LogEvent::Phase(started) if started.retry => Some(format!("retry {:?}", started.phase)),
+            LogEvent::Phase(started) => Some(format!("{:?}", started.phase)),
+            LogEvent::Marker(RunMarker { kind }) => Some(format!("{kind:?}")),
             LogEvent::Agent(_) => None,
         })
         .collect()
@@ -274,12 +324,13 @@ fn plan_revise_approve_renders_and_prepares_the_upload(cx: &mut TestAppContext) 
         .expect("approved");
     assert_eq!(fx.run(cx, id).status, RunStatus::Rendering);
     let done = fx.wait_for_status(cx, id, RunStatus::Succeeded);
-    assert_eq!(done.output.as_deref(), Some(fx.final_cut().as_path()));
-    assert!(fx.final_cut().is_file());
+    assert_eq!(done.output, Some(fx.cut(1)), "the render is kept as the edit's own file");
+    assert!(fx.cut(1).is_file());
+    assert!(!fx.final_cut().exists(), "nothing is left where the next render writes");
     assert_eq!(done.session_id.as_deref(), Some(session.as_str()), "phases resume one session");
     assert!((done.cost_usd.unwrap() - 3.0 * 0.0123).abs() < 1e-9, "cost adds up over phases");
     assert!(done.summary.unwrap().contains("Rendered edit/final.mp4"));
-    assert_eq!(fx.upload_file(cx), Some(fx.final_cut()), "the final cut becomes the upload file");
+    assert_eq!(fx.upload_file(cx), Some(fx.cut(1)), "the final cut becomes the upload file");
     assert_eq!(fx.video_status(cx), VideoStatus::Editing);
 
     let events = fx.stored_events(cx, id);
@@ -306,7 +357,7 @@ fn auto_approve_renders_and_feedback_renders_again(cx: &mut TestAppContext) {
     let id = fx.start(cx, true);
     assert_eq!(fx.run(cx, id).status, RunStatus::Rendering);
     let first = fx.wait_for_status(cx, id, RunStatus::Succeeded);
-    assert_eq!(first.output.as_deref(), Some(fx.final_cut().as_path()));
+    assert_eq!(first.output, Some(fx.cut(1)));
     assert_eq!(phases(&fx.stored_events(cx, id)), [(PhaseKind::Auto, None)]);
 
     // An upload file chosen by hand is kept.
@@ -318,20 +369,92 @@ fn auto_approve_renders_and_feedback_renders_again(cx: &mut TestAppContext) {
             state.update_video(video, cx);
         })
     });
-    let rendered_at = fs::metadata(fx.final_cut()).unwrap().modified().unwrap();
+    let rendered_at = fs::metadata(fx.cut(1)).unwrap().modified().unwrap();
     std::thread::sleep(Duration::from_millis(20));
 
     cx.update(|cx| fx.service.update(cx, |service, cx| service.send_feedback(id, "Shorter outro.".into(), cx)))
         .expect("feedback sent");
     assert_eq!(fx.run(cx, id).status, RunStatus::Rendering);
     let again = fx.wait_for_status(cx, id, RunStatus::Succeeded);
-    assert!(fs::metadata(fx.final_cut()).unwrap().modified().unwrap() > rendered_at, "final.mp4 rendered again");
+    assert_eq!(again.output, Some(fx.cut(2)), "the new render is a new file");
+    assert_eq!(fs::metadata(fx.cut(1)).unwrap().modified().unwrap(), rendered_at, "the first render is kept");
     assert!(again.summary.unwrap().contains("feedback applied"));
     assert_eq!(fx.upload_file(cx), Some(chosen));
     assert_eq!(
         phases(&fx.stored_events(cx, id)),
         [(PhaseKind::Auto, None), (PhaseKind::Feedback, Some("Shorter outro.".into()))]
     );
+}
+
+#[gpui_kit::test]
+fn a_new_edit_keeps_the_cut_of_the_earlier_one(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let first = fx.start(cx, true);
+    fx.wait_for_status(cx, first, RunStatus::Succeeded);
+    let first_cut = fs::read(fx.cut(1)).unwrap();
+
+    // A second edit of the same footage, cut differently.
+    make_clip(&fx.footage.join("take2.mp4"));
+    let second = fx.start(cx, true);
+    let done = fx.wait_for_status(cx, second, RunStatus::Succeeded);
+    assert_eq!(done.output, Some(fx.cut(2)));
+    assert_eq!(fx.run(cx, first).output, Some(fx.cut(1)), "the earlier edit still has its cut");
+    assert_eq!(fs::read(fx.cut(1)).unwrap(), first_cut, "and the file is untouched");
+    assert_ne!(fs::read(fx.cut(2)).unwrap(), first_cut);
+    assert_eq!(fx.upload_file(cx), Some(fx.cut(1)), "the upload keeps the cut it was given");
+}
+
+#[gpui_kit::test]
+fn a_cut_left_at_the_shared_path_is_kept_before_the_next_render(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    // A store as an earlier version left it: the edit's output and the upload file
+    // are the shared edit/final.mp4.
+    let fx = Fixture::new(cx, &[]);
+    fs::create_dir_all(fx.final_cut().parent().unwrap()).unwrap();
+    fs::copy(fx.footage.join("take1.mp4"), fx.final_cut()).unwrap();
+    let old_cut = fs::read(fx.final_cut()).unwrap();
+    let now = Utc::now();
+    let old = PipelineRun {
+        id: RunId::new(),
+        video_id: fx.video,
+        status: RunStatus::Succeeded,
+        brief: String::new(),
+        footage_dir: fx.footage.clone(),
+        session_id: Some("old".into()),
+        summary: Some("Rendered.".into()),
+        output: Some(fx.final_cut()),
+        error: None,
+        cost_usd: None,
+        created_at: now,
+        updated_at: now,
+    };
+    cx.read(|cx| fx.state.read(cx).store().lock().unwrap().insert_run(&old).unwrap());
+    cx.update(|cx| {
+        fx.state.update(cx, |state, cx| {
+            let mut video = state.video(fx.video).unwrap().clone();
+            video.publish.file = Some(fx.final_cut());
+            state.update_video(video, cx);
+        });
+        PipelineService::init(fx.state.clone(), cx);
+    });
+    let service = cx.read(PipelineService::global);
+    let id = cx
+        .update(|cx| service.update(cx, |service, cx| service.start_run(fx.video, "Again.".into(), true, cx)))
+        .expect("run started");
+    assert_eq!(cx.read(|cx| service.read(cx).run(old.id).cloned().unwrap().output), Some(fx.cut(1)));
+    assert_eq!(fx.upload_file(cx), Some(fx.cut(1)), "the upload form follows the kept cut");
+    assert_eq!(fs::read(fx.cut(1)).unwrap(), old_cut);
+
+    wait_until(cx, "the new render", |cx| {
+        service.read(cx).run(id).is_some_and(|run| run.status == RunStatus::Succeeded)
+    });
+    assert_eq!(cx.read(|cx| service.read(cx).run(id).cloned().unwrap().output), Some(fx.cut(2)));
+    assert_eq!(fs::read(fx.cut(1)).unwrap(), old_cut, "the render did not overwrite it");
 }
 
 #[gpui_kit::test]
@@ -352,6 +475,7 @@ fn cancel_stops_the_agent_and_its_children(cx: &mut TestAppContext) {
     assert!(live.cancelling);
     let cancelled = fx.wait_for_status(cx, id, RunStatus::Cancelled);
     assert_eq!(cancelled.error, None);
+    assert_eq!(markers(&fx.stored_events(cx, id)), ["Plan", "Cancelled"], "the log says where it stopped");
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while !pids.iter().all(|pid| process_gone(*pid)) {
@@ -407,7 +531,33 @@ fn a_failing_agent_fails_the_run_with_its_stderr(cx: &mut TestAppContext) {
     assert_eq!(fx.run(cx, id).status, RunStatus::Planning);
     assert_eq!(fx.run(cx, id).error, None);
     fx.wait_for_status(cx, id, RunStatus::Failed);
-    assert_eq!(phases(&fx.stored_events(cx, id)), [(PhaseKind::Plan, None), (PhaseKind::Plan, None)]);
+    assert_eq!(markers(&fx.stored_events(cx, id)), ["Plan", "retry Plan"]);
+}
+
+#[gpui_kit::test]
+fn an_agent_command_that_is_not_claude_code_is_named_as_the_cause(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let silent = fx.root.path().join("not-claude");
+    fs::write(&silent, "#!/bin/sh\necho 'true (GNU coreutils) 9.7'\n").unwrap();
+    fs::set_permissions(&silent, fs::Permissions::from_mode(0o755)).unwrap();
+    cx.update(|cx| {
+        fx.state.update(cx, |state, cx| {
+            state.update_settings(cx, |settings| settings.pipeline.agent_command = silent.display().to_string())
+        })
+    });
+    let service = fx.service.clone();
+    wait_until(cx, "the requirement check", |cx| !service.read(cx).is_checking());
+    let doctor = cx.read(|cx| service.read(cx).doctor().cloned()).expect("doctor");
+    assert!(!doctor.agent.ok && doctor.agent.detail.contains("is not Claude Code"), "{:?}", doctor.agent);
+
+    let id = fx.start(cx, false);
+    let failed = fx.wait_for_status(cx, id, RunStatus::Failed);
+    let error = failed.error.expect("error");
+    assert!(error.starts_with("The agent stopped without reporting a result"), "{error}");
+    assert!(error.ends_with("Check the agent command in Settings > AI editing."), "{error}");
 }
 
 #[gpui_kit::test]
@@ -450,6 +600,7 @@ fn startup_marks_interrupted_runs_failed_and_they_can_continue(cx: &mut TestAppC
         let stored = status(cx, run.id);
         assert_eq!((stored.status, stored.error.as_deref()), (RunStatus::Failed, Some(INTERRUPTED)));
         assert_eq!(fx.run(cx, run.id).status, RunStatus::Failed);
+        assert_eq!(markers(&fx.stored_events(cx, run.id)), ["Interrupted"]);
     }
     assert_eq!(status(cx, runs[3].id).status, RunStatus::AwaitingApproval);
     assert_eq!(status(cx, runs[4].id).status, RunStatus::Succeeded);
@@ -472,7 +623,40 @@ fn startup_marks_interrupted_runs_failed_and_they_can_continue(cx: &mut TestAppC
     });
     let continued = cx.read(|cx| service.read(cx).run(interrupted).cloned().unwrap());
     assert_eq!(continued.session_id.as_deref(), Some("s-render"));
-    assert_eq!(continued.output, Some(fx.final_cut()));
+    assert_eq!(continued.output, Some(fx.cut(1)));
+}
+
+#[gpui_kit::test]
+fn video_rows_show_interrupted_runs_as_failed_from_the_start(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().unwrap();
+    let video = videocrm_core::Video::new("Quit while planning");
+    store.insert_video(&video).unwrap();
+    let now = Utc::now();
+    let run = PipelineRun {
+        id: RunId::new(),
+        video_id: video.id,
+        status: RunStatus::Planning,
+        brief: String::new(),
+        footage_dir: PathBuf::from("/nonexistent"),
+        session_id: Some("s".into()),
+        summary: None,
+        output: None,
+        error: None,
+        cost_usd: None,
+        created_at: now,
+        updated_at: now,
+    };
+    store.insert_run(&run).unwrap();
+    // The rows are read before the service starts, as at app startup.
+    let state = cx.new(|_| AppState::new(store).expect("app state"));
+    assert_eq!(cx.read(|cx| state.read(cx).row(video.id).unwrap().latest_run), Some(RunStatus::Planning));
+
+    cx.update(|cx| {
+        AppState::set_global(state.clone(), cx);
+        PipelineService::init(state.clone(), cx);
+    });
+    let row = cx.read(|cx| state.read(cx).row(video.id).cloned().unwrap());
+    assert_eq!(row.latest_run, Some(RunStatus::Failed), "no edit shows as running after a restart");
 }
 
 #[gpui_kit::test]
@@ -749,7 +933,7 @@ fn the_panel_takes_an_edit_from_brief_to_publish(cx: &mut TestAppContext) {
     wait_for_window(cx, window, "the output card", |window, _| shows(window, "run-use-for-upload"));
     click(cx, window, "run-use-for-upload");
     assert_eq!(route(cx, &fx), Route::Video { id: video, tab: VideoTab::Publish });
-    assert_eq!(fx.upload_file(cx), Some(fx.final_cut()));
+    assert_eq!(fx.upload_file(cx), Some(fx.cut(1)));
 }
 
 #[gpui_kit::test]
@@ -786,6 +970,35 @@ fn requested_changes_revise_the_strategy(cx: &mut TestAppContext) {
         phases(&fx.stored_events(cx, id)),
         [(PhaseKind::Plan, None), (PhaseKind::Revise, Some("Add an end card.".into()))]
     );
+}
+
+#[gpui_kit::test]
+fn a_discarded_strategy_can_be_restored(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let id = fx.start(cx, false);
+    let video = fx.video;
+    let window = open(cx, move |window, cx| AiEditPanel::new(video, window, cx));
+    let strategy = fx.wait_for_status(cx, id, RunStatus::AwaitingApproval).summary;
+    wait_for_window(cx, window, "the strategy card", |window, _| shows(window, "run-discard"));
+
+    click(cx, window, "run-discard");
+    assert_eq!(fx.run(cx, id).status, RunStatus::Cancelled);
+    wait_for_window(cx, window, "the discarded card", |window, _| shows(window, "run-restore"));
+    assert!(!cx.update_window(window, |_, window, _| shows(window, "run-continue")).unwrap());
+
+    click(cx, window, "run-restore");
+    let restored = fx.run(cx, id);
+    assert_eq!((restored.status, restored.summary), (RunStatus::AwaitingApproval, strategy));
+    wait_for_window(cx, window, "the strategy card", |window, _| shows(window, "run-approve"));
+    assert_eq!(markers(&fx.stored_events(cx, id)), ["Plan", "Discarded", "Restored"]);
+    assert!(latest_run(cx, &fx) == Some(id) && fx.stored_run(cx, id).status == RunStatus::AwaitingApproval);
+
+    // An edit cancelled while the agent worked has no strategy to bring back.
+    let restore = cx.update(|cx| fx.service.update(cx, |service, cx| service.restore(id, cx)));
+    assert_eq!(restore, Err(RunError::NotAvailable(RunStatus::AwaitingApproval)));
 }
 
 #[gpui_kit::test]
@@ -869,6 +1082,33 @@ fn settings_save_toggles_at_once_and_text_after_a_pause(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
+fn a_skill_folder_typed_with_a_tilde_is_found_in_the_home_folder(cx: &mut TestAppContext) {
+    let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
+    let window = open(cx, AiSettings::new);
+    let pipeline = |cx: &mut TestAppContext| cx.read(|cx| fx.state.read(cx).settings().pipeline.clone());
+    let saved = pipeline(cx).skill_dir;
+    let type_folder = |cx: &mut TestAppContext, text: &str| {
+        click(cx, window, "ai-settings-skill-dir");
+        cx.update_window(window, |_, window, cx| {
+            window.press("secondary-a", cx);
+            window.input(text, cx);
+        })
+        .unwrap();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+    };
+
+    // A relative path would resolve against wherever the app was started from.
+    type_folder(cx, "video-use");
+    assert_eq!(pipeline(cx).skill_dir, saved, "the unusable path is not saved");
+    wait_for_window(cx, window, "the reason", |window, _| shows(window, "ai-settings-skill-dir-error"));
+
+    type_folder(cx, "~/video_editing/video-use");
+    let home = std::env::home_dir().expect("home folder");
+    assert_eq!(pipeline(cx).skill_dir, Some(home.join("video_editing/video-use")));
+}
+
+#[gpui_kit::test]
 fn takes_dropped_on_the_footage_card_are_copied_in(cx: &mut TestAppContext) {
     let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
     let card = fx.root.path().join("sd-card");
@@ -940,6 +1180,71 @@ fn the_brief_form_survives_leaving_the_video(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_brief_follows_the_video_until_the_creator_edits_it(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let video = fx.video;
+    let write_script = |cx: &mut TestAppContext, text: &str| {
+        cx.update(|cx| {
+            fx.state.update(cx, |state, cx| {
+                let mut script = state.ensure_document(video, DocumentKind::Script, cx).expect("script");
+                script.blocks = vec![Block::paragraph(text)];
+                state.save_document(script, cx);
+            })
+        });
+        cx.run_until_parked();
+    };
+    let start = |cx: &mut TestAppContext, window: AnyWindowHandle| -> String {
+        wait_for_window(cx, window, "the composer", |window, _| shows(window, "ai-edit-start"));
+        click(cx, window, "ai-edit-start");
+        let id = latest_run(cx, &fx).expect("the panel started a run");
+        let brief = fx.run(cx, id).brief;
+        fx.wait_for_status(cx, id, RunStatus::AwaitingApproval);
+        click(cx, window, "ai-edit-new");
+        brief
+    };
+    write_script(cx, "The template's opening.");
+    let panel =
+        move |window: &mut Window, cx: &mut App| -> AnyView { cx.new(|cx| AiEditPanel::new(video, window, cx)).into() };
+    let (window, page) = open_host(cx, panel);
+    let service = fx.service.clone();
+    wait_until(cx, "requirement check", |cx| service.read(cx).doctor().is_some_and(|doctor| doctor.ready()));
+
+    // The script changes while the tab is open, the hook while the page is closed.
+    write_script(cx, "Creators who film with one camera.");
+    close(cx, &page);
+    cx.update(|cx| {
+        fx.state.update(cx, |state, cx| {
+            let mut changed = state.video(video).unwrap().clone();
+            changed.hook = "One camera is enough.".into();
+            state.update_video(changed, cx);
+        })
+    });
+    show(cx, window, &page, panel);
+    let brief = start(cx, window);
+    assert!(brief.contains("Creators who film with one camera.") && !brief.contains("template's"), "{brief}");
+    assert!(brief.contains("Hook: One camera is enough."), "{brief}");
+
+    // Once the creator edits it, the brief keeps their words and says it is out of date.
+    wait_for_window(cx, window, "the composer", |window, _| shows(window, "brief"));
+    click(cx, window, "brief");
+    cx.update_window(window, |_, window, cx| window.input("Keep my words. ", cx)).unwrap();
+    write_script(cx, "A newer line.");
+    wait_for_window(cx, window, "the notice", |window, _| shows(window, "brief-stale"));
+    let brief = start(cx, window);
+    assert!(brief.contains("Keep my words.") && !brief.contains("A newer line."), "{brief}");
+
+    // Reset drafts it from the video again.
+    wait_for_window(cx, window, "the composer", |window, _| shows(window, "brief-reset"));
+    click(cx, window, "brief-reset");
+    assert!(!cx.update_window(window, |_, window, _| shows(window, "brief-stale")).unwrap());
+    let brief = start(cx, window);
+    assert!(brief.contains("A newer line.") && !brief.contains("Keep my words."), "{brief}");
+}
+
+#[gpui_kit::test]
 fn a_long_activity_log_lays_out_only_the_rows_in_view(cx: &mut TestAppContext) {
     let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
     let now = Utc::now();
@@ -981,4 +1286,141 @@ fn a_long_activity_log_lays_out_only_the_rows_in_view(cx: &mut TestAppContext) {
     let (first, last) = (format!("timeline-1-{}", run.id), format!("timeline-999-{}", run.id));
     wait_for_window(cx, window, "the first activity rows", |window, _| shows(window, &first));
     assert!(!cx.update_window(window, |_, window, _| shows(window, &last)).unwrap(), "rows far below are not laid out");
+}
+
+/// The panel inside a page that scrolls, as on the video page.
+struct ScrollPage {
+    panel: Entity<AiEditPanel>,
+    scroll: ScrollHandle,
+}
+
+impl Render for ScrollPage {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().id("page").size_full().overflow_y_scroll().track_scroll(&self.scroll).child(self.panel.clone())
+    }
+}
+
+#[gpui_kit::test]
+fn the_wheel_scrolls_back_through_a_log_that_followed_a_live_edit(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let chatty = chatty_agent(fx.root.path());
+    cx.update(|cx| {
+        fx.state.update(cx, |state, cx| {
+            state.update_settings(cx, |settings| settings.pipeline.agent_command = chatty.display().to_string())
+        })
+    });
+    let video = fx.video;
+    let scroll = ScrollHandle::new();
+    let page_scroll = scroll.clone();
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::new(Default::default(), size(px(1280.), px(900.))))),
+        ..WindowOptions::default()
+    };
+    let (window, _) = cx
+        .update(|cx| {
+            gpui_kit::open_window(options, cx, move |window, cx| {
+                let panel = cx.new(|cx| AiEditPanel::new(video, window, cx));
+                cx.new(|_| ScrollPage { panel, scroll: page_scroll })
+            })
+        })
+        .expect("open test window");
+    // The panel watches the edit from its start, so its log follows the newest rows.
+    let id = fx.start(cx, true);
+    fx.wait_for_status(cx, id, RunStatus::Failed);
+    let events = fx.stored_events(cx, id);
+    let last = format!("timeline-{}-{id}", events.last().expect("events").seq);
+    let summary_seq = events
+        .iter()
+        .rev()
+        .find(|entry| matches!(entry.event, LogEvent::Agent(AgentEvent::AssistantText { .. })))
+        .expect("the summary")
+        .seq;
+    let wheel = |cx: &mut TestAppContext, target: &str, lines: f32| {
+        let target = target.to_owned();
+        cx.update_window(window, |_, window, cx| window.scroll(target, ScrollDelta::Lines(point(0., lines)), cx))
+            .unwrap();
+        cx.run_until_parked();
+    };
+    let visible = |cx: &mut TestAppContext, id: &str| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            shows(window, id)
+        })
+        .unwrap()
+    };
+
+    // Down the page to the activity box.
+    wheel(cx, "footage-drop", -100.);
+    wait_for_window(cx, window, "the end of the log", |window, _| shows(window, &last));
+    let page_end = scroll.offset();
+    assert!(page_end.y < px(0.), "the page scrolled");
+
+    // The final summary shows its first lines; expanded, it is taller than the box.
+    let toggle = format!("message-toggle-{summary_seq}-{id}");
+    assert!(visible(cx, &toggle), "a long message offers Show more");
+    click(cx, window, ElementId::Name(toggle.into()));
+    let summary_row = ElementId::Name(format!("timeline-{summary_seq}-{id}").into());
+    wait_for_window(cx, window, "the whole summary", |window, _| {
+        window.find(summary_row.clone()).bounds().size.height > window.find("run-activity").bounds().size.height
+    });
+
+    // Back to the end, where the log follows its newest rows again, then up.
+    wheel(cx, "run-activity", -500.);
+    assert!(visible(cx, &last), "the wheel reaches the end of the log");
+    wheel(cx, "run-activity", 5.);
+    assert!(!visible(cx, &last), "wheeling up leaves the end of the log");
+    assert!(!visible(cx, &last), "and stays there");
+    assert_eq!(scroll.offset(), page_end, "the log takes the wheel, not the page");
+
+    // At the start of the log, the wheel moves the page.
+    wheel(cx, "run-activity", 2000.);
+    assert_eq!(scroll.offset(), page_end, "the log scrolls to its start first");
+    wheel(cx, "run-activity", 3.);
+    assert!(scroll.offset().y > page_end.y, "then the page scrolls up");
+}
+
+#[gpui_kit::test]
+fn a_short_activity_log_takes_only_the_room_it_needs(cx: &mut TestAppContext) {
+    let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
+    let now = Utc::now();
+    let run = PipelineRun {
+        id: RunId::new(),
+        video_id: fx.video,
+        status: RunStatus::Failed,
+        brief: String::new(),
+        footage_dir: fx.footage.clone(),
+        session_id: None,
+        summary: None,
+        output: None,
+        error: Some("The agent stopped.".into()),
+        cost_usd: None,
+        created_at: now,
+        updated_at: now,
+    };
+    cx.read(|cx| {
+        let store = fx.state.read(cx).store();
+        let mut store = store.lock().unwrap();
+        store.insert_run(&run).unwrap();
+        let events = [
+            LogEvent::Phase(PhaseStarted { phase: PhaseKind::Plan, text: None, retry: false }),
+            LogEvent::Agent(AgentEvent::AssistantText { text: "Looking at the footage.".into() }),
+            LogEvent::Agent(AgentEvent::ToolUse { id: "t1".into(), name: "Bash".into(), summary: "ls".into() }),
+        ];
+        for event in events {
+            store.append_run_event(run.id, &event.to_payload()).unwrap();
+        }
+    });
+    cx.update(|cx| PipelineService::init(fx.state.clone(), cx));
+    let video = fx.video;
+    let window = open(cx, move |window, cx| AiEditPanel::new(video, window, cx));
+    let last = format!("timeline-3-{}", run.id);
+    wait_for_window(cx, window, "the log", |window, _| shows(window, &last));
+    wait_for_window(cx, window, "the box to fit the log", |window, _| {
+        let row = window.find(ElementId::Name(last.clone().into())).bounds();
+        let log = window.find("run-activity").bounds();
+        log.size.height < px(200.) && row.bottom() <= log.bottom()
+    });
 }

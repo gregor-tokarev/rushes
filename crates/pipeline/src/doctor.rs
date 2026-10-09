@@ -13,7 +13,7 @@ const ELEVENLABS_KEY: &str = "ELEVENLABS_API_KEY";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Check {
     pub ok: bool,
-    /// What was found (path, version) or what is missing and how to fix it.
+    /// What was found (version and path) or what is missing, as plain text for people.
     pub detail: String,
 }
 
@@ -75,16 +75,25 @@ pub fn doctor(config: &AgentConfig, skill_dir: Option<&Path>) -> Doctor {
     }
 }
 
+/// What `claude --version` prints after the version number: `2.1.284 (Claude Code)`.
+const CLAUDE_CODE: &str = "Claude Code";
+
 fn check_agent(config: &AgentConfig) -> Check {
     let Some(program) = config.resolve_command() else {
-        return Check::fail(format!(
-            "`{}` not found: install Claude Code or set the agent command",
-            config.command.display()
-        ));
+        return Check::fail(format!("{} not found", config.command.display()));
     };
-    match run_captured(&program, ["--version"], &config.env, VERSION_TIMEOUT) {
-        Some(version) => Check::pass(format!("{} ({})", program.display(), first_line(&version))),
-        None => Check::fail(format!("{} does not run (`--version` failed)", program.display())),
+    let Some(output) = run_captured(&program, ["--version"], &config.env, VERSION_TIMEOUT) else {
+        return Check::fail(format!("{} does not run: --version failed", program.display()));
+    };
+    let version = first_line(&output);
+    // Any program runs; only Claude Code can run the edit.
+    if !version.contains(CLAUDE_CODE) {
+        return Check::fail(format!("{} is not Claude Code: --version printed \"{version}\"", program.display()));
+    }
+    let number = version.split_whitespace().next().filter(|word| word.starts_with(|c: char| c.is_ascii_digit()));
+    match number {
+        Some(number) => Check::pass(format!("{CLAUDE_CODE} {number} · {}", program.display())),
+        None => Check::pass(format!("{CLAUDE_CODE} · {}", program.display())),
     }
 }
 
@@ -107,12 +116,27 @@ fn check_skill(skill_dir: Option<&Path>) -> (Check, Option<PathBuf>) {
 
 fn check_ffmpeg_tool(program: Option<PathBuf>, name: &str) -> Check {
     let Some(program) = program else {
-        return Check::fail(format!("`{name}` not found on PATH: install ffmpeg"));
+        return Check::fail(format!("{name} not found on PATH"));
     };
     match run_captured(&program, ["-version"], &[], VERSION_TIMEOUT) {
-        Some(version) => Check::pass(format!("{} ({})", program.display(), first_line(&version))),
-        None => Check::fail(format!("{} does not run (`-version` failed)", program.display())),
+        Some(output) => match ffmpeg_version(first_line(&output)) {
+            Some(version) => Check::pass(format!("{name} {version} · {}", program.display())),
+            None => Check::pass(program.display().to_string()),
+        },
+        None => Check::fail(format!("{} does not run: -version failed", program.display())),
     }
+}
+
+/// The version in ffmpeg's banner, `ffmpeg version 8.0.1-3ubuntu2 Copyright (c) ...`:
+/// `8.0.1`, without a distribution's package suffix. Builds from git keep their name
+/// (`N-118000-g1234abcd`).
+fn ffmpeg_version(banner: &str) -> Option<&str> {
+    let mut words = banner.split_whitespace();
+    words.find(|word| *word == "version")?;
+    let version = words.next()?;
+    let release = version.split_once('-').map_or(version, |(release, _)| release);
+    let numeric = !release.is_empty() && release.chars().all(|c| c.is_ascii_digit() || c == '.');
+    Some(if numeric { release } else { version })
 }
 
 /// Mirrors how video-use's `helpers/transcribe.py` finds the key: a `KEY=` line in the
@@ -165,7 +189,7 @@ fn check_python(skill_dir: Option<&Path>, uv: Option<PathBuf>, python3: Option<P
     } else if let Some(python3) = python3 {
         Check::pass(format!("{} (no virtualenv: the skill's dependencies are not verified)", python3.display()))
     } else {
-        Check::fail("no Python found: install uv and run `uv sync` in the skill folder")
+        Check::fail("no Python found")
     }
 }
 
@@ -176,6 +200,15 @@ fn first_line(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ffmpeg_versions_lose_the_banner_and_package_suffix() {
+        let banner = "ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025 the FFmpeg developers";
+        assert_eq!(ffmpeg_version(banner), Some("8.0.1"));
+        assert_eq!(ffmpeg_version("ffprobe version 7.1 Copyright (c) 2007-2024"), Some("7.1"));
+        assert_eq!(ffmpeg_version("ffmpeg version N-118000-g1234abcd Copyright"), Some("N-118000-g1234abcd"));
+        assert_eq!(ffmpeg_version("something else"), None);
+    }
 
     #[test]
     fn dotenv_detects_assignments_without_reading_values_out() {

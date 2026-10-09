@@ -175,7 +175,7 @@ fn requirements<'a>(doctor: &'a Doctor, cx: &App) -> Vec<Requirement<'a>> {
             name: "Claude Code",
             check: &doctor.agent,
             fix: "Install it with `npm install -g @anthropic-ai/claude-code` and run `claude` once to sign in, \
-                  or set the agent command below."
+                  or set the agent command in Settings > AI editing."
                 .to_owned(),
         },
         Requirement {

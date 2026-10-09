@@ -11,16 +11,17 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui_kit::{App, AppContext as _, Context, Entity, Global, SharedString, Subscription, Task};
+use videocrm_core::input::expand_user_path;
 use videocrm_core::media::{self, MediaKind};
 use videocrm_core::settings::PipelineSettings;
 use videocrm_core::{PipelineRun, RunId, RunStatus, Store, StoreError, VideoId, VideoStatus};
 use videocrm_pipeline::{
     AgentConfig, AgentEvent, Doctor, Phase, PhaseOutcome, PipelineError, RunContext, default_skill_dir, doctor,
-    run_phase,
+    keep_final_cut, run_phase,
 };
 
 use super::brief::BriefDraft;
-use super::timeline::{LogEvent, PhaseKind, PhaseStarted, TimelineEntry};
+use super::timeline::{LogEvent, MarkerKind, PhaseKind, PhaseStarted, RunMarker, TimelineEntry};
 use crate::state::{AppEvent, AppState};
 
 /// Error of runs a previous session left running.
@@ -140,10 +141,11 @@ impl Global for GlobalPipelineService {}
 
 impl PipelineService {
     /// Creates the service and registers it globally. Call once at startup, after
-    /// `AppState::set_global`.
+    /// `AppState::set_global` and before anything shows run state.
     ///
-    /// Runs a previous session left working are marked failed ([`INTERRUPTED`]); they
-    /// can be continued when the agent session is known.
+    /// Runs a previous session left working are marked failed ([`INTERRUPTED`]), and
+    /// the video rows (whose latest run they may be) are reloaded; they can be
+    /// continued when the agent session is known.
     pub fn init(state: Entity<AppState>, cx: &mut App) {
         let service = cx.new(|cx| {
             let subscriptions = vec![
@@ -170,8 +172,10 @@ impl PipelineService {
                 drafts: HashMap::new(),
                 _subscriptions: subscriptions,
             };
-            if let Err(error) = service.recover_interrupted(cx) {
-                service.report(error, cx);
+            match service.recover_interrupted(cx) {
+                Ok(true) => service.state.update(cx, |state, cx| state.reload(cx)),
+                Ok(false) => {}
+                Err(error) => service.report(error, cx),
             }
             service.reload_runs(cx);
             service.refresh_doctor(cx);
@@ -311,7 +315,7 @@ impl PipelineService {
         self.mark_editing(video_id, cx);
 
         let phase = if auto_approve { PhaseKind::Auto } else { PhaseKind::Plan };
-        if let Err(error) = self.launch(id, phase, None, cx) {
+        if let Err(error) = self.launch(id, PhaseStarted { phase, text: None, retry: false }, cx) {
             if self.run(id).is_some_and(|run| run.status == RunStatus::Queued) {
                 self.finish(id, Err(error.to_string()), cx);
             }
@@ -327,7 +331,7 @@ impl PipelineService {
             return Err(RunError::NotAvailable(run.status));
         }
         let notes = notes.map(|notes| notes.trim().to_owned()).filter(|notes| !notes.is_empty());
-        self.continue_run(id, PhaseKind::Approve, notes, cx)
+        self.continue_run(id, PhaseStarted { phase: PhaseKind::Approve, text: notes, retry: false }, cx)
     }
 
     /// Sends the creator's feedback. While the strategy awaits approval this asks for a
@@ -349,7 +353,7 @@ impl PipelineService {
             },
             status => return Err(RunError::NotAvailable(status)),
         };
-        self.continue_run(id, phase, Some(message.trim().to_owned()), cx)
+        self.continue_run(id, PhaseStarted { phase, text: Some(message.trim().to_owned()), retry: false }, cx)
     }
 
     /// Runs the phase that failed or was cancelled again, resuming the agent session
@@ -361,7 +365,7 @@ impl PipelineService {
         }
         let (phase, text) =
             self.last_started(id, cx).map_or((PhaseKind::Plan, None), |started| (started.phase, started.text));
-        self.continue_run(id, phase, text, cx)
+        self.continue_run(id, PhaseStarted { phase, text, retry: true }, cx)
     }
 
     /// The marker of the phase the run started last, from its event log.
@@ -369,51 +373,66 @@ impl PipelineService {
         self.load_timeline(id, cx);
         self.timeline(id).iter().rev().find_map(|entry| match &entry.event {
             LogEvent::Phase(started) => Some(started.clone()),
-            LogEvent::Agent(_) => None,
+            LogEvent::Agent(_) | LogEvent::Marker(_) => None,
         })
+    }
+
+    /// Whether the run's strategy was discarded and can be brought back: nothing
+    /// happened to the run since. Reads the loaded event log.
+    pub fn can_restore(&self, id: RunId) -> bool {
+        let discarded = self
+            .timeline(id)
+            .last()
+            .is_some_and(|entry| matches!(&entry.event, LogEvent::Marker(RunMarker { kind: MarkerKind::Discarded })));
+        discarded && self.run(id).is_some_and(|run| run.status == RunStatus::Cancelled && run.summary.is_some())
+    }
+
+    /// Brings a discarded strategy back for approval.
+    pub fn restore(&mut self, id: RunId, cx: &mut Context<Self>) -> Result<(), RunError> {
+        let status = self.run(id).ok_or(RunError::RunNotFound)?.status;
+        self.load_timeline(id, cx);
+        if !self.can_restore(id) {
+            return Err(RunError::NotAvailable(status));
+        }
+        self.append_event(id, LogEvent::Marker(RunMarker { kind: MarkerKind::Restored }), cx);
+        self.update_run(id, cx, |run| run.status = RunStatus::AwaitingApproval);
+        self.after_status_change(cx);
+        Ok(())
     }
 
     fn last_phase(&mut self, id: RunId, cx: &mut Context<Self>) -> Option<PhaseKind> {
         self.last_started(id, cx).map(|started| started.phase)
     }
 
-    /// Stops the agent of a working run, or discards a strategy awaiting approval.
+    /// Stops the agent of a working run, or discards a strategy awaiting approval (it
+    /// can be restored; see [`Self::restore`]).
     pub fn cancel(&mut self, id: RunId, cx: &mut Context<Self>) {
         if let Some(live) = self.live.get_mut(&id) {
             live.cancel.store(true, Ordering::SeqCst);
             live.phase.cancelling = true;
             cx.notify();
         } else if self.run(id).is_some_and(|run| run.status == RunStatus::AwaitingApproval) {
+            self.load_timeline(id, cx);
+            self.append_event(id, LogEvent::Marker(RunMarker { kind: MarkerKind::Discarded }), cx);
             self.update_run(id, cx, |run| run.status = RunStatus::Cancelled);
             self.after_status_change(cx);
         }
     }
 
-    fn continue_run(
-        &mut self,
-        id: RunId,
-        phase: PhaseKind,
-        text: Option<String>,
-        cx: &mut Context<Self>,
-    ) -> Result<(), RunError> {
+    fn continue_run(&mut self, id: RunId, started: PhaseStarted, cx: &mut Context<Self>) -> Result<(), RunError> {
         let video_id = self.run(id).ok_or(RunError::RunNotFound)?.video_id;
         if self.live_run_of(video_id).is_some() {
             return Err(RunError::AlreadyRunning);
         }
-        self.launch(id, phase, text, cx)
+        self.launch(id, started, cx)
     }
 
     /// Records the phase, sets the run working and starts the agent thread.
-    fn launch(
-        &mut self,
-        id: RunId,
-        phase: PhaseKind,
-        text: Option<String>,
-        cx: &mut Context<Self>,
-    ) -> Result<(), RunError> {
+    fn launch(&mut self, id: RunId, started: PhaseStarted, cx: &mut Context<Self>) -> Result<(), RunError> {
+        let (phase, text) = (started.phase, started.text.clone());
         let run = self.run(id).ok_or(RunError::RunNotFound)?.clone();
         let settings = self.state.read(cx).settings().pipeline.clone();
-        let skill_dir = settings.skill_dir.clone().or_else(default_skill_dir).ok_or(RunError::NoSkillFolder)?;
+        let skill_dir = skill_dir(&settings).or_else(default_skill_dir).ok_or(RunError::NoSkillFolder)?;
         let config = self.agent_config(&settings);
         let context =
             RunContext { footage_dir: run.footage_dir.clone(), skill_dir, session_id: run.session_id.clone() };
@@ -425,7 +444,10 @@ impl PipelineService {
             PhaseKind::Feedback => Phase::Feedback { message: text.clone().unwrap_or_default() },
         };
 
-        self.append_event(id, LogEvent::Phase(PhaseStarted { phase, text }), cx);
+        if phase.renders() {
+            self.keep_shared_cut(run.video_id, &run.footage_dir, cx);
+        }
+        self.append_event(id, LogEvent::Phase(started), cx);
         let status = if phase.renders() { RunStatus::Rendering } else { RunStatus::Planning };
         self.update_run(id, cx, |run| {
             run.status = status;
@@ -436,6 +458,7 @@ impl PipelineService {
         let (stopped_tx, stopped) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let agent_cancel = cancel.clone();
+        let renders = phase.renders();
         let spawned = std::thread::Builder::new().name(format!("ai-edit-{}", id.short())).spawn(move || {
             let result = run_phase(
                 &config,
@@ -443,7 +466,8 @@ impl PipelineService {
                 pipeline_phase,
                 &mut |event| send(&events, AgentMessage::Event(event.clone())),
                 &agent_cancel,
-            );
+            )
+            .map(|outcome| if renders { keep_cut(outcome, &context.footage_dir) } else { outcome });
             send(&events, AgentMessage::Finished(result));
             // The quit handler may already have stopped waiting.
             _ = stopped_tx.send(());
@@ -498,19 +522,25 @@ impl PipelineService {
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(PipelineError::Cancelled) => {
+                self.append_event(id, LogEvent::Marker(RunMarker { kind: MarkerKind::Cancelled }), cx);
                 self.update_run(id, cx, |run| run.status = RunStatus::Cancelled);
                 self.after_status_change(cx);
                 return;
             }
-            Err(PipelineError::AgentFailed { message, stderr_tail, session_id }) => {
+            Err(PipelineError::AgentFailed { message, stderr_tail, session_id, no_result }) => {
                 if let Some(session_id) = session_id {
                     self.update_run(id, cx, |run| run.session_id = Some(session_id));
+                }
+                let mut message = sentence(&message);
+                if no_result {
+                    // Most likely not Claude Code, or one that can't start.
+                    message.push_str(" Check the agent command in Settings > AI editing.");
                 }
                 self.finish(id, Err(failure_text(&message, &stderr_tail)), cx);
                 return;
             }
             Err(error) => {
-                self.finish(id, Err(error.to_string()), cx);
+                self.finish(id, Err(sentence(&error.to_string())), cx);
                 return;
             }
         };
@@ -567,6 +597,36 @@ impl PipelineService {
         self.after_status_change(cx);
     }
 
+    /// A cut left at the shared `edit/final.mp4` that a run or the upload form still
+    /// refers to (kept there by an earlier version, or when keeping it failed) moves to
+    /// `edit/cuts/` before a render can overwrite it.
+    fn keep_shared_cut(&mut self, video_id: VideoId, footage_dir: &Path, cx: &mut Context<Self>) {
+        let shared = media::edit_outputs(footage_dir).final_cut;
+        let Some(shared) = shared else { return };
+        let owner = self.video_runs(video_id).find(|run| run.output.as_ref() == Some(&shared)).map(|run| run.id);
+        let uploads =
+            self.state.read(cx).video(video_id).is_some_and(|video| video.publish.file.as_ref() == Some(&shared));
+        if owner.is_none() && !uploads {
+            return;
+        }
+        let kept = match keep_final_cut(footage_dir) {
+            Ok(kept) => kept,
+            Err(error) => {
+                return self.report(format!("Couldn't keep the earlier cut {}: {error}", shared.display()), cx);
+            }
+        };
+        if let Some(owner) = owner {
+            self.update_run(owner, cx, |run| run.output = Some(kept.clone()));
+        }
+        if uploads {
+            self.state.update(cx, |state, cx| {
+                let Some(mut video) = state.video(video_id).cloned() else { return };
+                video.publish.file = Some(kept);
+                state.update_video(video, cx);
+            });
+        }
+    }
+
     fn after_status_change(&mut self, cx: &mut Context<Self>) {
         self.state.update(cx, |state, cx| state.reload(cx));
         cx.notify();
@@ -596,6 +656,10 @@ impl PipelineService {
     }
 
     fn append_event(&mut self, id: RunId, event: LogEvent, cx: &mut Context<Self>) {
+        if self.run(id).is_none() {
+            // Deleted with its video; the store has nothing to append to.
+            return;
+        }
         let stored = self.with_store(cx, |store| store.append_run_event(id, &event.to_payload()));
         match stored {
             Ok(stored) => {
@@ -615,16 +679,21 @@ impl PipelineService {
         }
     }
 
-    fn recover_interrupted(&mut self, cx: &mut Context<Self>) -> Result<(), StoreError> {
+    /// Marks the runs a previous session left working failed; returns whether there were any.
+    fn recover_interrupted(&mut self, cx: &mut Context<Self>) -> Result<bool, StoreError> {
         self.with_store(cx, |store| {
+            let mut recovered = false;
             for mut run in store.list_runs(None)? {
                 if run.status.is_active() {
                     run.status = RunStatus::Failed;
                     run.error = Some(INTERRUPTED.to_owned());
                     store.update_run(&mut run)?;
+                    let marker = LogEvent::Marker(RunMarker { kind: MarkerKind::Interrupted });
+                    store.append_run_event(run.id, &marker.to_payload())?;
+                    recovered = true;
                 }
             }
-            Ok(())
+            Ok(recovered)
         })
     }
 
@@ -677,7 +746,7 @@ impl PipelineService {
     pub fn refresh_doctor(&mut self, cx: &mut Context<Self>) {
         let settings = self.state.read(cx).settings().pipeline.clone();
         let config = self.agent_config(&settings);
-        let skill_dir = settings.skill_dir.clone();
+        let skill_dir = skill_dir(&settings);
         self.checked = Some(settings);
         self.doctor_task = Some(cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(async move { doctor(&config, skill_dir.as_deref()) }).await;
@@ -704,7 +773,12 @@ impl PipelineService {
         let command = settings.agent_command.trim();
         let defaults = AgentConfig::default();
         AgentConfig {
-            command: if command.is_empty() { defaults.command.clone() } else { PathBuf::from(command) },
+            command: match command {
+                "" => defaults.command.clone(),
+                // Saved before the settings expanded `~` themselves.
+                path if path.starts_with('~') => expand_user_path(path).unwrap_or_else(|_| PathBuf::from(path)),
+                command => PathBuf::from(command),
+            },
             model: settings.model.as_deref().map(str::trim).filter(|model| !model.is_empty()).map(str::to_owned),
             env: self.agent_env.clone(),
             ..defaults
@@ -730,6 +804,28 @@ fn send(events: &UnboundedSender<AgentMessage>, message: AgentMessage) {
     _ = events.unbounded_send(message);
 }
 
+/// Moves the final cut a render produced out of the way of later renders; see
+/// [`keep_final_cut`]. When it can't be moved, the run keeps the shared path.
+fn keep_cut(mut outcome: PhaseOutcome, footage_dir: &Path) -> PhaseOutcome {
+    if outcome.rendered
+        && !outcome.is_error
+        && let Ok(kept) = keep_final_cut(footage_dir)
+    {
+        outcome.final_cut = Some(kept);
+    }
+    outcome
+}
+
+/// The configured skill folder, `~` expanded (settings saved before the field expanded
+/// it may hold one).
+fn skill_dir(settings: &PipelineSettings) -> Option<PathBuf> {
+    let dir = settings.skill_dir.clone()?;
+    match dir.to_str() {
+        Some(text) if text.starts_with('~') => Some(expand_user_path(text).unwrap_or(dir)),
+        _ => Some(dir),
+    }
+}
+
 /// Whether `dir` holds at least one video or audio take.
 fn has_footage(dir: &Path) -> bool {
     media::list_footage(dir)
@@ -746,6 +842,17 @@ fn revision_brief(brief: &str, feedback: &str) -> String {
         feedback.trim(),
         brief.trim()
     )
+}
+
+/// A pipeline message as a sentence: capitalised, ending in a full stop.
+fn sentence(message: &str) -> String {
+    let message = message.trim();
+    let mut chars = message.chars();
+    let mut text: String = chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default();
+    if !text.is_empty() && !text.ends_with(['.', '!', '?']) {
+        text.push('.');
+    }
+    text
 }
 
 /// The text stored in [`PipelineRun::error`] for a failed agent.
@@ -774,6 +881,16 @@ mod tests {
         let text = failure_text("agent failed: API Error", &["line 1".into(), "line 2".into()]);
         assert_eq!(split_failure(&text), ("agent failed: API Error", Some("line 1\nline 2")));
         assert_eq!(split_failure(&failure_text("cancelled", &[])), ("cancelled", None));
+    }
+
+    #[test]
+    fn pipeline_messages_read_as_sentences() {
+        assert_eq!(
+            sentence("the agent stopped without reporting a result (exit status: 0)"),
+            "The agent stopped without reporting a result (exit status: 0)."
+        );
+        assert_eq!(sentence("API Error: overloaded."), "API Error: overloaded.");
+        assert_eq!(sentence(""), "");
     }
 
     #[test]
