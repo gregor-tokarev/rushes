@@ -34,6 +34,9 @@ impl Fixture {
         cx.update(|cx| {
             gpui_kit::init(cx);
             shell::init(cx);
+            // Overlays slide in on wall-clock time; without motion a click lands
+            // on a dialog's button where the last frame drew it.
+            cx.set_reduce_motion(true);
         });
         let media = tempfile::tempdir().expect("temp media folder");
         let mut store = Store::open_in_memory().expect("in-memory store");
