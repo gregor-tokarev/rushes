@@ -171,7 +171,7 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   the account first. The service re-reads it on `AppEvent::SettingsChanged`; a different backend signs
   out, because tokens belong to the backend that issued them (`Account::backend`).
 - `connection()` is `Disconnected | Connecting { authorize_url } | Connected(Account) |
-  Failed(message)`; the service emits `YoutubeEvent::ConnectionChanged` and notifies on
+  NeedsSignIn(Account) | Failed(message)`; the service emits `YoutubeEvent::ConnectionChanged` and notifies on
   every change. `connect` runs the sign-in on a `youtube-sign-in` thread. Before the
   browser opens it checks that the sign-in can work: for the emulators both must answer
   (the same probe as **Check**), and `check_client` must accept the OAuth client. Either
@@ -187,8 +187,11 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   after **Disconnect** cannot write the tokens back.
 - At startup the saved login is restored without network access, then the account is read
   again in the background (it is also re-read after each upload finishes processing) so
-  the subscriber and video counts stay current. Rejected tokens (`needs_sign_in`) turn the
-  connection into `Failed("YouTube needs you to connect the account again.")`.
+  the subscriber and video counts stay current. Rejected tokens (`needs_sign_in`, such as
+  the weekly expiry of apps in Testing) turn the connection into `NeedsSignIn(account)`:
+  the settings, the Publish tab and the sidebar badge keep naming the account ("Sign in
+  again · Reconnect to keep uploading as Demo Creator (@creator)") with a **Reconnect**
+  button, and the badge's dot turns amber.
 - The channel picture is downloaded once per URL into `<data dir>/avatars/` for the
   account card and the sidebar badge; without it the avatar shows initials.
 - `disconnect` cancels running uploads (they stay resumable), removes the credentials file

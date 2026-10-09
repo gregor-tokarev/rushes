@@ -341,6 +341,31 @@ impl RenderOnce for ConnectionPanel {
                             .child(cancel),
                     )
             }
+            Connection::NeedsSignIn(account) => {
+                let who = match &account.channel_handle {
+                    Some(handle) => format!("{} ({handle})", display_name(&account)),
+                    None => display_name(&account),
+                };
+                let mut detail = format!("Reconnect to keep uploading as {who}.");
+                if service.config().is_ok_and(|config| config.is_google()) {
+                    detail.push_str(" Google ends the sign-ins of apps in Testing after 7 days.");
+                }
+                let action = match (&config_problem, self.manage) {
+                    (Some(_), true) => connect.label("Reconnect").primary().disabled(true),
+                    (Some(_), false) => open_settings,
+                    (None, _) => connect.label("Reconnect").primary(),
+                };
+                v_flex()
+                    .gap_3()
+                    .child(status_line(
+                        IconName::TriangleAlert,
+                        theme.warning,
+                        "Sign in again",
+                        Some(detail.into()),
+                        cx,
+                    ))
+                    .child(h_flex().child(action))
+            }
             Connection::Failed(message) => {
                 let action = match (&config_problem, self.manage) {
                     (Some(_), true) => None,

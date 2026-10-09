@@ -22,7 +22,7 @@ use videocrm::publish::{
 use videocrm::route::Route;
 use videocrm_core::settings::YoutubeBackend;
 use videocrm_core::{Block, BlockKind, DocumentKind, Privacy, UploadId, UploadJob, UploadStatus, VideoId, YoutubeLink};
-use videocrm_youtube::RetryCause;
+use videocrm_youtube::{CredentialStore, RetryCause};
 
 /// Longer than the views' save delay.
 const SAVED: Duration = Duration::from_secs(1);
@@ -584,4 +584,45 @@ fn a_file_found_missing_at_upload_shows_on_the_file_card(cx: &mut TestAppContext
         assert!(window.find("upload-blockers").visible());
     });
     assert!(workspace.service.read_with(cx, |s, _| s.jobs().is_empty()));
+}
+
+#[gpui_kit::test]
+fn an_expired_sign_in_names_the_account_and_offers_reconnect(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    // Google ends the grant (every 7 days for apps in Testing): the refresh token is gone
+    // and the access token has expired by the next start.
+    let client = workspace.service.read_with(cx, |s, _| s.client()).unwrap();
+    client.revoke().unwrap();
+    let store = CredentialStore::new(workspace.dir.path().join("credentials.json"));
+    let mut login = store.load().unwrap().unwrap();
+    login.credentials.expires_at = Utc::now() - chrono::TimeDelta::hours(1);
+    store.save(&login).unwrap();
+
+    let service = workspace.restart(cx);
+    let account =
+        wait_until(cx, "the rejected sign-in", |cx| match service.read_with(cx, |s, _| s.connection().clone()) {
+            Connection::NeedsSignIn(account) => Some(account),
+            _ => None,
+        });
+    assert_eq!(account.channel_handle.as_deref(), Some("@creator"));
+    assert!(!service.read_with(cx, |s, _| s.is_connected()));
+
+    let (handle, _badge) = open(cx, |window, cx| cx.new(|cx| AccountBadge::new(window, cx)));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("account-badge").label(), Some("Demo Creator, Sign in again. Open YouTube settings"));
+    });
+    let (handle, _settings) = open(cx, |window, cx| cx.new(|cx| YoutubeSettings::new(window, cx)));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.within("youtube-connection").click("connect", cx);
+    });
+    let url = wait_until(cx, "the consent page", |cx| match service.read_with(cx, |s, _| s.connection().clone()) {
+        Connection::Connecting { authorize_url: Some(url) } => Some(url.to_string()),
+        _ => None,
+    });
+    publish_support::consent_in_browser(&url, "creator@example.com");
+    wait_until(cx, "the connection", |cx| service.read_with(cx, |s, _| s.is_connected().then_some(())));
 }

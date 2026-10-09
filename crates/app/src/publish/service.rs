@@ -47,7 +47,10 @@ pub enum Connection {
         authorize_url: Option<SharedString>,
     },
     Connected(Account),
-    /// The last sign-in failed or the account has to sign in again.
+    /// YouTube no longer accepts the saved sign-in of this account (expired, revoked, or a
+    /// permission unticked): connecting again keeps uploading as it.
+    NeedsSignIn(Account),
+    /// The last sign-in failed.
     Failed(SharedString),
 }
 
@@ -382,11 +385,16 @@ impl YoutubeService {
         }
     }
 
-    /// Asks for a new sign-in after YouTube rejected the stored tokens.
+    /// Asks for a new sign-in after YouTube rejected the stored tokens. The account stays
+    /// on screen, so the creator knows whom to sign in as.
     pub(super) fn require_sign_in(&mut self, cx: &mut Context<Self>) {
         self.client = None;
         self.tokens = None;
-        self.set_connection(Connection::Failed("YouTube needs you to connect the account again.".into()), cx);
+        let connection = match self.connection.clone() {
+            Connection::Connected(account) | Connection::NeedsSignIn(account) => Connection::NeedsSignIn(account),
+            _ => Connection::Failed("YouTube needs you to connect the account again.".into()),
+        };
+        self.set_connection(connection, cx);
     }
 
     fn restore_login(&mut self, cx: &mut Context<Self>) {
