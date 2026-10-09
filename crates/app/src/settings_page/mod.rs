@@ -36,17 +36,24 @@ pub struct SettingsPage {
 impl SettingsPage {
     pub fn new(section: SettingsSection, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = AppState::global(cx);
-        let subscriptions = vec![cx.subscribe(&state, |_, _, event: &AppEvent, cx| {
-            if *event == AppEvent::SettingsChanged {
-                cx.notify();
-            }
-        })];
+        let youtube = cx.new(|cx| YoutubeSettings::new(window, cx));
+        let ai = cx.new(|cx| AiSettings::new(window, cx));
+        let subscriptions = vec![
+            cx.subscribe(&state, |_, _, event: &AppEvent, cx| {
+                if *event == AppEvent::SettingsChanged {
+                    cx.notify();
+                }
+            }),
+            // Their fields render inside this page's groups.
+            cx.observe(&youtube, |_, _, cx| cx.notify()),
+            cx.observe(&ai, |_, _, cx| cx.notify()),
+        ];
         Self {
             section,
             opened: 0,
             media_folder: cx.new(|cx| MediaFolderField::new("settings-media-root", window, cx)),
-            youtube: cx.new(|cx| YoutubeSettings::new(window, cx)),
-            ai: cx.new(|cx| AiSettings::new(window, cx)),
+            youtube,
+            ai,
             _subscriptions: subscriptions,
         }
     }
@@ -78,10 +85,17 @@ impl SettingsPage {
         self.media_folder.update(cx, |field, cx| field.commit_before_quit(cx));
     }
 
-    fn pages(&self) -> Vec<SettingPage> {
+    fn pages(&self, cx: &App) -> Vec<SettingPage> {
         let media_folder = self.media_folder.clone();
-        let youtube = self.youtube.clone();
-        let ai = self.ai.clone();
+        let youtube_groups: Vec<SettingGroup> = self
+            .youtube
+            .read(cx)
+            .sections(cx)
+            .into_iter()
+            .map(|section| section.setting_group(&self.youtube))
+            .collect();
+        let ai_groups: Vec<SettingGroup> =
+            AiSettings::sections().into_iter().map(|section| section.setting_group(&self.ai)).collect();
         vec![
             SettingPage::new(SettingsSection::General.label())
                 .icon(Icon::new(IconName::Settings2))
@@ -121,18 +135,12 @@ impl SettingsPage {
                             .keywords(["database", "path"]),
                     ]),
                 ]),
-            SettingPage::new(SettingsSection::Youtube.label()).icon(Icon::new(IconName::CirclePlay)).group(
-                SettingGroup::new().item(
-                    SettingItem::render(move |_, _, _| youtube.clone()).keywords(["account", "upload", "google"]),
-                ),
-            ),
-            SettingPage::new(SettingsSection::AiEditing.label()).icon(Icon::new(IconName::WandSparkles)).group(
-                SettingGroup::new().item(SettingItem::render(move |_, _, _| ai.clone()).keywords([
-                    "agent",
-                    "claude",
-                    "video-use",
-                ])),
-            ),
+            SettingPage::new(SettingsSection::Youtube.label())
+                .icon(Icon::new(IconName::CirclePlay))
+                .groups(youtube_groups),
+            SettingPage::new(SettingsSection::AiEditing.label())
+                .icon(Icon::new(IconName::WandSparkles))
+                .groups(ai_groups),
             SettingPage::new(SettingsSection::About.label()).icon(Icon::new(IconName::Info)).group(
                 SettingGroup::new().item(
                     SettingItem::render(|_, _, cx| {
@@ -217,11 +225,11 @@ fn data_folder_field() -> SettingField<SharedString> {
 }
 
 impl Render for SettingsPage {
-    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page_ix = SettingsSection::ALL.iter().position(|section| *section == self.section).unwrap_or(0);
         Settings::new(("settings", self.opened))
             .default_selected_index(SelectIndex { page_ix, group_ix: None })
             .sidebar_width(window.rem_size() * 14.)
-            .pages(self.pages())
+            .pages(self.pages(cx))
     }
 }

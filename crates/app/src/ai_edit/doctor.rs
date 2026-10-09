@@ -98,16 +98,13 @@ impl DoctorChecklist {
             )
     }
 
-    fn render_row(&self, requirement: &Requirement, last: bool, cx: &App) -> Stateful<Div> {
+    fn render_row(&self, requirement: &Requirement, cx: &App) -> Stateful<Div> {
         let theme = cx.theme();
         let ok = requirement.check.ok;
         h_flex()
             .id(requirement.key)
             .items_start()
             .gap_3()
-            .px_3()
-            .py_2p5()
-            .when(!last, |this| this.border_b_1().border_color(theme.border))
             .child(div().pt_0p5().child(
                 Icon::new(if ok { IconName::CircleCheck } else { IconName::CircleX }).small().text_color(if ok {
                     theme.success
@@ -142,14 +139,10 @@ impl Render for DoctorChecklist {
         let header = self.render_header(doctor.as_ref(), checking, cx);
         let rows: Vec<_> = doctor.as_ref().map(|doctor| requirements(doctor, cx)).unwrap_or_default();
         let shown: Vec<_> = rows.iter().filter(|row| !self.compact || !row.check.ok).collect();
-        let theme = cx.theme();
 
-        v_flex().w_full().gap_3().child(header).when(!shown.is_empty(), |this| {
-            this.child(
-                v_flex().rounded(theme.radius_lg).border_1().border_color(theme.border).children(
-                    shown.iter().enumerate().map(|(ix, row)| self.render_row(row, ix + 1 == shown.len(), cx)),
-                ),
-            )
+        // A plain list: the checklist sits in a page or a card that already frames it.
+        v_flex().w_full().gap_4().child(header).when(!shown.is_empty(), |this| {
+            this.child(v_flex().gap_3().children(shown.iter().map(|row| self.render_row(row, cx))))
         })
     }
 }

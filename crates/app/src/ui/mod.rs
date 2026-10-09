@@ -15,8 +15,8 @@
 //! - **Settings.** Every settings section is built from the kit's setting
 //!   groups and items: a muted group title, label and description on the
 //!   leading side, the control trailing or stacked below, text fields capped at
-//!   [`settings::FIELD_MAX_WIDTH`]. Onboarding draws the same fields with
-//!   [`settings::SettingField`].
+//!   [`settings::FIELD_MAX_WIDTH`]. Views whose settings also appear in
+//!   onboarding describe them once as [`settings::SettingsSection`]s.
 //! - **Empty states.** [`EmptyState`]: muted icon without a disc, `text_base`
 //!   semibold title, muted description and, where there is one, the next action
 //!   as a small outline button, centred in the region it stands for.

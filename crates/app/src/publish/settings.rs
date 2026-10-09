@@ -14,19 +14,18 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
+    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, SharedString, Styled as _, Subscription, Task, Window, div,
 };
 use videocrm_core::settings::{DEFAULT_EMULATOR_GOOGLE_URL, DEFAULT_EMULATOR_YOUTUBE_URL, YoutubeBackend};
 
 use super::service::{Connection, EmulatorCheck, YoutubeService, probe_emulators};
-use super::ui::{ConnectionPanel, FieldRow, help_text, status_line};
+use super::ui::{ConnectionPanel, help_text, status_line};
 use crate::state::{AppEvent, AppState};
+use crate::ui::settings::{FIELD_MAX_WIDTH, SettingsField, SettingsSection};
 
 /// Typing in a field is saved this long after the last keystroke.
 const SAVE_DELAY: Duration = Duration::from_millis(500);
-/// Fields stop growing here: an ID or a URL does not need the whole page width.
-const FIELD_MAX_WIDTH: Rems = Rems(36.);
 
 /// One step of the Google Cloud setup, with the console page it happens on.
 struct SetupStep {
@@ -269,8 +268,8 @@ impl YoutubeSettings {
         .detach();
     }
 
-    /// Setup steps and the client fields.
-    fn render_google(&self, locked: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The Google Cloud setup steps, folded behind a toggle.
+    fn render_setup_steps(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let steps = GOOGLE_STEPS.iter().enumerate().map(|(ix, step)| {
             h_flex()
@@ -306,107 +305,60 @@ impl YoutubeSettings {
                 this.steps_open = !this.steps_open;
                 cx.notify();
             }));
-        v_flex()
-            .max_w(FIELD_MAX_WIDTH)
-            .gap_4()
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Your Google OAuth client"))
-                    .child(help_text(
-                        "VideoCRM uploads through an OAuth client in your own Google Cloud project. Creating one is free.",
-                        cx,
-                    )),
-            )
-            .child(
-                Collapsible::new()
-                    .open(open)
-                    .child(h_flex().child(toggle))
-                    .content(v_flex().id("google-setup-steps").gap_2().pt_2().children(steps)),
-            )
-            .child(
-                FieldRow::new("Client ID")
-                    .control(Input::new(&self.client_id).id("youtube-client-id").disabled(locked)),
-            )
-            .child(
-                FieldRow::new("Client secret").control(
-                    Input::new(&self.client_secret).id("youtube-client-secret").mask_toggle().disabled(locked),
-                ),
-            )
+        Collapsible::new()
+            .open(open)
+            .child(h_flex().child(toggle))
+            .content(v_flex().id("google-setup-steps").max_w(FIELD_MAX_WIDTH).gap_2().pt_2().children(steps))
     }
 
     /// What Google will show, right below Connect.
-    fn render_expectations(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_expectations(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let muted = cx.theme().muted_foreground;
         v_flex()
             .id("youtube-expectations")
             .max_w(FIELD_MAX_WIDTH)
             .gap_1p5()
-            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("When you connect"))
             .children(GOOGLE_EXPECTATIONS.iter().map(|note| {
                 h_flex()
                     .gap_2()
                     .items_start()
                     // A plain dot: an outlined circle reads as a radio button.
                     .child(div().mt_1p5().size_1().flex_shrink_0().rounded_full().bg(muted))
-                    .child(help_text(*note, cx).flex_1().min_w_0())
+                    .child(div().flex_1().min_w_0().text_sm().text_color(muted).child(*note))
             }))
             // Tests check that the notes are on screen.
             .test_support()
     }
 
-    /// The developer option: the local emulators instead of YouTube.
-    fn render_developer(&self, locked: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let service = self.service.read(cx);
-        let env_target = service
-            .is_env_override()
-            .then(|| service.config().map_or_else(|_| "the emulators".to_owned(), |config| config.backend_label()));
-        let emulator = self.kind == BackendKind::Emulator;
-        let open = self.developer_open;
-        let toggle = Button::new("youtube-developer")
-            .label("Developer: local emulator")
-            .icon(if open { IconName::ChevronDown } else { IconName::ChevronRight })
-            .ghost()
-            .small()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.developer_open = !this.developer_open;
-                cx.notify();
-            }));
-        let content = v_flex()
-            .max_w(FIELD_MAX_WIDTH)
-            .gap_4()
-            .pt_3()
-            .child(
-                v_flex()
-                    .gap_1p5()
-                    .child(
-                        Switch::new("youtube-use-emulator")
-                            .label("Connect to the local emulators instead of YouTube")
-                            .checked(emulator || env_target.is_some())
-                            .disabled(locked || env_target.is_some())
-                            .on_change(cx.listener(|this, on: &bool, _, cx| {
-                                this.set_kind(if *on { BackendKind::Emulator } else { BackendKind::Google }, cx)
-                            })),
-                    )
-                    .child(help_text(
-                        "For development and demos without a Google account. Start them with \
-                         scripts/emulators.sh. They keep accounts and uploads in memory until they stop.",
-                        cx,
-                    )),
-            )
-            .when_some(env_target, |this, target| {
-                this.child(help_text(
-                    format!(
-                        "VIDEOCRM_GOOGLE_URL or VIDEOCRM_YOUTUBE_URL is set, so VideoCRM connects to {target} \
-                         whatever this says."
-                    ),
-                    cx,
-                ))
-            });
-        Collapsible::new().open(open).child(h_flex().child(toggle)).content(content)
+    /// The account and what can be done about the connection.
+    fn render_account(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let connection = self.service.read(cx).connection().clone();
+        let note = match connection {
+            Connection::Connected(_) => {
+                Some("Disconnect to change the OAuth client or how VideoCRM connects to YouTube.")
+            }
+            Connection::Connecting { .. } => Some("Cancel the sign-in to change these settings."),
+            _ => None,
+        };
+        v_flex()
+            .w_full()
+            .gap_3()
+            .child(ConnectionPanel::new("youtube-connection", self.service.clone()).manage(true))
+            .children(note.map(|note| help_text(note, cx)))
     }
 
-    fn render_emulator(&self, locked: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The developer switch: the local emulators instead of YouTube.
+    fn render_emulator_switch(&self, locked: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let env_override = self.service.read(cx).is_env_override();
+        Switch::new("youtube-use-emulator")
+            .checked(self.kind == BackendKind::Emulator || env_override)
+            .disabled(locked || env_override)
+            .on_change(cx.listener(|this, on: &bool, _, cx| {
+                this.set_kind(if *on { BackendKind::Emulator } else { BackendKind::Google }, cx)
+            }))
+    }
+
+    fn render_emulator_check(&self, locked: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let checking = self.check == Some(EmulatorCheck::Checking);
         let result = match &self.check {
@@ -418,85 +370,138 @@ impl YoutubeSettings {
             }
             Some(EmulatorCheck::Checking) | None => None,
         };
-        v_flex()
-            .max_w(FIELD_MAX_WIDTH)
-            .gap_4()
+        h_flex()
+            .gap_3()
+            .items_start()
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Local emulators"))
-                    .child(help_text("Empty fields use the default addresses.", cx)),
+                Button::new("check-emulators")
+                    .label("Check")
+                    .small()
+                    .outline()
+                    .loading(checking)
+                    .disabled(checking || locked)
+                    .on_click(cx.listener(|this, _, _, cx| this.check_emulators(cx))),
             )
-            .child(
-                FieldRow::new("Google emulator")
-                    .control(Input::new(&self.google_url).id("youtube-google-url").disabled(locked)),
-            )
-            .child(
-                FieldRow::new("YouTube emulator")
-                    .control(Input::new(&self.youtube_url).id("youtube-youtube-url").disabled(locked)),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_start()
-                    .child(
-                        Button::new("check-emulators")
-                            .label("Check")
-                            .small()
-                            .outline()
-                            .loading(checking)
-                            .disabled(checking)
-                            .on_click(cx.listener(|this, _, _, cx| this.check_emulators(cx))),
-                    )
-                    .children(result.map(|result| div().pt_0p5().min_w_0().child(result))),
-            )
+            .children(result.map(|result| div().pt_0p5().min_w_0().child(result)))
     }
-}
 
-impl Render for YoutubeSettings {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The settings as the Settings page groups them, for the connection as it is now.
+    pub fn sections(&self, cx: &App) -> Vec<SettingsSection<Self>> {
         let service = self.service.read(cx);
         let connection = service.connection().clone();
         let env_override = service.is_env_override();
         let emulator = self.kind == BackendKind::Emulator || env_override;
-        let border = cx.theme().border;
-        let panel = ConnectionPanel::new("youtube-connection", self.service.clone()).manage(true);
-        let section = v_flex().id("youtube-settings").w_full().gap_6();
-        match connection {
-            // Signed in: the account first. Tokens belong to one client and backend, so
-            // changing either waits for a disconnect.
-            Connection::Connected(_) => section
-                .child(panel)
-                .child(help_text("Disconnect to change the OAuth client or how VideoCRM connects to YouTube.", cx))
-                .when(emulator, |this| this.child(div().h_px().bg(border)).child(self.render_developer(true, cx))),
-            // Not yet: fill in the client, connect, then the status. What Google will show
-            // matters once Connect can be clicked.
-            connection => {
-                let connecting = matches!(connection, Connection::Connecting { .. });
-                let ready = service.config().is_ok();
-                section
-                    .map(|this| match (self.kind, env_override) {
-                        // The environment decides the addresses; nothing to fill in.
-                        (_, true) => this,
-                        (BackendKind::Google, false) => {
-                            this.child(self.render_google(connecting, cx).into_any_element())
-                        }
-                        (BackendKind::Emulator, false) => {
-                            this.child(self.render_emulator(connecting, cx).into_any_element())
-                        }
-                    })
-                    .child(
-                        v_flex()
-                            .gap_4()
-                            .child(panel)
-                            .when(connecting, |this| {
-                                this.child(help_text("Cancel the sign-in to change these settings.", cx))
-                            })
-                            .when(!emulator && !connecting && ready, |this| this.child(self.render_expectations(cx))),
+        let connected = matches!(connection, Connection::Connected(_));
+        let connecting = matches!(connection, Connection::Connecting { .. });
+        let ready = service.config().is_ok();
+        let locked = connected || connecting;
+        let mut sections = Vec::new();
+        // Tokens belong to one client and backend: changing either waits for a disconnect.
+        match (self.kind, env_override, connected) {
+            // The environment decides the addresses; nothing to fill in.
+            (_, true, _) | (_, _, true) => {}
+            (BackendKind::Google, false, false) => sections.push(
+                SettingsSection::new()
+                    .title("OAuth client")
+                    .description(
+                        "VideoCRM uploads through an OAuth client in your own Google Cloud project. Creating one is \
+                         free.",
                     )
-                    .child(div().h_px().bg(border))
-                    .child(self.render_developer(connecting, cx))
-            }
+                    .element(|this: &mut Self, _, cx| this.render_setup_steps(cx))
+                    .field(
+                        SettingsField::new("Client ID", move |this: &mut Self, _, _| {
+                            Input::new(&this.client_id).id("youtube-client-id").disabled(locked)
+                        })
+                        .stacked(),
+                    )
+                    .field(
+                        SettingsField::new("Client secret", move |this: &mut Self, _, _| {
+                            Input::new(&this.client_secret).id("youtube-client-secret").mask_toggle().disabled(locked)
+                        })
+                        .stacked(),
+                    ),
+            ),
+            (BackendKind::Emulator, false, false) => sections.push(
+                SettingsSection::new()
+                    .title("Local emulators")
+                    .description("Empty fields use the default addresses.")
+                    .field(
+                        SettingsField::new("Google emulator", move |this: &mut Self, _, _| {
+                            Input::new(&this.google_url).id("youtube-google-url").disabled(locked)
+                        })
+                        .stacked(),
+                    )
+                    .field(
+                        SettingsField::new("YouTube emulator", move |this: &mut Self, _, _| {
+                            Input::new(&this.youtube_url).id("youtube-youtube-url").disabled(locked)
+                        })
+                        .stacked(),
+                    )
+                    .element(move |this: &mut Self, _, cx| this.render_emulator_check(locked, cx)),
+            ),
         }
+        sections
+            .push(SettingsSection::new().title("Account").element(|this: &mut Self, _, cx| this.render_account(cx)));
+        if !emulator && !locked && ready {
+            sections.push(
+                SettingsSection::new()
+                    .title("When you connect")
+                    .element(|this: &mut Self, _, cx| this.render_expectations(cx)),
+            );
+        }
+        if !connected || emulator {
+            let mut developer = SettingsSection::new().title("Developer").field(
+                SettingsField::new("Local emulators", move |this: &mut Self, _, cx| {
+                    this.render_emulator_switch(locked, cx)
+                })
+                .description(
+                    "Connect to the local emulators instead of YouTube, for development and demos without a Google \
+                     account. Start them with scripts/emulators.sh; they keep accounts and uploads in memory until \
+                     they stop.",
+                ),
+            );
+            if env_override {
+                let target =
+                    service.config().map_or_else(|_| "the emulators".to_owned(), |config| config.backend_label());
+                developer = developer.element(move |_: &mut Self, _, cx| {
+                    help_text(
+                        format!(
+                            "VIDEOCRM_GOOGLE_URL or VIDEOCRM_YOUTUBE_URL is set, so VideoCRM connects to {target} \
+                             whatever this says."
+                        ),
+                        cx,
+                    )
+                });
+            }
+            sections.push(developer);
+        }
+        sections
+    }
+}
+
+impl Render for YoutubeSettings {
+    /// Outside the Settings page (onboarding) the sections stack, and the
+    /// developer option stays folded behind a toggle.
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut sections = self.sections(cx);
+        let developer = sections.pop_if(|section| section.has_title("Developer"));
+        let shown: Vec<AnyElement> = sections.iter().map(|section| section.render(self, window, cx)).collect();
+        let developer = developer.map(|section| {
+            let open = self.developer_open;
+            let toggle = Button::new("youtube-developer")
+                .label("Developer: local emulator")
+                .icon(if open { IconName::ChevronDown } else { IconName::ChevronRight })
+                .ghost()
+                .small()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.developer_open = !this.developer_open;
+                    cx.notify();
+                }));
+            let content = div().pt_3().child(section.render(self, window, cx));
+            Collapsible::new().open(open).child(h_flex().child(toggle)).content(content)
+        });
+        v_flex().id("youtube-settings").w_full().gap_8().children(shown).children(
+            developer.map(|developer| div().pt_4().border_t_1().border_color(cx.theme().border).child(developer)),
+        )
     }
 }

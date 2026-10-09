@@ -168,7 +168,8 @@ fn breadcrumb(state: &gpui_kit::Entity<AppState>, cx: &App) -> impl IntoElement 
         },
         Route::Pipelines => vec![Crumb::new("Pipelines")],
         Route::Uploads => vec![Crumb::new("Uploads")],
-        Route::Settings { section } => vec![Crumb::new("Settings"), Crumb::new(section.label())],
+        // The settings list picks sections on its own, so the route's section can be stale.
+        Route::Settings { .. } => vec![Crumb::new("Settings")],
         Route::Onboarding => vec![Crumb::new("Welcome")],
     };
     let theme = cx.theme();
