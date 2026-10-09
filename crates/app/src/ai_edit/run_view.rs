@@ -63,8 +63,8 @@ pub(crate) struct RunView {
     /// Log length `items` was folded from.
     folded_len: usize,
     scroll: ScrollHandle,
-    /// Keep the newest events in view while the agent works. Scrolling up stops it;
-    /// scrolling back to the end resumes it.
+    /// Keep the newest events in view, from the start of a phase until the creator
+    /// scrolls up (also once the phase ended); scrolling back to the end resumes it.
     follow: bool,
     output: Option<OutputFacts>,
     output_task: Option<Task<()>>,
@@ -79,7 +79,7 @@ impl RunView {
         let subscription = cx.observe(&service, |this, _, cx| this.sync(cx));
         Self {
             notes: cx.new(|cx| {
-                TextareaState::new(window, cx).auto_grow(2, 8).placeholder("Notes for the render (optional)")
+                TextareaState::new(window, cx).auto_grow(2, 8).placeholder("Optional, e.g. keep the pause before the punchline")
             }),
             feedback: cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 10)),
             service,
@@ -760,7 +760,7 @@ impl Render for RunView {
             return div();
         };
         let live = self.live(cx);
-        if live.is_some() && self.follow {
+        if self.follow {
             // Rows such as Markdown messages settle their height a frame late, so the
             // end is re-applied every frame rather than once per event.
             self.scroll.scroll_to_bottom();

@@ -126,6 +126,12 @@ impl AiSettings {
         }
         subscriptions
             .push(cx.subscribe(&extra_instructions, |this, _, event: &InputEvent, cx| this.on_text_event(event, cx)));
+        // Leaving the settings before the pause ends must not lose what was typed.
+        subscriptions.push(cx.on_release(|this, cx| {
+            if this.save_task.is_some() {
+                this.write_text(cx);
+            }
+        }));
 
         Self {
             state,
@@ -156,19 +162,27 @@ impl AiSettings {
 
     /// Saves every text field now.
     fn save_text(&mut self, cx: &mut Context<Self>) {
+        self.write_text(cx);
+        cx.notify();
+    }
+
+    fn write_text(&mut self, cx: &mut App) {
         self.save_task = None;
         let agent_command = self.agent_command.read(cx).value().trim().to_string();
         let skill_dir = self.skill_dir.read(cx).value().trim().to_string();
         let extra_instructions = self.extra_instructions.read(cx).value().to_string();
         let target_length = self.target_length.read(cx).value().trim().to_string();
         let model = self.model_value(cx);
-        self.update(cx, move |pipeline| {
-            pipeline.agent_command =
-                if agent_command.is_empty() { DEFAULT_AGENT_COMMAND.to_owned() } else { agent_command };
-            pipeline.skill_dir = (!skill_dir.is_empty()).then(|| PathBuf::from(skill_dir));
-            pipeline.extra_instructions = extra_instructions;
-            pipeline.default_preferences.target_length = target_length;
-            pipeline.model = model;
+        self.state.update(cx, |state, cx| {
+            state.update_settings(cx, |settings| {
+                let pipeline = &mut settings.pipeline;
+                pipeline.agent_command =
+                    if agent_command.is_empty() { DEFAULT_AGENT_COMMAND.to_owned() } else { agent_command };
+                pipeline.skill_dir = (!skill_dir.is_empty()).then(|| PathBuf::from(skill_dir));
+                pipeline.extra_instructions = extra_instructions;
+                pipeline.default_preferences.target_length = target_length;
+                pipeline.model = model;
+            })
         });
     }
 

@@ -10,13 +10,13 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Div, Entity, FontWeight, IntoElement, ParentElement as _, Render, SharedString,
+    AnyElement, App, AppContext as _, Context, Div, Entity, FontWeight, IntoElement, ParentElement as _, Render, SharedString,
     Styled as _, Subscription, Window, div,
 };
 use videocrm_core::settings::EditPreferences;
 use videocrm_core::{DocumentKind, PipelineRun, RunId, RunStatus, VideoId};
 
-use super::brief::{COLOR_GRADES, color_grade_label, default_brief, with_preferences};
+use super::brief::{BriefDraft, COLOR_GRADES, color_grade_label, default_brief, with_preferences};
 use super::doctor::DoctorChecklist;
 use super::footage::{FootageCard, FootageChanged};
 use super::format;
@@ -52,7 +52,11 @@ impl AiEditPanel {
         let state = AppState::global(cx);
         let service = PipelineService::global(cx);
         let settings = state.read(cx).settings().pipeline.clone();
-        let preferences = settings.default_preferences.clone();
+        let draft = service.read(cx).draft(video_id).cloned();
+        let (preferences, auto_approve) = match &draft {
+            Some(draft) => (draft.preferences.clone(), draft.auto_approve),
+            None => (settings.default_preferences.clone(), settings.auto_approve),
+        };
 
         let brief =
             cx.new(|cx| TextareaState::new(window, cx).auto_grow(6, 18).placeholder("Describe the edit you want"));
@@ -73,6 +77,15 @@ impl AiEditPanel {
                     this.apply_preferences(window, cx);
                 }
             }),
+            cx.on_release(|this, cx| {
+                let draft = BriefDraft {
+                    brief: this.brief.read(cx).value().to_string(),
+                    preferences: this.preferences.clone(),
+                    auto_approve: this.auto_approve,
+                };
+                let video_id = this.video_id;
+                this.service.update(cx, |service, _| service.keep_draft(video_id, draft));
+            }),
         ];
 
         let latest = service
@@ -86,14 +99,17 @@ impl AiEditPanel {
             brief,
             target_length,
             preferences,
-            auto_approve: settings.auto_approve,
+            auto_approve,
             composing: latest.is_none(),
             run_view,
             doctor,
             start_error: None,
             _subscriptions: subscriptions,
         };
-        panel.reset_brief(window, cx);
+        match draft {
+            Some(draft) => panel.brief.update(cx, |input, cx| input.set_value(draft.brief, window, cx)),
+            None => panel.reset_brief(window, cx),
+        }
         panel.run_view.update(cx, |view, cx| view.set_run(latest, window, cx));
         panel
     }
@@ -166,6 +182,8 @@ impl AiEditPanel {
         let service = self.service.read(cx);
         if !footage.is_loaded() {
             Some("Reading the footage folder…")
+        } else if footage.is_importing() {
+            Some("Copying footage…")
         } else if !footage.has_takes() {
             Some("Add footage to start an edit.")
         } else if service.live_run_of(self.video_id).is_some() {
@@ -234,35 +252,25 @@ impl AiEditPanel {
                     menu
                 })
         });
-        let has_runs = !runs.is_empty();
-        let theme = cx.theme();
-        h_flex()
-            .gap_3()
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
-                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("AI edit"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child("video-use cuts the takes: it proposes a strategy, you approve, it renders."),
-                    ),
-            )
-            .children(history)
-            .when(has_runs && !self.composing, |this| {
-                this.child(
-                    Button::new("ai-edit-new").outline().small().icon(IconName::Plus).label("New edit").on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.composing = true;
-                            this.start_error = None;
-                            cx.notify();
-                        }),
-                    ),
-                )
-            })
+        let new_edit = (!runs.is_empty() && !self.composing).then(|| {
+            Button::new("ai-edit-new")
+                .outline()
+                .small()
+                .icon(IconName::Plus)
+                .label("New edit")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.composing = true;
+                    this.start_error = None;
+                    cx.notify();
+                }))
+                .into_any_element()
+        });
+        section_header(
+            "AI edit",
+            "video-use cuts the takes: it proposes a strategy, you approve, it renders.",
+            history.map(IntoElement::into_any_element).into_iter().chain(new_edit),
+            cx,
+        )
     }
 
     fn render_composer(&self, cx: &mut Context<Self>) -> Div {
@@ -402,6 +410,24 @@ impl AiEditPanel {
                 this.child(div().text_sm().text_color(theme.danger).child(error))
             })
     }
+}
+
+/// A section title with its trailing actions, and a description below.
+pub(super) fn section_header(
+    title: &'static str,
+    description: impl Into<SharedString>,
+    actions: impl IntoIterator<Item = AnyElement>,
+    cx: &App,
+) -> Div {
+    v_flex()
+        .gap_0p5()
+        .child(
+            h_flex()
+                .gap_2()
+                .child(div().flex_1().min_w_0().text_base().font_weight(FontWeight::SEMIBOLD).child(title))
+                .children(actions),
+        )
+        .child(div().text_sm().text_color(cx.theme().muted_foreground).child(description.into()))
 }
 
 /// One run in the history menu.

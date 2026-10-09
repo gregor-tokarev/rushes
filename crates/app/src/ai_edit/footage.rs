@@ -26,6 +26,7 @@ use videocrm_pipeline::{MediaInfo, probe_media};
 
 use super::format;
 use super::icons::media_icon;
+use super::panel::section_header;
 use crate::state::AppState;
 
 /// How often the folder is listed again, to pick up takes added outside the app.
@@ -108,6 +109,11 @@ impl FootageCard {
 
     pub(crate) fn is_loaded(&self) -> bool {
         self.loaded
+    }
+
+    /// Files are being copied in; the folder holds partial takes until they finish.
+    pub(crate) fn is_importing(&self) -> bool {
+        self.import.is_some()
     }
 
     fn footage_dir(&self, cx: &App) -> Option<PathBuf> {
@@ -298,7 +304,6 @@ impl FootageCard {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme();
         let durations: Vec<f64> =
             self.takes.iter().filter_map(|take| take.info.as_ref()).map(|info| info.duration_secs).collect();
         let summary = match self.takes.len() {
@@ -312,33 +317,24 @@ impl FootageCard {
                 }
             }
         };
-        h_flex()
-            .gap_3()
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
-                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Footage"))
-                    .child(div().text_sm().text_color(theme.muted_foreground).child(summary)),
-            )
-            .child(
-                Button::new("footage-open-folder")
-                    .ghost()
-                    .small()
-                    .icon(IconName::FolderOpen)
-                    .label("Open folder")
-                    .on_click(cx.listener(|this, _, _, cx| this.open_folder(cx))),
-            )
-            .child(
-                Button::new("footage-add")
-                    .outline()
-                    .small()
-                    .icon(IconName::Plus)
-                    .label("Add footage…")
-                    .disabled(self.import.is_some())
-                    .on_click(cx.listener(|this, _, _, cx| this.add_footage(cx))),
-            )
+        let actions = [
+            Button::new("footage-open-folder")
+                .ghost()
+                .small()
+                .icon(IconName::FolderOpen)
+                .label("Open folder")
+                .on_click(cx.listener(|this, _, _, cx| this.open_folder(cx)))
+                .into_any_element(),
+            Button::new("footage-add")
+                .outline()
+                .small()
+                .icon(IconName::Plus)
+                .label("Add footage…")
+                .disabled(self.import.is_some())
+                .on_click(cx.listener(|this, _, _, cx| this.add_footage(cx)))
+                .into_any_element(),
+        ];
+        section_header("Footage", summary, actions, cx)
     }
 
     fn render_list(&self, cx: &App) -> Div {

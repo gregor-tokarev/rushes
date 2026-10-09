@@ -4,6 +4,14 @@ use videocrm_core::document::teleprompter_text;
 use videocrm_core::settings::EditPreferences;
 use videocrm_core::{Block, Video, VideoFormat};
 
+/// The state of a video's brief form.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BriefDraft {
+    pub brief: String,
+    pub preferences: EditPreferences,
+    pub auto_approve: bool,
+}
+
 /// video-use grade presets, as stored in [`EditPreferences::color_grade`], with their labels.
 pub const COLOR_GRADES: [(&str, &str); 4] =
     [("none", "None"), ("subtle", "Subtle"), ("neutral_punch", "Neutral punch"), ("warm_cinematic", "Warm cinematic")];
