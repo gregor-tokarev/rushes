@@ -5,16 +5,20 @@
 
 #![cfg(unix)]
 
+use std::cell::RefCell;
 use std::fs;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, ElementId, Entity, ExternalPaths, FileDropEvent,
-    PlatformInput, Render, TestAppContext, Window, WindowBounds, WindowOptions, px, size,
+    AnyView, AnyWindowHandle, App, AppContext as _, Bounds, Context, ElementId, Entity, ExternalPaths, FileDropEvent,
+    IntoElement, ParentElement as _, PlatformInput, Render, Styled as _, TestAppContext, Window, WindowBounds,
+    WindowOptions, div, px, size,
 };
 use tempfile::TempDir;
 use videocrm::ai_edit::{
@@ -22,7 +26,7 @@ use videocrm::ai_edit::{
     split_failure,
 };
 use videocrm::route::{Route, VideoTab};
-use videocrm::state::AppState;
+use videocrm::state::{AppEvent, AppState};
 use videocrm_core::{NewVideo, PipelineRun, RunId, RunStatus, Store, VideoId, VideoStatus};
 use videocrm_pipeline::AgentEvent;
 
@@ -145,6 +149,26 @@ impl Fixture {
 
 fn fake_agent() -> PathBuf {
     fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/fake-agent")).expect("fake agent")
+}
+
+/// An agent that reports success without doing anything; with `LAZY_IS_ERROR=1` it
+/// reports an error result (like a turn limit) but still exits normally.
+fn lazy_agent(dir: &Path) -> PathBuf {
+    let path = dir.join("lazy-agent");
+    fs::write(
+        &path,
+        r#"#!/bin/sh
+echo '{"type":"system","subtype":"init","session_id":"lazy-session","cwd":"/","tools":[],"model":"lazy"}'
+if [ "$LAZY_IS_ERROR" = 1 ]; then
+  echo '{"type":"result","subtype":"error_max_turns","is_error":true,"result":"Reached the turn limit.","session_id":"lazy-session","total_cost_usd":0.01}'
+else
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"All done.","session_id":"lazy-session","total_cost_usd":0.01}'
+fi
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
 }
 
 /// A 3 second 320x240 test pattern with a sine tone.
@@ -476,6 +500,111 @@ fn the_requirement_check_passes_with_the_fake_agent(cx: &mut TestAppContext) {
     assert!(!doctor.agent.ok && !doctor.ready());
 }
 
+#[gpui_kit::test]
+fn an_edit_that_failed_while_planning_plans_again_with_feedback(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[("FAKE_AGENT_MODE", "fail")]);
+    let id = fx.start(cx, false);
+    fx.wait_for_status(cx, id, RunStatus::Failed);
+
+    // The agent works again; the creator continues the failed plan with feedback.
+    let pid_file = fx.pid_file.display().to_string();
+    cx.update(|cx| {
+        fx.service.update(cx, |service, cx| {
+            service.set_agent_env(vec![("FAKE_AGENT_PID_FILE".into(), pid_file)], cx);
+            service.send_feedback(id, "Use the second take for the intro.".into(), cx)
+        })
+    })
+    .expect("continued");
+    let planned = fx.wait_for_status(cx, id, RunStatus::AwaitingApproval);
+    assert!(planned.summary.expect("strategy").contains("**Strategy**"));
+    assert!(!fx.final_cut().exists(), "nothing is rendered before the strategy is approved");
+    assert_eq!(
+        phases(&fx.stored_events(cx, id)),
+        [(PhaseKind::Plan, None), (PhaseKind::Revise, Some("Use the second take for the intro.".into()))]
+    );
+}
+
+#[gpui_kit::test]
+fn a_render_that_leaves_an_old_final_cut_fails(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    // A final cut from an earlier edit of the same footage.
+    fs::create_dir_all(fx.final_cut().parent().unwrap()).unwrap();
+    fs::copy(fx.footage.join("take1.mp4"), fx.final_cut()).unwrap();
+    let lazy = lazy_agent(fx.root.path());
+    cx.update(|cx| {
+        fx.state.update(cx, |state, cx| {
+            state.update_settings(cx, |settings| settings.pipeline.agent_command = lazy.display().to_string())
+        })
+    });
+
+    let id = fx.start(cx, true);
+    let failed = fx.wait_for_status(cx, id, RunStatus::Failed);
+    assert!(failed.error.as_deref().is_some_and(|error| error.contains("without rendering")), "{failed:?}");
+    assert_eq!(failed.output, None);
+    assert_eq!(fx.upload_file(cx), None, "the old cut is not offered for upload");
+}
+
+#[gpui_kit::test]
+fn an_error_result_keeps_the_proposed_strategy(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let id = fx.start(cx, false);
+    let strategy = fx.wait_for_status(cx, id, RunStatus::AwaitingApproval).summary.expect("strategy");
+
+    let lazy = lazy_agent(fx.root.path());
+    cx.update(|cx| {
+        fx.state.update(cx, |state, cx| {
+            state.update_settings(cx, |settings| settings.pipeline.agent_command = lazy.display().to_string())
+        });
+        fx.service.update(cx, |service, cx| service.set_agent_env(vec![("LAZY_IS_ERROR".into(), "1".into())], cx));
+        fx.service.update(cx, |service, cx| service.send_feedback(id, "Shorter.".into(), cx))
+    })
+    .expect("feedback sent");
+    let failed = fx.wait_for_status(cx, id, RunStatus::Failed);
+    assert_eq!(failed.error.as_deref(), Some("Reached the turn limit."));
+    assert_eq!(failed.summary, Some(strategy), "the error does not replace the strategy");
+}
+
+#[gpui_kit::test]
+fn deleting_a_video_stops_its_edit_quietly(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[("FAKE_AGENT_DELAY_MS", "400")]);
+    let errors = Rc::new(RefCell::new(Vec::new()));
+    let _errors = cx.update(|cx| {
+        let errors = errors.clone();
+        cx.subscribe(&fx.state, move |_, event: &AppEvent, _| {
+            if let AppEvent::Error(message) = event {
+                errors.borrow_mut().push(message.to_string());
+            }
+        })
+    });
+    let id = fx.start(cx, false);
+    let pid_file = fx.pid_file.clone();
+    wait_until(cx, "the agent", |_| !recorded_pids(&pid_file).is_empty());
+
+    cx.update(|cx| fx.state.update(cx, |state, cx| state.delete_videos(&[fx.video], cx)));
+    assert!(cx.read(|cx| fx.service.read(cx).runs().is_empty()), "the store deleted the run with its video");
+    let service = fx.service.clone();
+    wait_until(cx, "the agent to stop", |cx| service.read(cx).live_phase(id).is_none());
+    let pids = recorded_pids(&fx.pid_file);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !pids.iter().all(|pid| process_gone(*pid)) {
+        assert!(Instant::now() < deadline, "agent processes still running: {pids:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(*errors.borrow(), Vec::<String>::new());
+}
+
 // UI integration tests
 
 /// Opens `build`'s view in a headless window tall enough for the whole panel.
@@ -491,6 +620,63 @@ fn open<V: Render>(
         .update(|cx| gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| build(window, cx))))
         .expect("open test window");
     handle
+}
+
+/// Shows one view that a test can close or replace, as navigating does.
+struct Host {
+    view: Option<AnyView>,
+}
+
+impl Render for Host {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().children(self.view.clone())
+    }
+}
+
+fn open_host(
+    cx: &mut TestAppContext,
+    build: impl FnOnce(&mut Window, &mut App) -> AnyView + 'static,
+) -> (AnyWindowHandle, Entity<Host>) {
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::new(Default::default(), size(px(1280.), px(2400.))))),
+        ..WindowOptions::default()
+    };
+    cx.update(|cx| {
+        gpui_kit::open_window(options, cx, |window, cx| {
+            let view = build(window, cx);
+            cx.new(|_| Host { view: Some(view) })
+        })
+    })
+    .expect("open test window")
+}
+
+/// Closes the hosted view, as navigating away does.
+fn close(cx: &mut TestAppContext, host: &Entity<Host>) {
+    cx.update(|cx| {
+        host.update(cx, |host, cx| {
+            host.view = None;
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+}
+
+/// Hosts a new view, as navigating to a page does.
+fn show(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    host: &Entity<Host>,
+    build: impl FnOnce(&mut Window, &mut App) -> AnyView,
+) {
+    cx.update_window(window, |_, window, cx| {
+        let view = build(window, cx);
+        host.update(cx, |host, cx| {
+            host.view = Some(view);
+            cx.notify();
+        });
+    })
+    .expect("window");
+    cx.run_until_parked();
 }
 
 /// Like [`wait_until`], re-rendering the window and asking it each time.
@@ -636,6 +822,16 @@ fn a_pipelines_row_opens_its_run(cx: &mut TestAppContext) {
     let row = format!("pipeline-run-{id}");
     wait_for_window(cx, window, "the run row", |window, _| shows(window, &row));
 
+    // The keyboard reaches the rows like buttons: Tab (the root's `focus_next`), then Enter.
+    cx.update_window(window, |_, window, cx| {
+        window.focus_next(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    assert_eq!(route(cx, &fx), Route::Video { id: fx.video, tab: VideoTab::Footage });
+    cx.update(|cx| fx.service.update(cx, |service, _| service.take_revealed(fx.video)));
+
+    cx.update(|cx| fx.state.update(cx, |state, cx| state.navigate(Route::Pipelines, cx)));
     click(cx, window, ElementId::Name(row.into()));
     assert_eq!(route(cx, &fx), Route::Video { id: fx.video, tab: VideoTab::Footage });
     let revealed = cx.update(|cx| fx.service.update(cx, |service, _| service.take_revealed(fx.video)));
@@ -696,4 +892,93 @@ fn takes_dropped_on_the_footage_card_are_copied_in(cx: &mut TestAppContext) {
     wait_until(cx, "the copied take", |_| fs::metadata(&copied).is_ok_and(|meta| meta.len() == 3 * 1024 * 1024));
     assert!(take.is_file(), "the source is copied, not moved");
     assert!(!fx.footage.join("notes.txt").exists(), "only media files are imported");
+}
+
+#[gpui_kit::test]
+fn text_typed_right_before_leaving_the_settings_is_saved(cx: &mut TestAppContext) {
+    let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
+    let (window, settings) = open_host(cx, |window, cx| cx.new(|cx| AiSettings::new(window, cx)).into());
+    click(cx, window, "ai-settings-agent-command");
+    cx.update_window(window, |_, window, cx| {
+        window.press("secondary-a", cx);
+        window.input("/opt/claude/bin/claude", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    close(cx, &settings);
+    let pipeline = cx.read(|cx| fx.state.read(cx).settings().pipeline.clone());
+    assert_eq!(pipeline.agent_command, "/opt/claude/bin/claude");
+}
+
+#[gpui_kit::test]
+fn the_brief_form_survives_leaving_the_video(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let video = fx.video;
+    let panel =
+        move |window: &mut Window, cx: &mut App| -> AnyView { cx.new(|cx| AiEditPanel::new(video, window, cx)).into() };
+    let (window, page) = open_host(cx, panel);
+    let service = fx.service.clone();
+    wait_until(cx, "requirement check", |cx| service.read(cx).doctor().is_some_and(|doctor| doctor.ready()));
+    wait_for_window(cx, window, "the composer", |window, _| shows(window, "ai-edit-start"));
+    click(cx, window, "brief-subtitles");
+    click(cx, window, "brief-auto-approve");
+
+    // Away to another page and back.
+    close(cx, &page);
+    show(cx, window, &page, panel);
+    wait_for_window(cx, window, "the composer", |window, _| shows(window, "ai-edit-start"));
+    click(cx, window, "ai-edit-start");
+    let id = latest_run(cx, &fx).expect("the panel started a run");
+    let run = fx.run(cx, id);
+    assert!(run.brief.contains("- Burn subtitles into the render."), "{}", run.brief);
+    assert_eq!(run.status, RunStatus::Rendering, "the strategy review stays skipped");
+    fx.wait_for_status(cx, id, RunStatus::Succeeded);
+}
+
+#[gpui_kit::test]
+fn a_long_activity_log_lays_out_only_the_rows_in_view(cx: &mut TestAppContext) {
+    let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
+    let now = Utc::now();
+    let run = PipelineRun {
+        id: RunId::new(),
+        video_id: fx.video,
+        status: RunStatus::Succeeded,
+        brief: String::new(),
+        footage_dir: fx.footage.clone(),
+        session_id: Some("s".into()),
+        summary: Some("Rendered.".into()),
+        output: None,
+        error: None,
+        cost_usd: None,
+        created_at: now,
+        updated_at: now,
+    };
+    cx.read(|cx| {
+        let store = fx.state.read(cx).store();
+        let mut store = store.lock().unwrap();
+        store.insert_run(&run).unwrap();
+        for ix in 0..1000 {
+            let event = if ix % 2 == 0 {
+                AgentEvent::ToolUse {
+                    id: format!("t{ix}"),
+                    name: "Bash".into(),
+                    summary: format!("ffmpeg -i take{ix}.mp4"),
+                }
+            } else {
+                AgentEvent::ToolResult { tool_use_id: format!("t{}", ix - 1), is_error: false, summary: "ok".into() }
+            };
+            store.append_run_event(run.id, &LogEvent::Agent(event).to_payload()).unwrap();
+        }
+    });
+    // A fresh service reads the run the store now holds.
+    cx.update(|cx| PipelineService::init(fx.state.clone(), cx));
+    let video = fx.video;
+    let window = open(cx, move |window, cx| AiEditPanel::new(video, window, cx));
+    let (first, last) = (format!("timeline-1-{}", run.id), format!("timeline-999-{}", run.id));
+    wait_for_window(cx, window, "the first activity rows", |window, _| shows(window, &first));
+    assert!(!cx.update_window(window, |_, window, _| shows(window, &last)).unwrap(), "rows far below are not laid out");
 }
