@@ -73,6 +73,7 @@ pub struct RunEvent {
     pub payload: serde_json::Value,
 }
 
+#[derive(Debug)]
 pub struct Store {
     conn: Connection,
 }
@@ -214,7 +215,7 @@ impl Store {
 
     /// Position that places a new video after all existing ones.
     pub fn next_position(&self) -> StoreResult<f64> {
-        Ok(self.conn.query_row("SELECT COALESCE(MAX(position) + 1.0, 0.0) FROM videos", [], |row| row.get(0))?)
+        Ok(next_video_position(&self.conn)?)
     }
 
     /// Creates a video at the end of the list with a Script document from the
@@ -222,13 +223,12 @@ impl Store {
     /// the video icon.
     pub fn create_video(&mut self, new: NewVideo) -> StoreResult<(Video, Vec<Document>)> {
         let tx = self.conn.transaction()?;
-        let position = tx.query_row("SELECT COALESCE(MAX(position) + 1.0, 0.0) FROM videos", [], |row| row.get(0))?;
         let video = Video {
             icon: new.template.icon().map(str::to_string),
             format: new.format,
             hook: new.hook,
             publish_date: new.publish_date,
-            position,
+            position: next_video_position(&tx)?,
             ..Video::new(new.title)
         };
         write_video(&tx, INSERT_VIDEO, &video)?;
@@ -414,8 +414,8 @@ impl Store {
             .conn
             .prepare_cached(
                 "INSERT INTO run_events (run_id, seq, at, payload)
-             VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM run_events WHERE run_id = ?1), ?2, ?3)
-             RETURNING seq",
+                 VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM run_events WHERE run_id = ?1), ?2, ?3)
+                 RETURNING seq",
             )?
             .query_row(params![run_id, at, Json(payload)], |row| row.get(0))?;
         Ok(RunEvent { run_id, seq, at, payload: payload.clone() })
@@ -506,8 +506,7 @@ impl Store {
     pub fn seed_sample_workspace(&mut self) -> StoreResult<Vec<Video>> {
         let workspace = sample::sample_workspace();
         let tx = self.conn.transaction()?;
-        let offset: f64 =
-            tx.query_row("SELECT COALESCE(MAX(position) + 1.0, 0.0) FROM videos", [], |row| row.get(0))?;
+        let offset = next_video_position(&tx)?;
         let property_offset: i32 =
             tx.query_row("SELECT COALESCE(MAX(position) + 1, 0) FROM property_defs", [], |row| row.get(0))?;
 
@@ -640,7 +639,7 @@ fn migration_1(tx: &Transaction<'_>) -> rusqlite::Result<()> {
             video_id    TEXT NOT NULL REFERENCES videos (id) ON DELETE CASCADE,
             file        TEXT NOT NULL,
             status      TEXT NOT NULL,   -- JSON UploadStatus
-            state       TEXT GENERATED ALWAYS AS (json_extract(status, '$.state')) VIRTUAL,
+            state       TEXT GENERATED ALWAYS AS (json_extract(status, '$.state')) VIRTUAL,  -- status tag, for queries
             session_url TEXT,
             created_at  TEXT NOT NULL,
             updated_at  TEXT NOT NULL
@@ -758,6 +757,10 @@ fn video_from_row(row: &Row<'_>) -> rusqlite::Result<Video> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
+}
+
+fn next_video_position(conn: &Connection) -> rusqlite::Result<f64> {
+    conn.query_row("SELECT COALESCE(MAX(position) + 1.0, 0.0) FROM videos", [], |row| row.get(0))
 }
 
 fn query_video(conn: &Connection, id: VideoId) -> rusqlite::Result<Option<Video>> {

@@ -1026,6 +1026,73 @@ mod tests {
         assert_eq!(shape(&parsed), shape(&expected));
     }
 
+    /// Pseudo-random documents built from markup-like texts must survive a round trip.
+    #[test]
+    fn round_trips_generated_documents() {
+        const LINES: &[&str] = &[
+            "plain words",
+            "# hash",
+            "## two",
+            "- dash",
+            "* star",
+            "+ plus",
+            "1. one",
+            "2) two",
+            "> gt",
+            "```",
+            "````",
+            "---",
+            "***",
+            "_ _ _",
+            "\\back",
+            "\\# escaped",
+            "[ ] box",
+            "[x] done",
+            "[!broll] cue",
+            "[!NOTE] alert",
+            "**bold** _it_ `code`",
+            "[link](https://x.dev)",
+            "- -",
+            "#tag",
+            "42",
+            "3.14",
+        ];
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+
+        for _ in 0..300 {
+            let mut blocks = Vec::new();
+            let mut list_indent: Option<u8> = None;
+            for _ in 0..next(12) + 1 {
+                let kind = BlockKind::ALL[next(BlockKind::ALL.len())];
+                let line_count = if kind.is_heading() { 1 } else { next(3) + 1 };
+                let text = match kind {
+                    BlockKind::Divider => String::new(),
+                    BlockKind::Code => {
+                        (0..line_count).map(|_| ["", "  indented", "```", "x"][next(4)]).collect::<Vec<_>>().join("\n")
+                    }
+                    _ => (0..line_count).map(|_| LINES[next(LINES.len())]).collect::<Vec<_>>().join("\n"),
+                };
+                let indent = if is_list_kind(kind) {
+                    let indent = next(usize::from(list_indent.map_or(0, |i| i + 1)) + 1) as u8;
+                    list_indent = Some(indent);
+                    indent
+                } else {
+                    list_indent = None;
+                    0
+                };
+                let checked = kind == BlockKind::Todo && next(2) == 1;
+                blocks.push(Block { indent, checked, ..Block::new(kind, text) });
+            }
+            assert_round_trip(&blocks);
+        }
+    }
+
     #[test]
     fn imports_common_markdown_dialects() {
         let markdown = "Intro line\r\nwraps here\r\n\r\n* star bullet\r\n    + four-space nested\r\n        \
