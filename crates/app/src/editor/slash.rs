@@ -18,10 +18,13 @@ impl BlockType {
         self.kind.label()
     }
 
+    /// Whether the normalized query starts the label, an alias, or one of
+    /// their words: `/head` finds headings, `/text` finds "On-screen text".
     fn matches(&self, query: &str) -> bool {
-        std::iter::once(self.label())
-            .chain(self.aliases.iter().copied())
-            .any(|term| normalize(term).contains(query))
+        std::iter::once(self.label()).chain(self.aliases.iter().copied()).any(|term| {
+            normalize(term).starts_with(query)
+                || term.split(|c: char| !c.is_alphanumeric()).any(|word| normalize(word).starts_with(query))
+        })
     }
 }
 
@@ -147,6 +150,11 @@ mod tests {
         assert_eq!(kinds("h2"), vec![BlockKind::Heading2]);
         assert_eq!(kinds("overlay"), vec![BlockKind::OnScreen]);
         assert!(kinds("zzz").is_empty());
+    }
+
+    #[test]
+    fn single_letters_match_word_starts_only() {
+        assert_eq!(kinds("b"), vec![BlockKind::Bulleted, BlockKind::BRoll, BlockKind::Quote]);
     }
 
     #[test]

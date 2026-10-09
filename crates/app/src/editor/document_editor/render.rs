@@ -7,10 +7,10 @@ use gpui_kit::base::input::Textarea;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, ThemeStyled as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Side, Sizable as _, ThemeStyled as _, h_flex, v_flex};
 use gpui_kit::assets::IconName;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, DragMoveEvent, ElementId, FontStyle, FontWeight,
+    Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, DragMoveEvent, ElementId, FontStyle, FontWeight,
     HighlightStyle, InteractiveElement as _, InteractiveText, IntoElement, MouseButton, MouseDownEvent,
     ParentElement as _, Render, Rems, SharedString, StatefulInteractiveElement as _, StrikethroughStyle,
     Styled as _, StyledText, TestSupportExt as _, UnderlineStyle, WeakEntity, Window, anchored, deferred,
@@ -31,6 +31,8 @@ const ROW_GROUP: &str = "document-block";
 const GUTTER: Rems = Rems(3.5);
 /// Readable width of the text column.
 const TEXT_WIDTH: Rems = Rems(46.);
+/// Tallest the slash menu grows before it scrolls.
+const SLASH_MENU_MAX_HEIGHT: Rems = Rems(22.);
 /// Indent of one list level.
 const INDENT_STEP: Rems = Rems(1.5);
 /// The input engine wraps text this far before its right edge, so rendered
@@ -109,7 +111,7 @@ impl Render for DocumentEditor {
             .blocks
             .iter()
             .zip(&numbers)
-            .map(|(block, number)| self.render_block(block, *number, &row, cx))
+            .map(|(block, number)| self.render_block(block, *number, &row, window, cx))
             .collect();
 
         v_flex()
@@ -162,7 +164,14 @@ impl Render for DocumentEditor {
 }
 
 impl DocumentEditor {
-    fn render_block(&self, block: &Block, number: usize, row: &RowContext, cx: &mut Context<Self>) -> AnyElement {
+    fn render_block(
+        &self,
+        block: &Block,
+        number: usize,
+        row: &RowContext,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let id = block.id;
         let metrics = Metrics::of(block.kind);
         let menu_open = self.block_menu.as_ref().is_some_and(|menu| menu.block == id);
@@ -182,7 +191,11 @@ impl DocumentEditor {
             .child(self.render_content(block, number, metrics, row, cx))
             .when_some(
                 self.slash.as_ref().filter(|menu| menu.block == id && row.editing == Some(id)),
-                |this, menu| this.child(div().absolute().left_0().top_full().child(self.render_slash_menu(menu, cx))),
+                |this, menu| {
+                    let above = self.slash_menu_opens_above(menu, window, cx);
+                    let anchor = div().absolute().left_0().map(|this| if above { this.top_0() } else { this.top_full() });
+                    this.child(anchor.child(self.render_slash_menu(menu, above, cx)))
+                },
             );
 
         h_flex()
@@ -472,7 +485,19 @@ impl DocumentEditor {
         .into_any_element()
     }
 
-    fn render_slash_menu(&self, menu: &SlashMenu, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Opens the slash menu above its block when the space below, judged
+    /// from the input's previous layout, cannot fit it but the space above can.
+    fn slash_menu_opens_above(&self, menu: &SlashMenu, window: &Window, cx: &App) -> bool {
+        let Some(bounds) = self.inputs.get(&menu.block).and_then(|input| input.state.read(cx).text_bounds()) else {
+            return false;
+        };
+        let rows = menu.items().len().max(1) as f32;
+        let height = window.rem_size() * SLASH_MENU_MAX_HEIGHT.0.min(2.5 + 3. * rows);
+        let below = window.viewport_size().height - bounds.bottom();
+        below < height && bounds.top() > below
+    }
+
+    fn render_slash_menu(&self, menu: &SlashMenu, above: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let items = menu.items();
         let heading = if menu.query.is_empty() { "Basic blocks" } else { "Blocks" };
@@ -522,15 +547,16 @@ impl DocumentEditor {
                 )
         });
 
+        let anchor = if above { Anchor::BottomLeft } else { Anchor::TopLeft };
         deferred(
-            anchored().snap_to_window_with_margin(px(8.)).child(
+            anchored().anchor(anchor).snap_to_window_with_margin(px(8.)).child(
                 v_flex()
                     .id("slash-menu")
                     .test_support()
                     .occlude()
-                    .mt_1()
+                    .map(|this| if above { this.mb_1() } else { this.mt_1() })
                     .w(rems(20.))
-                    .max_h(rems(22.))
+                    .max_h(SLASH_MENU_MAX_HEIGHT)
                     .overflow_y_scroll()
                     .p_1()
                     .popover_style(cx)
@@ -552,6 +578,7 @@ fn render_block_menu(menu: &BlockMenu) -> impl IntoElement {
     deferred(
         anchored()
             .position(menu.position)
+            .anchor(Anchor::TopRight)
             .snap_to_window_with_margin(px(8.))
             .child(menu.menu.clone()),
     )
@@ -585,7 +612,7 @@ pub(super) fn block_menu(
     let turn_into = {
         let editor = editor.clone();
         move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
-            BLOCK_TYPES.iter().fold(menu, |menu, ty| {
+            BLOCK_TYPES.iter().fold(menu.check_side(Side::Right), |menu, ty| {
                 let editor = editor.clone();
                 let kind = ty.kind;
                 menu.item(

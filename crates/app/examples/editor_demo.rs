@@ -4,6 +4,7 @@
 //! cargo run -p videocrm --example editor_demo            # sample script
 //! cargo run -p videocrm --example editor_demo -- --dark  # dark theme
 //! cargo run -p videocrm --example editor_demo -- --blocks 300
+//! cargo run -p videocrm --example editor_demo -- --font Inter
 //! ```
 
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -149,11 +150,9 @@ fn long_document(count: usize) -> Vec<Block> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dark = args.iter().any(|arg| arg == "--dark");
-    let count = args
-        .iter()
-        .position(|arg| arg == "--blocks")
-        .and_then(|ix| args.get(ix + 1))
-        .and_then(|count| count.parse().ok());
+    let value = |flag: &str| args.iter().position(|arg| arg == flag).and_then(|ix| args.get(ix + 1)).cloned();
+    let count = value("--blocks").and_then(|count| count.parse().ok());
+    let font = value("--font");
 
     let document = Document {
         id: DocumentId::new(),
@@ -169,6 +168,9 @@ fn main() {
         gpui_kit::init(cx);
         if dark {
             Theme::change(ThemeMode::Dark, None, cx);
+        }
+        if let Some(font) = font {
+            Theme::update(cx, |theme| theme.font_family = font.into());
         }
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1180.), px(860.)), cx)),
