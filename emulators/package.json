@@ -1,0 +1,20 @@
+{
+  "name": "videocrm-emulators",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Google OAuth and YouTube Data API v3 emulators for VideoCRM development and tests",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "emulate start --config emulate.config.ts",
+    "test": "node --test",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.1",
+    "emulate": "0.12.1",
+    "typescript": "7.0.2"
+  }
+}
