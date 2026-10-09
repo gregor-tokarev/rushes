@@ -257,7 +257,7 @@ impl Onboarding {
                     .child(choice(
                         "start-empty",
                         StartChoice::Empty,
-                        IconName::Square,
+                        IconName::Inbox,
                         "Start empty",
                         "An empty database, ready for your ideas.",
                     ))
