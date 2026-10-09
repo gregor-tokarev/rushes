@@ -612,3 +612,61 @@ fn keyboard_renames_and_opens_the_selected_row(cx: &mut TestAppContext) {
     db.step(cx, |window, cx| window.press("enter", cx));
     assert_eq!(db.take_events(), vec![DatabaseEvent::OpenVideo(db.desk)]);
 }
+
+#[gpui_kit::test]
+fn escape_cancels_an_inline_edit_at_once(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    db.step(cx, |window, cx| {
+        window.click_at(row_id(db.desk), point(px(190.), px(16.)), cx)
+    });
+    db.step(cx, |window, cx| window.press("f2", cx));
+    db.step(cx, |window, cx| window.input(" tour", cx));
+    assert!(db.with_window(cx, |window, _| window.try_find("cell-input").is_some()));
+
+    // The row is still selected, so the table would take Escape to clear the
+    // selection; the editor gets it first.
+    db.step(cx, |window, cx| window.press("escape", cx));
+    assert!(
+        db.with_window(cx, |window, _| window.try_find("cell-input").is_none()),
+        "one Escape closes the editor"
+    );
+    assert!(db.take_events().is_empty(), "nothing is saved");
+    assert_eq!(
+        cx.read(|cx| db
+            .panel
+            .read(cx)
+            .video(db.desk)
+            .map(|video| video.title.clone())),
+        Some("Desk setup 2026".to_string())
+    );
+    assert_eq!(
+        cx.read(|cx| db.panel.read(cx).selected_video()),
+        Some(db.desk),
+        "the row stays selected"
+    );
+
+    // Keyboard focus is back on the table: Enter opens the row.
+    db.step(cx, |window, cx| window.press("enter", cx));
+    assert_eq!(db.take_events(), vec![DatabaseEvent::OpenVideo(db.desk)]);
+}
+
+#[gpui_kit::test]
+fn row_keys_do_not_reach_through_an_open_cell_menu(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    db.step(cx, |window, cx| {
+        window.click_at(row_id(db.desk), point(px(190.), px(16.)), cx)
+    });
+    db.press_and_release(cx, format!("status-{}", db.desk));
+    assert!(db.with_window(cx, |window, _| window.try_find("popup-menu").is_some()));
+
+    // Backspace and Delete in the status menu do not ask to delete the row.
+    db.step(cx, |window, cx| window.press("backspace", cx));
+    db.step(cx, |window, cx| window.press("delete", cx));
+    assert!(
+        db.with_window(cx, |window, _| window.try_find("ok").is_none()),
+        "no delete confirmation"
+    );
+    assert!(db.take_events().is_empty());
+}

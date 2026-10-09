@@ -31,10 +31,14 @@ use super::table::{CellEditors, EmptyReason, TableModel, VideoTable};
 
 actions!(
     video_database,
-    [OpenSelected, RenameSelected, DeleteSelected]
+    [OpenSelected, RenameSelected, DeleteSelected, CancelEdit]
 );
 
 const KEY_CONTEXT: &str = "VideoDatabase";
+
+/// Key context around the inline cell editor, so Escape cancels the edit
+/// before the table takes it to clear the row selection.
+pub(crate) const CELL_EDITOR_CONTEXT: &str = "VideoDatabaseCellEditor";
 
 /// Key context around a text input that lives inside a popover, a dialog or
 /// the table: Enter and Space belong to the input there, so they must not
@@ -127,6 +131,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("f2", RenameSelected, table),
         KeyBinding::new("backspace", DeleteSelected, table),
         KeyBinding::new("delete", DeleteSelected, table),
+        KeyBinding::new("escape", CancelEdit, Some(CELL_EDITOR_CONTEXT)),
         // The input still sees these keys; `NoAction` only keeps the
         // shallower Popover, Dialog and table bindings from firing too.
         KeyBinding::new("enter", NoAction, text_entry),
@@ -1038,7 +1043,17 @@ impl DatabasePanel {
         }
     }
 
-    fn on_open_selected(&mut self, _: &OpenSelected, _: &mut Window, cx: &mut Context<Self>) {
+    /// Whether the row keys apply: the table itself has focus, not a cell's
+    /// menu or popover opened inside it.
+    fn row_keys_apply(&self, window: &Window, cx: &App) -> bool {
+        self.table.focus_handle(cx).is_focused(window)
+    }
+
+    fn on_open_selected(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.row_keys_apply(window, cx) {
+            cx.propagate();
+            return;
+        }
         if let Some(id) = self.selected {
             self.open_video(id, cx);
         }
@@ -1050,6 +1065,10 @@ impl DatabasePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.row_keys_apply(window, cx) {
+            cx.propagate();
+            return;
+        }
         if let Some(id) = self.selected {
             let cell = CellRef {
                 video: id,
@@ -1065,9 +1084,20 @@ impl DatabasePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.row_keys_apply(window, cx) {
+            cx.propagate();
+            return;
+        }
         if let Some(id) = self.selected {
             self.confirm_delete_videos(vec![id], window, cx);
         }
+    }
+
+    /// Escape in the inline editor: drop the edit and hand the keyboard back
+    /// to the table.
+    fn on_cancel_edit(&mut self, _: &CancelEdit, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_editing(window, cx);
+        self.table.focus_handle(cx).focus(window, cx);
     }
 
     fn render_table(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1141,6 +1171,7 @@ impl Render for DatabasePanel {
             .on_action(cx.listener(Self::on_open_selected))
             .on_action(cx.listener(Self::on_rename_selected))
             .on_action(cx.listener(Self::on_delete_selected))
+            .on_action(cx.listener(Self::on_cancel_edit))
             .size_full()
             .min_h_0()
             .bg(cx.theme().background)

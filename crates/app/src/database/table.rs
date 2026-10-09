@@ -20,7 +20,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight,
-    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, SharedString, Stateful,
+    InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, WeakEntity, Window, div, px,
 };
 use videocrm_core::{
@@ -32,7 +32,7 @@ use super::colors::{format_color, free_tag_color, run_status_color, upload_statu
 use super::elements::{CellButton, Chip, cell_slot, empty_value, muted_icon};
 use super::format;
 use super::icons::column_icon;
-use super::panel::{CellRef, DatabasePanel, TEXT_ENTRY_CONTEXT};
+use super::panel::{CELL_EDITOR_CONTEXT, CellRef, DatabasePanel, TEXT_ENTRY_CONTEXT};
 use super::property_editor::PropertyEditorMode;
 use super::query::column_name;
 
@@ -593,25 +593,25 @@ impl VideoTable {
     }
 
     fn render_inline_editor(&self, cell: CellRef, _: &mut Window, _: &mut App) -> AnyElement {
-        let panel = self.panel.clone();
+        // Escape is bound in the editor's own context (see `CancelEdit`);
+        // the text-entry context keeps Enter and Space in the input.
         div()
             .id(element_id("cell-editor", cell.video))
-            .key_context(TEXT_ENTRY_CONTEXT)
+            .key_context(CELL_EDITOR_CONTEXT)
             .size_full()
-            .flex()
-            .items_center()
-            .mx_neg_1()
-            .on_key_down(move |event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" {
-                    cx.stop_propagation();
-                    _ = panel.update(cx, |panel, cx| panel.cancel_editing(window, cx));
-                }
-            })
             .child(
-                Input::new(&self.editors.cell_input)
-                    .id("cell-input")
-                    .small()
-                    .w_full(),
+                div()
+                    .key_context(TEXT_ENTRY_CONTEXT)
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .mx_neg_1()
+                    .child(
+                        Input::new(&self.editors.cell_input)
+                            .id("cell-input")
+                            .small()
+                            .w_full(),
+                    ),
             )
             .into_any_element()
     }
