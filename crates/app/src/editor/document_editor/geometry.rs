@@ -54,6 +54,11 @@ impl Geometry {
         self.reveal = false;
     }
 
+    /// Where the row was drawn in the last frame, in window coordinates.
+    pub fn row_bounds(&self, id: BlockId) -> Option<Bounds<Pixels>> {
+        self.rows.get(&id).map(|row| row.bounds)
+    }
+
     /// Height of the spacer to draw instead of a row that was measured with
     /// the same content and lies more than a viewport away from the visible
     /// area, or `None` when the row must be rendered.

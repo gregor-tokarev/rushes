@@ -15,7 +15,7 @@ use gpui_kit::component::input::{
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::{
     App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Point,
-    ScrollHandle, SharedString, Subscription, Window,
+    ScrollHandle, SharedString, Subscription, Window, point,
 };
 use videocrm_core::{Block, BlockId, BlockKind, Document};
 
@@ -25,8 +25,8 @@ use super::inline::{Marker, toggle_marker};
 use super::markdown::{Shortcut, detect_shortcut, is_list, parse_blocks};
 use super::slash::{self, BlockType};
 use super::{
-    ClearBlockSelection, DeleteSelectedBlock, InsertParagraphBelow, SelectNextBlock, SelectPreviousBlock,
-    ToggleBold, ToggleCode, ToggleItalic,
+    ClearBlockSelection, DeleteSelectedBlock, InsertParagraphBelow, OpenBlockMenu, SelectNextBlock,
+    SelectPreviousBlock, ToggleBold, ToggleCode, ToggleItalic,
 };
 
 /// Events a [`DocumentEditor`] emits to its owner.
@@ -893,6 +893,15 @@ impl DocumentEditor {
         self.slash = None;
         self.block_menu = Some(BlockMenu { block: id, menu, position, _subscription: subscription });
         cx.notify();
+    }
+
+    /// Opens the block menu beside the focused block's text, where the drag
+    /// handle's menu would appear.
+    fn open_focused_block_menu(&mut self, _: &OpenBlockMenu, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.focused else { return };
+        let Some(bounds) = self.geometry.borrow().row_bounds(id) else { return };
+        let position = point(bounds.left() + window.rem_size() * render::GUTTER.0, bounds.top());
+        self.open_block_menu(id, position, window, cx);
     }
 
     fn set_hovered(&mut self, id: BlockId, hovered: bool, cx: &mut Context<Self>) {

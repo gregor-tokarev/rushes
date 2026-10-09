@@ -489,3 +489,16 @@ fn long_documents_render_only_rows_near_the_viewport(cx: &mut TestAppContext) {
     assert_eq!(f.blocks(cx)[299].text, "Line 299!");
     assert_eq!(f.blocks(cx).len(), 300);
 }
+
+#[gpui_kit::test]
+fn the_block_menu_opens_from_the_keyboard(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![paragraph("first"), paragraph("second")]);
+    f.focus_last(cx);
+    f.press(cx, &["secondary-/"]);
+    assert!(f.is_visible(cx, "popup-menu".into()));
+    // Move up is the fourth item.
+    f.step(cx, |window, cx| window.within("popup-menu").click(3usize, cx));
+    let texts: Vec<_> = f.blocks(cx).into_iter().map(|block| block.text).collect();
+    assert_eq!(texts, ["second", "first"]);
+    assert!(!f.is_visible(cx, "popup-menu".into()));
+}

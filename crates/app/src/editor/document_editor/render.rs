@@ -28,7 +28,7 @@ use crate::editor::slash::BLOCK_TYPES;
 
 /// Width of the gutter holding the add button and drag handle. The same
 /// space is reserved on the trailing side so text stays centered.
-const GUTTER: Rems = Rems(3.5);
+pub(super) const GUTTER: Rems = Rems(3.5);
 /// Readable width of the text column.
 const TEXT_WIDTH: Rems = Rems(46.);
 /// Tallest the slash menu grows before it scrolls.
@@ -185,6 +185,7 @@ impl Render for DocumentEditor {
             .on_action(cx.listener(Self::delete_selected))
             .on_action(cx.listener(Self::insert_below_selected))
             .on_action(cx.listener(Self::clear_selection))
+            .on_action(cx.listener(Self::open_focused_block_menu))
             .w_full()
             .flex_1()
             .items_center()

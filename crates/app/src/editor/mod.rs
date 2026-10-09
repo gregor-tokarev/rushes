@@ -42,6 +42,9 @@ actions!(
         InsertParagraphBelow,
         /// Clear the block selection.
         ClearBlockSelection,
+        /// Open the block menu (Turn into, Duplicate, Move, Delete) of the
+        /// focused block; the keyboard path to the drag handle's menu.
+        OpenBlockMenu,
     ]
 );
 
@@ -67,5 +70,6 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("delete", DeleteSelectedBlock, Some(CONTEXT)),
         KeyBinding::new("enter", InsertParagraphBelow, Some(CONTEXT)),
         KeyBinding::new("escape", ClearBlockSelection, Some(CONTEXT)),
+        KeyBinding::new("secondary-/", OpenBlockMenu, Some(CONTEXT)),
     ]);
 }
