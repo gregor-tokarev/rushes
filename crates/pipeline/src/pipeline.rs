@@ -84,19 +84,14 @@ pub fn run_phase(
     }
     // The skill is usually a symlink; `--add-dir` and the agent work with real paths.
     let skill_dir = fs::canonicalize(&ctx.skill_dir)?;
-    let program = config
-        .resolve_command()
-        .ok_or_else(|| PipelineError::AgentNotFound(config.command.clone()))?;
+    let program = config.resolve_command().ok_or_else(|| PipelineError::AgentNotFound(config.command.clone()))?;
     let footage = match phase {
         Phase::Plan { .. } | Phase::Auto { .. } => list_footage(&ctx.footage_dir)?,
         Phase::Approve { .. } | Phase::Feedback { .. } => Vec::new(),
     };
 
     // A blank id (e.g. an unset database column) means a fresh session.
-    let resume = ctx
-        .session_id
-        .clone()
-        .filter(|session_id| !session_id.trim().is_empty());
+    let resume = ctx.session_id.clone().filter(|session_id| !session_id.trim().is_empty());
 
     let edit_dir = ctx.footage_dir.join(EDIT_DIR);
     let final_cut = edit_dir.join(FINAL_CUT);
@@ -115,16 +110,8 @@ pub fn run_phase(
         stderr_tail: run.stderr_tail.clone(),
         session_id: session_id.clone(),
     };
-    let Some(AgentEvent::Result {
-        is_error,
-        result_text,
-        cost_usd,
-        ..
-    }) = run.result
-    else {
-        return Err(failed(format!(
-            "the agent stopped without reporting a result ({status})"
-        )));
+    let Some(AgentEvent::Result { is_error, result_text, cost_usd, .. }) = run.result else {
+        return Err(failed(format!("the agent stopped without reporting a result ({status})")));
     };
     if !status.success() {
         return Err(failed(if is_error && !result_text.is_empty() {
@@ -134,11 +121,7 @@ pub fn run_phase(
         }));
     }
 
-    let summary_text = if result_text.trim().is_empty() {
-        run.last_text.unwrap_or_default()
-    } else {
-        result_text
-    };
+    let summary_text = if result_text.trim().is_empty() { run.last_text.unwrap_or_default() } else { result_text };
     let after = file_stamp(&final_cut);
     let preview = edit_dir.join(PREVIEW);
     Ok(PhaseOutcome {
@@ -242,10 +225,7 @@ fn intro(skill_md: &Path, footage: &[FootageFile]) -> String {
             .to_owned()
     } else {
         let lines: Vec<String> = footage.iter().map(describe).collect();
-        format!(
-            "Raw footage in the current directory:\n{}",
-            lines.join("\n")
-        )
+        format!("Raw footage in the current directory:\n{}", lines.join("\n"))
     };
     format!(
         "Use the video-use skill to edit the raw footage in the current directory. Read the \
@@ -286,11 +266,7 @@ fn describe(file: &FootageFile) -> String {
 fn format_duration(seconds: f64) -> String {
     let total = seconds.max(0.0).round() as u64;
     let (hours, minutes, seconds) = (total / 3600, total / 60 % 60, total % 60);
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
+    if hours > 0 { format!("{hours}:{minutes:02}:{seconds:02}") } else { format!("{minutes}:{seconds:02}") }
 }
 
 #[cfg(test)]

@@ -19,17 +19,11 @@ pub struct Check {
 
 impl Check {
     fn pass(detail: impl Into<String>) -> Self {
-        Self {
-            ok: true,
-            detail: detail.into(),
-        }
+        Self { ok: true, detail: detail.into() }
     }
 
     fn fail(detail: impl Into<String>) -> Self {
-        Self {
-            ok: false,
-            detail: detail.into(),
-        }
+        Self { ok: false, detail: detail.into() }
     }
 }
 
@@ -51,16 +45,9 @@ pub struct Doctor {
 
 impl Doctor {
     pub fn ready(&self) -> bool {
-        [
-            &self.agent,
-            &self.skill,
-            &self.ffmpeg,
-            &self.ffprobe,
-            &self.elevenlabs,
-            &self.python,
-        ]
-        .iter()
-        .all(|check| check.ok)
+        [&self.agent, &self.skill, &self.ffmpeg, &self.ffprobe, &self.elevenlabs, &self.python]
+            .iter()
+            .all(|check| check.ok)
     }
 }
 
@@ -97,19 +84,13 @@ fn check_agent(config: &AgentConfig) -> Check {
     };
     match run_captured(&program, ["--version"], &config.env, VERSION_TIMEOUT) {
         Some(version) => Check::pass(format!("{} ({})", program.display(), first_line(&version))),
-        None => Check::fail(format!(
-            "{} does not run (`--version` failed)",
-            program.display()
-        )),
+        None => Check::fail(format!("{} does not run (`--version` failed)", program.display())),
     }
 }
 
 fn check_skill(skill_dir: Option<&Path>) -> (Check, Option<PathBuf>) {
     let Some(dir) = skill_dir.map(Path::to_owned).or_else(default_skill_dir) else {
-        return (
-            Check::fail("no skill folder configured and no home directory"),
-            None,
-        );
+        return (Check::fail("no skill folder configured and no home directory"), None);
     };
     let skill_md = dir.join("SKILL.md");
     match fs::canonicalize(&dir) {
@@ -130,10 +111,7 @@ fn check_ffmpeg_tool(program: Option<PathBuf>, name: &str) -> Check {
     };
     match run_captured(&program, ["-version"], &[], VERSION_TIMEOUT) {
         Some(version) => Check::pass(format!("{} ({})", program.display(), first_line(&version))),
-        None => Check::fail(format!(
-            "{} does not run (`-version` failed)",
-            program.display()
-        )),
+        None => Check::fail(format!("{} does not run (`-version` failed)", program.display())),
     }
 }
 
@@ -145,25 +123,18 @@ fn check_elevenlabs(config: &AgentConfig, skill_dir: Option<&Path>) -> Check {
         let text = fs::read_to_string(path).ok()?;
         dotenv_has_value(&text, ELEVENLABS_KEY).map(|filled| (path, filled))
     });
-    let in_environment = config
-        .env_var(ELEVENLABS_KEY)
-        .is_some_and(|key| !key.to_string_lossy().trim().is_empty());
+    let in_environment = config.env_var(ELEVENLABS_KEY).is_some_and(|key| !key.to_string_lossy().trim().is_empty());
     match (in_file, env_file.as_deref()) {
-        (Some((path, true)), _) => {
-            Check::pass(format!("{ELEVENLABS_KEY} is set in {}", path.display()))
-        }
+        (Some((path, true)), _) => Check::pass(format!("{ELEVENLABS_KEY} is set in {}", path.display())),
         (Some((path, false)), _) => Check::fail(format!(
             "{ELEVENLABS_KEY} is empty in {}: the skill reads that file before the \
              environment, so fill in the key there or remove the line",
             path.display()
         )),
-        (None, _) if in_environment => {
-            Check::pass(format!("{ELEVENLABS_KEY} is set in the environment"))
+        (None, _) if in_environment => Check::pass(format!("{ELEVENLABS_KEY} is set in the environment")),
+        (None, Some(path)) => {
+            Check::fail(format!("{ELEVENLABS_KEY} is missing: add it to {} or the environment", path.display()))
         }
-        (None, Some(path)) => Check::fail(format!(
-            "{ELEVENLABS_KEY} is missing: add it to {} or the environment",
-            path.display()
-        )),
         (None, None) => Check::fail(format!("{ELEVENLABS_KEY} is not set in the environment")),
     }
 }
@@ -192,20 +163,14 @@ fn check_python(skill_dir: Option<&Path>, uv: Option<PathBuf>, python3: Option<P
     } else if let Some(uv) = uv {
         Check::pass(format!("uv ({}) runs the skill's helpers", uv.display()))
     } else if let Some(python3) = python3 {
-        Check::pass(format!(
-            "{} (no virtualenv: the skill's dependencies are not verified)",
-            python3.display()
-        ))
+        Check::pass(format!("{} (no virtualenv: the skill's dependencies are not verified)", python3.display()))
     } else {
         Check::fail("no Python found: install uv and run `uv sync` in the skill folder")
     }
 }
 
 fn first_line(text: &str) -> &str {
-    text.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or_default()
+    text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -220,10 +185,7 @@ mod tests {
         assert_eq!(has("ELEVENLABS_API_KEY=\n"), Some(false));
         assert_eq!(has("ELEVENLABS_API_KEY=\"\""), Some(false));
         // The first assignment wins, as in the skill.
-        assert_eq!(
-            has("ELEVENLABS_API_KEY=\nELEVENLABS_API_KEY=x"),
-            Some(false)
-        );
+        assert_eq!(has("ELEVENLABS_API_KEY=\nELEVENLABS_API_KEY=x"), Some(false));
         assert_eq!(has("# ELEVENLABS_API_KEY=x"), None);
         assert_eq!(has("OTHER_ELEVENLABS_API_KEY=x"), None);
         // The skill does not understand `export`, so neither may we.

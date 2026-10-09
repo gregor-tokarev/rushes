@@ -10,10 +10,8 @@ use serde::Deserialize;
 use crate::exec::{find_executable, run_captured};
 
 /// File extensions video-use can take as source footage (lowercase).
-const MEDIA_EXTENSIONS: [&str; 15] = [
-    "mp4", "mov", "m4v", "mkv", "webm", "avi", "mts", "m2ts", "mxf", "mp3", "wav", "m4a", "aac",
-    "flac", "ogg",
-];
+const MEDIA_EXTENSIONS: [&str; 15] =
+    ["mp4", "mov", "m4v", "mkv", "webm", "avi", "mts", "m2ts", "mxf", "mp3", "wav", "m4a", "aac", "flac", "ogg"];
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -72,13 +70,7 @@ pub fn list_footage(dir: &Path) -> io::Result<Vec<FootageFile>> {
         }
     }
     names.sort();
-    Ok(names
-        .into_iter()
-        .map(|name| FootageFile {
-            media: probe_media(&dir.join(&name)),
-            name,
-        })
-        .collect())
+    Ok(names.into_iter().map(|name| FootageFile { media: probe_media(&dir.join(&name)), name }).collect())
 }
 
 #[derive(Deserialize)]
@@ -113,16 +105,9 @@ fn parse_probe(json: &str) -> Option<MediaInfo> {
     let seconds = |text: &Option<String>| text.as_deref().and_then(|text| text.parse::<f64>().ok());
     // Cover art in audio files shows up as a one-frame video stream.
     let video = probe.streams.iter().find(|stream| {
-        stream.codec_type.as_deref() == Some("video")
-            && stream
-                .disposition
-                .as_ref()
-                .is_none_or(|d| d.attached_pic == 0)
+        stream.codec_type.as_deref() == Some("video") && stream.disposition.as_ref().is_none_or(|d| d.attached_pic == 0)
     });
-    let has_audio = probe
-        .streams
-        .iter()
-        .any(|stream| stream.codec_type.as_deref() == Some("audio"));
+    let has_audio = probe.streams.iter().any(|stream| stream.codec_type.as_deref() == Some("audio"));
     if video.is_none() && !has_audio {
         return None;
     }
@@ -130,13 +115,7 @@ fn parse_probe(json: &str) -> Option<MediaInfo> {
         .format
         .as_ref()
         .and_then(|format| seconds(&format.duration))
-        .or_else(|| {
-            probe
-                .streams
-                .iter()
-                .filter_map(|stream| seconds(&stream.duration))
-                .reduce(f64::max)
-        })?;
+        .or_else(|| probe.streams.iter().filter_map(|stream| seconds(&stream.duration)).reduce(f64::max))?;
     Some(MediaInfo {
         duration_secs,
         width: video.and_then(|stream| stream.width),
@@ -157,12 +136,7 @@ mod tests {
             "format":{"duration":"3.023000"}}"#;
         assert_eq!(
             parse_probe(json),
-            Some(MediaInfo {
-                duration_secs: 3.023,
-                width: Some(1280),
-                height: Some(720),
-                has_audio: true
-            })
+            Some(MediaInfo { duration_secs: 3.023, width: Some(1280), height: Some(720), has_audio: true })
         );
     }
 
@@ -173,18 +147,12 @@ mod tests {
             {"codec_type":"video","width":600,"height":600,"disposition":{"attached_pic":1}}],
             "format":{}}"#;
         let info = parse_probe(json).expect("audio file");
-        assert_eq!(
-            (info.duration_secs, info.width, info.has_audio),
-            (61.5, None, true)
-        );
+        assert_eq!((info.duration_secs, info.width, info.has_audio), (61.5, None, true));
     }
 
     #[test]
     fn rejects_non_media() {
-        assert_eq!(
-            parse_probe(r#"{"streams":[],"format":{"duration":"1.0"}}"#),
-            None
-        );
+        assert_eq!(parse_probe(r#"{"streams":[],"format":{"duration":"1.0"}}"#), None);
         assert_eq!(parse_probe("not json"), None);
     }
 }

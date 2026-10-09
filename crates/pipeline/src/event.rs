@@ -103,13 +103,7 @@ fn parse_system(value: &Value, line: &str) -> Vec<AgentEvent> {
             tools: value
                 .get("tools")
                 .and_then(Value::as_array)
-                .map(|tools| {
-                    tools
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
+                .map(|tools| tools.iter().filter_map(Value::as_str).map(str::to_owned).collect())
                 .unwrap_or_default(),
         }],
         "permission_denied" => vec![AgentEvent::PermissionDenied {
@@ -124,13 +118,11 @@ fn parse_system(value: &Value, line: &str) -> Vec<AgentEvent> {
 fn parse_assistant(value: &Value) -> Vec<AgentEvent> {
     content_blocks(value)
         .filter_map(|block| match str_field(block, "type") {
-            "text" => non_empty(str_field(block, "text")).map(|text| AgentEvent::AssistantText {
-                text: text.to_owned(),
-            }),
+            "text" => {
+                non_empty(str_field(block, "text")).map(|text| AgentEvent::AssistantText { text: text.to_owned() })
+            }
             "thinking" => {
-                non_empty(str_field(block, "thinking")).map(|text| AgentEvent::Thinking {
-                    text: text.to_owned(),
-                })
+                non_empty(str_field(block, "thinking")).map(|text| AgentEvent::Thinking { text: text.to_owned() })
             }
             "redacted_thinking" => None,
             "tool_use" | "server_tool_use" => {
@@ -151,14 +143,8 @@ fn parse_user(value: &Value) -> Vec<AgentEvent> {
         .filter_map(|block| match str_field(block, "type") {
             "tool_result" => Some(AgentEvent::ToolResult {
                 tool_use_id: str_field(block, "tool_use_id").to_owned(),
-                is_error: block
-                    .get("is_error")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                summary: truncate(
-                    &content_text(block.get("content").unwrap_or(&Value::Null)),
-                    RESULT_SUMMARY_CHARS,
-                ),
+                is_error: block.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                summary: truncate(&content_text(block.get("content").unwrap_or(&Value::Null)), RESULT_SUMMARY_CHARS),
             }),
             // Prompt echoes and injected skill instructions.
             "text" => None,
@@ -171,41 +157,23 @@ fn parse_result(value: &Value) -> AgentEvent {
     let errors = value
         .get("errors")
         .and_then(Value::as_array)
-        .map(|errors| {
-            errors
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join("; ")
-        })
+        .map(|errors| errors.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("; "))
         .unwrap_or_default();
-    let result_text = non_empty(str_field(value, "result"))
-        .or(non_empty(&errors))
-        .unwrap_or(str_field(value, "subtype"))
-        .to_owned();
+    let result_text =
+        non_empty(str_field(value, "result")).or(non_empty(&errors)).unwrap_or(str_field(value, "subtype")).to_owned();
     AgentEvent::Result {
-        is_error: value
-            .get("is_error")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+        is_error: value.get("is_error").and_then(Value::as_bool).unwrap_or(false),
         result_text,
         session_id: str_field(value, "session_id").to_owned(),
         cost_usd: value.get("total_cost_usd").and_then(Value::as_f64),
         duration_ms: value.get("duration_ms").and_then(Value::as_u64),
-        num_turns: value
-            .get("num_turns")
-            .and_then(Value::as_u64)
-            .and_then(|turns| u32::try_from(turns).ok()),
+        num_turns: value.get("num_turns").and_then(Value::as_u64).and_then(|turns| u32::try_from(turns).ok()),
     }
 }
 
 /// Blocks of `message.content`; a plain-string content has none.
 fn content_blocks(value: &Value) -> impl Iterator<Item = &Value> {
-    value
-        .pointer("/message/content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
+    value.pointer("/message/content").and_then(Value::as_array).into_iter().flatten()
 }
 
 /// One line describing what a tool call does, picked per well-known tool.
@@ -213,16 +181,9 @@ fn tool_use_summary(name: &str, input: &Value) -> String {
     let field = |key: &str| non_empty(str_field(input, key));
     let summary = match name {
         "Bash" => field("command").map(|command| {
-            let mut lines = command
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty());
+            let mut lines = command.lines().map(str::trim).filter(|line| !line.is_empty());
             let first = lines.next().unwrap_or_default();
-            if lines.next().is_some() {
-                format!("{first} …")
-            } else {
-                first.to_owned()
-            }
+            if lines.next().is_some() { format!("{first} …") } else { first.to_owned() }
         }),
         "Read" | "Write" | "Edit" | "MultiEdit" => field("file_path").map(str::to_owned),
         "NotebookEdit" => field("notebook_path").map(str::to_owned),
@@ -261,10 +222,7 @@ fn content_text(content: &Value) -> String {
 }
 
 fn unknown(kind: &str, raw: &str) -> AgentEvent {
-    AgentEvent::Unknown {
-        kind: kind.to_owned(),
-        excerpt: truncate(raw, UNKNOWN_EXCERPT_CHARS),
-    }
+    AgentEvent::Unknown { kind: kind.to_owned(), excerpt: truncate(raw, UNKNOWN_EXCERPT_CHARS) }
 }
 
 fn str_field<'a>(value: &'a Value, key: &str) -> &'a str {

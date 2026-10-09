@@ -8,3 +8,4 @@ publish.workspace = true
 [dependencies]
 gpui-kit.workspace = true
 videocrm-core = { path = "../core" }
+videocrm-pipeline = { path = "../pipeline" }

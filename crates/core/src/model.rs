@@ -569,13 +569,7 @@ impl BlockKind {
 
     /// Whether the block's text is read aloud in the video.
     pub fn is_spoken(self) -> bool {
-        matches!(
-            self,
-            BlockKind::Paragraph
-                | BlockKind::Bulleted
-                | BlockKind::Numbered
-                | BlockKind::Quote
-        )
+        matches!(self, BlockKind::Paragraph | BlockKind::Bulleted | BlockKind::Numbered | BlockKind::Quote)
     }
 
     pub fn is_heading(self) -> bool {
@@ -681,11 +675,20 @@ pub struct PipelineRun {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum UploadStatus {
     Pending,
-    Uploading { sent: u64, total: u64 },
+    Uploading {
+        sent: u64,
+        total: u64,
+    },
     /// Bytes delivered; YouTube is processing.
-    Processing { video_id: String },
-    Done { video_id: String },
-    Failed { error: String },
+    Processing {
+        video_id: String,
+    },
+    Done {
+        video_id: String,
+    },
+    Failed {
+        error: String,
+    },
     Cancelled,
 }
 

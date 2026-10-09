@@ -23,11 +23,7 @@ impl Machine {
         let base = fs::canonicalize(root.path()).expect("canonical tempdir");
         let bin = base.join("bin");
         fs::create_dir(&bin).unwrap();
-        Self {
-            _root: root,
-            base,
-            bin,
-        }
+        Self { _root: root, base, bin }
     }
 
     /// An executable shell script in the fake `bin/`.
@@ -77,39 +73,14 @@ fn everything_installed_is_ready() {
     let report = doctor(&machine.config(), Some(&link));
 
     assert!(report.ready(), "{report:#?}");
-    assert_eq!(
-        report.agent.detail,
-        format!(
-            "{} (9.9.9 (Claude Code))",
-            machine.bin.join("claude").display()
-        )
-    );
+    assert_eq!(report.agent.detail, format!("{} (9.9.9 (Claude Code))", machine.bin.join("claude").display()));
     assert_eq!(report.skill.detail, real.display().to_string());
     assert_eq!(report.skill_dir.as_deref(), Some(real.as_path()));
-    assert!(
-        report
-            .ffmpeg
-            .detail
-            .ends_with("(ffmpeg version 9.9-fake Copyright)")
-    );
-    assert!(
-        report
-            .ffprobe
-            .detail
-            .starts_with(&machine.bin.join("ffprobe").display().to_string())
-    );
-    assert_eq!(
-        report.elevenlabs.detail,
-        format!(
-            "ELEVENLABS_API_KEY is set in {}",
-            real.join(".env").display()
-        )
-    );
+    assert!(report.ffmpeg.detail.ends_with("(ffmpeg version 9.9-fake Copyright)"));
+    assert!(report.ffprobe.detail.starts_with(&machine.bin.join("ffprobe").display().to_string()));
+    assert_eq!(report.elevenlabs.detail, format!("ELEVENLABS_API_KEY is set in {}", real.join(".env").display()));
     assert!(report.python.detail.starts_with("video-use virtualenv"));
-    assert!(
-        !format!("{report:?}").contains(SECRET),
-        "the key must never leave the .env file"
-    );
+    assert!(!format!("{report:?}").contains(SECRET), "the key must never leave the .env file");
 }
 
 #[test]
@@ -129,12 +100,7 @@ fn nothing_installed_is_not_ready() {
         assert!(!check.ok, "{name} should fail: {check:?}");
     }
     assert!(report.agent.detail.contains("`claude` not found"));
-    assert!(
-        report
-            .skill
-            .detail
-            .contains("missing-skill/SKILL.md not found")
-    );
+    assert!(report.skill.detail.contains("missing-skill/SKILL.md not found"));
     assert!(report.ffmpeg.detail.contains("install ffmpeg"));
     assert_eq!(report.skill_dir, None);
 }
@@ -161,9 +127,7 @@ fn empty_dotenv_line_shadows_the_environment() {
     let machine = Machine::new().with_tools();
     let (link, real) = machine.skill("ELEVENLABS_API_KEY=\n");
     let mut config = machine.config();
-    config
-        .env
-        .push(("ELEVENLABS_API_KEY".to_owned(), SECRET.to_owned()));
+    config.env.push(("ELEVENLABS_API_KEY".to_owned(), SECRET.to_owned()));
     let report = doctor(&config, Some(&link));
 
     assert!(!report.ready());
@@ -186,10 +150,7 @@ fn exported_dotenv_line_is_not_a_key() {
     let report = doctor(&machine.config(), Some(&link));
 
     assert!(!report.elevenlabs.ok);
-    assert!(
-        report.elevenlabs.detail.contains("is missing"),
-        "{report:?}"
-    );
+    assert!(report.elevenlabs.detail.contains("is missing"), "{report:?}");
     assert!(!format!("{report:?}").contains(SECRET));
 }
 
@@ -200,26 +161,16 @@ fn key_from_the_environment_and_python_fallbacks() {
     fs::create_dir(&skill).unwrap();
     fs::write(skill.join("SKILL.md"), "# video-use\n").unwrap();
     let mut config = machine.config();
-    config
-        .env
-        .push(("ELEVENLABS_API_KEY".to_owned(), SECRET.to_owned()));
+    config.env.push(("ELEVENLABS_API_KEY".to_owned(), SECRET.to_owned()));
 
     let without_python = doctor(&config, Some(&skill));
-    assert_eq!(
-        without_python.elevenlabs.detail,
-        "ELEVENLABS_API_KEY is set in the environment"
-    );
+    assert_eq!(without_python.elevenlabs.detail, "ELEVENLABS_API_KEY is set in the environment");
     assert!(!without_python.python.ok);
 
     machine.stub("python3", "exit 0");
     let python3 = doctor(&config, Some(&skill));
     assert!(python3.python.ok);
-    assert!(
-        python3
-            .python
-            .detail
-            .contains("dependencies are not verified")
-    );
+    assert!(python3.python.detail.contains("dependencies are not verified"));
 
     machine.stub("uv", "exit 0");
     let uv = doctor(&config, Some(&skill));
@@ -232,14 +183,8 @@ fn key_from_the_environment_and_python_fallbacks() {
 fn agent_command_can_be_a_path() {
     let machine = Machine::new().with_tools();
     let custom = machine.stub("my-agent", "echo 'custom 1.0'");
-    let config = AgentConfig {
-        command: custom.clone(),
-        ..machine.config()
-    };
+    let config = AgentConfig { command: custom.clone(), ..machine.config() };
     let report = doctor(&config, Some(Path::new("/nonexistent")));
     assert!(report.agent.ok);
-    assert_eq!(
-        report.agent.detail,
-        format!("{} (custom 1.0)", custom.display())
-    );
+    assert_eq!(report.agent.detail, format!("{} (custom 1.0)", custom.display()));
 }

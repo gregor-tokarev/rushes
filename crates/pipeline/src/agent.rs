@@ -20,17 +20,8 @@ pub const DEFAULT_COMMAND: &str = "claude";
 pub const DEFAULT_PERMISSION_MODE: &str = "acceptEdits";
 /// What video-use needs: shell (ffmpeg, python helpers), file tools, the skill
 /// loader, sub-agents for animations and a todo list.
-pub const DEFAULT_ALLOWED_TOOLS: [&str; 9] = [
-    "Bash",
-    "Read",
-    "Write",
-    "Edit",
-    "Glob",
-    "Grep",
-    "Skill",
-    "Agent",
-    "TodoWrite",
-];
+pub const DEFAULT_ALLOWED_TOOLS: [&str; 9] =
+    ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill", "Agent", "TodoWrite"];
 
 const STDERR_TAIL_LINES: usize = 20;
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -130,10 +121,7 @@ impl AgentConfig {
         if let Some(model) = &self.model {
             args.extend(["--model".into(), model.into()]);
         }
-        args.extend([
-            "--permission-mode".into(),
-            self.permission_mode.clone().into(),
-        ]);
+        args.extend(["--permission-mode".into(), self.permission_mode.clone().into()]);
         if !self.allowed_tools.is_empty() {
             args.push(format!("--allowedTools={}", self.allowed_tools.join(",")).into());
         }
@@ -221,27 +209,13 @@ pub(crate) fn run_agent(
     // Own process group, so cancelling reaches ffmpeg/python grandchildren too.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let child = command.spawn().map_err(|source| PipelineError::Spawn {
-        command: program.to_owned(),
-        source,
-    })?;
-    let mut agent = AgentProcess {
-        child,
-        kill_grace: config.kill_grace,
-    };
+    let child = command.spawn().map_err(|source| PipelineError::Spawn { command: program.to_owned(), source })?;
+    let mut agent = AgentProcess { child, kill_grace: config.kill_grace };
 
     let (tx, rx) = mpsc::channel();
     let readers = [
-        agent
-            .child
-            .stdout
-            .take()
-            .map(|out| spawn_reader(out, tx.clone(), Line::Stdout)),
-        agent
-            .child
-            .stderr
-            .take()
-            .map(|err| spawn_reader(err, tx, Line::Stderr)),
+        agent.child.stdout.take().map(|out| spawn_reader(out, tx.clone(), Line::Stdout)),
+        agent.child.stderr.take().map(|err| spawn_reader(err, tx, Line::Stderr)),
     ];
     if let Some(error) = readers.into_iter().flatten().find_map(Result::err) {
         return Err(error.into());
@@ -291,11 +265,7 @@ pub(crate) fn run_agent(
     Ok((status, run))
 }
 
-fn spawn_reader(
-    stream: impl Read + Send + 'static,
-    tx: Sender<Line>,
-    wrap: fn(String) -> Line,
-) -> std::io::Result<()> {
+fn spawn_reader(stream: impl Read + Send + 'static, tx: Sender<Line>, wrap: fn(String) -> Line) -> std::io::Result<()> {
     thread::Builder::new()
         .name("agent-output".to_owned())
         .spawn(move || {
@@ -384,9 +354,7 @@ mod tests {
     }
 
     fn strings(args: Vec<OsString>) -> Vec<String> {
-        args.into_iter()
-            .map(|arg| arg.into_string().expect("utf-8"))
-            .collect()
+        args.into_iter().map(|arg| arg.into_string().expect("utf-8")).collect()
     }
 
     #[test]
@@ -465,9 +433,7 @@ mod tests {
     fn stderr_tail_keeps_the_last_lines() {
         let mut run = AgentRun::default();
         for n in 0..STDERR_TAIL_LINES + 5 {
-            run.observe(&AgentEvent::Stderr {
-                line: n.to_string(),
-            });
+            run.observe(&AgentEvent::Stderr { line: n.to_string() });
         }
         assert_eq!(run.stderr_tail.len(), STDERR_TAIL_LINES);
         assert_eq!(run.stderr_tail[0], "5");

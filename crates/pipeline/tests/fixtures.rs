@@ -32,11 +32,7 @@ fn every_captured_line_is_understood() {
         let text = fs::read_to_string(&path).expect("fixture readable");
         for line in text.lines() {
             for event in parse_line(line) {
-                assert!(
-                    !matches!(event, AgentEvent::Unknown { .. }),
-                    "{}: unexpected {event:?}",
-                    path.display()
-                );
+                assert!(!matches!(event, AgentEvent::Unknown { .. }), "{}: unexpected {event:?}", path.display());
             }
         }
         files += 1;
@@ -55,14 +51,8 @@ fn every_run_starts_with_init_and_ends_with_result() {
         "error_bad_model.jsonl",
     ] {
         let events = events(name);
-        assert!(
-            matches!(events.first(), Some(AgentEvent::Init { .. })),
-            "{name}"
-        );
-        assert!(
-            matches!(events.last(), Some(AgentEvent::Result { .. })),
-            "{name}"
-        );
+        assert!(matches!(events.first(), Some(AgentEvent::Init { .. })), "{name}");
+        assert!(matches!(events.last(), Some(AgentEvent::Result { .. })), "{name}");
     }
 }
 
@@ -81,9 +71,7 @@ fn text_reply() {
     assert_eq!(
         events[1..],
         [
-            AgentEvent::AssistantText {
-                text: "ok".to_owned()
-            },
+            AgentEvent::AssistantText { text: "ok".to_owned() },
             AgentEvent::Result {
                 is_error: false,
                 result_text: "ok".to_owned(),
@@ -104,47 +92,24 @@ fn tool_calls_are_summarised() {
     };
     assert_eq!(cwd, &PathBuf::from("/tmp/videocrm-capture/footage"));
     assert!(tools.iter().any(|tool| tool == "Bash"));
-    assert_eq!(
-        tool_use_names(&events),
-        [
-            ("Bash", "ls"),
-            ("Read", "/tmp/videocrm-capture/skilldir/SKILL.md")
-        ]
-    );
+    assert_eq!(tool_use_names(&events), [("Bash", "ls"), ("Read", "/tmp/videocrm-capture/skilldir/SKILL.md")]);
     let results: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::ToolResult {
-                tool_use_id,
-                is_error,
-                summary,
-            } => Some((tool_use_id.as_str(), *is_error, summary.as_str())),
+            AgentEvent::ToolResult { tool_use_id, is_error, summary } => {
+                Some((tool_use_id.as_str(), *is_error, summary.as_str()))
+            }
             _ => None,
         })
         .collect();
     assert_eq!(
         results,
         [
-            (
-                "toolu_01U496iZCmKwbdXfkmachH6m",
-                false,
-                "take1.mp4\ntake2.mp4"
-            ),
-            (
-                "toolu_01CnuSxKSvUDTAhzERJPvHQm",
-                false,
-                "1\t# fake skill\n2"
-            ),
+            ("toolu_01U496iZCmKwbdXfkmachH6m", false, "take1.mp4\ntake2.mp4"),
+            ("toolu_01CnuSxKSvUDTAhzERJPvHQm", false, "1\t# fake skill\n2"),
         ]
     );
-    assert!(matches!(
-        events.last(),
-        Some(AgentEvent::Result {
-            is_error: false,
-            num_turns: Some(3),
-            ..
-        })
-    ));
+    assert!(matches!(events.last(), Some(AgentEvent::Result { is_error: false, num_turns: Some(3), .. })));
 }
 
 #[test]
@@ -169,21 +134,11 @@ fn resumed_session_keeps_its_id() {
 #[test]
 fn permission_denials_are_reported() {
     let events = events("permission_denied.jsonl");
-    assert_eq!(
-        tool_use_names(&events),
-        [
-            ("ToolSearch", "select:WebFetch"),
-            ("WebFetch", "https://example.com")
-        ]
-    );
-    assert!(
-        events.contains(&AgentEvent::PermissionDenied {
-            tool_name: "WebFetch".to_owned(),
-            message:
-                "Claude requested permissions to use WebFetch, but you haven't granted it yet."
-                    .to_owned(),
-        })
-    );
+    assert_eq!(tool_use_names(&events), [("ToolSearch", "select:WebFetch"), ("WebFetch", "https://example.com")]);
+    assert!(events.contains(&AgentEvent::PermissionDenied {
+        tool_name: "WebFetch".to_owned(),
+        message: "Claude requested permissions to use WebFetch, but you haven't granted it yet.".to_owned(),
+    }));
     assert!(events.iter().any(|event| matches!(
         event,
         AgentEvent::ToolResult { is_error: true, summary, .. } if summary.contains("WebFetch")
@@ -223,9 +178,7 @@ fn errors_carry_their_message() {
         events("error_bad_resume.jsonl"),
         [AgentEvent::Result {
             is_error: true,
-            result_text:
-                "No conversation found with session ID: 00000000-0000-0000-0000-000000000000"
-                    .to_owned(),
+            result_text: "No conversation found with session ID: 00000000-0000-0000-0000-000000000000".to_owned(),
             session_id: "00000000-0000-0000-0000-000000000000".to_owned(),
             cost_usd: Some(0.0),
             duration_ms: Some(0),
@@ -250,13 +203,8 @@ fn unexpected_input_never_fails() {
         &parse_line(r#"{"type":"system","subtype":"task_started","task_id":"a"}"#)[..],
         [AgentEvent::Unknown { kind, .. }] if kind == "system/task_started"
     ));
-    assert!(
-        matches!(&parse_line("[1,2]")[..], [AgentEvent::Unknown { kind, .. }] if kind == "untyped")
-    );
-    assert_eq!(
-        parse_line(r#"{"type":"assistant","message":{"content":"plain"}}"#),
-        []
-    );
+    assert!(matches!(&parse_line("[1,2]")[..], [AgentEvent::Unknown { kind, .. }] if kind == "untyped"));
+    assert_eq!(parse_line(r#"{"type":"assistant","message":{"content":"plain"}}"#), []);
     assert_eq!(parse_line(r#"{"type":"assistant"}"#), []);
 
     // Unknown blocks do not hide the known ones next to them; missing fields default.
@@ -267,28 +215,11 @@ fn unexpected_input_never_fails() {
             {"type":"tool_use","name":"Bash"}]}}"#,
     );
     assert!(matches!(&mixed[0], AgentEvent::Unknown { kind, .. } if kind == "assistant/hologram"));
-    assert_eq!(
-        mixed[1],
-        AgentEvent::AssistantText {
-            text: "hi".to_owned()
-        }
-    );
-    assert_eq!(
-        mixed[2],
-        AgentEvent::ToolUse {
-            id: String::new(),
-            name: "Bash".to_owned(),
-            summary: String::new()
-        }
-    );
+    assert_eq!(mixed[1], AgentEvent::AssistantText { text: "hi".to_owned() });
+    assert_eq!(mixed[2], AgentEvent::ToolUse { id: String::new(), name: "Bash".to_owned(), summary: String::new() });
     assert!(matches!(
         &parse_line(r#"{"type":"result"}"#)[..],
-        [AgentEvent::Result {
-            is_error: false,
-            cost_usd: None,
-            num_turns: None,
-            ..
-        }]
+        [AgentEvent::Result { is_error: false, cost_usd: None, num_turns: None, .. }]
     ));
 }
 
@@ -307,23 +238,13 @@ fn long_tool_output_is_truncated() {
 
 #[test]
 fn events_round_trip_through_json() {
-    for name in [
-        "tool_calls.jsonl",
-        "permission_denied.jsonl",
-        "error_bad_resume.jsonl",
-    ] {
+    for name in ["tool_calls.jsonl", "permission_denied.jsonl", "error_bad_resume.jsonl"] {
         for event in events(name) {
             let json = serde_json::to_string(&event).expect("serialize");
             let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(back, event);
         }
     }
-    let json = serde_json::to_value(AgentEvent::Stderr {
-        line: "boom".to_owned(),
-    })
-    .unwrap();
-    assert_eq!(
-        json,
-        serde_json::json!({ "type": "stderr", "line": "boom" })
-    );
+    let json = serde_json::to_value(AgentEvent::Stderr { line: "boom".to_owned() }).unwrap();
+    assert_eq!(json, serde_json::json!({ "type": "stderr", "line": "boom" }));
 }
