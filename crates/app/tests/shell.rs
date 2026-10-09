@@ -398,6 +398,18 @@ fn palette_actions_and_keys_toggle_the_sidebar(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn keys_keep_working_after_the_focused_page_goes_away(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
+    app.click(cx, "page-hook");
+
+    app.navigate(cx, Route::Settings);
+    app.press(cx, "ctrl-b");
+    assert!(cx.read(|cx| app.workspace.read(cx).is_sidebar_collapsed()));
+}
+
+#[gpui_kit::test]
 fn the_title_and_hook_save_on_enter(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, true, &["Desk setup tour"]);
     let id = app.video_id(cx, "Desk setup tour");

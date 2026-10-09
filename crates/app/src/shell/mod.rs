@@ -141,6 +141,12 @@ impl Workspace {
                 this.flush_pending_saves(cx);
                 async {}
             }),
+            // When the focused element goes away (a page left, a dialog closed
+            // over it), the workspace's keys keep working.
+            cx.on_focus_lost(window, |this, window, cx| {
+                let target = window.focus_lost_restore_target(cx).unwrap_or_else(|| this.focus_handle.clone());
+                target.focus(window, cx);
+            }),
         ];
 
         let mut workspace = Self {
