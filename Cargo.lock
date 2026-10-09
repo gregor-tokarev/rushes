@@ -7514,6 +7514,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "gpui-kit",
+ "tempfile",
  "videocrm-core",
  "videocrm-pipeline",
  "videocrm-youtube",
