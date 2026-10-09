@@ -1,0 +1,878 @@
+//! The table view: a [`TableDelegate`] rendering one video per row, with an
+//! inline editor for every editable column.
+//!
+//! The delegate only renders. It holds a snapshot of what the active view
+//! shows ([`TableModel`]) that [`DatabasePanel`] replaces after every change,
+//! and it routes every edit back to the panel.
+
+use std::rc::Rc;
+
+use chrono::{DateTime, NaiveDate, Utc};
+use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::calendar::{Calendar, CalendarState};
+use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::popover::Popover;
+use gpui_kit::component::table::{Column as TableColumn, TableDelegate, TableState};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{
+    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight, InteractiveElement as _,
+    IntoElement, KeyDownEvent, ParentElement as _, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div, px,
+};
+use videocrm_core::{
+    BuiltinField, Column, ColumnLayout, PropertyDef, PropertyKind, PropertyValue,
+    SortDirection, SortSpec, VideoFormat, VideoId, VideoRow, VideoStatus,
+};
+
+use super::colors::{format_color, free_tag_color, run_status_color, upload_status_color};
+use super::elements::{CellButton, Chip, empty_value, muted_icon};
+use super::icons::column_icon;
+use super::panel::{CellRef, DatabasePanel};
+use super::property_editor::PropertyEditorMode;
+use super::query::column_name;
+use super::format;
+
+/// Narrowest a column can be resized to, in pixels.
+const MIN_COLUMN_WIDTH: f32 = 72.0;
+/// Width of the trailing "+" column that adds a property, in pixels.
+const ADD_COLUMN_WIDTH: f32 = 44.0;
+/// Most tag suggestions offered at once.
+const MAX_TAG_SUGGESTIONS: usize = 8;
+
+/// Why the table has no rows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum EmptyReason {
+    #[default]
+    NoVideos,
+    NoMatches,
+}
+
+/// What the table shows, prepared by the panel.
+#[derive(Default)]
+pub(crate) struct TableModel {
+    pub rows: Vec<VideoRow>,
+    pub columns: Vec<ColumnLayout>,
+    pub properties: Rc<[PropertyDef]>,
+    pub sorts: Vec<SortSpec>,
+    /// Every tag used by any video, for suggestions.
+    pub known_tags: Rc<[String]>,
+    pub editing: Option<CellRef>,
+    pub date_target: Option<CellRef>,
+    pub tags_target: Option<VideoId>,
+    pub empty: EmptyReason,
+    pub now: DateTime<Utc>,
+}
+
+impl TableModel {
+    fn today(&self) -> NaiveDate {
+        self.now.date_naive()
+    }
+}
+
+/// Editors shared by every cell; only one of each is ever open.
+#[derive(Clone)]
+pub(crate) struct CellEditors {
+    pub cell_input: Entity<InputState>,
+    pub tag_input: Entity<InputState>,
+    pub calendar: Entity<CalendarState>,
+}
+
+pub(crate) struct VideoTable {
+    panel: WeakEntity<DatabasePanel>,
+    editors: CellEditors,
+    model: TableModel,
+}
+
+impl VideoTable {
+    pub fn new(panel: WeakEntity<DatabasePanel>, editors: CellEditors) -> Self {
+        Self { panel, editors, model: TableModel::default() }
+    }
+
+    pub fn set_model(&mut self, model: TableModel) {
+        self.model = model;
+    }
+
+    /// The visible database column at a table column index; `None` for the
+    /// trailing add-property column.
+    pub fn column_at(&self, col_ix: usize) -> Option<Column> {
+        self.model.columns.get(col_ix).map(|layout| layout.column)
+    }
+
+    fn render_cell(&self, row: &VideoRow, column: Column, window: &mut Window, cx: &mut App) -> AnyElement {
+        let cell = CellRef { video: row.video.id, column };
+        if self.model.editing == Some(cell) {
+            return self.render_inline_editor(cell, window, cx);
+        }
+
+        let video = &row.video;
+        match column {
+            Column::Builtin(field) => match field {
+                BuiltinField::Title => self.render_title(row, cx),
+                BuiltinField::Status => self.render_status(video.id, video.status),
+                BuiltinField::Format => self.render_format(video.id, video.format),
+                BuiltinField::PublishDate => self.render_date(cell, video.publish_date, cx),
+                BuiltinField::Tags => self.render_tags(video.id, &video.tags, cx),
+                BuiltinField::Script => match format::script_summary(row.script_words, row.script_seconds) {
+                    Some(summary) => muted_text(summary, cx).into_any_element(),
+                    None => empty_value(cx).into_any_element(),
+                },
+                BuiltinField::Edit => match row.latest_run {
+                    Some(run) => Chip::new(run.label(), run_status_color(run)).dot(true).into_any_element(),
+                    None => empty_value(cx).into_any_element(),
+                },
+                BuiltinField::Youtube => match &row.latest_upload {
+                    Some(upload) => Chip::new(format::upload(upload), upload_status_color(upload))
+                        .dot(true)
+                        .into_any_element(),
+                    None => empty_value(cx).into_any_element(),
+                },
+                BuiltinField::CreatedAt => {
+                    muted_text(format::timestamp(video.created_at, self.model.now), cx).into_any_element()
+                }
+                BuiltinField::UpdatedAt => {
+                    muted_text(format::timestamp(video.updated_at, self.model.now), cx).into_any_element()
+                }
+            },
+            Column::Custom(property) => {
+                let Some(def) = self.model.properties.iter().find(|def| def.id == property) else {
+                    return empty_value(cx).into_any_element();
+                };
+                self.render_custom(cell, def, video.properties.get(&property), cx)
+            }
+        }
+    }
+
+    fn render_title(&self, row: &VideoRow, cx: &mut App) -> AnyElement {
+        let video = &row.video;
+        let id = video.id;
+        let open = {
+            let panel = self.panel.clone();
+            move |event: &ClickEvent, _: &mut Window, cx: &mut App| {
+                if event.click_count() == 1 {
+                    _ = panel.update(cx, |panel, cx| panel.open_video(id, cx));
+                }
+            }
+        };
+        let rename = {
+            let panel = self.panel.clone();
+            move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                if event.click_count() == 2 {
+                    let cell = CellRef { video: id, column: Column::Builtin(BuiltinField::Title) };
+                    _ = panel.update(cx, |panel, cx| panel.start_editing(cell, window, cx));
+                }
+            }
+        };
+        let title = video.title.trim();
+
+        h_flex()
+            .id(element_id("title", id))
+            .group("video-title")
+            .size_full()
+            .gap_1p5()
+            .min_w_0()
+            .on_click(rename)
+            .child(video_icon(video.icon.as_deref(), cx))
+            .child(
+                div()
+                    .id(element_id("title-text", id))
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::MEDIUM)
+                    .cursor_pointer()
+                    .hover(|this| this.underline())
+                    .map(|this| {
+                        if title.is_empty() {
+                            this.text_color(cx.theme().muted_foreground).child("Untitled")
+                        } else {
+                            this.child(title.to_string())
+                        }
+                    })
+                    .on_click(open.clone()),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new(element_id("open", id))
+                    .xsmall()
+                    .outline()
+                    .icon(IconName::PanelRightOpen)
+                    .label("Open")
+                    .invisible()
+                    .group_hover("video-title", |this| this.visible())
+                    .on_click(move |event, window, cx| open(event, window, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn render_status(&self, id: VideoId, current: VideoStatus) -> AnyElement {
+        let panel = self.panel.clone();
+        CellButton::new(element_id("status", id))
+            .mx_neg_1()
+            .child(Chip::new(current.label(), current.color()).dot(true))
+            .dropdown_menu(move |menu, _, _| {
+                VideoStatus::ALL.into_iter().fold(menu, |menu, status| {
+                    let panel = panel.clone();
+                    menu.item(
+                        PopupMenuItem::element(move |_, _| Chip::new(status.label(), status.color()).dot(true))
+                            .checked(status == current)
+                            .on_click(move |_, _, cx| {
+                                _ = panel.update(cx, |panel, cx| panel.set_status(id, status, cx));
+                            }),
+                    )
+                })
+            })
+            .into_any_element()
+    }
+
+    fn render_format(&self, id: VideoId, current: VideoFormat) -> AnyElement {
+        let panel = self.panel.clone();
+        CellButton::new(element_id("format", id))
+            .mx_neg_1()
+            .child(Chip::new(current.label(), format_color(current)))
+            .dropdown_menu(move |menu, _, _| {
+                VideoFormat::ALL.into_iter().fold(menu, |menu, format| {
+                    let panel = panel.clone();
+                    menu.item(
+                        PopupMenuItem::element(move |_, _| Chip::new(format.label(), format_color(format)))
+                            .checked(format == current)
+                            .on_click(move |_, _, cx| {
+                                _ = panel.update(cx, |panel, cx| {
+                                    panel.update_video(id, |video| video.format = format, cx)
+                                });
+                            }),
+                    )
+                })
+            })
+            .into_any_element()
+    }
+
+    fn render_date(&self, cell: CellRef, value: Option<NaiveDate>, cx: &mut App) -> AnyElement {
+        let trigger = CellButton::new(element_id(&format!("date-{}", column_key(cell.column)), cell.video))
+            .mx_neg_1()
+            .child(match value {
+                Some(date) => div().child(format::date(date, self.model.today())),
+                None => empty_value(cx),
+            });
+
+        let calendar = self.editors.calendar.clone();
+        let clear = self.panel.clone();
+        let on_open_change = {
+            let panel = self.panel.clone();
+            move |open: &bool, window: &mut Window, cx: &mut App| {
+                let target = open.then_some(cell);
+                _ = panel.update(cx, |panel, cx| panel.set_date_target(target, window, cx));
+            }
+        };
+
+        Popover::new(element_id(&format!("date-popover-{}", column_key(cell.column)), cell.video))
+            .open(self.model.date_target == Some(cell))
+            .on_open_change(on_open_change)
+            .trigger(trigger)
+            .content(move |_, _, _| {
+                let clear = clear.clone();
+                v_flex()
+                    .gap_2()
+                    .child(Calendar::new(&calendar).small())
+                    .when(value.is_some(), |this| {
+                        this.child(
+                            Button::new("clear-date")
+                                .ghost()
+                                .small()
+                                .icon(IconName::X)
+                                .label("Clear date")
+                                .on_click(move |_, window, cx| {
+                                    _ = clear.update(cx, |panel, cx| panel.set_date(cell, None, window, cx));
+                                }),
+                        )
+                    })
+            })
+            .into_any_element()
+    }
+
+    fn render_tags(&self, id: VideoId, tags: &[String], cx: &mut App) -> AnyElement {
+        let trigger = CellButton::new(element_id("tags", id))
+            .mx_neg_1()
+            .map(|this| {
+                if tags.is_empty() {
+                    this.child(empty_value(cx))
+                } else {
+                    this.children(tags.iter().map(|tag| {
+                        div().flex_shrink_0().child(Chip::new(tag.clone(), free_tag_color(tag)))
+                    }))
+                }
+            });
+
+        let on_open_change = {
+            let panel = self.panel.clone();
+            move |open: &bool, window: &mut Window, cx: &mut App| {
+                let target = open.then_some(id);
+                _ = panel.update(cx, |panel, cx| panel.set_tags_target(target, window, cx));
+            }
+        };
+        let tags: Rc<[String]> = tags.into();
+        let known_tags = self.model.known_tags.clone();
+        let input = self.editors.tag_input.clone();
+        let panel = self.panel.clone();
+
+        Popover::new(element_id("tags-popover", id))
+            .open(self.model.tags_target == Some(id))
+            .on_open_change(on_open_change)
+            .track_focus(&input.focus_handle(cx))
+            .trigger(trigger)
+            .content(move |_, _, cx| {
+                tags_editor(id, &tags, &known_tags, &input, &panel, cx)
+            })
+            .into_any_element()
+    }
+
+    fn render_custom(
+        &self,
+        cell: CellRef,
+        def: &PropertyDef,
+        value: Option<&PropertyValue>,
+        cx: &mut App,
+    ) -> AnyElement {
+        let id = cell.video;
+        let property = def.id;
+        match &def.kind {
+            PropertyKind::Text => {
+                let text = match value {
+                    Some(PropertyValue::Text(text)) => text.as_str(),
+                    _ => "",
+                };
+                self.editable_text(cell, text.to_string(), false, cx)
+            }
+            PropertyKind::Number => {
+                let text = match value {
+                    Some(PropertyValue::Number(number)) => format::number(*number),
+                    _ => String::new(),
+                };
+                self.editable_text(cell, text, true, cx)
+            }
+            PropertyKind::Url => {
+                let url = match value {
+                    Some(PropertyValue::Url(url)) => url.trim().to_string(),
+                    _ => String::new(),
+                };
+                if url.is_empty() {
+                    return self.editable_text(cell, url, false, cx);
+                }
+                let target = if url.contains("://") { url.clone() } else { format!("https://{url}") };
+                h_flex()
+                    .size_full()
+                    .gap_1()
+                    .child(div().flex_1().min_w_0().h_full().child(self.editable_text(cell, url, false, cx)))
+                    .child(
+                        Button::new(element_id(&format!("open-url-{}", property), id))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::ExternalLink)
+                            .tooltip("Open link")
+                            .on_click(move |_, _, cx| cx.open_url(&target)),
+                    )
+                    .into_any_element()
+            }
+            PropertyKind::Select { options } => {
+                let current = match value {
+                    Some(PropertyValue::Select(Some(option))) => options.iter().find(|o| &o.id == option),
+                    _ => None,
+                };
+                let options = options.clone();
+                let selected = current.map(|option| option.id.clone());
+                let panel = self.panel.clone();
+                CellButton::new(element_id(&format!("select-{}", property), id))
+                    .mx_neg_1()
+                    .map(|this| match current {
+                        Some(option) => this.child(Chip::new(option.name.clone(), option.color)),
+                        None => this.child(empty_value(cx)),
+                    })
+                    .dropdown_menu(move |menu, _, _| {
+                        let set = |value: Option<String>| {
+                            let panel = panel.clone();
+                            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                                let value = PropertyValue::Select(value.clone());
+                                _ = panel.update(cx, |panel, cx| {
+                                    panel.set_property_value(id, property, Some(value), cx)
+                                });
+                            }
+                        };
+                        let menu = options.iter().fold(menu, |menu, option| {
+                            let (name, color) = (option.name.clone(), option.color);
+                            menu.item(
+                                PopupMenuItem::element(move |_, _| Chip::new(name.clone(), color))
+                                    .checked(selected.as_ref() == Some(&option.id))
+                                    .on_click(set(Some(option.id.clone()))),
+                            )
+                        });
+                        menu.when(options.is_empty(), |menu| menu.label("No options yet"))
+                            .when(selected.is_some(), |menu| {
+                                menu.separator()
+                                    .item(PopupMenuItem::new("Clear").icon(IconName::X).on_click(set(None)))
+                            })
+                    })
+                    .into_any_element()
+            }
+            PropertyKind::MultiSelect { options } => {
+                let selected: Vec<String> = match value {
+                    Some(PropertyValue::MultiSelect(ids)) => ids.clone(),
+                    _ => Vec::new(),
+                };
+                let chips: Vec<AnyElement> = options
+                    .iter()
+                    .filter(|option| selected.contains(&option.id))
+                    .map(|option| {
+                        div()
+                            .flex_shrink_0()
+                            .child(Chip::new(option.name.clone(), option.color))
+                            .into_any_element()
+                    })
+                    .collect();
+                let trigger = CellButton::new(element_id(&format!("multi-{}", property), id))
+                    .mx_neg_1()
+                    .map(|this| if chips.is_empty() { this.child(empty_value(cx)) } else { this.children(chips) });
+                let options = options.clone();
+                let panel = self.panel.clone();
+                Popover::new(element_id(&format!("multi-popover-{}", property), id))
+                    .trigger(trigger)
+                    .content(move |_, _, cx| {
+                        v_flex().gap_1().min_w_48().children(options.iter().map(|option| {
+                            let panel = panel.clone();
+                            let option_id = option.id.clone();
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Checkbox::new(SharedString::from(format!("option-{}", option.id)))
+                                        .checked(selected.contains(&option.id))
+                                        .on_click(move |_, _, cx| {
+                                            _ = panel.update(cx, |panel, cx| {
+                                                panel.toggle_multi_option(id, property, &option_id, cx)
+                                            });
+                                        }),
+                                )
+                                .child(Chip::new(option.name.clone(), option.color))
+                        }))
+                        .when(options.is_empty(), |this| this.child(muted_text("No options yet", cx)))
+                    })
+                    .into_any_element()
+            }
+            PropertyKind::Date => {
+                let date = match value {
+                    Some(PropertyValue::Date(date)) => *date,
+                    _ => None,
+                };
+                self.render_date(cell, date, cx)
+            }
+            PropertyKind::Checkbox => {
+                let checked = matches!(value, Some(PropertyValue::Checkbox(true)));
+                let panel = self.panel.clone();
+                h_flex()
+                    .size_full()
+                    .child(
+                        Checkbox::new(element_id(&format!("checkbox-{}", property), id))
+                            .checked(checked)
+                            .on_click(move |checked, _, cx| {
+                                let value = PropertyValue::Checkbox(*checked);
+                                _ = panel.update(cx, |panel, cx| {
+                                    panel.set_property_value(id, property, Some(value), cx)
+                                });
+                            }),
+                    )
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// Text that turns into an inline editor when clicked.
+    fn editable_text(&self, cell: CellRef, text: String, align_right: bool, cx: &mut App) -> AnyElement {
+        let panel = self.panel.clone();
+        CellButton::new(element_id(&format!("text-{}", column_key(cell.column)), cell.video))
+            .mx_neg_1()
+            .when(align_right, |this| this.justify_end())
+            .map(|this| {
+                if text.is_empty() {
+                    this.child(div())
+                } else {
+                    this.child(div().min_w_0().truncate().child(text))
+                }
+            })
+            .on_click(move |_, window, cx| {
+                _ = panel.update(cx, |panel, cx| panel.start_editing(cell, window, cx));
+            })
+            .text_color(cx.theme().foreground)
+            .into_any_element()
+    }
+
+    fn render_inline_editor(&self, cell: CellRef, _: &mut Window, _: &mut App) -> AnyElement {
+        let panel = self.panel.clone();
+        div()
+            .id(element_id("cell-editor", cell.video))
+            .size_full()
+            .flex()
+            .items_center()
+            .mx_neg_1()
+            .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    _ = panel.update(cx, |panel, cx| panel.cancel_editing(window, cx));
+                }
+            })
+            .child(Input::new(&self.editors.cell_input).id("cell-input").small().w_full())
+            .into_any_element()
+    }
+}
+
+impl TableDelegate for VideoTable {
+    fn columns_count(&self, _: &App) -> usize {
+        self.model.columns.len() + 1
+    }
+
+    fn rows_count(&self, _: &App) -> usize {
+        self.model.rows.len()
+    }
+
+    fn column(&self, col_ix: usize, _: &App) -> TableColumn {
+        let Some(layout) = self.model.columns.get(col_ix) else {
+            return TableColumn::new("add-property", "Add property")
+                .width(px(ADD_COLUMN_WIDTH))
+                .resizable(false)
+                .movable(false)
+                .selectable(false);
+        };
+        let column = layout.column;
+        let name = column_name(column, &self.model.properties).unwrap_or_default();
+        let is_number = matches!(
+            column,
+            Column::Custom(id) if self
+                .model
+                .properties
+                .iter()
+                .any(|def| def.id == id && def.kind == PropertyKind::Number)
+        );
+        TableColumn::new(column_key(column), name)
+            .width(px(layout.width.max(MIN_COLUMN_WIDTH)))
+            .min_width(px(MIN_COLUMN_WIDTH))
+            .movable(false)
+            .selectable(false)
+            .when(column == Column::Builtin(BuiltinField::Title), |this| this.fixed_left())
+            .when(is_number, |this| this.text_right())
+    }
+
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let Some(column) = self.column_at(col_ix) else {
+            let panel = self.panel.clone();
+            return Button::new("add-property")
+                .ghost()
+                .xsmall()
+                .icon(IconName::Plus)
+                .tooltip("Add property")
+                .on_click(move |_, window, cx| {
+                    _ = panel.update(cx, |panel, cx| panel.open_property_editor(None, PropertyEditorMode::Create, window, cx));
+                })
+                .into_any_element();
+        };
+
+        let properties = self.model.properties.clone();
+        let name = column_name(column, &properties).unwrap_or_default();
+        let sort = self.model.sorts.iter().find(|sort| sort.column == column).map(|sort| sort.direction);
+        let panel = self.panel.clone();
+        CellButton::new(SharedString::from(format!("column-{}", column_key(column))))
+            .mx_neg_1()
+            .text_color(cx.theme().muted_foreground)
+            .child(Icon::new(column_icon(column, &properties)).xsmall())
+            .child(div().min_w_0().truncate().child(name))
+            .when_some(sort, |this, direction| {
+                this.child(Icon::new(match direction {
+                    SortDirection::Ascending => IconName::ArrowUp,
+                    SortDirection::Descending => IconName::ArrowDown,
+                })
+                .xsmall()
+                .text_color(cx.theme().primary))
+            })
+            .dropdown_menu(move |menu, _, _| column_menu(menu, column, &properties, &panel))
+            .into_any_element()
+    }
+
+    fn render_tr(
+        &mut self,
+        row_ix: usize,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> Stateful<Div> {
+        match self.model.rows.get(row_ix) {
+            Some(row) => div().id(element_id("video-row", row.video.id)),
+            None => div().id(("video-row", row_ix)),
+        }
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let (Some(row), Some(column)) = (self.model.rows.get(row_ix), self.column_at(col_ix)) else {
+            return div().into_any_element();
+        };
+        let row = row.clone();
+        self.render_cell(&row, column, window, cx)
+    }
+
+    fn context_menu(
+        &mut self,
+        row_ix: usize,
+        menu: PopupMenu,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> PopupMenu {
+        match self.model.rows.get(row_ix) {
+            Some(row) => video_menu(menu, row.video.id, true, &self.panel),
+            None => menu,
+        }
+    }
+
+    fn render_empty(&mut self, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
+        render_empty_state(self.model.empty, &self.panel, cx)
+    }
+}
+
+/// Commands on one video, shared by table rows and board cards.
+pub(crate) fn video_menu(
+    menu: PopupMenu,
+    id: VideoId,
+    renamable: bool,
+    panel: &WeakEntity<DatabasePanel>,
+) -> PopupMenu {
+    let command = |run: fn(&mut DatabasePanel, VideoId, &mut Window, &mut Context<DatabasePanel>)| {
+        let panel = panel.clone();
+        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            _ = panel.update(cx, |panel, cx| run(panel, id, window, cx));
+        }
+    };
+    menu.item(
+        PopupMenuItem::new("Open")
+            .icon(IconName::PanelRightOpen)
+            .on_click(command(|panel, id, _, cx| panel.open_video(id, cx))),
+    )
+    .when(renamable, |menu| {
+        menu.item(
+            PopupMenuItem::new("Rename")
+                .icon(IconName::Pencil)
+                .on_click(command(|panel, id, window, cx| {
+                    let cell = CellRef { video: id, column: Column::Builtin(BuiltinField::Title) };
+                    panel.start_editing(cell, window, cx);
+                })),
+        )
+    })
+    .item(
+        PopupMenuItem::new("Duplicate")
+            .icon(IconName::Copy)
+            .on_click(command(|panel, id, _, cx| panel.duplicate_video(id, cx))),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new("Delete…")
+            .icon(IconName::Trash)
+            .on_click(command(|panel, id, window, cx| panel.confirm_delete_videos(vec![id], window, cx))),
+    )
+}
+
+fn column_menu(
+    menu: PopupMenu,
+    column: Column,
+    properties: &[PropertyDef],
+    panel: &WeakEntity<DatabasePanel>,
+) -> PopupMenu {
+    let command = |run: Rc<dyn Fn(&mut DatabasePanel, &mut Window, &mut Context<DatabasePanel>)>| {
+        let panel = panel.clone();
+        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            _ = panel.update(cx, |panel, cx| run(panel, window, cx));
+        }
+    };
+    let sort = |direction| {
+        command(Rc::new(move |panel: &mut DatabasePanel, _: &mut Window, cx: &mut Context<DatabasePanel>| {
+            panel.sort_by(column, direction, cx)
+        }))
+    };
+
+    let menu = menu
+        .item(PopupMenuItem::new("Sort ascending").icon(IconName::ArrowUp).on_click(sort(SortDirection::Ascending)))
+        .item(
+            PopupMenuItem::new("Sort descending")
+                .icon(IconName::ArrowDown)
+                .on_click(sort(SortDirection::Descending)),
+        );
+    let menu = menu.when(column != Column::Builtin(BuiltinField::Title), |menu| {
+        menu.separator().item(
+            PopupMenuItem::new("Hide")
+                .icon(IconName::EyeOff)
+                .on_click(command(Rc::new(move |panel, _, cx| panel.set_column_visible(column, false, cx)))),
+        )
+    });
+
+    let Column::Custom(property) = column else {
+        return menu;
+    };
+    let has_options = properties
+        .iter()
+        .any(|def| def.id == property && matches!(def.kind, PropertyKind::Select { .. } | PropertyKind::MultiSelect { .. }));
+    let edit = |mode: PropertyEditorMode| {
+        command(Rc::new(move |panel, window, cx| panel.open_property_editor(Some(property), mode, window, cx)))
+    };
+    menu.separator()
+        .item(PopupMenuItem::new("Rename…").icon(IconName::Pencil).on_click(edit(PropertyEditorMode::Rename)))
+        .when(has_options, |menu| {
+            menu.item(
+                PopupMenuItem::new("Edit options…")
+                    .icon(IconName::List)
+                    .on_click(edit(PropertyEditorMode::Edit)),
+            )
+        })
+        .separator()
+        .item(
+            PopupMenuItem::new("Delete property…")
+                .icon(IconName::Trash)
+                .on_click(command(Rc::new(move |panel, window, cx| panel.confirm_delete_property(property, window, cx)))),
+        )
+}
+
+fn tags_editor(
+    id: VideoId,
+    tags: &[String],
+    known_tags: &[String],
+    input: &Entity<InputState>,
+    panel: &WeakEntity<DatabasePanel>,
+    cx: &App,
+) -> AnyElement {
+    let query = input.read(cx).value().trim().to_lowercase();
+    let suggestions: Vec<&String> = known_tags
+        .iter()
+        .filter(|tag| !tags.iter().any(|own| own.eq_ignore_ascii_case(tag)))
+        .filter(|tag| query.is_empty() || tag.to_lowercase().contains(&query))
+        .take(MAX_TAG_SUGGESTIONS)
+        .collect();
+
+    let tag_button = |tag: &String, removing: bool| {
+        let panel = panel.clone();
+        let value = tag.clone();
+        let label = if removing { "remove-tag" } else { "add-tag" };
+        div()
+            .id(SharedString::from(format!("{label}-{tag}")))
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .child(Chip::new(tag.clone(), free_tag_color(tag)))
+            .when(removing, |this| this.child(muted_icon(IconName::X, cx)))
+            .on_click(move |_, _, cx| {
+                _ = panel.update(cx, |panel, cx| {
+                    if removing {
+                        panel.remove_tag(id, &value, cx);
+                    } else {
+                        panel.add_tag(id, &value, cx);
+                    }
+                });
+            })
+    };
+
+    v_flex()
+        .w_64()
+        .gap_2()
+        .child(Input::new(input).id("tag-input").small())
+        .when(!tags.is_empty(), |this| {
+            this.child(h_flex().flex_wrap().gap_1().children(tags.iter().map(|tag| tag_button(tag, true))))
+        })
+        .when(!suggestions.is_empty(), |this| {
+            this.child(muted_text("Suggestions", cx).text_xs())
+                .child(h_flex().flex_wrap().gap_1().children(suggestions.into_iter().map(|tag| tag_button(tag, false))))
+        })
+        .into_any_element()
+}
+
+/// The empty state of the table and the board.
+pub(crate) fn render_empty_state(reason: EmptyReason, panel: &WeakEntity<DatabasePanel>, cx: &App) -> AnyElement {
+    let panel = panel.clone();
+    let (icon, title, description, action) = match reason {
+        EmptyReason::NoVideos => (
+            IconName::Clapperboard,
+            "No videos yet",
+            "Plan your first video: add an idea, then move it through scripting, filming and editing.",
+            Button::new("empty-new-video")
+                .primary()
+                .small()
+                .icon(IconName::Plus)
+                .label("New video")
+                .on_click(move |_, _, cx| {
+                    _ = panel.update(cx, |panel, cx| panel.create_video(None, cx));
+                }),
+        ),
+        EmptyReason::NoMatches => (
+            IconName::SearchX,
+            "No videos match",
+            "Try another search or remove some filters.",
+            Button::new("empty-clear-filters")
+                .outline()
+                .small()
+                .label("Clear filters")
+                .on_click(move |_, window, cx| {
+                    _ = panel.update(cx, |panel, cx| panel.clear_filters(window, cx));
+                }),
+        ),
+    };
+
+    v_flex()
+        .id("database-empty")
+        .size_full()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .py_8()
+        .child(Icon::new(icon).size_8().text_color(cx.theme().muted_foreground.opacity(0.7)))
+        .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(title))
+        .child(
+            div()
+                .max_w_80()
+                .text_sm()
+                .text_center()
+                .text_color(cx.theme().muted_foreground)
+                .child(description),
+        )
+        .child(div().pt_2().child(action))
+        .into_any_element()
+}
+
+/// The video's emoji, or a neutral page glyph when it has none.
+pub(crate) fn video_icon(icon: Option<&str>, cx: &App) -> AnyElement {
+    match icon.map(str::trim).filter(|icon| !icon.is_empty()) {
+        Some(emoji) => div().flex_shrink_0().child(emoji.to_string()).into_any_element(),
+        None => Icon::new(IconName::FileText)
+            .small()
+            .flex_shrink_0()
+            .text_color(cx.theme().muted_foreground)
+            .into_any_element(),
+    }
+}
+
+pub(crate) fn muted_text(text: impl Into<SharedString>, cx: &App) -> Div {
+    div().min_w_0().truncate().text_color(cx.theme().muted_foreground).child(text.into())
+}
+
+/// A stable element id for a part of one video's row or card.
+pub(crate) fn element_id(part: &str, video: VideoId) -> ElementId {
+    ElementId::Name(format!("{part}-{video}").into())
+}
+
+/// A stable key for a database column, used in element ids.
+pub(crate) fn column_key(column: Column) -> String {
+    match column {
+        Column::Builtin(field) => format!("{field:?}").to_lowercase(),
+        Column::Custom(id) => id.to_string(),
+    }
+}
