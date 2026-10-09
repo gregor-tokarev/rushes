@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Enter, Input, InputEvent, InputState, MoveDown, Position, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
@@ -33,6 +33,7 @@ use crate::ai_edit::AiEditPanel;
 use crate::publish::PublishPanel;
 use crate::route::{Route, VideoTab};
 use crate::state::{AppEvent, AppState};
+use crate::ui::dialog::confirm_delete_videos;
 use crate::ui::{EmptyState, PageIcon};
 
 pub use document::{DocumentTab, PathPurpose, SAVE_DELAY, ScriptRail, ScriptStats};
@@ -405,25 +406,9 @@ impl VideoPage {
 
     fn confirm_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(video) = self.video(cx) else { return };
-        let title: SharedString = format!("Delete “{}”?", display_title(&video.title)).into();
         let (state, id) = (self.state.clone(), self.video_id);
-        let consequence = "Its script, notes and edit history are removed. Files in its media folder stay on disk.";
-        let description: SharedString = match crate::publish::delete_upload_notice(&[id], cx) {
-            Some(notice) => format!("{notice} {consequence}").into(),
-            None => consequence.into(),
-        };
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let state = state.clone();
-            alert
-                .title(title.clone())
-                .description(description.clone())
-                .confirm()
-                .ok_text("Delete")
-                .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, _, cx| {
-                    state.update(cx, |state, cx| state.delete_videos(&[id], cx));
-                    true
-                })
+        confirm_delete_videos(vec![(id, video.title.clone())], window, cx, move |ids, cx| {
+            state.update(cx, |state, cx| state.delete_videos(&ids, cx));
         });
     }
 
@@ -502,7 +487,7 @@ impl VideoPage {
                     .item(item("Open media folder", IconName::FolderOpen, |page, _, cx| page.open_media_folder(cx)))
                     .item(item("Copy video id", IconName::Hash, VideoPage::copy_video_id))
                     .separator()
-                    .item(item("Delete video…", IconName::Trash, VideoPage::confirm_delete))
+                    .item(item("Delete…", IconName::Trash, VideoPage::confirm_delete))
             })
     }
 
@@ -613,12 +598,6 @@ fn take_tab_reveal(video: VideoId, tab: VideoTab, cx: &mut App) -> bool {
         cx.set_global(TabReveal(None));
     }
     requested
-}
-
-/// A video title for confirmation copy, with a placeholder for untitled videos.
-fn display_title(title: &str) -> &str {
-    let title = title.trim();
-    if title.is_empty() { "Untitled" } else { title }
 }
 
 impl Render for VideoPage {

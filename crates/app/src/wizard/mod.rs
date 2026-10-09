@@ -2,9 +2,8 @@
 
 use chrono::NaiveDate;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState, DateTime};
-use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::form::{Field, Form};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -20,6 +19,7 @@ use videocrm_core::{NewVideo, VideoFormat, VideoStatus};
 
 use crate::database::Chip;
 use crate::state::AppState;
+use crate::ui::dialog::form_footer;
 use crate::ui::{ChoiceCard, PageIcon};
 
 /// Opens the new-video dialog. `status` preselects the stage (board column "+").
@@ -36,11 +36,7 @@ pub fn open_new_video_dialog(status: Option<VideoStatus>, window: &mut Window, c
             .title("New video")
             .width(width)
             .child(form.clone())
-            .footer(
-                DialogFooter::new()
-                    .child(DialogClose::new().child(Button::new("new-video-cancel").outline().label("Cancel")))
-                    .child(DialogAction::new().child(Button::new("new-video-create").primary().label("Create"))),
-            )
+            .footer(form_footer("new-video-cancel", "new-video-create", "Create"))
             // `submit` closes the dialog itself before it opens the new video.
             .on_ok(move |_, window, cx| {
                 form.update(cx, |form, cx| form.submit(window, cx));
@@ -219,6 +215,9 @@ impl Render for NewVideoForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .id("new-video-form")
+            // The dialog spaces its title from the body by a field gap; a form
+            // starts a group's distance below it.
+            .pt_2()
             .gap_4()
             .child(
                 Form::new()
