@@ -308,6 +308,8 @@ impl RunView {
         let step = match run.status {
             RunStatus::Queued | RunStatus::Planning => 0,
             RunStatus::AwaitingApproval => 1,
+            // A discarded strategy is still there to review.
+            RunStatus::Cancelled if self.service.read(cx).can_restore(run.id) => 1,
             RunStatus::Rendering => 2,
             RunStatus::Succeeded => 4,
             RunStatus::Failed | RunStatus::Cancelled => {
@@ -738,14 +740,12 @@ impl RunView {
                 divider(row_id, label, border, muted)
             }
             TimelineItem::Message { text, .. } => {
-                // A long message (the final summary) shows its opening lines; the state
-                // card above has it in full.
+                // A long message (the strategy, the final summary) shows its start; the
+                // state card above has it in full.
                 let preview = format::message_preview(text);
-                let body = match preview {
-                    Some(preview) if !expanded => {
-                        markdown(element_id(&format!("message-{seq}-preview"), run_id), preview.to_owned())
-                    }
-                    _ => markdown(element_id(&format!("message-{seq}"), run_id), text.clone()),
+                let body = match preview.clone() {
+                    Some(preview) if !expanded => div().line_clamp(3).text_ellipsis().child(preview).into_any_element(),
+                    _ => markdown(element_id(&format!("message-{seq}"), run_id), text.clone()).into_any_element(),
                 };
                 let toggle = preview.is_some().then(|| {
                     Button::new(element_id(&format!("message-toggle-{seq}"), run_id))

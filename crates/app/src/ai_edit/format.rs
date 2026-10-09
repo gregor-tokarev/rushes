@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Local, Utc};
+use videocrm_core::document::strip_inline_markdown;
 use videocrm_pipeline::MediaInfo;
 
 /// File size in decimal units: "820 KB", "1.4 GB".
@@ -67,37 +68,46 @@ pub fn started(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
-/// Non-blank lines of a long agent message the activity log shows before "Show more".
-const PREVIEW_LINES: usize = 3;
+/// Characters from which an agent message is shown as a preview in the activity log.
+const PREVIEW_CHARS: usize = 280;
+/// Non-blank lines from which an agent message is shown as a preview.
+const PREVIEW_LINES: usize = 4;
 
-/// The opening lines of a long agent message, or `None` when it is short enough to show
-/// whole. Cuts at line breaks outside code blocks, so the Markdown of the kept lines
-/// stays intact.
-pub fn message_preview(text: &str) -> Option<&str> {
-    let text = text.trim();
-    let (mut lines, mut in_fence, mut cut) = (0, false, None);
-    let mut offset = 0;
-    for line in text.split_inclusive('\n') {
-        let fence = line.trim_start().starts_with("```");
-        if fence && !in_fence && lines > 0 {
-            // A code block starts: end the preview before it.
-            cut = Some(offset);
-            break;
-        }
-        in_fence ^= fence;
-        offset += line.len();
-        if !line.trim().is_empty() {
-            lines += 1;
-        }
-        if lines >= PREVIEW_LINES && !in_fence {
-            cut = Some(offset);
-            break;
-        }
+/// The start of a long agent message as one line of plain text (Markdown markers
+/// removed), for a clamped preview; `None` when the message is short enough to show
+/// whole.
+pub fn message_preview(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    if text.trim().chars().count() <= PREVIEW_CHARS && lines.len() < PREVIEW_LINES {
+        return None;
     }
-    let cut = cut?;
-    // Hiding a single line saves nothing.
-    let hidden = text[cut..].lines().filter(|line| !line.trim().is_empty()).count();
-    (hidden > 1).then(|| text[..cut].trim_end())
+    let mut preview = String::new();
+    for line in lines.iter().filter(|line| !line.starts_with("```")) {
+        if preview.chars().count() > 2 * PREVIEW_CHARS {
+            break;
+        }
+        let plain = strip_inline_markdown(strip_block_marker(line));
+        if !preview.is_empty() {
+            preview.push(' ');
+        }
+        preview.push_str(plain.trim());
+    }
+    // The view clamps it to a few lines; more text would only be shaped and cut.
+    Some(preview.chars().take(2 * PREVIEW_CHARS).collect())
+}
+
+/// A Markdown line without its heading, list or quote marker.
+fn strip_block_marker(line: &str) -> &str {
+    let line = line.trim_start_matches('#').trim_start_matches('>').trim_start();
+    if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")).or_else(|| line.strip_prefix("+ "))
+    {
+        return rest;
+    }
+    let digits = line.find(|c: char| !c.is_ascii_digit()).unwrap_or(0);
+    match line[digits..].strip_prefix(". ") {
+        Some(rest) if digits > 0 => rest,
+        _ => line,
+    }
 }
 
 #[cfg(test)]
@@ -150,19 +160,23 @@ mod tests {
     }
 
     #[test]
-    fn long_messages_are_previewed_by_whole_lines() {
-        let summary = "The final cut is rendered: **`edit/final.mp4`**.\n\n**What's in it:**\n1. **Intro:** take 1.\n\
-                       2. **Main point:** take 2.\n3. **Outro:** take 3.";
+    fn long_messages_are_previewed_as_plain_text() {
+        let summary = "## The cut\n\nThe final cut is rendered: **`edit/final.mp4`**, 14.6s.\n\n**What's in it:**\n\
+                       1. **Intro:** take 1.\n- *Main point:* take 2.\n> Outro: take 3.";
         assert_eq!(
-            message_preview(summary),
-            Some("The final cut is rendered: **`edit/final.mp4`**.\n\n**What's in it:**\n1. **Intro:** take 1.")
+            message_preview(summary).as_deref(),
+            Some(
+                "The cut The final cut is rendered: edit/final.mp4, 14.6s. What's in it: Intro: take 1. \
+                 Main point: take 2. Outro: take 3."
+            )
         );
-        // Short messages, and those with one more line, show whole.
-        assert_eq!(message_preview("Rendering the preview."), None);
-        assert_eq!(message_preview("One.\nTwo.\nThree.\nFour."), None);
-        assert_eq!(message_preview("One.\nTwo.\nThree.\nFour.\nFive."), Some("One.\nTwo.\nThree."));
-        // A code block is never cut open.
-        assert_eq!(message_preview("Ran:\n```\na\nb\nc\n```\nThen:\nx\ny"), Some("Ran:"));
-        assert_eq!(message_preview("```\na\nb\nc\n```\nDone.\nx\ny"), Some("```\na\nb\nc\n```"));
+        // Short messages show whole, as Markdown.
+        assert_eq!(message_preview("Rendering the **preview**."), None);
+        assert_eq!(message_preview("One.\nTwo.\nThree."), None);
+        assert!(message_preview(&"word ".repeat(100)).is_some());
+        // Code blocks lose their fences; very long messages only their start.
+        assert_eq!(message_preview("Ran:\n```\nls edit\n```\nDone.").as_deref(), Some("Ran: ls edit Done."));
+        let long = "A sentence of the summary. ".repeat(200);
+        assert_eq!(message_preview(&format!("{long}\n{long}")).unwrap().chars().count(), 2 * PREVIEW_CHARS);
     }
 }
