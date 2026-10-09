@@ -240,7 +240,10 @@ fn intro(skill_md: &Path, footage: &[FootageFile]) -> String {
             .to_owned()
     } else {
         let lines: Vec<String> = footage.iter().map(describe).collect();
-        format!("Raw footage in the current directory:\n{}", lines.join("\n"))
+        format!(
+            "Raw footage in the current directory:\n{}",
+            lines.join("\n")
+        )
     };
     format!(
         "Use the video-use skill to edit the raw footage in the current directory. Read the \

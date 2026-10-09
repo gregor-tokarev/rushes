@@ -94,13 +94,19 @@ mod tests {
 
     #[test]
     fn finds_programs_on_path_and_by_path() {
-        let sh = find_executable(Path::new("sh"), Some(OsStr::new("/nonexistent:/bin:/usr/bin")))
-            .expect("sh on PATH");
+        let sh = find_executable(
+            Path::new("sh"),
+            Some(OsStr::new("/nonexistent:/bin:/usr/bin")),
+        )
+        .expect("sh on PATH");
         assert!(sh.is_absolute());
         assert_eq!(find_executable(&sh, None), Some(sh.clone()));
         assert_eq!(find_executable(Path::new("sh"), None), None);
         assert_eq!(
-            find_executable(Path::new("definitely-not-a-program"), Some(OsStr::new("/bin"))),
+            find_executable(
+                Path::new("definitely-not-a-program"),
+                Some(OsStr::new("/bin"))
+            ),
             None
         );
     }
@@ -110,9 +116,15 @@ mod tests {
         let sh = find_executable(Path::new("sh"), Some(OsStr::new("/bin:/usr/bin"))).unwrap();
         let out = run_captured(&sh, ["-c", "echo hi"], &[], Duration::from_secs(5));
         assert_eq!(out.as_deref(), Some("hi\n"));
-        assert_eq!(run_captured(&sh, ["-c", "exit 3"], &[], Duration::from_secs(5)), None);
+        assert_eq!(
+            run_captured(&sh, ["-c", "exit 3"], &[], Duration::from_secs(5)),
+            None
+        );
         let started = Instant::now();
-        assert_eq!(run_captured(&sh, ["-c", "sleep 5"], &[], Duration::from_millis(200)), None);
+        assert_eq!(
+            run_captured(&sh, ["-c", "sleep 5"], &[], Duration::from_millis(200)),
+            None
+        );
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 }

@@ -124,10 +124,14 @@ fn parse_system(value: &Value, line: &str) -> Vec<AgentEvent> {
 fn parse_assistant(value: &Value) -> Vec<AgentEvent> {
     content_blocks(value)
         .filter_map(|block| match str_field(block, "type") {
-            "text" => non_empty(str_field(block, "text"))
-                .map(|text| AgentEvent::AssistantText { text: text.to_owned() }),
-            "thinking" => non_empty(str_field(block, "thinking"))
-                .map(|text| AgentEvent::Thinking { text: text.to_owned() }),
+            "text" => non_empty(str_field(block, "text")).map(|text| AgentEvent::AssistantText {
+                text: text.to_owned(),
+            }),
+            "thinking" => {
+                non_empty(str_field(block, "thinking")).map(|text| AgentEvent::Thinking {
+                    text: text.to_owned(),
+                })
+            }
             "redacted_thinking" => None,
             "tool_use" | "server_tool_use" => {
                 let name = str_field(block, "name");
@@ -147,7 +151,10 @@ fn parse_user(value: &Value) -> Vec<AgentEvent> {
         .filter_map(|block| match str_field(block, "type") {
             "tool_result" => Some(AgentEvent::ToolResult {
                 tool_use_id: str_field(block, "tool_use_id").to_owned(),
-                is_error: block.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                is_error: block
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
                 summary: truncate(
                     &content_text(block.get("content").unwrap_or(&Value::Null)),
                     RESULT_SUMMARY_CHARS,
@@ -177,7 +184,10 @@ fn parse_result(value: &Value) -> AgentEvent {
         .unwrap_or(str_field(value, "subtype"))
         .to_owned();
     AgentEvent::Result {
-        is_error: value.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+        is_error: value
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         result_text,
         session_id: str_field(value, "session_id").to_owned(),
         cost_usd: value.get("total_cost_usd").and_then(Value::as_f64),
@@ -203,7 +213,10 @@ fn tool_use_summary(name: &str, input: &Value) -> String {
     let field = |key: &str| non_empty(str_field(input, key));
     let summary = match name {
         "Bash" => field("command").map(|command| {
-            let mut lines = command.lines().map(str::trim).filter(|line| !line.is_empty());
+            let mut lines = command
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty());
             let first = lines.next().unwrap_or_default();
             if lines.next().is_some() {
                 format!("{first} …")

@@ -19,11 +19,17 @@ pub struct Check {
 
 impl Check {
     fn pass(detail: impl Into<String>) -> Self {
-        Self { ok: true, detail: detail.into() }
+        Self {
+            ok: true,
+            detail: detail.into(),
+        }
     }
 
     fn fail(detail: impl Into<String>) -> Self {
-        Self { ok: false, detail: detail.into() }
+        Self {
+            ok: false,
+            detail: detail.into(),
+        }
     }
 }
 
@@ -91,13 +97,19 @@ fn check_agent(config: &AgentConfig) -> Check {
     };
     match run_captured(&program, ["--version"], &config.env, VERSION_TIMEOUT) {
         Some(version) => Check::pass(format!("{} ({})", program.display(), first_line(&version))),
-        None => Check::fail(format!("{} does not run (`--version` failed)", program.display())),
+        None => Check::fail(format!(
+            "{} does not run (`--version` failed)",
+            program.display()
+        )),
     }
 }
 
 fn check_skill(skill_dir: Option<&Path>) -> (Check, Option<PathBuf>) {
     let Some(dir) = skill_dir.map(Path::to_owned).or_else(default_skill_dir) else {
-        return (Check::fail("no skill folder configured and no home directory"), None);
+        return (
+            Check::fail("no skill folder configured and no home directory"),
+            None,
+        );
     };
     let skill_md = dir.join("SKILL.md");
     match fs::canonicalize(&dir) {
@@ -118,7 +130,10 @@ fn check_ffmpeg_tool(program: Option<PathBuf>, name: &str) -> Check {
     };
     match run_captured(&program, ["-version"], &[], VERSION_TIMEOUT) {
         Some(version) => Check::pass(format!("{} ({})", program.display(), first_line(&version))),
-        None => Check::fail(format!("{} does not run (`-version` failed)", program.display())),
+        None => Check::fail(format!(
+            "{} does not run (`-version` failed)",
+            program.display()
+        )),
     }
 }
 
@@ -178,7 +193,10 @@ fn check_python(skill_dir: Option<&Path>, uv: Option<PathBuf>, python3: Option<P
 }
 
 fn first_line(text: &str) -> &str {
-    text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default()
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -187,11 +205,20 @@ mod tests {
 
     #[test]
     fn dotenv_detects_assignments_without_reading_values_out() {
-        assert!(dotenv_has_value("ELEVENLABS_API_KEY=sk_123\n", ELEVENLABS_KEY));
-        assert!(dotenv_has_value("# c\nexport ELEVENLABS_API_KEY = \"x\"", ELEVENLABS_KEY));
+        assert!(dotenv_has_value(
+            "ELEVENLABS_API_KEY=sk_123\n",
+            ELEVENLABS_KEY
+        ));
+        assert!(dotenv_has_value(
+            "# c\nexport ELEVENLABS_API_KEY = \"x\"",
+            ELEVENLABS_KEY
+        ));
         assert!(!dotenv_has_value("ELEVENLABS_API_KEY=\n", ELEVENLABS_KEY));
         assert!(!dotenv_has_value("ELEVENLABS_API_KEY=\"\"", ELEVENLABS_KEY));
         assert!(!dotenv_has_value("# ELEVENLABS_API_KEY=x", ELEVENLABS_KEY));
-        assert!(!dotenv_has_value("OTHER_ELEVENLABS_API_KEY=x", ELEVENLABS_KEY));
+        assert!(!dotenv_has_value(
+            "OTHER_ELEVENLABS_API_KEY=x",
+            ELEVENLABS_KEY
+        ));
     }
 }

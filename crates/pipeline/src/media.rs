@@ -112,7 +112,10 @@ fn parse_probe(json: &str) -> Option<MediaInfo> {
     // Cover art in audio files shows up as a one-frame video stream.
     let video = probe.streams.iter().find(|stream| {
         stream.codec_type.as_deref() == Some("video")
-            && stream.disposition.as_ref().is_none_or(|d| d.attached_pic == 0)
+            && stream
+                .disposition
+                .as_ref()
+                .is_none_or(|d| d.attached_pic == 0)
     });
     let has_audio = probe
         .streams
@@ -168,12 +171,18 @@ mod tests {
             {"codec_type":"video","width":600,"height":600,"disposition":{"attached_pic":1}}],
             "format":{}}"#;
         let info = parse_probe(json).expect("audio file");
-        assert_eq!((info.duration_secs, info.width, info.has_audio), (61.5, None, true));
+        assert_eq!(
+            (info.duration_secs, info.width, info.has_audio),
+            (61.5, None, true)
+        );
     }
 
     #[test]
     fn rejects_non_media() {
-        assert_eq!(parse_probe(r#"{"streams":[],"format":{"duration":"1.0"}}"#), None);
+        assert_eq!(
+            parse_probe(r#"{"streams":[],"format":{"duration":"1.0"}}"#),
+            None
+        );
         assert_eq!(parse_probe("not json"), None);
     }
 }

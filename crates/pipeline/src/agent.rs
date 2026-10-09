@@ -20,7 +20,15 @@ pub const DEFAULT_PERMISSION_MODE: &str = "acceptEdits";
 /// What video-use needs: shell (ffmpeg, python helpers), file tools, the skill
 /// loader, sub-agents for animations and a todo list.
 pub const DEFAULT_ALLOWED_TOOLS: [&str; 9] = [
-    "Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill", "Agent", "TodoWrite",
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "Skill",
+    "Agent",
+    "TodoWrite",
 ];
 
 const STDERR_TAIL_LINES: usize = 20;
@@ -101,7 +109,10 @@ impl AgentConfig {
         if let Some(model) = &self.model {
             args.extend(["--model".into(), model.into()]);
         }
-        args.extend(["--permission-mode".into(), self.permission_mode.clone().into()]);
+        args.extend([
+            "--permission-mode".into(),
+            self.permission_mode.clone().into(),
+        ]);
         if !self.allowed_tools.is_empty() {
             args.push(format!("--allowedTools={}", self.allowed_tools.join(",")).into());
         }
@@ -196,8 +207,14 @@ pub(crate) fn run_agent(
 
     let (tx, rx) = mpsc::channel();
     let readers = [
-        child.stdout.take().map(|out| spawn_reader(out, tx.clone(), Line::Stdout)),
-        child.stderr.take().map(|err| spawn_reader(err, tx, Line::Stderr)),
+        child
+            .stdout
+            .take()
+            .map(|out| spawn_reader(out, tx.clone(), Line::Stdout)),
+        child
+            .stderr
+            .take()
+            .map(|err| spawn_reader(err, tx, Line::Stderr)),
     ];
     if let Some(error) = readers.into_iter().flatten().find_map(Result::err) {
         terminate(&mut child, config.kill_grace);
@@ -397,7 +414,9 @@ mod tests {
     fn stderr_tail_keeps_the_last_lines() {
         let mut run = AgentRun::default();
         for n in 0..STDERR_TAIL_LINES + 5 {
-            run.observe(&AgentEvent::Stderr { line: n.to_string() });
+            run.observe(&AgentEvent::Stderr {
+                line: n.to_string(),
+            });
         }
         assert_eq!(run.stderr_tail.len(), STDERR_TAIL_LINES);
         assert_eq!(run.stderr_tail[0], "5");
