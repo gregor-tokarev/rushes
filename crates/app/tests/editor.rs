@@ -548,3 +548,39 @@ fn escape_closes_the_block_menu_and_returns_to_the_block(cx: &mut TestAppContext
     f.type_text(cx, "!");
     assert_eq!(f.summary(cx), owned(&[(BlockKind::Paragraph, "first"), (BlockKind::Paragraph, "second!")]));
 }
+
+#[gpui_kit::test]
+fn pasted_dividers_and_code_keep_their_own_blocks(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![paragraph("abc")]);
+    f.focus_last(cx);
+    cx.write_to_clipboard(ClipboardItem::new_string("---\nfoo".into()));
+    f.press(cx, &["secondary-v"]);
+    assert_eq!(
+        f.summary(cx),
+        owned(&[(BlockKind::Paragraph, "abc"), (BlockKind::Divider, ""), (BlockKind::Paragraph, "foo")])
+    );
+
+    let f = Fixture::new(cx, vec![paragraph("abcdef")]);
+    f.focus_first(cx);
+    f.press(cx, &["right", "right", "right"]);
+    cx.write_to_clipboard(ClipboardItem::new_string("```\nlet x = 1;\n```\n".into()));
+    f.press(cx, &["secondary-v"]);
+    assert_eq!(
+        f.summary(cx),
+        owned(&[
+            (BlockKind::Paragraph, "abc"),
+            (BlockKind::Code, "let x = 1;"),
+            (BlockKind::Paragraph, "def"),
+        ])
+    );
+
+    let f = Fixture::new(cx, vec![paragraph("")]);
+    f.focus_last(cx);
+    cx.write_to_clipboard(ClipboardItem::new_string("---\n---".into()));
+    f.press(cx, &["secondary-v"]);
+    f.type_text(cx, "after");
+    assert_eq!(
+        f.summary(cx),
+        owned(&[(BlockKind::Divider, ""), (BlockKind::Divider, ""), (BlockKind::Paragraph, "after")])
+    );
+}
