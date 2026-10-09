@@ -46,6 +46,8 @@ fn open_workspace(state: AppState, cx: &mut App) {
     YoutubeService::init(state.clone(), cx);
     PipelineService::init(state.clone(), cx);
     shell::apply_theme(theme, None, cx);
+    // The workspace's quit hook writes pending edits, as for Ctrl+Q.
+    shell::on_termination_signal(cx, |cx| cx.quit());
 
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1440.), px(900.)), cx))),

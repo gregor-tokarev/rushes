@@ -7,6 +7,7 @@
 pub(crate) mod elements;
 mod palette;
 mod sidebar;
+mod signals;
 mod startup;
 mod theme;
 mod title_bar;
@@ -34,6 +35,7 @@ use crate::video_page::VideoPage;
 use crate::wizard;
 
 use palette::CommandPalette;
+pub use signals::on_termination_signal;
 pub use startup::{InstanceLock, StartupNotice, StartupProblem, open_startup_notice};
 pub use theme::{apply_theme, register_fonts};
 
