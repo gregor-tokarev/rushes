@@ -10,7 +10,7 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, Wind
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _, Window, div,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
 };
 use videocrm_core::{UploadJob, UploadStatus};
 
