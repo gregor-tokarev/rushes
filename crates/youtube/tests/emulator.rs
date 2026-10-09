@@ -458,6 +458,57 @@ fn cancelled_upload_resumes_from_the_server_offset() {
 }
 
 #[test]
+fn cancel_aborts_a_chunk_in_flight() {
+    let Some(emulators) = Emulators::start() else {
+        return;
+    };
+    let (credentials, _) = sign_in(&emulators, "creator@example.com");
+    let client = client(&emulators, credentials).with_upload_options(UploadOptions {
+        chunk_size: 8 * UPLOAD_GRANULARITY,
+        ..UploadOptions::default()
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (path, sha256) = video_file(dir.path(), "long.mp4", 5 * 1024 * 1024);
+
+    // Cancel inside the first 2 MiB chunk: the request is cut off mid-body.
+    let cancel = AtomicBool::new(false);
+    let error = client
+        .upload_video(
+            &path,
+            &metadata("Cut off"),
+            &mut |event| {
+                if matches!(event, UploadProgress::Bytes { sent, .. } if sent >= 3 * UPLOAD_GRANULARITY) {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+            &cancel,
+        )
+        .unwrap_err();
+    let session_url = error.session_url().unwrap().to_owned();
+
+    let mut first_offset = None;
+    client
+        .resume_upload(
+            &session_url,
+            &path,
+            &mut |event| {
+                if let UploadProgress::Bytes { sent, .. } = event {
+                    first_offset.get_or_insert(sent);
+                }
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let first_offset = first_offset.unwrap();
+    assert!(
+        first_offset < 8 * UPLOAD_GRANULARITY,
+        "the first chunk was not aborted: {first_offset}"
+    );
+    assert_eq!(first_offset % UPLOAD_GRANULARITY, 0);
+    assert_eq!(emulators.uploads()[0]["sha256"], sha256.as_str());
+}
+
+#[test]
 fn transient_failures_are_retried_from_the_server_offset() {
     let Some(emulators) = Emulators::start() else {
         return;
