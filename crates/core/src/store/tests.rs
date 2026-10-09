@@ -452,6 +452,28 @@ fn multi_select_values_are_pruned_per_option() {
 }
 
 #[test]
+fn non_finite_numbers_are_rejected_instead_of_breaking_listings() {
+    let mut store = store();
+    let score = PropertyId::new();
+    // `"nan".parse::<f64>()` and `"inf"` succeed, so a number cell can produce these.
+    for number in [f64::NAN, f64::INFINITY] {
+        let mut video = Video::new("Scored");
+        video.properties.insert(score, PropertyValue::Number(number));
+        assert!(store.insert_video(&video).is_err());
+    }
+    let mut video = insert(&mut store, "Scored", 0.0);
+    video.properties.insert(score, PropertyValue::Number(f64::NEG_INFINITY));
+    assert!(store.update_video(&mut video).is_err());
+    assert_eq!(store.list_videos().unwrap().len(), 1);
+    assert!(store.get_video(video.id).unwrap().unwrap().properties.is_empty());
+
+    let mut view = store.list_views().unwrap().remove(0);
+    view.columns[0].width = f32::NAN;
+    assert!(store.save_view(&view).is_err());
+    assert_eq!(store.list_views().unwrap().len(), 2);
+}
+
+#[test]
 fn deleting_a_property_removes_values_and_view_columns() {
     let mut store = store();
     let sponsor = PropertyDef { id: PropertyId::new(), name: "Sponsor".into(), kind: PropertyKind::Text, position: 0 };

@@ -766,6 +766,11 @@ const UPDATE_VIDEO: &str = "UPDATE videos SET title = ?2, icon = ?3, status = ?4
 
 /// Runs `INSERT_VIDEO` or `UPDATE_VIDEO`, which share parameter numbering.
 fn write_video(conn: &Connection, sql: &str, video: &Video) -> rusqlite::Result<usize> {
+    for value in video.properties.values() {
+        if let PropertyValue::Number(number) = value {
+            ensure_finite("number property", *number)?;
+        }
+    }
     conn.prepare_cached(sql)?.execute(params![
         video.id,
         video.title,
@@ -940,6 +945,9 @@ fn query_views(conn: &Connection) -> rusqlite::Result<Vec<DatabaseView>> {
 }
 
 fn upsert_view(conn: &Connection, view: &DatabaseView) -> rusqlite::Result<()> {
+    for layout in &view.columns {
+        ensure_finite("column width", f64::from(layout.width))?;
+    }
     let config = ViewConfig { columns: view.columns.clone(), sorts: view.sorts.clone(), filter: view.filter.clone() };
     conn.prepare_cached(
         "INSERT INTO database_views (id, name, kind, config, position) VALUES (?1, ?2, ?3, ?4, ?5)
@@ -1049,6 +1057,16 @@ impl<T: Serialize> ToSql for Json<T> {
 impl<T: DeserializeOwned> FromSql for Json<T> {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         serde_json::from_str(value.as_str()?).map(Json).map_err(FromSqlError::other)
+    }
+}
+
+/// JSON has no NaN or infinity: serde_json writes them as `null`, which then
+/// fails to load and would break every listing of the table.
+fn ensure_finite(what: &str, value: f64) -> rusqlite::Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(rusqlite::Error::ToSqlConversionFailure(format!("{what} must be a finite number, not {value}").into()))
     }
 }
 
