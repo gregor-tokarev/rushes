@@ -36,6 +36,7 @@ use super::icons::column_icon;
 use super::panel::{CELL_EDITOR_CONTEXT, CellRef, DatabasePanel, TEXT_ENTRY_CONTEXT};
 use super::property_editor::PropertyEditorMode;
 use super::query::column_name;
+use crate::ui::video_icon;
 
 /// Narrowest a column can be resized to, in pixels.
 const MIN_COLUMN_WIDTH: f32 = 72.0;
@@ -188,7 +189,7 @@ impl VideoTable {
             .gap_1p5()
             .min_w_0()
             .on_click(rename)
-            .child(video_icon(video.icon.as_deref(), cx))
+            .child(video_icon(video.icon.as_deref()))
             .child(
                 div()
                     .id(element_id("title-text", id))
@@ -908,17 +909,6 @@ pub(crate) fn render_empty_state(reason: EmptyReason, panel: &WeakEntity<Databas
 /// The hint icon of a newer attempt: a warning when it failed.
 fn attempt_icon(failed: bool) -> IconName {
     if failed { IconName::CircleAlert } else { IconName::Info }
-}
-
-/// The video's emoji, or a neutral page glyph when it has none.
-///
-/// Drawn in a fixed slot so titles line up whatever the glyph's width.
-pub(crate) fn video_icon(icon: Option<&str>, cx: &App) -> Div {
-    let slot = h_flex().w_5().h_5().flex_shrink_0().justify_center();
-    match icon.map(str::trim).filter(|icon| !icon.is_empty()) {
-        Some(emoji) => slot.child(emoji.to_string()),
-        None => slot.child(Icon::new(IconName::FileText).small().text_color(cx.theme().muted_foreground)),
-    }
 }
 
 pub(crate) fn muted_text(text: impl Into<SharedString>, cx: &App) -> Div {

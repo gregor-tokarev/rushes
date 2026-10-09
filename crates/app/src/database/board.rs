@@ -19,7 +19,8 @@ use super::elements::{Chip, muted_icon};
 use super::format;
 use super::panel::DatabasePanel;
 use super::query::status_visible;
-use super::table::{EmptyReason, element_id, render_empty_state, video_icon, video_menu};
+use super::table::{EmptyReason, element_id, render_empty_state, video_menu};
+use crate::ui::video_icon;
 
 /// The payload of a card being dragged.
 #[derive(Clone)]
@@ -44,7 +45,7 @@ impl Render for DraggedCard {
             .opacity(0.92)
             .text_sm()
             .font_weight(FontWeight::MEDIUM)
-            .child(video_icon(self.icon.as_deref(), cx))
+            .child(video_icon(self.icon.as_deref()))
             .child(div().min_w_0().truncate().child(self.title.clone()))
     }
 }
@@ -219,7 +220,7 @@ impl DatabasePanel {
                             .items_start()
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
-                            .child(video_icon(video.icon.as_deref(), cx))
+                            .child(video_icon(video.icon.as_deref()))
                             .child(div().min_w_0().line_clamp(2).text_ellipsis().map(|this| {
                                 if title.is_empty() {
                                     this.text_color(cx.theme().muted_foreground).child("Untitled")

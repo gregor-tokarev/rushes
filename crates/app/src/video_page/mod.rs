@@ -32,10 +32,11 @@ use videocrm_core::{DocumentKind, Video, VideoId};
 use crate::ai_edit::AiEditPanel;
 use crate::publish::PublishPanel;
 use crate::route::{Route, VideoTab};
-use crate::shell::elements::empty_state;
 use crate::state::{AppEvent, AppState};
+use crate::ui::{EmptyState, PageIcon};
 
 pub use document::{DocumentTab, PathPurpose, SAVE_DELAY, ScriptRail, ScriptStats};
+pub use emoji::ICON_CHOICES;
 pub use properties::PropertiesPanel;
 pub use saves::{DocumentSaves, SAVE_RETRY_DELAY};
 
@@ -50,6 +51,8 @@ const RAIL_MIN_WINDOW_WIDTH: Rems = Rems(72.);
 /// Width of the script rail. Wide windows keep this lane free on every tab,
 /// so switching tabs never moves the header or the tab strip.
 const RAIL_WIDTH: Rems = Rems(16.);
+/// Side of the page icon above the title.
+const PAGE_ICON_SIZE: Rems = Rems(3.5);
 /// The tab strip's index among the scrolled page's children: header,
 /// properties, tab strip, tab content, page end.
 const TAB_STRIP_ITEM: usize = 2;
@@ -428,15 +431,15 @@ impl VideoPage {
         let page = cx.weak_entity();
         let current = video.icon.clone().filter(|icon| !icon.is_empty());
         let has_icon = current.is_some();
-        let trigger = match video.icon.clone().filter(|icon| !icon.is_empty()) {
-            // The emoji sits on the column's edge; its hover surface bleeds past it.
+        let trigger = match current.clone() {
+            // The icon sits on the column's edge; its hover surface bleeds past it.
             Some(icon) => Button::new("page-icon")
                 .ghost()
                 .h(rems(4.5))
                 .w(rems(4.5))
-                .ml(rems(-0.625))
+                .ml(rems(-0.5))
                 .accessibility_label("Change icon")
-                .child(div().text_size(rems(3.25)).line_height(rems(4.)).child(icon)),
+                .child(PageIcon::new(Some(&icon)).size(PAGE_ICON_SIZE)),
             None => Button::new("page-icon")
                 .ghost()
                 .xsmall()
@@ -456,13 +459,13 @@ impl VideoPage {
             v_flex()
                 .gap_2()
                 .child(div().text_xs().font_medium().text_color(cx.theme().muted_foreground).child("Page icon"))
-                .child(div().grid().grid_cols(8).gap_0p5().children(emoji::EMOJI.iter().map(|emoji| {
+                .child(div().grid().grid_cols(8).gap_0p5().children(ICON_CHOICES.iter().map(|emoji| {
                     Button::new(SharedString::from(format!("emoji-{emoji}")))
                         .ghost()
                         .size(rems(2.25))
                         .accessibility_label(*emoji)
                         .selected(current.as_deref() == Some(*emoji))
-                        .child(div().text_xl().child(*emoji))
+                        .child(PageIcon::new(Some(emoji)).size(rems(1.375)))
                         .on_click(pick(Some(emoji.to_string())))
                 })))
                 .when(has_icon, |this| {
@@ -580,19 +583,17 @@ impl VideoPage {
 
     fn render_missing(&self, cx: &mut Context<Self>) -> AnyElement {
         let state = self.state.clone();
-        v_flex()
-            .id("video-missing")
-            .test_support()
+        div()
             .size_full()
-            .items_center()
-            .justify_center()
+            .bg(cx.theme().background)
             .child(
-                empty_state(
+                EmptyState::new(
+                    "video-missing",
                     IconName::FileQuestionMark,
                     "This video isn’t here anymore",
                     "It may have been deleted. Your other videos are in the database.",
                 )
-                .child(
+                .action(
                     Button::new("back-to-videos")
                         .outline()
                         .small()
@@ -600,7 +601,6 @@ impl VideoPage {
                         .on_click(move |_, _, cx| state.update(cx, |state, cx| state.navigate(Route::default(), cx))),
                 ),
             )
-            .bg(cx.theme().background)
             .into_any_element()
     }
 }

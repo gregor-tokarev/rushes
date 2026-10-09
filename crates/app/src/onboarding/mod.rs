@@ -16,8 +16,8 @@ use gpui_kit::{
 use crate::ai_edit::DoctorChecklist;
 use crate::publish::YoutubeSettings;
 use crate::settings_page::{Commit, MediaFolderField};
-use crate::shell::elements::ChoiceCard;
 use crate::state::AppState;
+use crate::ui::ChoiceCard;
 use crate::wizard;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

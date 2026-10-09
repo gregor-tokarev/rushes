@@ -19,6 +19,7 @@ use crate::database::Chip;
 use crate::database::colors::run_status_color;
 use crate::route::VideoTab;
 use crate::state::AppState;
+use crate::ui::video_icon;
 
 /// The Pipelines page: runs across all videos, newest first. A row opens the
 /// video's "Footage & AI edit" tab with that run selected. Owns its scrolling.
@@ -111,13 +112,7 @@ impl PipelinesPage {
                     .flex_1()
                     .min_w_0()
                     .gap_2()
-                    .child(match icon {
-                        Some(icon) => div().w_5().flex_shrink_0().child(icon),
-                        None => div()
-                            .w_5()
-                            .flex_shrink_0()
-                            .child(Icon::new(IconName::Clapperboard).small().text_color(theme.muted_foreground)),
-                    })
+                    .child(video_icon(icon.as_deref()))
                     .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(title)),
             )
             .child(

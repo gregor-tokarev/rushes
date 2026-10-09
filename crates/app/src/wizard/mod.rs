@@ -19,11 +19,8 @@ use videocrm_core::templates::TemplateKind;
 use videocrm_core::{NewVideo, VideoFormat, VideoStatus};
 
 use crate::database::Chip;
-use crate::shell::elements::ChoiceCard;
 use crate::state::AppState;
-
-/// Icon of the blank template, which has no page icon of its own.
-const BLANK_TEMPLATE_ICON: &str = "📄";
+use crate::ui::{ChoiceCard, PageIcon};
 
 /// Opens the new-video dialog. `status` preselects the stage (board column "+").
 pub fn open_new_video_dialog(status: Option<VideoStatus>, window: &mut Window, cx: &mut App) {
@@ -198,7 +195,8 @@ impl NewVideoForm {
             let kind = *kind;
             ChoiceCard::new(
                 SharedString::from(format!("template-{}", kind.label().to_lowercase())),
-                div().text_base().child(kind.icon().unwrap_or(BLANK_TEMPLATE_ICON)),
+                // The page icon the video starts with; the blank template has none.
+                PageIcon::new(kind.icon()),
                 kind.label(),
                 kind.description(),
             )

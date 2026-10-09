@@ -28,8 +28,8 @@ use videocrm_core::{Block, BlockId, BlockKind, DocumentId, DocumentKind, VideoId
 use super::saves::DocumentSaves;
 use crate::database::format;
 use crate::editor::{DocumentEditor, DocumentEditorEvent};
-use crate::shell::elements::{RowButton, empty_state, section_label};
 use crate::state::AppState;
+use crate::ui::{EmptyState, RowButton, section_label};
 
 /// How long after the last edit a document is written.
 pub const SAVE_DELAY: Duration = Duration::from_millis(600);
@@ -521,16 +521,16 @@ impl Render for DocumentTab {
                 .child(div().id("document-entry").size_0().track_focus(&self.entry))
                 .child(editor.clone())
                 .into_any_element(),
-            None => v_flex()
+            None => div()
                 .w_full()
-                .py_8()
                 .child(
-                    empty_state(
+                    EmptyState::new(
+                        "document-unavailable",
                         IconName::FileExclamationPoint,
                         "This document couldn’t be opened",
                         "The database didn’t return it. Try again, or restart VideoCRM if it keeps happening.",
                     )
-                    .child(
+                    .action(
                         Button::new("document-retry")
                             .outline()
                             .small()

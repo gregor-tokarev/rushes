@@ -16,10 +16,11 @@ use gpui_kit::{
 };
 use videocrm_core::{VideoId, ViewKind};
 
-use super::sidebar::{display_title, video_emoji};
+use super::sidebar::display_title;
 use super::{NewVideo, OpenSettings, ToggleSidebar, ToggleTheme, Workspace};
 use crate::route::{Route, SettingsSection, VideoTab};
 use crate::state::AppState;
+use crate::ui::PageIcon;
 use crate::wizard;
 
 /// Most videos listed at once; the query narrows the rest.
@@ -55,7 +56,8 @@ impl PaletteAction {
 
 enum EntryIcon {
     Icon(IconName),
-    Emoji(SharedString),
+    /// A video's page icon; `None` when it has none.
+    Page(Option<SharedString>),
 }
 
 struct Entry {
@@ -188,7 +190,7 @@ impl CommandPalette {
                 Entry {
                     label: title.into(),
                     detail: Some(video.status.label().into()),
-                    icon: EntryIcon::Emoji(video_emoji(video.icon.as_deref()).to_string().into()),
+                    icon: EntryIcon::Page(video.icon.clone().map(Into::into)),
                     command: PaletteCommand::OpenVideo(video.id),
                 },
             ));
@@ -361,23 +363,14 @@ fn command_group(group: Group) -> CommandGroup {
         };
         match entry.icon {
             EntryIcon::Icon(icon) => item.icon(icon),
-            EntryIcon::Emoji(emoji) => {
+            EntryIcon::Page(icon) => {
                 let (label, detail) = (entry.label, entry.detail);
                 item.child(move |_, cx| {
                     h_flex()
                         .flex_1()
                         .min_w_0()
                         .gap_2()
-                        .child(
-                            div()
-                                .flex_none()
-                                .size_4()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_xs()
-                                .child(emoji.clone()),
-                        )
+                        .child(PageIcon::new(icon.as_deref()))
                         .child(div().flex_1().min_w_0().truncate().child(label.clone()))
                         .children(
                             detail
