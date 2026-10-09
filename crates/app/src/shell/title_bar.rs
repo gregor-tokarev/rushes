@@ -103,6 +103,17 @@ impl Workspace {
     }
 }
 
+/// Longest video title the breadcrumb shows before eliding the rest.
+const BREADCRUMB_TITLE_CHARS: usize = 48;
+
+/// `title`, elided with `…` past [`BREADCRUMB_TITLE_CHARS`] so the title bar keeps room for its actions.
+fn shorten(title: &str) -> String {
+    match title.char_indices().nth(BREADCRUMB_TITLE_CHARS) {
+        Some((end, _)) => format!("{}…", title[..end].trim_end()),
+        None => title.to_string(),
+    }
+}
+
 /// Where the main area is: `Videos › Board`, `Videos › 🎬 Title › Script`.
 fn breadcrumb(state: &gpui_kit::Entity<AppState>, cx: &App) -> Breadcrumb {
     let navigate = |route: Route| {
@@ -123,7 +134,7 @@ fn breadcrumb(state: &gpui_kit::Entity<AppState>, cx: &App) -> Breadcrumb {
         Route::Video { id, tab } => match app.video(id) {
             Some(video) => {
                 let page: SharedString =
-                    format!("{} {}", video_emoji(video.icon.as_deref()), display_title(&video.title)).into();
+                    format!("{} {}", video_emoji(video.icon.as_deref()), shorten(&display_title(&video.title))).into();
                 Breadcrumb::new()
                     .child(videos())
                     .child(BreadcrumbItem::new(page).on_click(navigate(Route::Video { id, tab: VideoTab::Script })))
