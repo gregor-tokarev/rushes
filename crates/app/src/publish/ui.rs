@@ -1,18 +1,20 @@
 //! Presentation pieces shared by the publish views: field chrome, the account
 //! summary and the connect controls.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use chrono::{DateTime, Datelike as _, Local, Utc};
+use gpui_kit::assets::IconName;
+use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::avatar::Avatar;
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::group_box::{GroupBox, GroupBoxVariants as _};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::assets::IconName;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, ClipboardItem, Div, ElementId, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    RenderOnce,
-    SharedString, Styled as _, Window, div,
+    AnyElement, App, ClipboardItem, Div, ElementId, Entity, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div, relative,
 };
 use videocrm_core::UploadStatus;
 use videocrm_youtube::Account;
@@ -36,7 +38,7 @@ pub(super) struct FieldRow {
     label: SharedString,
     counter: Option<(usize, usize)>,
     help: Option<SharedString>,
-    control: Option<gpui_kit::AnyElement>,
+    control: Option<AnyElement>,
 }
 
 impl FieldRow {
@@ -87,7 +89,28 @@ impl RenderOnce for FieldRow {
 
 /// Small muted text under a control.
 pub(super) fn help_text(text: impl Into<SharedString>, cx: &App) -> Div {
-    div().text_xs().line_height(gpui_kit::relative(1.45)).text_color(cx.theme().muted_foreground).child(text.into())
+    div().text_xs().line_height(relative(1.45)).text_color(cx.theme().muted_foreground).child(text.into())
+}
+
+/// An icon beside a short title and an optional explanation.
+pub(super) fn status_line(
+    icon: IconName,
+    color: Hsla,
+    title: impl Into<SharedString>,
+    detail: Option<SharedString>,
+    cx: &App,
+) -> Div {
+    h_flex()
+        .gap_2()
+        .items_start()
+        .child(div().pt_0p5().child(Icon::new(icon).small().text_color(color)))
+        .child(
+            v_flex()
+                .min_w_0()
+                .gap_0p5()
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title.into()))
+                .when_some(detail, |this, detail| this.child(help_text(detail, cx))),
+        )
 }
 
 /// A titled, outlined card of the side column.
@@ -97,14 +120,34 @@ pub(super) fn card(id: impl Into<ElementId>, title: &'static str) -> GroupBox {
 
 /// Status of an upload job as the videos table shows it.
 pub(super) fn upload_chip(status: &UploadStatus, progress: Option<f32>) -> Chip {
-    let label = match (status, progress) {
+    Chip::new(upload_label(status, progress), upload_status_color(status)).dot(true)
+}
+
+/// `Uploading 42%` from the live progress when there is one, else the stored status.
+fn upload_label(status: &UploadStatus, progress: Option<f32>) -> String {
+    match (status, progress) {
         (UploadStatus::Uploading { .. }, Some(fraction)) => format!("Uploading {}%", (fraction * 100.0).floor()),
         (UploadStatus::Uploading { sent, total }, None) if *total > 0 => {
             format!("Uploading {}%", sent.saturating_mul(100) / total)
         }
         (status, _) => status.label().to_owned(),
-    };
-    Chip::new(label, upload_status_color(status)).dot(true)
+    }
+}
+
+/// `Today, 14:02`, `Yesterday, 09:10`, `Oct 7, 14:02`, or `Oct 7, 2025` in another year.
+pub(super) fn format_when(at: DateTime<Utc>, now: DateTime<Local>) -> String {
+    let at = at.with_timezone(&Local);
+    let days = (now.date_naive() - at.date_naive()).num_days();
+    match days {
+        0 => format!("Today, {}", at.format("%H:%M")),
+        1 => format!("Yesterday, {}", at.format("%H:%M")),
+        _ if at.year() == now.year() => at.format("%b %-d, %H:%M").to_string(),
+        _ => at.format("%b %-d, %Y").to_string(),
+    }
+}
+
+pub(super) fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned())
 }
 
 /// Avatar, channel and account of a signed-in YouTube account.
@@ -134,6 +177,9 @@ impl RenderOnce for AccountSummary {
         if let Some(videos) = account.video_count {
             details.push(plural(videos, "video"));
         }
+        if account.channel_id.is_none() {
+            details.push("No YouTube channel yet".to_owned());
+        }
         h_flex()
             .gap_3()
             .min_w_0()
@@ -162,8 +208,9 @@ pub(super) fn display_name(account: &Account) -> String {
     account.channel_title.clone().or_else(|| account.name.clone()).unwrap_or_else(|| account.email.clone())
 }
 
-pub(super) fn avatar(account: &Account, picture: Option<PathBuf>) -> gpui_kit::component::avatar::Avatar {
-    gpui_kit::component::avatar::Avatar::new().name(display_name(account)).when_some(picture, |this, path| this.src(path))
+/// The channel picture when it has been downloaded, otherwise initials.
+pub(super) fn avatar(account: &Account, picture: Option<PathBuf>) -> Avatar {
+    Avatar::new().name(display_name(account)).when_some(picture, |this, path| this.src(path))
 }
 
 fn plural(count: u64, noun: &str) -> String {
@@ -178,7 +225,7 @@ fn plural(count: u64, noun: &str) -> String {
 pub(super) struct ConnectionPanel {
     id: ElementId,
     service: Entity<YoutubeService>,
-    /// Offer "Disconnect" for a connected account (settings) or a link to settings.
+    /// In settings: offer "Disconnect", and leave fixing the settings to the form below.
     manage: bool,
 }
 
@@ -196,50 +243,32 @@ impl ConnectionPanel {
 impl RenderOnce for ConnectionPanel {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let service = self.service.read(cx);
-        let id = self.id;
         let config_problem = service.config().err().cloned();
         let theme = cx.theme();
-        let status_row = |icon: IconName, color, title: SharedString, detail: Option<SharedString>| {
-            h_flex()
-                .gap_3()
-                .items_start()
-                .child(div().pt_0p5().child(Icon::new(icon).text_color(color)))
-                .child(
-                    v_flex()
-                        .min_w_0()
-                        .gap_0p5()
-                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
-                        .when_some(detail, |this, detail| this.child(help_text(detail, cx))),
-                )
-        };
         let connect = {
             let service = self.service.clone();
             Button::new("connect").label("Connect").small().on_click(move |_, _, cx| {
                 service.update(cx, |service, cx| service.connect(cx));
             })
         };
-        let open_settings = Button::new("settings").label("Open settings").small().outline().on_click(
-            |_, _, cx| {
-                let state = AppState::global(cx);
-                state.update(cx, |state, cx| state.navigate(Route::Settings, cx));
-            },
-        );
+        let open_settings = Button::new("settings").label("Open settings").small().outline().on_click(|_, _, cx| {
+            let state = AppState::global(cx);
+            state.update(cx, |state, cx| state.navigate(Route::Settings, cx));
+        });
 
         let body = match service.connection().clone() {
-            Connection::Connected(account) => v_flex()
+            Connection::Connected(account) => h_flex()
                 .gap_3()
-                .child(AccountSummary::new(account, service.avatar().map(ToOwned::to_owned)))
+                .justify_between()
+                .child(
+                    div().flex_1().min_w_0().child(AccountSummary::new(account.clone(), service.avatar().map(ToOwned::to_owned))),
+                )
                 .when(self.manage, |this| {
                     let service = self.service.clone();
-                    this.child(
-                        h_flex().child(
-                            Button::new("disconnect")
-                                .label("Disconnect")
-                                .small()
-                                .outline()
-                                .on_click(move |_, _, cx| service.update(cx, |service, cx| service.disconnect(cx))),
-                        ),
-                    )
+                    let name = display_name(&account);
+                    this.child(Button::new("disconnect").label("Disconnect…").small().outline().on_click(
+                        move |_, window, cx| confirm_disconnect(service.clone(), name.clone(), window, cx),
+                    ))
                 }),
             Connection::Connecting { authorize_url } => {
                 let cancel = {
@@ -254,7 +283,7 @@ impl RenderOnce for ConnectionPanel {
                     .gap_3()
                     .child(
                         h_flex()
-                            .gap_3()
+                            .gap_2()
                             .items_start()
                             .child(div().pt_0p5().child(Spinner::new().small().color(theme.muted_foreground)))
                             .child(
@@ -293,18 +322,20 @@ impl RenderOnce for ConnectionPanel {
             }
             Connection::Failed(message) => v_flex()
                 .gap_3()
-                .child(status_row(IconName::CircleAlert, theme.danger, "Couldn't connect".into(), Some(message)))
+                .child(status_line(IconName::CircleAlert, theme.danger, "Couldn't connect", Some(message), cx))
                 .child(h_flex().gap_2().map(|this| match &config_problem {
-                    Some(_) => this.child(open_settings),
+                    Some(_) if !self.manage => this.child(open_settings),
+                    Some(_) => this,
                     None => this.child(connect.label("Try again")),
                 })),
             Connection::Disconnected => v_flex()
                 .gap_3()
-                .child(status_row(
+                .child(status_line(
                     IconName::CircleUser,
                     theme.muted_foreground,
-                    "Not connected".into(),
+                    "Not connected",
                     Some(config_problem.clone().unwrap_or_else(|| "Connect the channel you upload to.".into())),
+                    cx,
                 ))
                 .child(h_flex().gap_2().map(|this| match &config_problem {
                     Some(_) if !self.manage => this.child(open_settings),
@@ -312,6 +343,57 @@ impl RenderOnce for ConnectionPanel {
                     None => this.child(connect.primary()),
                 })),
         };
-        body.id(id)
+        body.id(self.id)
+    }
+}
+
+fn confirm_disconnect(service: Entity<YoutubeService>, name: String, window: &mut Window, cx: &mut App) {
+    let uploading = service.read(cx).active_upload_count() > 0;
+    window.open_alert_dialog(cx, move |dialog, _, _| {
+        let service = service.clone();
+        let consequence = if uploading {
+            "VideoCRM forgets the sign-in and Google revokes it. Uploads in progress stop; you can resume them after connecting again."
+        } else {
+            "VideoCRM forgets the sign-in and Google revokes it. Connect again to upload."
+        };
+        dialog
+            .title(format!("Disconnect “{name}”?"))
+            .description(consequence)
+            .confirm()
+            .ok_text("Disconnect")
+            .ok_variant(ButtonVariant::Danger)
+            .on_ok(move |_, _, cx| {
+                service.update(cx, |service, cx| service.disconnect(cx));
+                true
+            })
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{NaiveDate, TimeZone as _};
+
+    use super::*;
+
+    #[test]
+    fn times_read_relative_to_today() {
+        let local = |y, m, d, h, min| {
+            let naive = NaiveDate::from_ymd_opt(y, m, d).unwrap().and_hms_opt(h, min, 0).unwrap();
+            Local.from_local_datetime(&naive).earliest().unwrap()
+        };
+        let now = local(2026, 10, 9, 18, 30);
+        let utc = |at: DateTime<Local>| at.with_timezone(&Utc);
+        assert_eq!(format_when(utc(local(2026, 10, 9, 14, 2)), now), "Today, 14:02");
+        assert_eq!(format_when(utc(local(2026, 10, 8, 9, 10)), now), "Yesterday, 09:10");
+        assert_eq!(format_when(utc(local(2026, 10, 1, 7, 5)), now), "Oct 1, 07:05");
+        assert_eq!(format_when(utc(local(2025, 12, 31, 23, 0)), now), "Dec 31, 2025");
+    }
+
+    #[test]
+    fn upload_chips_show_progress() {
+        let uploading = UploadStatus::Uploading { sent: 25, total: 100 };
+        assert_eq!(upload_label(&uploading, None), "Uploading 25%");
+        assert_eq!(upload_label(&uploading, Some(0.426)), "Uploading 42%");
+        assert_eq!(upload_label(&UploadStatus::Done { video_id: "a".into() }, None), "Uploaded");
     }
 }

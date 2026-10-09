@@ -14,7 +14,6 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::radio::RadioGroup;
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
@@ -27,7 +26,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ObjectFit,
     ParentElement as _, PathPromptOptions, Render, SharedString, StyledImage as _, Styled as _, Subscription, Task,
-    Window, div, img, rems,
+    Rems, Window, div, img, rems,
 };
 use videocrm_core::document::DEFAULT_WPM;
 use videocrm_core::media::{self, MediaKind};
@@ -41,7 +40,7 @@ use super::rules::{
 };
 use super::service::YoutubeService;
 use super::transfer::{format_bytes, format_duration, format_eta, format_speed};
-use super::ui::{ConnectionPanel, FieldRow, card, help_text, section_heading};
+use super::ui::{ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, status_line};
 use super::upload::ProcessingOutcome;
 use crate::state::{AppEvent, AppState};
 
@@ -50,6 +49,8 @@ const SAVE_DELAY: Duration = Duration::from_millis(500);
 const PRIVACY_HELP: [&str; 3] =
     ["Only you can watch it.", "Anyone with the link can watch it.", "Everyone can find and watch it."];
 const THUMBNAIL_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "gif", "bmp"];
+/// Wide enough for the cards' buttons; the form takes the rest of the page column.
+const SIDE_COLUMN_WIDTH: Rems = Rems(17.);
 
 #[derive(Clone)]
 struct CategoryItem(Category);
@@ -168,7 +169,7 @@ impl PublishPanel {
                 }
             }),
             // Leaving the page must not lose the last edits.
-            cx.on_release(|this, cx| this.save(cx)),
+            cx.on_release(|this, cx| this.save_pending(cx)),
         ];
 
         let mut panel = Self {
@@ -209,7 +210,7 @@ impl PublishPanel {
     }
 
     /// Saves pending form edits now instead of after the delay.
-    pub fn save(&mut self, cx: &mut App) {
+    pub fn save_pending(&mut self, cx: &mut App) {
         if !self.dirty {
             return;
         }
@@ -226,7 +227,7 @@ impl PublishPanel {
         self.dirty = true;
         self.save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SAVE_DELAY).await;
-            this.update(cx, |this, cx| this.save(cx)).ok();
+            this.update(cx, |this, cx| this.save_pending(cx)).ok();
         }));
         cx.notify();
     }
@@ -452,7 +453,7 @@ impl PublishPanel {
     }
 
     fn start_upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.save(cx);
+        self.save_pending(cx);
         let uploaded_before = self.state.read(cx).video(self.video_id).is_some_and(|video| video.youtube.is_some());
         if !uploaded_before {
             self.upload_now(window, cx);
@@ -747,7 +748,7 @@ impl PublishPanel {
                 let resume_job = job.clone();
                 v_flex()
                     .gap_3()
-                    .child(status_line(IconName::TriangleAlert, theme.warning, "Upload stopped", Some(message), cx))
+                    .child(status_line(IconName::TriangleAlert, theme.warning, "Upload stopped", Some(message.into()), cx))
                     .child(
                         h_flex()
                             .gap_2()
@@ -780,7 +781,7 @@ impl PublishPanel {
                 v_flex()
                     .gap_3()
                     .when_some(failure, |this, error| {
-                        this.child(status_line(IconName::CircleAlert, theme.danger, "The last upload failed", Some(error), cx))
+                        this.child(status_line(IconName::CircleAlert, theme.danger, "The last upload failed", Some(error.into()), cx))
                     })
                     .child(self.render_upload_button(window, cx))
                     .when_some(youtube_url, |this, url| this.child(div().text_sm().child(open_link(url))))
@@ -943,7 +944,7 @@ impl PublishPanel {
                 .child(
                     div()
                         .w_full()
-                        .h(rems(10.5))
+                        .aspect_ratio(16. / 9.)
                         .rounded(theme.radius)
                         .overflow_hidden()
                         .border_1()
@@ -983,46 +984,22 @@ impl Render for PublishPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let form = v_flex()
             .flex_1()
-            .min_w_0()
-            .max_w(rems(42.))
+            .min_w(rems(20.))
             .gap_10()
             .child(self.render_details(cx))
             .child(self.render_visibility(cx))
             .child(self.render_audience(cx));
         let side = v_flex()
-            .w(rems(22.))
+            .w(SIDE_COLUMN_WIDTH)
             .flex_shrink_0()
             .gap_6()
             .child(self.render_upload(window, cx))
             .child(self.render_file(cx))
             .child(self.render_thumbnail(cx))
             .child(card("publish-account", "YouTube account").child(ConnectionPanel::new("publish-connection", self.service.clone())));
-        div()
-            .id("publish-panel")
-            .size_full()
-            .overflow_y_scrollbar()
-            .child(h_flex().items_start().gap_10().px_8().py_6().child(form).child(side))
+        // The video page owns scrolling and the page inset.
+        h_flex().id("publish-panel").w_full().items_start().gap_8().child(form).child(side)
     }
-}
-
-fn status_line(
-    icon: IconName,
-    color: gpui_kit::Hsla,
-    title: &'static str,
-    detail: Option<String>,
-    cx: &App,
-) -> impl IntoElement {
-    h_flex()
-        .gap_2()
-        .items_start()
-        .child(div().pt_0p5().child(Icon::new(icon).text_color(color)))
-        .child(
-            v_flex()
-                .min_w_0()
-                .gap_0p5()
-                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
-                .when_some(detail, |this, detail| this.child(help_text(detail, cx))),
-        )
 }
 
 /// "Uploads as unlisted." / "Publishes Fri, 10 Oct at 09:00."
@@ -1042,10 +1019,6 @@ fn file_meta(size: u64, media: Option<&MediaInfo>) -> String {
         }
     }
     parts.join(" · ")
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned())
 }
 
 /// AI edit outputs first (final cut, then preview), then the footage videos.

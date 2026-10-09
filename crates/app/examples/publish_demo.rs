@@ -8,13 +8,15 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Selectable as _, Theme, ThemeMode, h_flex, v_flex};
+use gpui_kit::component::setting::{SettingGroup, SettingItem, SettingPage, Settings};
+use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::{ActiveTheme as _, Icon, Selectable as _, Theme, ThemeMode, h_flex, v_flex};
 use gpui_kit::{
-    App, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    Subscription, Window, WindowBounds, WindowOptions, div, point, px, rems, size,
+    App, AppContext as _, Bounds, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, WindowBounds, WindowOptions, div,
+    point, px, rems, size,
 };
-use videocrm::database::WithDatabaseIcons;
-use videocrm::publish::{AccountBadge, PublishPanel, UploadsPage, WithPublishIcons, YoutubeService, YoutubeSettings};
+use videocrm::publish::{AccountBadge, PublishPanel, UploadsPage, YoutubeService, YoutubeSettings};
 use videocrm::route::{Route, VideoTab};
 use videocrm::state::AppState;
 use videocrm_core::Store;
@@ -60,7 +62,7 @@ impl Demo {
 }
 
 impl Render for Demo {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let route = self.state.read(cx).route().clone();
         let video_route = Route::Video { id: self.panel.read(cx).video_id(), tab: VideoTab::Publish };
         let title: SharedString = self
@@ -69,31 +71,41 @@ impl Render for Demo {
             .video(self.panel.read(cx).video_id())
             .map(|video| format!("{} {}", video.icon.clone().unwrap_or_default(), video.title).into())
             .unwrap_or_default();
+        // The shell's video page: one centered column that scrolls as a whole.
+        let column = || v_flex().w_full().max_w(rems(53.)).px(rems(3.5));
         let main = match route {
             Route::Uploads => self.uploads.clone().into_any_element(),
-            Route::Settings => div()
+            Route::Settings => {
+                let settings = self.settings.clone();
+                Settings::new("settings")
+                    .sidebar_width(window.rem_size() * 14.)
+                    .pages(vec![SettingPage::new("YouTube").icon(Icon::new(IconName::CirclePlay)).default_open(true).group(
+                        SettingGroup::new().item(SettingItem::render(move |_, _, _| settings.clone())),
+                    )])
+                    .into_any_element()
+            }
+            _ => div()
+                .id("demo-video-page")
                 .size_full()
-                .px_8()
-                .py_6()
+                .overflow_y_scroll()
                 .child(
                     v_flex()
-                        .max_w(rems(42.))
-                        .gap_6()
-                        .child(div().text_2xl().font_weight(gpui_kit::FontWeight::BOLD).child("YouTube"))
-                        .child(self.settings.clone()),
+                        .w_full()
+                        .items_center()
+                        .pt_12()
+                        .pb_24()
+                        .child(column().child(div().text_3xl().font_weight(gpui_kit::FontWeight::BOLD).child(title)))
+                        .child(
+                            column().pt_6().child(
+                                TabBar::new("video-tabs")
+                                    .underline()
+                                    .w_full()
+                                    .selected_index(3)
+                                    .children(VideoTab::ALL.iter().map(|tab| Tab::new().label(tab.label()))),
+                            ),
+                        )
+                        .child(column().pt_4().child(self.panel.clone())),
                 )
-                .into_any_element(),
-            _ => v_flex()
-                .size_full()
-                .child(
-                    v_flex()
-                        .px_8()
-                        .pt_8()
-                        .gap_1()
-                        .child(div().text_3xl().font_weight(gpui_kit::FontWeight::BOLD).child(title))
-                        .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Publish")),
-                )
-                .child(div().flex_1().min_h_0().child(self.panel.clone()))
                 .into_any_element(),
         };
         h_flex()
@@ -117,7 +129,7 @@ impl Render for Demo {
                             .child(self.nav_button("nav-uploads", "Uploads", IconName::CloudUpload, Route::Uploads, cx))
                             .child(self.nav_button("nav-settings", "Settings", IconName::Settings, Route::Settings, cx)),
                     )
-                    .child(self.badge.clone()),
+                    .child(div().pt_2().border_t_1().border_color(cx.theme().sidebar_border).child(self.badge.clone())),
             )
             .child(div().flex_1().min_w_0().child(main))
     }
@@ -157,7 +169,7 @@ fn main() {
         }
     };
 
-    gpui_kit::application().with_assets(WithPublishIcons(WithDatabaseIcons(gpui_kit::assets::Assets))).run(move |cx| {
+    gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx| {
         gpui_kit::init(cx);
         Theme::update(cx, |theme| theme.font_family = "Inter".into());
         if dark {

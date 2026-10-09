@@ -41,10 +41,6 @@ pub const CATEGORIES: [Category; 15] = [
 /// Category used when the video has none: YouTube's own default for uploads.
 pub const DEFAULT_CATEGORY: &str = "22";
 
-pub fn category(id: &str) -> Option<Category> {
-    CATEGORIES.iter().copied().find(|category| category.id == id)
-}
-
 /// Length of the tags the way YouTube counts it: characters, plus the separators
 /// between tags and the quotes around tags that contain a space.
 pub fn tags_length(tags: &[String]) -> usize {
@@ -296,9 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn categories_are_known_by_id() {
-        assert_eq!(category("27").map(|category| category.label), Some("Education"));
-        assert_eq!(category("99"), None);
+    fn groups_thousands() {
         assert_eq!(group_thousands(0), "0");
         assert_eq!(group_thousands(999), "999");
         assert_eq!(group_thousands(1234567), "1,234,567");

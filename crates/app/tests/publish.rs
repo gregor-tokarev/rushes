@@ -3,14 +3,14 @@
 //! jobs, backend switches. Every test starts its own emulator pair on free ports and
 //! is skipped with a notice when Node or `emulators/node_modules` is missing.
 
-mod support;
+mod publish_support;
 
 use std::time::Duration;
 
 use chrono::Utc;
 use gpui_kit::TestAppContext;
 use serde_json::json;
-use support::{Emulators, Workspace, wait_until};
+use publish_support::{Emulators, Workspace, wait_until};
 use videocrm::publish::{Connection, INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, UploadError};
 use videocrm_core::settings::YoutubeBackend;
 use videocrm_core::{Privacy, UploadId, UploadJob, UploadStatus, VideoStatus};
@@ -29,7 +29,7 @@ fn connects_through_the_browser_and_keeps_the_account(cx: &mut TestAppContext) {
     });
     assert_eq!(cx.opened_url().as_deref(), Some(url.as_str()), "the consent page opens in the browser");
 
-    let page = support::consent_in_browser(&url, "creator@example.com");
+    let page = publish_support::consent_in_browser(&url, "creator@example.com");
     assert!(page.contains("signed in"), "{page}");
     let account = wait_until(cx, "the connection", |cx| service.read_with(cx, |s, _| s.account().cloned()));
     assert_eq!(account.email, "creator@example.com");
@@ -74,7 +74,7 @@ fn cancelling_the_sign_in_stops_waiting(cx: &mut TestAppContext) {
     assert_eq!(service.read_with(cx, |s, _| s.connection().clone()), Connection::Disconnected);
     // The loopback server is gone: finishing the consent now reaches nobody.
     std::thread::sleep(Duration::from_millis(200));
-    assert!(support::try_consent_in_browser(&url, "creator@example.com").is_err());
+    assert!(publish_support::try_consent_in_browser(&url, "creator@example.com").is_err());
     cx.run_until_parked();
     assert_eq!(service.read_with(cx, |s, _| s.connection().clone()), Connection::Disconnected);
 }
@@ -86,8 +86,8 @@ fn uploads_a_video_and_follows_processing(cx: &mut TestAppContext) {
     workspace.sign_in(cx, "creator@example.com");
     let service = workspace.service.clone();
 
-    let file = support::video_file(workspace.dir.path(), "final.mp4");
-    let thumbnail = support::png_file(workspace.dir.path(), "thumbnail.png");
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let thumbnail = publish_support::png_file(workspace.dir.path(), "thumbnail.png");
     let video_id = workspace.create_video(cx, "Rust ownership in 60 seconds", |video| {
         video.publish.description = "One owner, many borrowers.".into();
         video.publish.tags = vec!["rust".into(), "ownership".into()];
@@ -131,7 +131,7 @@ fn uploads_a_video_and_follows_processing(cx: &mut TestAppContext) {
     let uploads = emulators.uploads();
     let received = uploads.iter().find(|upload| upload["videoId"] == youtube_id.as_str()).expect("upload on YouTube");
     assert_eq!(received["bytes"], std::fs::metadata(&file).unwrap().len());
-    assert_eq!(received["sha256"], support::sha256(&file));
+    assert_eq!(received["sha256"], publish_support::sha256(&file));
     let snippet = &received["snippet"];
     assert_eq!(snippet["title"], "Rust ownership in 60 seconds");
     assert_eq!(snippet["tags"], json!(["rust", "ownership"]));
@@ -150,7 +150,7 @@ fn a_scheduled_private_upload_marks_the_video_scheduled(cx: &mut TestAppContext)
     let workspace = Workspace::open(cx, emulators.backend());
     workspace.sign_in(cx, "creator@example.com");
     let service = workspace.service.clone();
-    let file = support::video_file(workspace.dir.path(), "final.mp4");
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
     let video_id = workspace.create_video(cx, "Desk setup 2026", |video| {
         video.publish.file = Some(file.clone());
         video.publish.privacy = Privacy::Private;
@@ -174,7 +174,7 @@ fn a_cancelled_upload_resumes_where_youtube_stopped(cx: &mut TestAppContext) {
     let workspace = Workspace::open(cx, emulators.backend());
     workspace.sign_in(cx, "creator@example.com");
     let service = workspace.service.clone();
-    let file = support::video_file(workspace.dir.path(), "final.mp4");
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
     let video_id = workspace.create_video(cx, "Keychron Q1 Max review", |video| {
         video.publish.file = Some(file.clone());
         video.publish.privacy = Privacy::Private;
@@ -203,7 +203,7 @@ fn a_cancelled_upload_resumes_where_youtube_stopped(cx: &mut TestAppContext) {
     });
     let received = emulators.uploads();
     assert_eq!(received.len(), 1);
-    assert_eq!(received[0]["sha256"], support::sha256(&file));
+    assert_eq!(received[0]["sha256"], publish_support::sha256(&file));
     assert_eq!(service.update(cx, |service, cx| service.resume_upload(upload, cx)), Err(UploadError::NotResumable));
 }
 
