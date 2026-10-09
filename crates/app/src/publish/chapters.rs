@@ -1,11 +1,14 @@
 //! YouTube chapters estimated from the script: one per Heading 2, timed by the
-//! spoken words before it.
+//! spoken words before it. The estimate is explained next to the button that
+//! inserts them; the description itself gets a plain list viewers can use.
 
 use videocrm_core::document::{runtime_secs_for_words, spoken_word_count, strip_inline_markdown};
 use videocrm_core::{Block, BlockKind};
 
 /// First line of the chapter list. Also how a later insert finds the list to replace.
-pub const CHAPTERS_HEADING: &str = "Chapters (estimated from the script):";
+pub const CHAPTERS_HEADING: &str = "Chapters:";
+/// YouTube ignores the whole list when a chapter is shorter than this.
+const MIN_CHAPTER_SECS: u32 = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chapter {
@@ -14,8 +17,9 @@ pub struct Chapter {
 }
 
 /// Chapters for the script `blocks` at `wpm` words per minute. YouTube requires the
-/// first chapter at 0:00, so spoken words before the first Heading 2 become an "Intro".
-/// Empty when the script has no Heading 2.
+/// first chapter at 0:00, so spoken words before the first Heading 2 become an "Intro",
+/// and chapters of at least ten seconds, so a shorter section gives its slot to the
+/// heading after it. Empty when the script has no Heading 2.
 pub fn chapters(blocks: &[Block], wpm: u32) -> Vec<Chapter> {
     let mut chapters: Vec<Chapter> = Vec::new();
     let mut words = 0;
@@ -30,8 +34,7 @@ pub fn chapters(blocks: &[Block], wpm: u32) -> Vec<Chapter> {
                 chapters.push(Chapter { start_secs: 0, title: "Intro".to_owned() });
             }
             match chapters.last_mut() {
-                // A heading with no spoken words after it would be a zero-length chapter.
-                Some(last) if last.start_secs == start_secs => last.title = title,
+                Some(last) if start_secs < last.start_secs + MIN_CHAPTER_SECS => last.title = title,
                 _ => chapters.push(Chapter { start_secs, title }),
             }
         } else {
@@ -109,14 +112,24 @@ mod tests {
 
     #[test]
     fn spoken_intro_before_the_first_heading_starts_at_zero() {
-        let blocks = vec![words(50), heading("Setup"), words(10), heading(""), heading("Demo")];
+        let blocks = vec![words(50), heading("Setup"), words(30), heading(""), heading("Demo")];
         assert_eq!(
             chapters(&blocks, DEFAULT_WPM),
             vec![
                 Chapter { start_secs: 0, title: "Intro".into() },
                 Chapter { start_secs: 20, title: "Setup".into() },
-                Chapter { start_secs: 24, title: "Demo".into() },
+                Chapter { start_secs: 32, title: "Demo".into() },
             ]
+        );
+    }
+
+    #[test]
+    fn sections_shorter_than_ten_seconds_merge_into_the_next() {
+        // 20 words are 8 seconds at 150 wpm.
+        let blocks = vec![heading("Cold open"), words(20), heading("Hook"), words(25), heading("Main")];
+        assert_eq!(
+            chapters(&blocks, DEFAULT_WPM),
+            vec![Chapter { start_secs: 0, title: "Hook".into() }, Chapter { start_secs: 18, title: "Main".into() }]
         );
     }
 
@@ -135,7 +148,7 @@ mod tests {
             Chapter { start_secs: 0, title: "Intro".into() },
             Chapter { start_secs: 3725, title: "Q&A".into() },
         ]);
-        assert_eq!(list, "Chapters (estimated from the script):\n0:00 Intro\n1:02:05 Q&A");
+        assert_eq!(list, "Chapters:\n0:00 Intro\n1:02:05 Q&A");
 
         assert_eq!(insert_chapters("", &list), list);
         let described = insert_chapters("My video.\n\n", &list);

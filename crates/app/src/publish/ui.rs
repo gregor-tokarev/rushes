@@ -16,7 +16,7 @@ use gpui_kit::{
     AnyElement, App, ClipboardItem, Div, ElementId, Entity, FontWeight, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div, relative,
 };
-use videocrm_core::UploadStatus;
+use videocrm_core::{TagColor, UploadStatus};
 use videocrm_youtube::Account;
 
 use super::rules::group_thousands;
@@ -114,14 +114,20 @@ pub(super) fn card(id: impl Into<ElementId>, title: &'static str) -> GroupBox {
     GroupBox::new().id(id).outline().title(div().text_sm().child(title))
 }
 
-/// Status of an upload job as the videos table shows it.
-pub(super) fn upload_chip(status: &UploadStatus, progress: Option<f32>) -> Chip {
-    Chip::new(upload_label(status, progress), upload_status_color(status)).dot(true)
+/// Status of an upload job as the videos table shows it, except that a failure
+/// the job can resume from reads as a stop that needs attention, not a dead end.
+pub(super) fn upload_chip(status: &UploadStatus, progress: Option<f32>, resumable: bool) -> Chip {
+    let color = match status {
+        UploadStatus::Failed { .. } if resumable => TagColor::Orange,
+        status => upload_status_color(status),
+    };
+    Chip::new(upload_label(status, progress, resumable), color).dot(true)
 }
 
 /// `Uploading 42%` from the live progress when there is one, else the stored status.
-fn upload_label(status: &UploadStatus, progress: Option<f32>) -> String {
+fn upload_label(status: &UploadStatus, progress: Option<f32>, resumable: bool) -> String {
     match (status, progress) {
+        (UploadStatus::Failed { .. }, _) if resumable => "Stopped".to_owned(),
         (UploadStatus::Uploading { .. }, Some(fraction)) => format!("Uploading {}%", (fraction * 100.0).floor()),
         (UploadStatus::Uploading { sent, total }, None) if *total > 0 => {
             format!("Uploading {}%", sent.saturating_mul(100) / total)
@@ -394,8 +400,11 @@ mod tests {
     #[test]
     fn upload_chips_show_progress() {
         let uploading = UploadStatus::Uploading { sent: 25, total: 100 };
-        assert_eq!(upload_label(&uploading, None), "Uploading 25%");
-        assert_eq!(upload_label(&uploading, Some(0.426)), "Uploading 42%");
-        assert_eq!(upload_label(&UploadStatus::Done { video_id: "a".into() }, None), "Uploaded");
+        assert_eq!(upload_label(&uploading, None, false), "Uploading 25%");
+        assert_eq!(upload_label(&uploading, Some(0.426), false), "Uploading 42%");
+        assert_eq!(upload_label(&UploadStatus::Done { video_id: "a".into() }, None, false), "Uploaded");
+        let failed = UploadStatus::Failed { error: "Network error.".into() };
+        assert_eq!(upload_label(&failed, None, false), "Failed");
+        assert_eq!(upload_label(&failed, None, true), "Stopped");
     }
 }

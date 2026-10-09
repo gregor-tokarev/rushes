@@ -200,7 +200,11 @@ impl UploadsPage {
                         .w_full()
                         .min_w_0()
                         .gap_1()
-                        .child(h_flex().child(upload_chip(&job.status, transfer.map(|transfer| transfer.fraction()))))
+                        .child(h_flex().child(upload_chip(
+                            &job.status,
+                            transfer.map(|transfer| transfer.fraction()),
+                            service.is_resumable(job),
+                        )))
                         .when_some(transfer, |this, transfer| {
                             this.child(
                                 Progress::new(SharedString::from(format!("upload-{id}-progress")))

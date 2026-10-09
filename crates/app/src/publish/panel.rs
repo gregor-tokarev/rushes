@@ -132,7 +132,7 @@ impl PublishPanel {
         let schedule = cx.new(|cx| {
             let mut picker = DatePickerState::new(window, cx)
                 .time_precision(TimePrecision::Minute)
-                .date_format("%a, %-d %b %Y")
+                .date_format("%a, %-d %b %Y, %H:%M")
                 .disabled_matcher(Matcher::interval(Some(today), None));
             picker.set_date_time(local_time(draft.publish_at.unwrap_or_else(|| default_schedule(&video))), window, cx);
             picker
@@ -166,6 +166,13 @@ impl PublishPanel {
                 {
                     this.draft.publish_at = Some(at);
                     this.schedule_save(cx);
+                }
+            }),
+            // Coming back from the file manager or another app may bring new files.
+            cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() {
+                    this.refresh_choices(cx);
+                    this.refresh_file(cx);
                 }
             }),
             // Leaving the page must not lose the last edits.
@@ -319,9 +326,7 @@ impl PublishPanel {
             self.file = None;
             return;
         };
-        if self.file.as_ref().is_some_and(|file| file.path == path) {
-            return;
-        }
+        // The previous details stay up while the file is read again.
         cx.spawn(async move |this, cx| {
             let details = cx
                 .background_spawn(async move {
@@ -389,9 +394,21 @@ impl PublishPanel {
             prompt: Some("Choose".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
-            // A closed or unavailable file dialog chooses nothing.
-            let Ok(Ok(Some(paths))) = paths.await else { return };
-            let Some(path) = paths.into_iter().next() else { return };
+            let chosen = match paths.await {
+                Ok(Ok(paths)) => paths.and_then(|paths| paths.into_iter().next()),
+                // The dialog went away with the window.
+                Err(_) => None,
+                // Linux needs the desktop portal for file dialogs.
+                Ok(Err(error)) => {
+                    this.update_in(cx, |_, window, cx| {
+                        let message = format!("Couldn't open the file dialog: {error}");
+                        window.push_notification(Notification::error(message), cx);
+                    })
+                    .ok();
+                    None
+                }
+            };
+            let Some(path) = chosen else { return };
             this.update_in(cx, |this, window, cx| {
                 if thumbnail {
                     this.set_thumbnail(Some(path), window, cx);
@@ -966,7 +983,13 @@ impl PublishPanel {
         let size =
             self.thumbnail_size.as_ref().filter(|(path, _)| Some(path) == current.as_ref()).map(|(_, size)| *size);
         let preview = match &current {
-            Some(path) => img(path.clone()).w_full().h_full().object_fit(ObjectFit::Cover).into_any_element(),
+            // A rounded parent does not clip its children, so the image rounds itself.
+            Some(path) => img(path.clone())
+                .w_full()
+                .h_full()
+                .rounded(theme.radius)
+                .object_fit(ObjectFit::Cover)
+                .into_any_element(),
             None => v_flex()
                 .size_full()
                 .items_center()
