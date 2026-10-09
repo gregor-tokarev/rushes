@@ -123,6 +123,8 @@ pub struct PipelineService {
     /// The settings the last requirement check ran with.
     checked: Option<PipelineSettings>,
     agent_env: Vec<(String, String)>,
+    /// A run another view asked to show; taken by the panel of its video.
+    revealed: Option<RunId>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -158,6 +160,7 @@ impl PipelineService {
                 doctor_task: None,
                 checked: None,
                 agent_env: Vec::new(),
+                revealed: None,
                 _subscriptions: subscriptions,
             };
             if let Err(error) = service.recover_interrupted(cx) {
@@ -223,6 +226,19 @@ impl PipelineService {
             }
             Err(error) => self.report(error, cx),
         }
+    }
+
+    /// Asks the AI edit panel of the run's video to select it.
+    pub fn reveal_run(&mut self, id: RunId, cx: &mut Context<Self>) {
+        self.revealed = Some(id);
+        cx.notify();
+    }
+
+    /// The run to select in `video_id`'s panel, if one was revealed; clears the request.
+    pub fn take_revealed(&mut self, video_id: VideoId) -> Option<RunId> {
+        let id = self.revealed.filter(|id| self.run(*id).is_some_and(|run| run.video_id == video_id))?;
+        self.revealed = None;
+        Some(id)
     }
 
     /// Extra environment for the agent and every tool it runs, such as a complete
