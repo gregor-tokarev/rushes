@@ -237,6 +237,12 @@ impl PropertiesPanel {
         let Some(video) = self.video(cx).cloned() else { return };
         let properties = self.state.read(cx).properties().to_vec();
 
+        // A typed tag that `flush` added is done.
+        let typed = self.tag_input.read(cx).value().trim().to_string();
+        if !typed.is_empty() && video.tags.iter().any(|tag| tag.eq_ignore_ascii_case(&typed)) {
+            self.tag_input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+
         let folder = video.folder.clone();
         self.folder_check = Some(cx.spawn(async move |this, cx| {
             let exists = match folder {

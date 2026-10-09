@@ -385,15 +385,21 @@ fn backspace_in_the_empty_tag_field_removes_the_last_tag(cx: &mut TestAppContext
     app.press(cx, "backspace");
     assert_eq!(tags(&app, cx), ["rust"]);
 
-    // A tag typed but not entered is kept when the app quits.
+    // A tag typed but not entered is kept when the page saves its edits,
+    // as on a tab switch, and when the app quits.
     app.type_text(cx, "desk");
+    app.open_video(cx, id, VideoTab::Notes);
+    assert_eq!(tags(&app, cx), ["rust", "desk"]);
+    assert_eq!(field_text(&app, cx, "property-tags-input"), "", "the added tag leaves the field");
+    app.click(cx, "property-tags-input");
+    app.type_text(cx, "studio");
     cx.update(|cx| cx.shutdown());
     let stored = cx.read(|cx| {
         let store = app.state.read(cx).store();
         let store = store.lock().expect("store lock");
         store.get_video(id).expect("read video").expect("video").tags
     });
-    assert_eq!(stored, ["rust", "desk"]);
+    assert_eq!(stored, ["rust", "desk", "studio"]);
 }
 
 #[gpui_kit::test]
