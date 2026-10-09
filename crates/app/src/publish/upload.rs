@@ -397,6 +397,8 @@ impl YoutubeService {
                         job.status = UploadStatus::Done { video_id: video_id.clone() };
                     }
                 });
+                // The channel's video count may have changed.
+                self.refresh_account(cx);
             }
             Err(error) => {
                 self.outcomes.remove(&id);

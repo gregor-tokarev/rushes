@@ -328,28 +328,35 @@ impl RenderOnce for ConnectionPanel {
                             .child(cancel),
                     )
             }
-            Connection::Failed(message) => v_flex()
-                .gap_3()
-                .child(status_line(IconName::CircleAlert, theme.danger, "Couldn't connect", Some(message), cx))
-                .child(h_flex().gap_2().map(|this| match &config_problem {
-                    Some(_) if !self.manage => this.child(open_settings),
-                    Some(_) => this,
-                    None => this.child(connect.label("Try again")),
-                })),
-            Connection::Disconnected => v_flex()
-                .gap_3()
-                .child(status_line(
-                    IconName::CircleUser,
-                    theme.muted_foreground,
-                    "Not connected",
-                    Some(config_problem.clone().unwrap_or_else(|| "Connect the channel you upload to.".into())),
-                    cx,
-                ))
-                .child(h_flex().gap_2().map(|this| match &config_problem {
-                    Some(_) if !self.manage => this.child(open_settings),
-                    Some(_) => this,
-                    None => this.child(connect.primary()),
-                })),
+            Connection::Failed(message) => {
+                let action = match (&config_problem, self.manage) {
+                    (Some(_), true) => None,
+                    (Some(_), false) => Some(open_settings),
+                    (None, _) => Some(connect.label("Try again")),
+                };
+                v_flex()
+                    .gap_3()
+                    .child(status_line(IconName::CircleAlert, theme.danger, "Couldn't connect", Some(message), cx))
+                    .children(action.map(|button| h_flex().child(button)))
+            }
+            Connection::Disconnected => {
+                let action = match (&config_problem, self.manage) {
+                    // The settings form right below is where the problem gets fixed.
+                    (Some(_), true) => None,
+                    (Some(_), false) => Some(open_settings),
+                    (None, _) => Some(connect.primary()),
+                };
+                v_flex()
+                    .gap_3()
+                    .child(status_line(
+                        IconName::CircleUser,
+                        theme.muted_foreground,
+                        "Not connected",
+                        Some(config_problem.clone().unwrap_or_else(|| "Connect the channel you upload to.".into())),
+                        cx,
+                    ))
+                    .children(action.map(|button| h_flex().child(button)))
+            }
         };
         body.id(self.id)
     }

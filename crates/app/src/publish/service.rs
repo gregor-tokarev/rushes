@@ -7,7 +7,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -64,6 +64,8 @@ pub struct YoutubeService {
     env_override: bool,
     connection: Connection,
     pub(super) client: Option<Arc<YoutubeClient>>,
+    /// Where `client` saves refreshed tokens.
+    tokens: Option<TokenSink>,
     /// Cancel flag of the sign-in in progress.
     sign_in: Option<Arc<AtomicBool>>,
     sign_in_attempt: u64,
@@ -83,7 +85,62 @@ impl EventEmitter<YoutubeEvent> for YoutubeService {}
 
 enum SignInStep {
     Opened(String),
-    Finished(Box<Result<(Arc<YoutubeClient>, Account), YoutubeError>>),
+    Finished(Box<Result<SignedIn, YoutubeError>>),
+}
+
+/// A finished browser sign-in, not saved yet: the service saves it only if it still
+/// wants it, so a cancelled sign-in leaves nothing behind.
+struct SignedIn {
+    client: Arc<YoutubeClient>,
+    tokens: TokenSink,
+    account: Account,
+}
+
+/// Saves a client's refreshed tokens to the credentials file while its sign-in lasts.
+/// A request still running after a sign-out must not write the tokens back.
+#[derive(Clone)]
+struct TokenSink {
+    store: CredentialStore,
+    signed_in: Arc<Mutex<bool>>,
+}
+
+impl TokenSink {
+    fn new(store: CredentialStore, signed_in: bool) -> Self {
+        Self { store, signed_in: Arc::new(Mutex::new(signed_in)) }
+    }
+
+    fn signed_in(&self) -> MutexGuard<'_, bool> {
+        self.signed_in.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Starts the sign-in by saving `login`.
+    fn sign_in(&self, login: &SavedLogin) -> Result<(), YoutubeError> {
+        let mut signed_in = self.signed_in();
+        self.store.save(login)?;
+        *signed_in = true;
+        Ok(())
+    }
+
+    /// Replaces the saved login, unless the sign-in has ended.
+    fn update(&self, login: &SavedLogin) -> Result<(), YoutubeError> {
+        let signed_in = self.signed_in();
+        if *signed_in { self.store.save(login) } else { Ok(()) }
+    }
+
+    fn save_credentials(&self, credentials: &Credentials) {
+        let signed_in = self.signed_in();
+        if *signed_in {
+            // A lost save only means one more token refresh after the next start.
+            let _ = self.store.save_credentials(credentials);
+        }
+    }
+
+    /// Ends the sign-in and removes the saved login.
+    fn sign_out(&self) -> Result<(), YoutubeError> {
+        let mut signed_in = self.signed_in();
+        *signed_in = false;
+        self.store.clear()
+    }
 }
 
 impl YoutubeService {
@@ -119,6 +176,7 @@ impl YoutubeService {
             env_override,
             connection: Connection::Disconnected,
             client: None,
+            tokens: None,
             sign_in: None,
             sign_in_attempt: 0,
             avatar: None,
@@ -190,11 +248,11 @@ impl YoutubeService {
         let attempt = self.sign_in_attempt;
         self.set_connection(Connection::Connecting { authorize_url: None }, cx);
 
-        let store = self.credentials.clone();
+        let tokens = TokenSink::new(self.credentials.clone(), false);
         let (sender, mut steps) = mpsc::unbounded();
         let spawned = thread::Builder::new()
             .name("youtube-sign-in".into())
-            .spawn(move || sign_in(config, store, &cancel, &sender));
+            .spawn(move || sign_in(config, tokens, &cancel, &sender));
         if let Err(error) = spawned {
             self.sign_in = None;
             self.set_connection(Connection::Failed(format!("Couldn't start the sign-in: {error}.").into()), cx);
@@ -225,7 +283,11 @@ impl YoutubeService {
         for upload in self.active.values() {
             upload.cancel();
         }
-        if let Err(error) = self.credentials.clear() {
+        let cleared = match self.tokens.take() {
+            Some(tokens) => tokens.sign_out(),
+            None => self.credentials.clear(),
+        };
+        if let Err(error) = cleared {
             report_error(&self.state, format!("Couldn't remove the saved YouTube sign-in: {error}"), cx);
         }
         if let Some(client) = self.client.take() {
@@ -260,9 +322,17 @@ impl YoutubeService {
             }
             SignInStep::Finished(result) => {
                 self.sign_in = None;
-                match *result {
-                    Ok((client, account)) => {
+                let signed_in = (*result).and_then(|signed_in| {
+                    let login = SavedLogin {
+                        credentials: signed_in.client.credentials(),
+                        account: Some(signed_in.account.clone()),
+                    };
+                    signed_in.tokens.sign_in(&login).map(|()| signed_in)
+                });
+                match signed_in {
+                    Ok(SignedIn { client, tokens, account }) => {
                         self.client = Some(client);
+                        self.tokens = Some(tokens);
                         self.set_connection(Connection::Connected(account), cx);
                         self.refresh_avatar(cx);
                     }
@@ -276,6 +346,7 @@ impl YoutubeService {
     /// Asks for a new sign-in after YouTube rejected the stored tokens.
     pub(super) fn require_sign_in(&mut self, cx: &mut Context<Self>) {
         self.client = None;
+        self.tokens = None;
         self.set_connection(Connection::Failed("YouTube needs you to connect the account again.".into()), cx);
     }
 
@@ -285,9 +356,12 @@ impl YoutubeService {
             Ok(Some(SavedLogin { credentials, account: Some(account) }))
                 if account.backend == config.backend_label() =>
             {
-                self.client = Some(new_client(config.clone(), credentials, self.credentials.clone()));
+                let tokens = TokenSink::new(self.credentials.clone(), true);
+                self.client = Some(new_client(config.clone(), credentials, tokens.clone()));
+                self.tokens = Some(tokens);
                 self.connection = Connection::Connected(account);
                 self.refresh_avatar(cx);
+                self.refresh_account(cx);
             }
             // Tokens of another backend, or no account: not usable here.
             Ok(_) => {}
@@ -313,6 +387,42 @@ impl YoutubeService {
             cx.emit(YoutubeEvent::ConnectionChanged);
             cx.notify();
         }
+    }
+
+    /// Reads the account and channel again (name, picture, subscriber and video counts)
+    /// and saves them. Offline, the saved account stays; rejected tokens ask for a new
+    /// sign-in right away instead of at the next upload.
+    pub(super) fn refresh_account(&mut self, cx: &mut Context<Self>) {
+        let (Some(client), Some(tokens), Ok(config)) = (self.client.clone(), self.tokens.clone(), self.config.clone())
+        else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let reader = client.clone();
+            let account = cx.background_spawn(async move { read_account(&reader, &config) }).await;
+            this.update(cx, |this, cx| {
+                // A sign-out or another sign-in since then makes this answer stale.
+                if !this.client.as_ref().is_some_and(|current| Arc::ptr_eq(current, &client)) {
+                    return;
+                }
+                match account {
+                    Ok(account) => {
+                        let login = SavedLogin { credentials: client.credentials(), account: Some(account.clone()) };
+                        if let Err(error) = tokens.update(&login) {
+                            report_error(&this.state, format!("Couldn't save the YouTube account: {error}"), cx);
+                        }
+                        if this.account() != Some(&account) {
+                            this.set_connection(Connection::Connected(account), cx);
+                            this.refresh_avatar(cx);
+                        }
+                    }
+                    Err(error) if error.needs_sign_in() => this.require_sign_in(cx),
+                    Err(_) => {}
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Downloads the channel picture into the data directory, once per picture URL.
@@ -345,12 +455,7 @@ impl YoutubeService {
 }
 
 /// Sign-in worker: consent in the browser, then the account it belongs to.
-fn sign_in(
-    config: YoutubeConfig,
-    store: CredentialStore,
-    cancel: &AtomicBool,
-    steps: &mpsc::UnboundedSender<SignInStep>,
-) {
+fn sign_in(config: YoutubeConfig, tokens: TokenSink, cancel: &AtomicBool, steps: &mpsc::UnboundedSender<SignInStep>) {
     let result = (|| {
         let pending = begin_authorization(&config)?;
         // The receiver is gone only when the app is shutting down.
@@ -364,29 +469,26 @@ fn sign_in(
                 message: String::new(),
             });
         }
-        let client = new_client(config.clone(), credentials, store.clone());
-        let user = client.userinfo()?;
-        let channel = match client.my_channel() {
-            Ok(channel) => Some(channel),
-            Err(YoutubeError::NoChannel) => None,
-            Err(error) => return Err(error),
-        };
-        let account = Account::new(&user, channel.as_ref(), &config);
-        store.save(&SavedLogin { credentials: client.credentials(), account: Some(account.clone()) })?;
-        Ok((client, account))
+        let client = new_client(config.clone(), credentials, tokens.clone());
+        let account = read_account(&client, &config)?;
+        Ok(SignedIn { client, tokens, account })
     })();
     let _ = steps.unbounded_send(SignInStep::Finished(Box::new(result)));
 }
 
-pub(super) fn new_client(
-    config: YoutubeConfig,
-    credentials: Credentials,
-    store: CredentialStore,
-) -> Arc<YoutubeClient> {
-    Arc::new(YoutubeClient::new(config, credentials, move |credentials| {
-        // A lost save only means one more token refresh after the next start.
-        let _ = store.save_credentials(credentials);
-    }))
+/// The Google account and its YouTube channel, if it has one.
+fn read_account(client: &YoutubeClient, config: &YoutubeConfig) -> Result<Account, YoutubeError> {
+    let user = client.userinfo()?;
+    let channel = match client.my_channel() {
+        Ok(channel) => Some(channel),
+        Err(YoutubeError::NoChannel) => None,
+        Err(error) => return Err(error),
+    };
+    Ok(Account::new(&user, channel.as_ref(), config))
+}
+
+fn new_client(config: YoutubeConfig, credentials: Credentials, tokens: TokenSink) -> Arc<YoutubeClient> {
+    Arc::new(YoutubeClient::new(config, credentials, move |credentials| tokens.save_credentials(credentials)))
 }
 
 /// The YouTube backend for `backend`, or why it is incomplete. The environment
@@ -496,6 +598,31 @@ mod tests {
         assert!(!overridden);
         assert_eq!(config.auth_url, "http://127.0.0.1:4002/o/oauth2/v2/auth");
         assert_eq!(config.api_base, "http://127.0.0.1:9/youtube/v3");
+    }
+
+    #[test]
+    fn refreshed_tokens_are_saved_only_while_signed_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(dir.path().join("credentials.json"));
+        let credentials = |token: &str| Credentials {
+            access_token: token.into(),
+            refresh_token: Some("refresh".into()),
+            expires_at: chrono::Utc::now(),
+            scope: UPLOAD_SCOPE.into(),
+            id_token: None,
+        };
+        let tokens = TokenSink::new(store.clone(), false);
+        tokens.save_credentials(&credentials("before the sign-in is accepted"));
+        assert_eq!(store.load().unwrap(), None);
+
+        tokens.sign_in(&SavedLogin { credentials: credentials("first"), account: None }).unwrap();
+        tokens.save_credentials(&credentials("refreshed"));
+        assert_eq!(store.load().unwrap().unwrap().credentials.access_token, "refreshed");
+
+        tokens.sign_out().unwrap();
+        tokens.save_credentials(&credentials("after the sign-out"));
+        assert!(tokens.update(&SavedLogin { credentials: credentials("late"), account: None }).is_ok());
+        assert_eq!(store.load().unwrap(), None);
     }
 
     #[test]

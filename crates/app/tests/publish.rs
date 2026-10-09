@@ -92,7 +92,7 @@ fn uploads_a_video_and_follows_processing(cx: &mut TestAppContext) {
         video.publish.description = "One owner, many borrowers.".into();
         video.publish.tags = vec!["rust".into(), "ownership".into()];
         video.publish.category_id = "28".into();
-        video.publish.privacy = Privacy::Unlisted;
+        video.publish.privacy = Privacy::Public;
         video.publish.file = Some(file.clone());
         video.publish.thumbnail = Some(thumbnail);
     });
@@ -122,7 +122,7 @@ fn uploads_a_video_and_follows_processing(cx: &mut TestAppContext) {
     let video = workspace.video(cx, video_id);
     let link = video.youtube.expect("the video links to YouTube");
     assert_eq!(link.video_id, youtube_id);
-    assert_eq!(link.privacy, Privacy::Unlisted);
+    assert_eq!(link.privacy, Privacy::Public);
     assert_eq!(video.status, VideoStatus::Published);
     let row = workspace.state.read_with(cx, |state, _| state.row(video_id).cloned()).unwrap();
     assert_eq!(row.latest_upload, Some(UploadStatus::Done { video_id: youtube_id.clone() }));
@@ -136,7 +136,15 @@ fn uploads_a_video_and_follows_processing(cx: &mut TestAppContext) {
     assert_eq!(snippet["title"], "Rust ownership in 60 seconds");
     assert_eq!(snippet["tags"], json!(["rust", "ownership"]));
     assert_eq!(snippet["categoryId"], "28");
-    assert_eq!(received["status"]["privacyStatus"], "unlisted");
+    assert_eq!(received["status"]["privacyStatus"], "public");
+
+    // The account is read again: the channel has a public video now.
+    let videos = wait_until(cx, "the account refresh", |cx| {
+        service.read_with(cx, |s, _| s.account().and_then(|account| account.video_count)).filter(|count| *count > 0)
+    });
+    assert_eq!(videos, 1);
+    let saved = CredentialStore::new(workspace.dir.path().join("credentials.json")).load().unwrap().unwrap();
+    assert_eq!(saved.account.and_then(|account| account.video_count), Some(1));
 
     // The custom thumbnail was set after the upload.
     let client = service.read_with(cx, |s, _| s.client()).unwrap();
