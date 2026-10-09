@@ -68,10 +68,13 @@ impl Error {
         }
     }
 
-    /// True when the user has to sign in again (revoked or expired grant).
+    /// True when the user has to sign in again: revoked or expired grant, or a
+    /// consent where YouTube permissions were unticked.
     pub fn needs_sign_in(&self) -> bool {
         match self {
-            Error::Api { status, .. } => *status == 401,
+            Error::Api { status, reason, .. } => {
+                *status == 401 || (*status == 403 && reason == "insufficientPermissions")
+            }
             Error::OAuth { error, .. } => error == "invalid_grant",
             Error::NoRefreshToken => true,
             _ => false,
@@ -121,6 +124,11 @@ fn describe_api_error(status: u16, reason: &str, message: &str) -> String {
         }
         "uploadLimitExceeded" => {
             "This channel reached YouTube's upload limit. Try again in about 24 hours.".to_owned()
+        }
+        "insufficientPermissions" => {
+            "VideoCRM is missing permission to manage your YouTube videos. Connect the account \
+             again and leave every permission box ticked."
+                .to_owned()
         }
         _ => format!("{message} (HTTP {status}, {reason})"),
     }
@@ -262,6 +270,23 @@ mod tests {
         assert!(api_error(403, &body("userRateLimitExceeded")).is_transient());
         assert!(!api_error(403, &body("quotaExceeded")).is_transient());
         assert!(!api_error(403, &body("forbidden")).is_transient());
+    }
+
+    #[test]
+    fn missing_scopes_ask_for_a_new_sign_in() {
+        let body = r#"{"error":{"code":403,"message":"Request had insufficient authentication scopes.",
+            "errors":[{"message":"Insufficient Permission","domain":"global","reason":"insufficientPermissions"}],
+            "status":"PERMISSION_DENIED"}}"#;
+        let error = api_error(403, body);
+        assert!(error.needs_sign_in());
+        assert!(error.to_string().contains("permission box"));
+        assert!(
+            !api_error(
+                403,
+                r#"{"error":{"code":403,"message":"x","errors":[{"reason":"forbidden"}]}}"#
+            )
+            .needs_sign_in()
+        );
     }
 
     #[test]

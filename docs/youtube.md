@@ -119,8 +119,10 @@ All calls block; run them on a background thread and stream progress back to the
    backoff from the server's offset; the retry budget resets whenever the server confirms
    new bytes. Cancel takes effect at the next read of the chunk being sent.
    `Error::SessionExpired` means start over.
-5. `Error::needs_sign_in()` tells when to ask the user to reconnect; `quotaExceeded` and
-   `uploadLimitExceeded` errors have user-facing messages.
+5. `Error::needs_sign_in()` tells when to ask the user to reconnect (revoked or expired
+   grant, or a `403 insufficientPermissions` because a YouTube scope was unticked);
+   `quotaExceeded`, `uploadLimitExceeded` and `insufficientPermissions` errors have
+   user-facing messages.
 
 ## Connecting a real YouTube account
 
