@@ -6,14 +6,14 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState, DateTime};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::form::{Field, Form};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, Icon, Side, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Window, div,
+    SharedString, Styled as _, Subscription, TestSupportExt as _, Window, div,
 };
 use videocrm_core::templates::TemplateKind;
 use videocrm_core::{NewVideo, VideoFormat, VideoStatus};
@@ -44,7 +44,11 @@ pub fn open_new_video_dialog(status: Option<VideoStatus>, window: &mut Window, c
                     .child(DialogClose::new().child(Button::new("new-video-cancel").outline().label("Cancel")))
                     .child(DialogAction::new().child(Button::new("new-video-create").primary().label("Create"))),
             )
-            .on_ok(move |_, window, cx| form.update(cx, |form, cx| form.submit(window, cx)))
+            // `submit` closes the dialog itself before it opens the new video.
+            .on_ok(move |_, window, cx| {
+                form.update(cx, |form, cx| form.submit(window, cx));
+                false
+            })
     });
     // Opening the dialog focuses the dialog itself; the title comes first.
     title.update(cx, |input, cx| input.focus(window, cx));
@@ -76,8 +80,10 @@ impl NewVideoForm {
                 this.publish_on = date.map(|date| date.date());
                 cx.notify();
             }),
-            cx.subscribe(&title, |this: &mut Self, _, _: &gpui_kit::component::input::InputEvent, cx| {
-                if this.error.take().is_some() {
+            // Only typing clears the error: Enter on an empty title reports it
+            // and is followed by the input's own PressEnter.
+            cx.subscribe(&title, |this: &mut Self, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) && this.error.take().is_some() {
                     cx.notify();
                 }
             }),
@@ -115,14 +121,19 @@ impl NewVideoForm {
         cx.notify();
     }
 
-    /// Creates the video and opens it. Returns whether the dialog may close.
-    fn submit(&mut self, _: &mut Window, cx: &mut Context<Self>) -> bool {
+    /// Creates the video and opens it, or shows why it can't.
+    ///
+    /// The dialog is closed first, without its exit animation: an animated
+    /// close hands focus back to the element focused before the dialog once
+    /// the animation ends, which would take the caret out of the new script.
+    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let title = self.title.read(cx).value().trim().to_string();
         if title.is_empty() {
             self.error = Some("Give the video a title.".into());
             cx.notify();
-            return false;
+            return;
         }
+        window.close_dialog(cx);
         let new = NewVideo {
             title,
             format: self.format,
@@ -142,7 +153,6 @@ impl NewVideoForm {
             }
             state.open_new_video(id, cx);
         });
-        true
     }
 
     fn render_format(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -255,6 +265,8 @@ impl Render for NewVideoForm {
             .when_some(self.error.clone(), |this, error| {
                 this.child(
                     h_flex()
+                        .id("new-video-error")
+                        .test_support()
                         .gap_2()
                         .text_sm()
                         .text_color(cx.theme().danger)
