@@ -1,7 +1,7 @@
 //! Installed-app OAuth: loopback redirect on `127.0.0.1:<random port>` with PKCE.
 
 use std::fmt;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -20,8 +20,8 @@ use crate::error::{Error, Result, api_error, oauth_error};
 use crate::http::{self, HttpResponse, body_text};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
-/// A browser may open speculative connections that never send a request; don't let
-/// one of them hold up the real redirect for long.
+/// Budget for reading one request. Browsers open speculative connections that never
+/// send anything; one of them must not hold up the real redirect (or cancel) for long.
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_REQUEST_HEAD: usize = 16 * 1024;
 
@@ -40,7 +40,9 @@ impl Credentials {
     /// True when the access token is expired or expires within `margin`.
     pub fn expires_within(&self, margin: Duration) -> bool {
         let margin = TimeDelta::from_std(margin).unwrap_or(TimeDelta::MAX);
-        self.expires_at <= Utc::now() + margin
+        Utc::now()
+            .checked_add_signed(margin)
+            .is_none_or(|limit| self.expires_at <= limit)
     }
 
     pub fn has_scope(&self, scope: &str) -> bool {
@@ -76,12 +78,15 @@ struct TokenResponse {
 
 impl TokenResponse {
     fn into_credentials(self, previous: Option<&Credentials>) -> Credentials {
+        // Google issues one-hour tokens; the clamp keeps a bogus value from overflowing.
+        let lifetime =
+            TimeDelta::try_seconds(self.expires_in.clamp(0, 365 * 24 * 3600)).unwrap_or_default();
         Credentials {
             access_token: self.access_token,
             refresh_token: self
                 .refresh_token
                 .or_else(|| previous.and_then(|p| p.refresh_token.clone())),
-            expires_at: Utc::now() + TimeDelta::seconds(self.expires_in),
+            expires_at: Utc::now() + lifetime,
             scope: self
                 .scope
                 .or_else(|| previous.map(|p| p.scope.clone()))
@@ -106,6 +111,17 @@ pub struct PendingAuthorization {
 
 /// Binds the loopback redirect listener and builds the consent URL.
 pub fn begin_authorization(config: &YoutubeConfig) -> Result<PendingAuthorization> {
+    if config.client_id.trim().is_empty() {
+        return Err(Error::InvalidInput(
+            "the OAuth client id is empty".to_owned(),
+        ));
+    }
+    // Google's token endpoint rejects Desktop clients without their secret, PKCE or not.
+    if config.is_google() && config.client_secret.is_none() {
+        return Err(Error::InvalidInput(
+            "Google also needs the OAuth client secret of the Desktop app client".to_owned(),
+        ));
+    }
     let listener = TcpListener::bind("127.0.0.1:0")
         .map_err(|e| Error::io("binding the sign-in redirect port", e))?;
     let port = listener
@@ -166,7 +182,7 @@ impl PendingAuthorization {
         }
     }
 
-    /// `None` when the connection was not the OAuth redirect.
+    /// `None` when the connection was not the redirect of this sign-in.
     fn handle_connection(
         &self,
         agent: &Agent,
@@ -193,9 +209,21 @@ impl PendingAuthorization {
             return None;
         }
 
-        let outcome = if param("state").as_deref() != Some(self.state.as_str()) {
-            Err(Error::StateMismatch)
-        } else if let Some(error) = error {
+        // Any local process or web page can reach this port; only our state counts.
+        if param("state").as_deref() != Some(self.state.as_str()) {
+            respond(
+                &mut stream,
+                "400 Bad Request",
+                &page(
+                    "Sign-in link expired",
+                    "This is not the sign-in VideoCRM is waiting for. Start again from VideoCRM.",
+                    false,
+                ),
+            );
+            return None;
+        }
+
+        let outcome = if let Some(error) = error {
             Err(match error.as_str() {
                 "access_denied" => Error::AccessDenied,
                 _ => Error::OAuth {
@@ -274,29 +302,48 @@ fn pkce_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
-/// Reads the request head and returns the request target, e.g. `/?code=...`.
+/// Reads the request head (at most [`MAX_REQUEST_HEAD`] bytes within
+/// [`REQUEST_READ_TIMEOUT`]) and returns the target of a GET, e.g. `/?code=...`.
 fn read_request_target(stream: &TcpStream) -> Option<String> {
     stream.set_nonblocking(false).ok()?;
-    stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT)).ok()?;
     stream.set_write_timeout(Some(REQUEST_READ_TIMEOUT)).ok()?;
-    let mut reader = BufReader::new(stream);
+    let deadline = Instant::now() + REQUEST_READ_TIMEOUT;
+    let mut reader =
+        BufReader::new(DeadlineReader { stream, deadline }.take(MAX_REQUEST_HEAD as u64));
     let mut request_line = String::new();
     reader.read_line(&mut request_line).ok()?;
     let mut parts = request_line.split_whitespace();
     let (method, target) = (parts.next()?, parts.next()?);
     // Drain the headers so the browser sees a clean response.
-    let mut read = request_line.len();
     let mut line = String::new();
-    while read < MAX_REQUEST_HEAD {
+    loop {
         line.clear();
         match reader.read_line(&mut line) {
             Ok(0) => break,
             Ok(_) if line.trim().is_empty() => break,
-            Ok(n) => read += n,
+            Ok(_) => {}
             Err(_) => return None,
         }
     }
     (method == "GET").then(|| target.to_owned())
+}
+
+/// Socket reader that gives up at `deadline`, however slowly bytes trickle in.
+struct DeadlineReader<'a> {
+    stream: &'a TcpStream,
+    deadline: Instant,
+}
+
+impl Read for DeadlineReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(remaining))?;
+        let mut stream = self.stream;
+        stream.read(buf)
+    }
 }
 
 fn respond(stream: &mut TcpStream, status: &str, body: &str) {
@@ -493,13 +540,29 @@ mod tests {
         );
     }
 
+    fn emulator_config() -> YoutubeConfig {
+        YoutubeConfig::emulator("http://127.0.0.1:1", "http://127.0.0.1:2")
+    }
+
+    fn address(pending: &PendingAuthorization) -> String {
+        pending
+            .redirect_uri()
+            .trim_start_matches("http://")
+            .to_owned()
+    }
+
+    /// Sends a raw request to the loopback server and returns the raw response.
+    fn browser_get(address: &str, path: &str) -> String {
+        let mut stream = TcpStream::connect(address).unwrap();
+        write!(stream, "GET {path} HTTP/1.1\r\nHost: {address}\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+
     #[test]
     fn begin_authorization_binds_a_loopback_port() {
-        let pending = begin_authorization(&YoutubeConfig::emulator(
-            "http://127.0.0.1:1",
-            "http://127.0.0.1:2",
-        ))
-        .unwrap();
+        let pending = begin_authorization(&emulator_config()).unwrap();
         assert!(pending.redirect_uri().starts_with("http://127.0.0.1:"));
         assert!(
             pending
@@ -509,71 +572,71 @@ mod tests {
     }
 
     #[test]
-    fn wait_ignores_unrelated_requests_and_rejects_a_wrong_state() {
-        let pending = begin_authorization(&YoutubeConfig::emulator(
-            "http://127.0.0.1:1",
-            "http://127.0.0.1:2",
-        ))
-        .unwrap();
-        let address = pending
-            .redirect_uri()
-            .trim_start_matches("http://")
-            .to_owned();
-        let browser = thread::spawn(move || {
-            let get = |path: &str| {
-                let mut stream = TcpStream::connect(&address).unwrap();
-                write!(stream, "GET {path} HTTP/1.1\r\nHost: {address}\r\n\r\n").unwrap();
-                let mut response = String::new();
-                std::io::Read::read_to_string(&mut stream, &mut response).unwrap();
-                response
-            };
-            let favicon = get("/favicon.ico");
-            let forged = get("/?code=abc&state=forged");
-            (favicon, forged)
-        });
-        let result = pending.wait(Duration::from_secs(10), &AtomicBool::new(false));
-        let (favicon, forged) = browser.join().unwrap();
-        assert!(favicon.starts_with("HTTP/1.1 404"));
-        assert!(forged.contains("Sign-in didn"));
-        assert!(matches!(result, Err(Error::StateMismatch)));
+    fn google_sign_in_requires_the_client_secret() {
+        let without = YoutubeConfig::google("id.apps.googleusercontent.com", None);
+        assert!(matches!(
+            begin_authorization(&without),
+            Err(Error::InvalidInput(_))
+        ));
+        let with = YoutubeConfig::google("id.apps.googleusercontent.com", Some("secret".into()));
+        assert!(begin_authorization(&with).is_ok());
     }
 
     #[test]
-    fn wait_reports_denied_consent_and_cancellation() {
-        let pending = begin_authorization(&YoutubeConfig::emulator(
-            "http://127.0.0.1:1",
-            "http://127.0.0.1:2",
-        ))
-        .unwrap();
-        let address = pending
-            .redirect_uri()
-            .trim_start_matches("http://")
-            .to_owned();
-        let state = pending.state.clone();
-        let browser = thread::spawn(move || {
-            let mut stream = TcpStream::connect(&address).unwrap();
-            write!(
-                stream,
-                "GET /?error=access_denied&state={state} HTTP/1.1\r\n\r\n"
-            )
-            .unwrap();
-            let mut response = String::new();
-            std::io::Read::read_to_string(&mut stream, &mut response).unwrap();
+    fn wait_ignores_unrelated_requests_and_foreign_state() {
+        let pending = begin_authorization(&emulator_config()).unwrap();
+        let address = address(&pending);
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let browser = thread::spawn({
+            let cancel = cancel.clone();
+            move || {
+                let favicon = browser_get(&address, "/favicon.ico");
+                let forged = browser_get(&address, "/?code=abc&state=forged");
+                cancel.store(true, Ordering::Relaxed);
+                (favicon, forged)
+            }
         });
-        let result = pending.wait(Duration::from_secs(10), &AtomicBool::new(false));
-        browser.join().unwrap();
-        assert!(matches!(result, Err(Error::AccessDenied)));
-
-        let pending = begin_authorization(&YoutubeConfig::emulator(
-            "http://127.0.0.1:1",
-            "http://127.0.0.1:2",
-        ))
-        .unwrap();
-        let result = pending.wait(Duration::from_secs(10), &AtomicBool::new(true));
+        let result = pending.wait(Duration::from_secs(10), &cancel);
+        let (favicon, forged) = browser.join().unwrap();
+        assert!(favicon.starts_with("HTTP/1.1 404"));
+        assert!(forged.starts_with("HTTP/1.1 400"), "{forged}");
+        assert!(forged.contains("Sign-in link expired"));
         assert!(matches!(
             result,
             Err(Error::Cancelled { session_url: None })
         ));
+    }
+
+    #[test]
+    fn a_stalled_connection_does_not_block_cancellation() {
+        let pending = begin_authorization(&emulator_config()).unwrap();
+        let mut stalled = TcpStream::connect(address(&pending)).unwrap();
+        stalled.write_all(b"G").unwrap();
+        let started = Instant::now();
+        let result = pending.wait(Duration::from_secs(30), &AtomicBool::new(true));
+        assert!(matches!(result, Err(Error::Cancelled { .. })));
+        assert!(started.elapsed() < REQUEST_READ_TIMEOUT + Duration::from_secs(1));
+
+        let pending = begin_authorization(&emulator_config()).unwrap();
+        let mut stalled = TcpStream::connect(address(&pending)).unwrap();
+        stalled.write_all(b"GET /?code=1").unwrap();
+        let started = Instant::now();
+        let result = pending.wait(Duration::from_millis(500), &AtomicBool::new(false));
+        assert!(matches!(result, Err(Error::Timeout)));
+        assert!(started.elapsed() < REQUEST_READ_TIMEOUT + Duration::from_secs(1));
+    }
+
+    #[test]
+    fn wait_reports_denied_consent() {
+        let pending = begin_authorization(&emulator_config()).unwrap();
+        let address = address(&pending);
+        let state = pending.state.clone();
+        let browser = thread::spawn(move || {
+            browser_get(&address, &format!("/?error=access_denied&state={state}"))
+        });
+        let result = pending.wait(Duration::from_secs(10), &AtomicBool::new(false));
+        assert!(browser.join().unwrap().contains("Sign-in didn"));
+        assert!(matches!(result, Err(Error::AccessDenied)));
     }
 
     #[test]

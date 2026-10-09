@@ -33,9 +33,6 @@ pub enum Error {
     #[error("sign-in was cancelled in the browser")]
     AccessDenied,
 
-    #[error("the sign-in response did not match this request; start the sign-in again")]
-    StateMismatch,
-
     #[error("timed out waiting for the browser sign-in")]
     Timeout,
 
@@ -59,7 +56,7 @@ pub enum Error {
     #[error("unexpected response: {0}")]
     Protocol(String),
 
-    #[error("invalid credentials file: {0}")]
+    #[error("invalid JSON: {0}")]
     Json(#[from] serde_json::Error),
 }
 
@@ -89,8 +86,8 @@ impl Error {
         }
     }
 
-    /// Failures worth retrying after a backoff: dropped connections, timeouts and
-    /// server-side errors.
+    /// Failures worth retrying after a backoff: dropped connections, timeouts,
+    /// server-side errors and short-term rate limits.
     pub(crate) fn is_transient(&self) -> bool {
         match self {
             Error::Http(error) => matches!(
@@ -102,7 +99,14 @@ impl Error {
                     | ureq::Error::Protocol(_)
                     | ureq::Error::BodyStalled
             ),
-            Error::Api { status, .. } => matches!(status, 408 | 429 | 500..=599),
+            Error::Api { status, reason, .. } => {
+                matches!(status, 408 | 429 | 500..=599)
+                    || (*status == 403
+                        && matches!(
+                            reason.as_str(),
+                            "rateLimitExceeded" | "userRateLimitExceeded"
+                        ))
+            }
             _ => false,
         }
     }
@@ -245,6 +249,19 @@ mod tests {
         assert!(
             matches!(&error, Error::Api { reason, message, .. } if reason == "invalid_token" && message == "Authentication required.")
         );
+    }
+
+    #[test]
+    fn rate_limits_are_retried_but_quota_is_not() {
+        let body = |reason: &str| {
+            format!(
+                r#"{{"error":{{"code":403,"message":"x","errors":[{{"reason":"{reason}"}}]}}}}"#
+            )
+        };
+        assert!(api_error(403, &body("rateLimitExceeded")).is_transient());
+        assert!(api_error(403, &body("userRateLimitExceeded")).is_transient());
+        assert!(!api_error(403, &body("quotaExceeded")).is_transient());
+        assert!(!api_error(403, &body("forbidden")).is_transient());
     }
 
     #[test]
