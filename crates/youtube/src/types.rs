@@ -117,11 +117,17 @@ struct Thumbnail {
 impl Thumbnails {
     /// Largest available size.
     pub fn best(&self) -> Option<String> {
-        [&self.maxres, &self.standard, &self.high, &self.medium, &self.default]
-            .into_iter()
-            .flatten()
-            .next()
-            .map(|thumbnail| thumbnail.url.clone())
+        [
+            &self.maxres,
+            &self.standard,
+            &self.high,
+            &self.medium,
+            &self.default,
+        ]
+        .into_iter()
+        .flatten()
+        .next()
+        .map(|thumbnail| thumbnail.url.clone())
     }
 }
 
@@ -171,15 +177,24 @@ impl From<ChannelResource> for Channel {
         let count = |value: Option<&String>| value.and_then(|v| v.parse::<u64>().ok());
         Channel {
             id: resource.id,
-            title: snippet.as_ref().map(|s| s.title.clone()).unwrap_or_default(),
+            title: snippet
+                .as_ref()
+                .map(|s| s.title.clone())
+                .unwrap_or_default(),
             custom_url: snippet.as_ref().and_then(|s| s.custom_url.clone()),
             thumbnail_url: snippet.as_ref().and_then(|s| s.thumbnails.best()),
             subscriber_count: statistics
                 .as_ref()
                 .filter(|s| !s.hidden_subscriber_count)
                 .and_then(|s| count(s.subscriber_count.as_ref())),
-            video_count: statistics.as_ref().and_then(|s| count(s.video_count.as_ref())).unwrap_or(0),
-            uploads_playlist_id: resource.content_details.map(|d| d.related_playlists.uploads).unwrap_or_default(),
+            video_count: statistics
+                .as_ref()
+                .and_then(|s| count(s.video_count.as_ref()))
+                .unwrap_or(0),
+            uploads_playlist_id: resource
+                .content_details
+                .map(|d| d.related_playlists.uploads)
+                .unwrap_or_default(),
         }
     }
 }
@@ -221,11 +236,22 @@ impl From<VideoResource> for VideoInfo {
     fn from(resource: VideoResource) -> Self {
         let url = watch_url(&resource.id);
         VideoInfo {
-            title: resource.snippet.as_ref().map(|s| s.title.clone()).unwrap_or_default(),
-            privacy: resource.status.as_ref().map(|s| s.privacy_status).unwrap_or_default(),
+            title: resource
+                .snippet
+                .as_ref()
+                .map(|s| s.title.clone())
+                .unwrap_or_default(),
+            privacy: resource
+                .status
+                .as_ref()
+                .map(|s| s.privacy_status)
+                .unwrap_or_default(),
             publish_at: resource.status.as_ref().and_then(|s| s.publish_at),
             published_at: resource.snippet.as_ref().and_then(|s| s.published_at),
-            upload_status: resource.status.as_ref().map_or(UploadStatus::Unknown, |s| s.upload_status),
+            upload_status: resource
+                .status
+                .as_ref()
+                .map_or(UploadStatus::Unknown, |s| s.upload_status),
             processing_status: resource.processing_details.map(|d| d.processing_status),
             thumbnail: resource.snippet.as_ref().and_then(|s| s.thumbnails.best()),
             url,
@@ -292,13 +318,17 @@ mod tests {
         assert_eq!(video.processing_status, Some(ProcessingStatus::Processing));
         assert_eq!(video.privacy, Privacy::Private);
         assert_eq!(video.url, "https://www.youtube.com/watch?v=abc");
-        assert_eq!(video.publish_at.unwrap().to_rfc3339(), "2026-02-01T00:00:00+00:00");
+        assert_eq!(
+            video.publish_at.unwrap().to_rfc3339(),
+            "2026-02-01T00:00:00+00:00"
+        );
         assert_eq!(video.thumbnail, None);
     }
 
     #[test]
     fn userinfo_accepts_v2_id_field() {
-        let user: GoogleUser = serde_json::from_str(r#"{"id":"123","email":"a@b.c","name":"A"}"#).unwrap();
+        let user: GoogleUser =
+            serde_json::from_str(r#"{"id":"123","email":"a@b.c","name":"A"}"#).unwrap();
         assert_eq!(user.sub, "123");
         assert_eq!(user.picture, None);
     }

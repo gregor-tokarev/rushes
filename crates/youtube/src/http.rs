@@ -39,5 +39,6 @@ pub(crate) fn json<T: DeserializeOwned>(mut response: HttpResponse) -> Result<T>
         return Err(api_error(status, &body_text(&mut response)));
     }
     let text = response.body_mut().read_to_string()?;
-    serde_json::from_str(&text).map_err(|error| Error::Protocol(format!("invalid JSON from server: {error}")))
+    serde_json::from_str(&text)
+        .map_err(|error| Error::Protocol(format!("invalid JSON from server: {error}")))
 }

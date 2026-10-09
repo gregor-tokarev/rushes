@@ -44,7 +44,9 @@ impl Credentials {
     }
 
     pub fn has_scope(&self, scope: &str) -> bool {
-        self.scope.split_whitespace().any(|granted| granted == scope)
+        self.scope
+            .split_whitespace()
+            .any(|granted| granted == scope)
     }
 }
 
@@ -52,7 +54,10 @@ impl fmt::Debug for Credentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Credentials")
             .field("access_token", &"<redacted>")
-            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
             .field("expires_at", &self.expires_at)
             .field("scope", &self.scope)
             .field("id_token", &self.id_token.as_ref().map(|_| "<redacted>"))
@@ -73,13 +78,17 @@ impl TokenResponse {
     fn into_credentials(self, previous: Option<&Credentials>) -> Credentials {
         Credentials {
             access_token: self.access_token,
-            refresh_token: self.refresh_token.or_else(|| previous.and_then(|p| p.refresh_token.clone())),
+            refresh_token: self
+                .refresh_token
+                .or_else(|| previous.and_then(|p| p.refresh_token.clone())),
             expires_at: Utc::now() + TimeDelta::seconds(self.expires_in),
             scope: self
                 .scope
                 .or_else(|| previous.map(|p| p.scope.clone()))
                 .unwrap_or_default(),
-            id_token: self.id_token.or_else(|| previous.and_then(|p| p.id_token.clone())),
+            id_token: self
+                .id_token
+                .or_else(|| previous.and_then(|p| p.id_token.clone())),
         }
     }
 }
@@ -97,13 +106,24 @@ pub struct PendingAuthorization {
 
 /// Binds the loopback redirect listener and builds the consent URL.
 pub fn begin_authorization(config: &YoutubeConfig) -> Result<PendingAuthorization> {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| Error::io("binding the sign-in redirect port", e))?;
-    let port = listener.local_addr().map_err(|e| Error::io("reading the sign-in redirect port", e))?.port();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| Error::io("binding the sign-in redirect port", e))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| Error::io("reading the sign-in redirect port", e))?
+        .port();
     let redirect_uri = format!("http://127.0.0.1:{port}");
     let verifier = random_token(48)?;
     let state = random_token(24)?;
     let authorize_url = authorize_url(config, &redirect_uri, &state, &pkce_challenge(&verifier))?;
-    Ok(PendingAuthorization { listener, config: config.clone(), redirect_uri, state, verifier, authorize_url })
+    Ok(PendingAuthorization {
+        listener,
+        config: config.clone(),
+        redirect_uri,
+        state,
+        verifier,
+        authorize_url,
+    })
 }
 
 impl PendingAuthorization {
@@ -138,20 +158,38 @@ impl PendingAuthorization {
                         return outcome;
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(POLL_INTERVAL),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(POLL_INTERVAL)
+                }
                 Err(e) => return Err(Error::io("accepting the sign-in redirect", e)),
             }
         }
     }
 
     /// `None` when the connection was not the OAuth redirect.
-    fn handle_connection(&self, agent: &Agent, mut stream: TcpStream) -> Option<Result<Credentials>> {
+    fn handle_connection(
+        &self,
+        agent: &Agent,
+        mut stream: TcpStream,
+    ) -> Option<Result<Credentials>> {
         let target = read_request_target(&stream)?;
         let url = Url::parse(&format!("http://127.0.0.1{target}")).ok()?;
-        let param = |name: &str| url.query_pairs().find(|(key, _)| key == name).map(|(_, value)| value.into_owned());
+        let param = |name: &str| {
+            url.query_pairs()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned())
+        };
         let (code, error) = (param("code"), param("error"));
         if url.path() != "/" || (code.is_none() && error.is_none()) {
-            respond(&mut stream, "404 Not Found", &page("Not found", "This address only completes the VideoCRM sign-in.", false));
+            respond(
+                &mut stream,
+                "404 Not Found",
+                &page(
+                    "Not found",
+                    "This address only completes the VideoCRM sign-in.",
+                    false,
+                ),
+            );
             return None;
         }
 
@@ -160,23 +198,45 @@ impl PendingAuthorization {
         } else if let Some(error) = error {
             Err(match error.as_str() {
                 "access_denied" => Error::AccessDenied,
-                _ => Error::OAuth { error, description: param("error_description") },
+                _ => Error::OAuth {
+                    error,
+                    description: param("error_description"),
+                },
             })
         } else {
             let code = code.unwrap_or_default();
-            exchange_code(agent, &self.config, &code, &self.redirect_uri, &self.verifier)
+            exchange_code(
+                agent,
+                &self.config,
+                &code,
+                &self.redirect_uri,
+                &self.verifier,
+            )
         };
 
         let body = match &outcome {
-            Ok(_) => page("You're signed in", "Return to VideoCRM — you can close this tab.", true),
-            Err(error) => page("Sign-in didn't finish", &format!("{error}. Return to VideoCRM and try again."), false),
+            Ok(_) => page(
+                "You're signed in",
+                "Return to VideoCRM — you can close this tab.",
+                true,
+            ),
+            Err(error) => page(
+                "Sign-in didn't finish",
+                &format!("{error}. Return to VideoCRM and try again."),
+                false,
+            ),
         };
         respond(&mut stream, "200 OK", &body);
         Some(outcome)
     }
 }
 
-fn authorize_url(config: &YoutubeConfig, redirect_uri: &str, state: &str, challenge: &str) -> Result<String> {
+fn authorize_url(
+    config: &YoutubeConfig,
+    redirect_uri: &str,
+    state: &str,
+    challenge: &str,
+) -> Result<String> {
     let scope = SCOPES.join(" ");
     let url = Url::parse_with_params(
         &config.auth_url,
@@ -193,14 +253,20 @@ fn authorize_url(config: &YoutubeConfig, redirect_uri: &str, state: &str, challe
             ("include_granted_scopes", "true"),
         ],
     )
-    .map_err(|e| Error::InvalidInput(format!("invalid authorization URL {}: {e}", config.auth_url)))?;
+    .map_err(|e| {
+        Error::InvalidInput(format!(
+            "invalid authorization URL {}: {e}",
+            config.auth_url
+        ))
+    })?;
     Ok(url.into())
 }
 
 /// URL-safe random string with `bytes` bytes of entropy (4/3 as many characters).
 fn random_token(bytes: usize) -> Result<String> {
     let mut buffer = vec![0u8; bytes];
-    getrandom::fill(&mut buffer).map_err(|e| Error::io("generating random sign-in values", e.into()))?;
+    getrandom::fill(&mut buffer)
+        .map_err(|e| Error::io("generating random sign-in values", e.into()))?;
     Ok(URL_SAFE_NO_PAD.encode(buffer))
 }
 
@@ -240,11 +306,17 @@ fn respond(stream: &mut TcpStream, status: &str, body: &str) {
         body.len()
     );
     // The browser may already have given up on the tab; the sign-in result stands either way.
-    let _ = stream.write_all(response.as_bytes()).and_then(|()| stream.flush());
+    let _ = stream
+        .write_all(response.as_bytes())
+        .and_then(|()| stream.flush());
 }
 
 fn page(title: &str, message: &str, success: bool) -> String {
-    let (accent, icon) = if success { ("#16a34a", "&#10003;") } else { ("#dc2626", "!") };
+    let (accent, icon) = if success {
+        ("#16a34a", "&#10003;")
+    } else {
+        ("#dc2626", "!")
+    };
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -272,10 +344,16 @@ fn page(title: &str, message: &str, success: bool) -> String {
 }
 
 fn escape_html(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
-fn token_request(mut response: HttpResponse, previous: Option<&Credentials>) -> Result<Credentials> {
+fn token_request(
+    mut response: HttpResponse,
+    previous: Option<&Credentials>,
+) -> Result<Credentials> {
     let status = response.status().as_u16();
     if !response.status().is_success() {
         return Err(oauth_error(status, &body_text(&mut response)));
@@ -284,7 +362,13 @@ fn token_request(mut response: HttpResponse, previous: Option<&Credentials>) -> 
     Ok(token.into_credentials(previous))
 }
 
-fn exchange_code(agent: &Agent, config: &YoutubeConfig, code: &str, redirect_uri: &str, verifier: &str) -> Result<Credentials> {
+fn exchange_code(
+    agent: &Agent,
+    config: &YoutubeConfig,
+    code: &str,
+    redirect_uri: &str,
+    verifier: &str,
+) -> Result<Credentials> {
     let mut form = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
@@ -304,8 +388,15 @@ pub fn refresh(config: &YoutubeConfig, credentials: &Credentials) -> Result<Cred
     refresh_with(&http::agent(), config, credentials)
 }
 
-pub(crate) fn refresh_with(agent: &Agent, config: &YoutubeConfig, credentials: &Credentials) -> Result<Credentials> {
-    let refresh_token = credentials.refresh_token.as_deref().ok_or(Error::NoRefreshToken)?;
+pub(crate) fn refresh_with(
+    agent: &Agent,
+    config: &YoutubeConfig,
+    credentials: &Credentials,
+) -> Result<Credentials> {
+    let refresh_token = credentials
+        .refresh_token
+        .as_deref()
+        .ok_or(Error::NoRefreshToken)?;
     let mut form = vec![
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
@@ -314,7 +405,10 @@ pub(crate) fn refresh_with(agent: &Agent, config: &YoutubeConfig, credentials: &
     if let Some(secret) = &config.client_secret {
         form.push(("client_secret", secret));
     }
-    token_request(agent.post(&config.token_url).send_form(form)?, Some(credentials))
+    token_request(
+        agent.post(&config.token_url).send_form(form)?,
+        Some(credentials),
+    )
 }
 
 /// Revokes the grant: the access token and, if present, the refresh token. Tokens
@@ -323,10 +417,17 @@ pub fn revoke(config: &YoutubeConfig, credentials: &Credentials) -> Result<()> {
     revoke_with(&http::agent(), config, credentials)
 }
 
-pub(crate) fn revoke_with(agent: &Agent, config: &YoutubeConfig, credentials: &Credentials) -> Result<()> {
-    let tokens = std::iter::once(credentials.access_token.as_str()).chain(credentials.refresh_token.as_deref());
+pub(crate) fn revoke_with(
+    agent: &Agent,
+    config: &YoutubeConfig,
+    credentials: &Credentials,
+) -> Result<()> {
+    let tokens = std::iter::once(credentials.access_token.as_str())
+        .chain(credentials.refresh_token.as_deref());
     for token in tokens {
-        let mut response = agent.post(&config.revoke_url).send_form([("token", token)])?;
+        let mut response = agent
+            .post(&config.revoke_url)
+            .send_form([("token", token)])?;
         let status = response.status().as_u16();
         if response.status().is_success() {
             continue;
@@ -356,14 +457,24 @@ mod tests {
     fn verifier_is_64_url_safe_characters() {
         let verifier = random_token(48).unwrap();
         assert_eq!(verifier.len(), 64);
-        assert!(verifier.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            verifier
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
         assert_ne!(verifier, random_token(48).unwrap());
     }
 
     #[test]
     fn authorize_url_carries_the_installed_app_parameters() {
         let config = YoutubeConfig::google("client.apps.googleusercontent.com", None);
-        let url = authorize_url(&config, "http://127.0.0.1:5555", "the-state", "the-challenge").unwrap();
+        let url = authorize_url(
+            &config,
+            "http://127.0.0.1:5555",
+            "the-state",
+            "the-challenge",
+        )
+        .unwrap();
         let url = Url::parse(&url).unwrap();
         assert_eq!(url.host_str(), Some("accounts.google.com"));
         let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
@@ -384,15 +495,30 @@ mod tests {
 
     #[test]
     fn begin_authorization_binds_a_loopback_port() {
-        let pending = begin_authorization(&YoutubeConfig::emulator("http://127.0.0.1:1", "http://127.0.0.1:2")).unwrap();
+        let pending = begin_authorization(&YoutubeConfig::emulator(
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:2",
+        ))
+        .unwrap();
         assert!(pending.redirect_uri().starts_with("http://127.0.0.1:"));
-        assert!(pending.authorize_url().contains(&format!("state={}", pending.state)));
+        assert!(
+            pending
+                .authorize_url()
+                .contains(&format!("state={}", pending.state))
+        );
     }
 
     #[test]
     fn wait_ignores_unrelated_requests_and_rejects_a_wrong_state() {
-        let pending = begin_authorization(&YoutubeConfig::emulator("http://127.0.0.1:1", "http://127.0.0.1:2")).unwrap();
-        let address = pending.redirect_uri().trim_start_matches("http://").to_owned();
+        let pending = begin_authorization(&YoutubeConfig::emulator(
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:2",
+        ))
+        .unwrap();
+        let address = pending
+            .redirect_uri()
+            .trim_start_matches("http://")
+            .to_owned();
         let browser = thread::spawn(move || {
             let get = |path: &str| {
                 let mut stream = TcpStream::connect(&address).unwrap();
@@ -414,12 +540,23 @@ mod tests {
 
     #[test]
     fn wait_reports_denied_consent_and_cancellation() {
-        let pending = begin_authorization(&YoutubeConfig::emulator("http://127.0.0.1:1", "http://127.0.0.1:2")).unwrap();
-        let address = pending.redirect_uri().trim_start_matches("http://").to_owned();
+        let pending = begin_authorization(&YoutubeConfig::emulator(
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:2",
+        ))
+        .unwrap();
+        let address = pending
+            .redirect_uri()
+            .trim_start_matches("http://")
+            .to_owned();
         let state = pending.state.clone();
         let browser = thread::spawn(move || {
             let mut stream = TcpStream::connect(&address).unwrap();
-            write!(stream, "GET /?error=access_denied&state={state} HTTP/1.1\r\n\r\n").unwrap();
+            write!(
+                stream,
+                "GET /?error=access_denied&state={state} HTTP/1.1\r\n\r\n"
+            )
+            .unwrap();
             let mut response = String::new();
             std::io::Read::read_to_string(&mut stream, &mut response).unwrap();
         });
@@ -427,9 +564,16 @@ mod tests {
         browser.join().unwrap();
         assert!(matches!(result, Err(Error::AccessDenied)));
 
-        let pending = begin_authorization(&YoutubeConfig::emulator("http://127.0.0.1:1", "http://127.0.0.1:2")).unwrap();
+        let pending = begin_authorization(&YoutubeConfig::emulator(
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:2",
+        ))
+        .unwrap();
         let result = pending.wait(Duration::from_secs(10), &AtomicBool::new(true));
-        assert!(matches!(result, Err(Error::Cancelled { session_url: None })));
+        assert!(matches!(
+            result,
+            Err(Error::Cancelled { session_url: None })
+        ));
     }
 
     #[test]

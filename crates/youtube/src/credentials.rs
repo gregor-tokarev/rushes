@@ -69,13 +69,17 @@ impl CredentialStore {
 
     pub fn save(&self, login: &SavedLogin) -> Result<()> {
         let json = serde_json::to_vec_pretty(login)?;
-        write_private(&self.path, &json).map_err(|e| Error::io(format!("writing {}", self.path.display()), e))
+        write_private(&self.path, &json)
+            .map_err(|e| Error::io(format!("writing {}", self.path.display()), e))
     }
 
     /// Replaces the tokens and keeps the stored account, e.g. after a token refresh.
     pub fn save_credentials(&self, credentials: &Credentials) -> Result<()> {
         let account = self.load()?.and_then(|login| login.account);
-        self.save(&SavedLogin { credentials: credentials.clone(), account })
+        self.save(&SavedLogin {
+            credentials: credentials.clone(),
+            account,
+        })
     }
 
     /// Signs out locally. Missing file is fine.
@@ -146,7 +150,10 @@ mod tests {
             channel_title: Some("Demo Creator".into()),
             backend: "Google".into(),
         };
-        let login = SavedLogin { credentials: credentials("first"), account: Some(account.clone()) };
+        let login = SavedLogin {
+            credentials: credentials("first"),
+            account: Some(account.clone()),
+        };
         store.save(&login).unwrap();
         assert_eq!(store.load().unwrap(), Some(login));
 
@@ -169,10 +176,17 @@ mod tests {
         let path = dir.path().join("credentials.json");
         // A stale temp file with open permissions must not leak its mode.
         fs::write(dir.path().join("credentials.json.tmp"), b"").unwrap();
-        fs::set_permissions(dir.path().join("credentials.json.tmp"), fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(
+            dir.path().join("credentials.json.tmp"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
         let store = CredentialStore::new(&path);
         store.save_credentials(&credentials("token")).unwrap();
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
@@ -180,6 +194,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials.json");
         fs::write(&path, b"{not json").unwrap();
-        assert!(matches!(CredentialStore::new(path).load(), Err(Error::Json(_))));
+        assert!(matches!(
+            CredentialStore::new(path).load(),
+            Err(Error::Json(_))
+        ));
     }
 }

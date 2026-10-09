@@ -17,11 +17,18 @@ pub enum Error {
 
     /// Error answer from a Google or YouTube endpoint.
     #[error("{}", describe_api_error(*.status, .reason, .message))]
-    Api { status: u16, reason: String, message: String },
+    Api {
+        status: u16,
+        reason: String,
+        message: String,
+    },
 
     /// The OAuth token endpoint refused a code or refresh token (`invalid_grant`, ...).
     #[error("Google sign-in failed ({error}){}", .description.as_deref().map(|d| format!(": {d}")).unwrap_or_default())]
-    OAuth { error: String, description: Option<String> },
+    OAuth {
+        error: String,
+        description: Option<String>,
+    },
 
     #[error("sign-in was cancelled in the browser")]
     AccessDenied,
@@ -58,7 +65,10 @@ pub enum Error {
 
 impl Error {
     pub(crate) fn io(context: impl Into<String>, source: std::io::Error) -> Self {
-        Error::Io { context: context.into(), source }
+        Error::Io {
+            context: context.into(),
+            source,
+        }
     }
 
     /// True when the user has to sign in again (revoked or expired grant).
@@ -100,9 +110,11 @@ impl Error {
 
 fn describe_api_error(status: u16, reason: &str, message: &str) -> String {
     match reason {
-        "quotaExceeded" => "The YouTube API quota for today is used up. It resets at midnight Pacific time; \
+        "quotaExceeded" => {
+            "The YouTube API quota for today is used up. It resets at midnight Pacific time; \
              each upload costs about 1,600 of the default 10,000 daily units."
-            .to_owned(),
+                .to_owned()
+        }
         "uploadLimitExceeded" => {
             "This channel reached YouTube's upload limit. Try again in about 24 hours.".to_owned()
         }
@@ -115,8 +127,13 @@ fn describe_api_error(status: u16, reason: &str, message: &str) -> String {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ErrorBody {
-    Api { error: ApiErrorBody },
-    OAuth { error: String, error_description: Option<String> },
+    Api {
+        error: ApiErrorBody,
+    },
+    OAuth {
+        error: String,
+        error_description: Option<String>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -146,7 +163,10 @@ pub(crate) fn api_error(status: u16, body: &str) -> Error {
                 .unwrap_or_else(|| "unknown".to_owned()),
             message: error.message,
         },
-        Ok(ErrorBody::OAuth { error, error_description }) => Error::Api {
+        Ok(ErrorBody::OAuth {
+            error,
+            error_description,
+        }) => Error::Api {
             status,
             message: error_description.unwrap_or_else(|| error.clone()),
             reason: error,
@@ -162,9 +182,13 @@ pub(crate) fn api_error(status: u16, body: &str) -> Error {
 /// Builds [`Error::OAuth`] from a token endpoint error body.
 pub(crate) fn oauth_error(status: u16, body: &str) -> Error {
     match serde_json::from_str::<ErrorBody>(body) {
-        Ok(ErrorBody::OAuth { error, error_description }) => {
-            Error::OAuth { error, description: error_description }
-        }
+        Ok(ErrorBody::OAuth {
+            error,
+            error_description,
+        }) => Error::OAuth {
+            error,
+            description: error_description,
+        },
         _ => api_error(status, body),
     }
 }
@@ -178,36 +202,55 @@ mod tests {
         let body = r#"{"error":{"code":403,"message":"The request cannot be completed because you have exceeded your quota.",
             "errors":[{"message":"...","domain":"youtube.quota","reason":"quotaExceeded"}]}}"#;
         let error = api_error(403, body);
-        assert!(matches!(&error, Error::Api { status: 403, reason, .. } if reason == "quotaExceeded"));
+        assert!(
+            matches!(&error, Error::Api { status: 403, reason, .. } if reason == "quotaExceeded")
+        );
         assert!(error.to_string().contains("quota for today is used up"));
         assert!(!error.is_transient());
     }
 
     #[test]
     fn falls_back_to_status_and_raw_text() {
-        let error = api_error(401, r#"{"error":{"code":401,"message":"Invalid Credentials","status":"UNAUTHENTICATED"}}"#);
+        let error = api_error(
+            401,
+            r#"{"error":{"code":401,"message":"Invalid Credentials","status":"UNAUTHENTICATED"}}"#,
+        );
         assert!(matches!(&error, Error::Api { reason, .. } if reason == "UNAUTHENTICATED"));
         assert!(error.needs_sign_in());
 
         let error = api_error(502, "<html>Bad Gateway</html>");
-        assert!(matches!(&error, Error::Api { reason, message, .. } if reason == "unknown" && message.contains("Bad Gateway")));
+        assert!(
+            matches!(&error, Error::Api { reason, message, .. } if reason == "unknown" && message.contains("Bad Gateway"))
+        );
         assert!(error.is_transient());
     }
 
     #[test]
     fn parses_oauth_error_bodies() {
-        let error = oauth_error(400, r#"{"error":"invalid_grant","error_description":"The refresh token is invalid."}"#);
+        let error = oauth_error(
+            400,
+            r#"{"error":"invalid_grant","error_description":"The refresh token is invalid."}"#,
+        );
         assert!(matches!(&error, Error::OAuth { error, .. } if error == "invalid_grant"));
         assert!(error.needs_sign_in());
-        assert_eq!(error.to_string(), "Google sign-in failed (invalid_grant): The refresh token is invalid.");
+        assert_eq!(
+            error.to_string(),
+            "Google sign-in failed (invalid_grant): The refresh token is invalid."
+        );
 
-        let error = api_error(401, r#"{"error":"invalid_token","error_description":"Authentication required."}"#);
-        assert!(matches!(&error, Error::Api { reason, message, .. } if reason == "invalid_token" && message == "Authentication required."));
+        let error = api_error(
+            401,
+            r#"{"error":"invalid_token","error_description":"Authentication required."}"#,
+        );
+        assert!(
+            matches!(&error, Error::Api { reason, message, .. } if reason == "invalid_token" && message == "Authentication required.")
+        );
     }
 
     #[test]
     fn upload_limit_has_its_own_message() {
-        let body = r#"{"error":{"code":400,"message":"x","errors":[{"reason":"uploadLimitExceeded"}]}}"#;
+        let body =
+            r#"{"error":{"code":400,"message":"x","errors":[{"reason":"uploadLimitExceeded"}]}}"#;
         assert!(api_error(400, body).to_string().contains("upload limit"));
     }
 }

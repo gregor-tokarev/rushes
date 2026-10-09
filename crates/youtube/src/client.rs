@@ -12,8 +12,8 @@ use crate::error::{Error, Result};
 use crate::http::{self, HttpResponse, bearer};
 use crate::oauth::{self, Credentials};
 use crate::types::{
-    Channel, ChannelResource, GoogleUser, ListResponse, PlaylistItemResource, ThumbnailSetResponse, VideoInfo,
-    VideoResource,
+    Channel, ChannelResource, GoogleUser, ListResponse, PlaylistItemResource, ThumbnailSetResponse,
+    Thumbnails, VideoInfo, VideoResource,
 };
 use crate::upload::UploadOptions;
 
@@ -73,9 +73,18 @@ impl YoutubeClient {
     /// The channel of the signed-in account.
     pub fn my_channel(&self) -> Result<Channel> {
         let url = format!("{}/channels", self.config.api_base);
-        let list: ListResponse<ChannelResource> =
-            self.get_json(&url, &[("part", "snippet,contentDetails,statistics"), ("mine", "true")])?;
-        list.items.into_iter().next().map(Channel::from).ok_or(Error::NoChannel)
+        let list: ListResponse<ChannelResource> = self.get_json(
+            &url,
+            &[
+                ("part", "snippet,contentDetails,statistics"),
+                ("mine", "true"),
+            ],
+        )?;
+        list.items
+            .into_iter()
+            .next()
+            .map(Channel::from)
+            .ok_or(Error::NoChannel)
     }
 
     /// `None` when the video does not exist or is not visible to this account.
@@ -91,12 +100,20 @@ impl YoutubeClient {
         let mut page_token: Option<String> = None;
         while ids.len() < max {
             let page_size = (max - ids.len()).min(MAX_PAGE).to_string();
-            let mut query = vec![("part", "contentDetails"), ("playlistId", playlist.as_str()), ("maxResults", &page_size)];
+            let mut query = vec![
+                ("part", "contentDetails"),
+                ("playlistId", playlist.as_str()),
+                ("maxResults", &page_size),
+            ];
             if let Some(token) = &page_token {
                 query.push(("pageToken", token));
             }
             let page: ListResponse<PlaylistItemResource> = self.get_json(&url, &query)?;
-            ids.extend(page.items.into_iter().map(|item| item.content_details.video_id));
+            ids.extend(
+                page.items
+                    .into_iter()
+                    .map(|item| item.content_details.video_id),
+            );
             match page.next_page_token {
                 Some(token) => page_token = Some(token),
                 None => break,
@@ -112,13 +129,22 @@ impl YoutubeClient {
         let content_type = match extension(path).as_deref() {
             Some("png") => "image/png",
             Some("jpg" | "jpeg") => "image/jpeg",
-            _ => return Err(Error::InvalidInput("the thumbnail must be a PNG or JPEG file".to_owned())),
+            _ => {
+                return Err(Error::InvalidInput(
+                    "the thumbnail must be a PNG or JPEG file".to_owned(),
+                ));
+            }
         };
-        let size = std::fs::metadata(path).map_err(|e| Error::io(format!("reading {}", path.display()), e))?.len();
+        let size = std::fs::metadata(path)
+            .map_err(|e| Error::io(format!("reading {}", path.display()), e))?
+            .len();
         if size > MAX_THUMBNAIL_BYTES {
-            return Err(Error::InvalidInput("the thumbnail is larger than YouTube's 2 MB limit".to_owned()));
+            return Err(Error::InvalidInput(
+                "the thumbnail is larger than YouTube's 2 MB limit".to_owned(),
+            ));
         }
-        let image = std::fs::read(path).map_err(|e| Error::io(format!("reading {}", path.display()), e))?;
+        let image =
+            std::fs::read(path).map_err(|e| Error::io(format!("reading {}", path.display()), e))?;
         let url = format!("{}/thumbnails/set", self.config.upload_base);
         let response = self.authorized(|token| {
             self.agent
@@ -132,7 +158,7 @@ impl YoutubeClient {
         let set: ThumbnailSetResponse = http::json(response)?;
         set.items
             .first()
-            .and_then(|thumbnails| thumbnails.best())
+            .and_then(Thumbnails::best)
             .ok_or_else(|| Error::Protocol("thumbnails.set returned no thumbnail".to_owned()))
     }
 
@@ -146,9 +172,18 @@ impl YoutubeClient {
         let mut found = HashMap::new();
         for batch in ids.chunks(MAX_PAGE) {
             let joined = batch.join(",");
-            let list: ListResponse<VideoResource> =
-                self.get_json(&url, &[("part", "snippet,status,processingDetails"), ("id", &joined)])?;
-            found.extend(list.items.into_iter().map(|video| (video.id.clone(), VideoInfo::from(video))));
+            let list: ListResponse<VideoResource> = self.get_json(
+                &url,
+                &[
+                    ("part", "snippet,status,processingDetails"),
+                    ("id", &joined),
+                ],
+            )?;
+            found.extend(
+                list.items
+                    .into_iter()
+                    .map(|video| (video.id.clone(), VideoInfo::from(video))),
+            );
         }
         Ok(ids.iter().filter_map(|id| found.remove(id)).collect())
     }
@@ -183,7 +218,9 @@ impl YoutubeClient {
 
     fn lock_credentials(&self) -> MutexGuard<'_, Credentials> {
         // Credentials are replaced whole, so a panic elsewhere cannot leave them torn.
-        self.credentials.lock().unwrap_or_else(PoisonError::into_inner)
+        self.credentials
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn access_token(&self) -> Result<String> {
@@ -217,7 +254,9 @@ impl YoutubeClient {
 }
 
 pub(crate) fn extension(path: &Path) -> Option<String> {
-    path.extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase)
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
 }
 
 #[cfg(test)]
