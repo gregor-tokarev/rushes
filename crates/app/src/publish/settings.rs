@@ -11,7 +11,7 @@ use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
     Render, SharedString, Styled as _, Subscription, Task, Window, div,
 };
 use videocrm_core::settings::{DEFAULT_EMULATOR_GOOGLE_URL, DEFAULT_EMULATOR_YOUTUBE_URL, YoutubeBackend};
@@ -23,6 +23,8 @@ use crate::state::{AppEvent, AppState};
 /// Typing in a field is saved this long after the last keystroke.
 const SAVE_DELAY: Duration = Duration::from_millis(500);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(3);
+/// Fields stop growing here: an ID or a URL does not need the whole page width.
+const FIELD_MAX_WIDTH: Rems = Rems(36.);
 const CLOUD_CONSOLE_URL: &str = "https://console.cloud.google.com/";
 const GOOGLE_STEPS: [&str; 5] = [
     "In the Google Cloud console, create a project.",
@@ -77,7 +79,9 @@ impl YoutubeSettings {
             }
         };
         let mut input = |value: String, placeholder: &str, masked: bool| {
-            cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.to_owned()).masked(masked).default_value(value))
+            cx.new(|cx| {
+                InputState::new(window, cx).placeholder(placeholder.to_owned()).masked(masked).default_value(value)
+            })
         };
         let client_id = input(client_id, "1234567890-abc.apps.googleusercontent.com", false);
         let client_secret = input(client_secret, "GOCSPX-…", true);
@@ -164,7 +168,13 @@ impl YoutubeSettings {
 
     /// Settings changed elsewhere (the other embedding of this section) show up here
     /// unless this form has edits of its own waiting.
-    fn on_app_event(&mut self, state: &Entity<AppState>, event: &AppEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_app_event(
+        &mut self,
+        state: &Entity<AppState>,
+        event: &AppEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if *event != AppEvent::SettingsChanged || self.dirty {
             return;
         }
@@ -257,6 +267,7 @@ impl YoutubeSettings {
                 .child(div().flex_1().min_w_0().child(*step))
         });
         v_flex()
+            .max_w(FIELD_MAX_WIDTH)
             .gap_4()
             .child(
                 v_flex()
@@ -265,19 +276,25 @@ impl YoutubeSettings {
                     .child(v_flex().gap_1().children(steps))
                     .child(
                         div().text_sm().child(
-                            Link::new("google-cloud-console")
-                                .href(CLOUD_CONSOLE_URL)
-                                .child(h_flex().gap_1().child("Open the Google Cloud console").child(
-                                    Icon::new(IconName::ExternalLink).xsmall(),
-                                )),
+                            Link::new("google-cloud-console").href(CLOUD_CONSOLE_URL).child(
+                                h_flex()
+                                    .gap_1()
+                                    .child("Open the Google Cloud console")
+                                    .child(Icon::new(IconName::ExternalLink).xsmall()),
+                            ),
                         ),
                     ),
             )
-            .child(FieldRow::new("Client ID").control(Input::new(&self.client_id).id("youtube-client-id").disabled(locked)))
+            .child(
+                FieldRow::new("Client ID")
+                    .control(Input::new(&self.client_id).id("youtube-client-id").disabled(locked)),
+            )
             .child(
                 FieldRow::new("Client secret")
                     .help("Until Google audits your project, YouTube locks the videos it uploads to private.")
-                    .control(Input::new(&self.client_secret).id("youtube-client-secret").mask_toggle().disabled(locked)),
+                    .control(
+                        Input::new(&self.client_secret).id("youtube-client-secret").mask_toggle().disabled(locked),
+                    ),
             )
     }
 
@@ -294,6 +311,7 @@ impl YoutubeSettings {
             Some(EmulatorCheck::Checking) | None => None,
         };
         v_flex()
+            .max_w(FIELD_MAX_WIDTH)
             .gap_4()
             .child(
                 FieldRow::new("Google emulator")
@@ -369,7 +387,9 @@ fn probe_emulators(google_url: &str, youtube_url: &str) -> EmulatorCheck {
     let youtube = answers(format!("{youtube_url}/_emulator/uploads"));
     match (google, youtube) {
         (true, true) => EmulatorCheck::Running,
-        (false, true) => EmulatorCheck::Unreachable(format!("The Google emulator isn't answering at {google_url}.").into()),
+        (false, true) => {
+            EmulatorCheck::Unreachable(format!("The Google emulator isn't answering at {google_url}.").into())
+        }
         (true, false) => {
             EmulatorCheck::Unreachable(format!("The YouTube emulator isn't answering at {youtube_url}.").into())
         }
@@ -387,6 +407,9 @@ mod tests {
     fn probing_reports_which_emulator_is_down() {
         // Nothing listens on port 9 (discard) of the loopback interface in a test run.
         let check = probe_emulators("http://127.0.0.1:9", "http://127.0.0.1:9");
-        assert_eq!(check, EmulatorCheck::Unreachable("Neither emulator is answering. Start them with scripts/emulators.sh.".into()));
+        assert_eq!(
+            check,
+            EmulatorCheck::Unreachable("Neither emulator is answering. Start them with scripts/emulators.sh.".into())
+        );
     }
 }

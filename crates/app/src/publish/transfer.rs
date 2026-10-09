@@ -63,7 +63,8 @@ impl Transfer {
         self.sent = sent;
         self.total = total;
         self.samples.push_back((at, sent));
-        while self.samples.len() > 2 && self.samples.front().is_some_and(|(time, _)| at.duration_since(*time) > RATE_WINDOW)
+        while self.samples.len() > 2
+            && self.samples.front().is_some_and(|(time, _)| at.duration_since(*time) > RATE_WINDOW)
         {
             self.samples.pop_front();
         }

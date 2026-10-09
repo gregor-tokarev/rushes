@@ -26,7 +26,8 @@ use videocrm_core::{NewVideo, Store, UploadJob, Video, VideoId};
 /// YouTube marks uploads processed this long after they finish.
 const PROCESSING_MS: u64 = 300;
 /// A 1×1 PNG.
-const PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+const PNG_BASE64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
 /// A running Google + YouTube emulator pair on free ports, stopped on drop.
 pub struct Emulators {
@@ -200,7 +201,11 @@ fn unescape(text: &str) -> String {
 
 /// Runs the app's tasks until `check` returns a value. Workers are real threads, so
 /// this waits in real time as well.
-pub fn wait_until<T>(cx: &mut TestAppContext, what: &str, mut check: impl FnMut(&mut TestAppContext) -> Option<T>) -> T {
+pub fn wait_until<T>(
+    cx: &mut TestAppContext,
+    what: &str,
+    mut check: impl FnMut(&mut TestAppContext) -> Option<T>,
+) -> T {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         cx.run_until_parked();
@@ -281,10 +286,11 @@ impl Workspace {
     /// Signs in through the emulator's consent page.
     pub fn sign_in(&self, cx: &mut TestAppContext, email: &str) {
         self.service.update(cx, |service, cx| service.connect(cx));
-        let url = wait_until(cx, "the consent page", |cx| match self.service.read_with(cx, |s, _| s.connection().clone()) {
-            Connection::Connecting { authorize_url: Some(url) } => Some(url.to_string()),
-            _ => None,
-        });
+        let url =
+            wait_until(cx, "the consent page", |cx| match self.service.read_with(cx, |s, _| s.connection().clone()) {
+                Connection::Connecting { authorize_url: Some(url) } => Some(url.to_string()),
+                _ => None,
+            });
         consent_in_browser(&url, email);
         wait_until(cx, "the connection", |cx| self.service.read_with(cx, |s, _| s.is_connected().then_some(())));
     }

@@ -144,7 +144,11 @@ pub fn metadata(video: &Video) -> VideoMetadata {
         title: video.upload_title().trim().to_owned(),
         description: publish.description.clone(),
         tags: publish.tags.clone(),
-        category_id: if publish.category_id.is_empty() { DEFAULT_CATEGORY.to_owned() } else { publish.category_id.clone() },
+        category_id: if publish.category_id.is_empty() {
+            DEFAULT_CATEGORY.to_owned()
+        } else {
+            publish.category_id.clone()
+        },
         privacy: youtube_privacy(publish.privacy),
         publish_at: publish.publish_at,
         made_for_kids: publish.made_for_kids,

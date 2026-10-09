@@ -6,13 +6,13 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::progress::Progress;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::table::{Table, TableBody, TableCell, TableHead, TableHeader, TableRow};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    Rems, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, rems,
+    AnyElement, App, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, rems,
 };
 use videocrm_core::{UploadJob, UploadStatus};
 
@@ -47,7 +47,8 @@ impl UploadsPage {
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = AppState::global(cx);
         let service = YoutubeService::global(cx);
-        let subscriptions = vec![cx.observe(&service, |_, _, cx| cx.notify()), cx.observe(&state, |_, _, cx| cx.notify())];
+        let subscriptions =
+            vec![cx.observe(&service, |_, _, cx| cx.notify()), cx.observe(&state, |_, _, cx| cx.notify())];
         Self { state, service, _subscriptions: subscriptions }
     }
 
@@ -88,8 +89,10 @@ impl UploadsPage {
             RowAction::Cancel => self.service.update(cx, |service, cx| service.cancel_upload(id, cx)),
             RowAction::Resume => {
                 if let Err(error) = self.service.update(cx, |service, cx| service.resume_upload(id, cx)) {
-                    window
-                        .push_notification(Notification::error(error.to_string()).title("Couldn't resume the upload"), cx);
+                    window.push_notification(
+                        Notification::error(error.to_string()).title("Couldn't resume the upload"),
+                        cx,
+                    );
                 }
             }
             RowAction::Open => {
@@ -114,9 +117,11 @@ impl UploadsPage {
         let detail: Option<SharedString> = match (&job.status, transfer) {
             _ if cancelling => Some("Stopping…".into()),
             (_, Some(transfer)) if transfer.total() > 0 => {
-                let mut parts = vec![format!("{} of {}", format_bytes(transfer.sent()), format_bytes(transfer.total()))];
-                parts.extend(transfer.bytes_per_second().map(format_speed));
+                // Most telling first: the cell truncates, and the tooltip has the rest.
+                let mut parts =
+                    vec![format!("{} of {}", format_bytes(transfer.sent()), format_bytes(transfer.total()))];
                 parts.extend(transfer.eta().map(format_eta));
+                parts.extend(transfer.bytes_per_second().map(format_speed));
                 Some(parts.join(" · ").into())
             }
             (UploadStatus::Failed { error }, None) => Some(error.clone().into()),
@@ -184,7 +189,9 @@ impl UploadsPage {
                         .min_w_0()
                         .gap_0p5()
                         .child(div().font_weight(FontWeight::MEDIUM).truncate().child(title))
-                        .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(file_name(&job.file))),
+                        .child(
+                            div().text_xs().text_color(theme.muted_foreground).truncate().child(file_name(&job.file)),
+                        ),
                 ),
             )
             .child(
@@ -268,14 +275,13 @@ impl Render for UploadsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let jobs: Vec<UploadJob> = self.service.read(cx).jobs().to_vec();
         let theme = cx.theme();
-        let header = v_flex()
-            .gap_1()
-            .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child("Uploads"))
-            .child(div().text_sm().text_color(theme.muted_foreground).child(if jobs.is_empty() {
+        let header = v_flex().gap_1().child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child("Uploads")).child(
+            div().text_sm().text_color(theme.muted_foreground).child(if jobs.is_empty() {
                 "Videos you send to YouTube, newest first.".to_owned()
             } else {
                 self.summary(cx)
-            }));
+            }),
+        );
         let content = if jobs.is_empty() {
             self.render_empty(cx)
         } else {
@@ -303,9 +309,11 @@ impl Render for UploadsPage {
                 )
                 .into_any_element()
         };
-        div().id("uploads-page").size_full().overflow_y_scroll().child(
-            v_flex().w_full().max_w(rems(72.)).px_10().py_8().gap_6().child(header).child(content),
-        )
+        div()
+            .id("uploads-page")
+            .size_full()
+            .overflow_y_scroll()
+            .child(v_flex().w_full().max_w(rems(72.)).px_10().py_8().gap_6().child(header).child(content))
     }
 }
 

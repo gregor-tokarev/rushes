@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, Local, NaiveTime, TimeDelta, TimeZone as _, Utc};
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::calendar::Matcher;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState, DateTime as PickerValue};
@@ -21,12 +22,11 @@ use gpui_kit::component::time_field::TimePrecision;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IndexPath, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
-use gpui_kit::assets::IconName;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ObjectFit,
-    ParentElement as _, PathPromptOptions, Render, SharedString, StyledImage as _, Styled as _, Subscription, Task,
-    Rems, Window, div, img, rems,
+    ParentElement as _, PathPromptOptions, Rems, Render, SharedString, Styled as _, StyledImage as _, Subscription,
+    Task, Window, div, img, rems,
 };
 use videocrm_core::document::DEFAULT_WPM;
 use videocrm_core::media::{self, MediaKind};
@@ -115,9 +115,8 @@ impl PublishPanel {
         let video = state.read(cx).video(video_id).cloned().unwrap_or_else(|| Video::new(""));
         let draft = video.publish.clone();
 
-        let title = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(video.title.clone()).default_value(draft.title.clone())
-        });
+        let title = cx
+            .new(|cx| InputState::new(window, cx).placeholder(video.title.clone()).default_value(draft.title.clone()));
         let description = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(6, 20)
@@ -348,9 +347,7 @@ impl PublishPanel {
         };
         cx.spawn(async move |this, cx| {
             let lookup = path.clone();
-            let size = cx
-                .background_spawn(async move { std::fs::metadata(&lookup).ok().map(|meta| meta.len()) })
-                .await;
+            let size = cx.background_spawn(async move { std::fs::metadata(&lookup).ok().map(|meta| meta.len()) }).await;
             this.update(cx, |this, cx| {
                 if this.draft.thumbnail.as_ref() == Some(&path) {
                     this.thumbnail_size = Some((path, size));
@@ -406,7 +403,13 @@ impl PublishPanel {
         .detach();
     }
 
-    fn on_tag_input(&mut self, input: &Entity<InputState>, event: &InputEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_tag_input(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let value = input.read(cx).value().to_string();
         let (complete, rest) = match event {
             InputEvent::PressEnter { .. } => (value.as_str(), ""),
@@ -436,7 +439,8 @@ impl PublishPanel {
         if scheduled {
             let picked = self.schedule.read(cx).date_time().start().and_then(utc_time);
             let video = self.state.read(cx).video(self.video_id).cloned().unwrap_or_else(|| Video::new(""));
-            self.draft.publish_at = Some(picked.filter(|at| *at > Utc::now()).unwrap_or_else(|| default_schedule(&video)));
+            self.draft.publish_at =
+                Some(picked.filter(|at| *at > Utc::now()).unwrap_or_else(|| default_schedule(&video)));
             // YouTube publishes scheduled videos by turning them public; until then they are private.
             self.draft.privacy = Privacy::Private;
         } else {
@@ -516,10 +520,14 @@ impl PublishPanel {
                     .control(Textarea::new(&self.description).aria_label("Description")),
             )
             .child(
-                h_flex()
-                    .gap_3()
-                    .child(chapters_button)
-                    .child(help_text(format!("Timestamps are estimated from the script at {DEFAULT_WPM} words per minute."), cx)),
+                h_flex().gap_3().child(chapters_button).child(
+                    help_text(
+                        format!("Timestamps are estimated from the script at {DEFAULT_WPM} words per minute."),
+                        cx,
+                    )
+                    .flex_1()
+                    .min_w_0(),
+                ),
             )
             .child(
                 FieldRow::new("Tags")
@@ -529,7 +537,9 @@ impl PublishPanel {
             )
             .child(
                 FieldRow::new("Category").control(
-                    div().max_w(rems(20.)).child(Select::new(&self.category).id("publish-category").placeholder("Category")),
+                    div()
+                        .max_w(rems(20.))
+                        .child(Select::new(&self.category).id("publish-category").placeholder("Category")),
                 ),
             )
     }
@@ -641,7 +651,12 @@ impl PublishPanel {
         let service = self.service.read(cx);
         let job = service.latest_job(self.video_id).cloned();
         let theme = cx.theme();
-        let youtube_url = self.state.read(cx).video(self.video_id).and_then(|video| video.youtube.as_ref()).map(|link| link.url.clone());
+        let youtube_url = self
+            .state
+            .read(cx)
+            .video(self.video_id)
+            .and_then(|video| video.youtube.as_ref())
+            .map(|link| link.url.clone());
         let open_link = |url: String| {
             Link::new("open-on-youtube")
                 .href(url)
@@ -653,16 +668,19 @@ impl PublishPanel {
                 let cancelling = service.is_cancelling(job.id);
                 let transfer = service.transfer(job.id);
                 let fraction = transfer.map_or(0.0, |transfer| transfer.fraction());
-                let mut details = Vec::new();
-                if let Some(transfer) = transfer.filter(|transfer| transfer.total() > 0) {
-                    details.push(format!("{} of {}", format_bytes(transfer.sent()), format_bytes(transfer.total())));
-                    if let Some(speed) = transfer.bytes_per_second() {
-                        details.push(format_speed(speed));
+                // Amount and speed on one line, time left on the next: the column is too
+                // narrow for one line, and a wrap in the middle of a figure reads badly.
+                let (amount, eta) = match transfer.filter(|transfer| transfer.total() > 0) {
+                    Some(transfer) => {
+                        let mut amount =
+                            format!("{} of {}", format_bytes(transfer.sent()), format_bytes(transfer.total()));
+                        if let Some(speed) = transfer.bytes_per_second() {
+                            amount = format!("{amount} · {}", format_speed(speed));
+                        }
+                        (Some(amount), transfer.eta().map(format_eta))
                     }
-                    if let Some(eta) = transfer.eta() {
-                        details.push(format_eta(eta));
-                    }
-                }
+                    None => (None, None),
+                };
                 let id = job.id;
                 v_flex()
                     .gap_2()
@@ -674,22 +692,28 @@ impl PublishPanel {
                             } else {
                                 "Uploading…"
                             }))
-                            .child(div().text_sm().text_color(theme.muted_foreground).child(format!("{}%", (fraction * 100.0).floor()))),
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("{}%", (fraction * 100.0).floor())),
+                            ),
                     )
-                    .child(Progress::new("upload-progress").value(fraction * 100.0).accessibility_label("Upload progress"))
-                    .child(help_text(details.join(" · "), cx))
                     .child(
-                        h_flex().pt_1().child(
-                            Button::new("cancel-upload")
-                                .label("Cancel")
-                                .small()
-                                .outline()
-                                .disabled(cancelling)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.service.update(cx, |service, cx| service.cancel_upload(id, cx))
-                                })),
-                        ),
+                        Progress::new("upload-progress").value(fraction * 100.0).accessibility_label("Upload progress"),
                     )
+                    .child(
+                        v_flex()
+                            .when_some(amount, |this, amount| this.child(help_text(amount, cx)))
+                            .when_some(eta, |this, eta| this.child(help_text(eta, cx))),
+                    )
+                    .child(h_flex().pt_1().child(
+                        Button::new("cancel-upload").label("Cancel").small().outline().disabled(cancelling).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.service.update(cx, |service, cx| service.cancel_upload(id, cx))
+                            }),
+                        ),
+                    ))
                     .into_any_element()
             }
             Some(job @ UploadJob { status: UploadStatus::Processing { .. } | UploadStatus::Done { .. }, .. }) => {
@@ -727,13 +751,17 @@ impl PublishPanel {
                     )
                     .child(
                         h_flex()
-                            .gap_4()
-                            .when_some(youtube_url.clone(), |this, url| this.child(div().text_sm().child(open_link(url))))
+                            .flex_wrap()
+                            .gap_x_4()
+                            .gap_y_2()
+                            .when_some(youtube_url.clone(), |this, url| {
+                                this.child(div().text_sm().child(open_link(url)))
+                            })
                             .child(
                                 Button::new("upload-again")
                                     .label("Upload again")
                                     .small()
-                                    .ghost()
+                                    .outline()
                                     .disabled(!self.blocking_reasons(cx).is_empty())
                                     .on_click(cx.listener(|this, _, window, cx| this.start_upload(window, cx))),
                             ),
@@ -741,14 +769,26 @@ impl PublishPanel {
                     .into_any_element()
             }
             Some(job) if service.is_resumable(job) => {
-                let message = match &job.status {
-                    UploadStatus::Failed { error } => error.clone(),
-                    _ => "Upload cancelled.".to_owned(),
+                let status = match &job.status {
+                    UploadStatus::Failed { error } => status_line(
+                        IconName::TriangleAlert,
+                        theme.warning,
+                        "Upload stopped",
+                        Some(error.clone().into()),
+                        cx,
+                    ),
+                    _ => status_line(
+                        IconName::CirclePause,
+                        theme.muted_foreground,
+                        "Upload cancelled",
+                        Some("Resume continues where it stopped.".into()),
+                        cx,
+                    ),
                 };
                 let resume_job = job.clone();
                 v_flex()
                     .gap_3()
-                    .child(status_line(IconName::TriangleAlert, theme.warning, "Upload stopped", Some(message.into()), cx))
+                    .child(status)
                     .child(
                         h_flex()
                             .gap_2()
@@ -759,7 +799,9 @@ impl PublishPanel {
                                     .small()
                                     .primary()
                                     .disabled(!service.is_connected())
-                                    .on_click(cx.listener(move |this, _, window, cx| this.resume_upload(&resume_job, window, cx))),
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.resume_upload(&resume_job, window, cx)
+                                    })),
                             )
                             .child(
                                 Button::new("upload-again")
@@ -781,7 +823,13 @@ impl PublishPanel {
                 v_flex()
                     .gap_3()
                     .when_some(failure, |this, error| {
-                        this.child(status_line(IconName::CircleAlert, theme.danger, "The last upload failed", Some(error.into()), cx))
+                        this.child(status_line(
+                            IconName::CircleAlert,
+                            theme.danger,
+                            "The last upload failed",
+                            Some(error.into()),
+                            cx,
+                        ))
                     })
                     .child(self.render_upload_button(window, cx))
                     .when_some(youtube_url, |this, url| this.child(div().text_sm().child(open_link(url))))
@@ -809,20 +857,15 @@ impl PublishPanel {
                 if reasons.is_empty() {
                     this.when_some(summary, |this, summary| this.child(help_text(summary, cx)))
                 } else {
-                    this.child(
-                        v_flex()
-                            .id("upload-blockers")
-                            .gap_1()
-                            .children(reasons.iter().map(|reason| {
-                                h_flex()
-                                    .gap_2()
-                                    .items_start()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(div().pt_0p5().child(Icon::new(IconName::Circle).xsmall()))
-                                    .child(reason.to_string())
-                            })),
-                    )
+                    this.child(v_flex().id("upload-blockers").gap_1().children(reasons.iter().map(|reason| {
+                        h_flex()
+                            .gap_2()
+                            .items_start()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(div().pt_0p5().child(Icon::new(IconName::Circle).xsmall()))
+                            .child(reason.to_string())
+                    })))
                 }
             })
     }
@@ -858,9 +901,11 @@ impl PublishPanel {
                     menu = menu.separator();
                 }
                 let panel = panel.clone();
-                menu.item(PopupMenuItem::new("Choose file…").icon(IconName::FolderOpen).on_click(move |_, window, cx| {
-                    panel.update(cx, |panel, cx| panel.choose_file(window, cx, false)).ok();
-                }))
+                menu.item(PopupMenuItem::new("Choose file…").icon(IconName::FolderOpen).on_click(
+                    move |_, window, cx| {
+                        panel.update(cx, |panel, cx| panel.choose_file(window, cx, false)).ok();
+                    },
+                ))
             });
 
         let body = match &current {
@@ -913,13 +958,10 @@ impl PublishPanel {
     fn render_thumbnail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let current = self.draft.thumbnail.clone();
-        let size = self.thumbnail_size.as_ref().filter(|(path, _)| Some(path) == current.as_ref()).map(|(_, size)| *size);
+        let size =
+            self.thumbnail_size.as_ref().filter(|(path, _)| Some(path) == current.as_ref()).map(|(_, size)| *size);
         let preview = match &current {
-            Some(path) => img(path.clone())
-                .w_full()
-                .h_full()
-                .object_fit(ObjectFit::Cover)
-                .into_any_element(),
+            Some(path) => img(path.clone()).w_full().h_full().object_fit(ObjectFit::Cover).into_any_element(),
             None => v_flex()
                 .size_full()
                 .items_center()
@@ -930,7 +972,7 @@ impl PublishPanel {
                 .child(div().text_xs().child("No thumbnail"))
                 .into_any_element(),
         };
-        let mut notes = vec!["1280 × 720 (16:9) JPG or PNG, up to 2 MB.".to_owned()];
+        let mut notes = vec!["1280 × 720 JPG or PNG, up to 2 MB.".to_owned()];
         match size {
             Some(None) => notes.insert(0, "The image is missing.".to_owned()),
             Some(Some(bytes)) if bytes > THUMBNAIL_MAX_BYTES => {
@@ -993,10 +1035,14 @@ impl Render for PublishPanel {
             .w(SIDE_COLUMN_WIDTH)
             .flex_shrink_0()
             .gap_6()
+            // The cards that clear the upload's blocking reasons follow it.
             .child(self.render_upload(window, cx))
+            .child(
+                card("publish-account", "YouTube account")
+                    .child(ConnectionPanel::new("publish-connection", self.service.clone())),
+            )
             .child(self.render_file(cx))
-            .child(self.render_thumbnail(cx))
-            .child(card("publish-account", "YouTube account").child(ConnectionPanel::new("publish-connection", self.service.clone())));
+            .child(self.render_thumbnail(cx));
         // The video page owns scrolling and the page inset.
         h_flex().id("publish-panel").w_full().items_start().gap_8().child(form).child(side)
     }
@@ -1005,7 +1051,9 @@ impl Render for PublishPanel {
 /// "Uploads as unlisted." / "Publishes Fri, 10 Oct at 09:00."
 fn upload_summary(video: &Video) -> String {
     match video.publish.publish_at {
-        Some(at) => format!("Uploads as private and goes public {}.", at.with_timezone(&Local).format("on %a, %-d %b at %H:%M")),
+        Some(at) => {
+            format!("Uploads as private and goes public {}.", at.with_timezone(&Local).format("on %a, %-d %b at %H:%M"))
+        }
         None => format!("Uploads as {}.", video.publish.privacy.label().to_lowercase()),
     }
 }
@@ -1107,7 +1155,8 @@ mod tests {
             std::fs::write(dir.join(file), b"x").unwrap();
         }
         let choices = file_choices(dir);
-        let names: Vec<(String, &str)> = choices.iter().map(|choice| (file_name(&choice.path), choice.source)).collect();
+        let names: Vec<(String, &str)> =
+            choices.iter().map(|choice| (file_name(&choice.path), choice.source)).collect();
         assert_eq!(
             names,
             [

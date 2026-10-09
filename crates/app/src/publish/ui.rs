@@ -10,7 +10,7 @@ use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::group_box::{GroupBox, GroupBoxVariants as _};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Size, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClipboardItem, Div, ElementId, Entity, FontWeight, Hsla, InteractiveElement as _, IntoElement,
@@ -100,17 +100,13 @@ pub(super) fn status_line(
     detail: Option<SharedString>,
     cx: &App,
 ) -> Div {
-    h_flex()
-        .gap_2()
-        .items_start()
-        .child(div().pt_0p5().child(Icon::new(icon).small().text_color(color)))
-        .child(
-            v_flex()
-                .min_w_0()
-                .gap_0p5()
-                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title.into()))
-                .when_some(detail, |this, detail| this.child(help_text(detail, cx))),
-        )
+    h_flex().gap_2().items_start().child(div().pt_0p5().child(Icon::new(icon).small().text_color(color))).child(
+        v_flex()
+            .min_w_0()
+            .gap_0p5()
+            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title.into()))
+            .when_some(detail, |this, detail| this.child(help_text(detail, cx))),
+    )
 }
 
 /// A titled, outlined card of the side column.
@@ -155,16 +151,23 @@ pub(super) fn file_name(path: &Path) -> String {
 pub(super) struct AccountSummary {
     account: Account,
     avatar: Option<PathBuf>,
+    compact: bool,
 }
 
 impl AccountSummary {
     pub(super) fn new(account: Account, avatar: Option<PathBuf>) -> Self {
-        Self { account, avatar }
+        Self { account, avatar, compact: false }
+    }
+
+    /// A smaller avatar and no video count, for narrow columns.
+    pub(super) fn compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
+        self
     }
 }
 
 impl RenderOnce for AccountSummary {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let account = self.account;
         let title = display_name(&account);
         let mut details = Vec::new();
@@ -174,7 +177,7 @@ impl RenderOnce for AccountSummary {
         if let Some(subscribers) = account.subscriber_count {
             details.push(plural(subscribers, "subscriber"));
         }
-        if let Some(videos) = account.video_count {
+        if let Some(videos) = account.video_count.filter(|_| !self.compact) {
             details.push(plural(videos, "video"));
         }
         if account.channel_id.is_none() {
@@ -183,22 +186,18 @@ impl RenderOnce for AccountSummary {
         h_flex()
             .gap_3()
             .min_w_0()
-            .child(avatar(&account, self.avatar).large())
+            .child(avatar(&account, self.avatar).with_size(if self.compact {
+                Size::Size(window.rem_size() * 2.5)
+            } else {
+                Size::Medium
+            }))
             .child(
                 v_flex()
                     .min_w_0()
                     .gap_0p5()
                     .child(div().font_weight(FontWeight::MEDIUM).truncate().child(title))
                     .child(div().text_sm().text_color(cx.theme().muted_foreground).truncate().child(account.email))
-                    .when(!details.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .truncate()
-                                .child(details.join(" · ")),
-                        )
-                    }),
+                    .when(!details.is_empty(), |this| this.child(help_text(details.join(" · "), cx))),
             )
     }
 }
@@ -260,15 +259,18 @@ impl RenderOnce for ConnectionPanel {
             Connection::Connected(account) => h_flex()
                 .gap_3()
                 .justify_between()
-                .child(
-                    div().flex_1().min_w_0().child(AccountSummary::new(account.clone(), service.avatar().map(ToOwned::to_owned))),
-                )
+                .child(div().flex_1().min_w_0().child(
+                    // Settings has room for every detail; the Publish side column does not.
+                    AccountSummary::new(account.clone(), service.avatar().map(ToOwned::to_owned)).compact(!self.manage),
+                ))
                 .when(self.manage, |this| {
                     let service = self.service.clone();
                     let name = display_name(&account);
-                    this.child(Button::new("disconnect").label("Disconnect…").small().outline().on_click(
-                        move |_, window, cx| confirm_disconnect(service.clone(), name.clone(), window, cx),
-                    ))
+                    this.child(
+                        Button::new("disconnect").label("Disconnect…").small().outline().on_click(
+                            move |_, window, cx| confirm_disconnect(service.clone(), name.clone(), window, cx),
+                        ),
+                    )
                 }),
             Connection::Connecting { authorize_url } => {
                 let cancel = {

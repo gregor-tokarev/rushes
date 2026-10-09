@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 use gpui_kit::TestAppContext;
-use serde_json::json;
 use publish_support::{Emulators, Workspace, wait_until};
+use serde_json::json;
 use videocrm::publish::{Connection, INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, UploadError};
 use videocrm_core::settings::YoutubeBackend;
 use videocrm_core::{Privacy, UploadId, UploadJob, UploadStatus, VideoStatus};
@@ -253,12 +253,14 @@ fn interrupted_uploads_become_resumable_failures_at_startup(cx: &mut TestAppCont
     workspace.insert_jobs(cx, &[&mid_transfer, &not_started, &processing, &done]);
 
     let service = workspace.restart(cx);
-    let status = |id: UploadId, cx: &mut TestAppContext| service.read_with(cx, |s, _| s.job(id).unwrap().status.clone());
+    let status =
+        |id: UploadId, cx: &mut TestAppContext| service.read_with(cx, |s, _| s.job(id).unwrap().status.clone());
     assert_eq!(status(mid_transfer.id, cx), UploadStatus::Failed { error: INTERRUPTED_RESUMABLE.into() });
     assert_eq!(status(not_started.id, cx), UploadStatus::Failed { error: INTERRUPTED.into() });
     assert_eq!(status(processing.id, cx), UploadStatus::Done { video_id: "abc".into() });
     assert_eq!(status(done.id, cx), UploadStatus::Done { video_id: "def".into() });
-    let resumable = |id: UploadId, cx: &mut TestAppContext| service.read_with(cx, |s, _| s.is_resumable(s.job(id).unwrap()));
+    let resumable =
+        |id: UploadId, cx: &mut TestAppContext| service.read_with(cx, |s, _| s.is_resumable(s.job(id).unwrap()));
     assert!(resumable(mid_transfer.id, cx));
     assert!(!resumable(not_started.id, cx));
     // The change is stored, not just shown.

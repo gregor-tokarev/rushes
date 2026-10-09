@@ -39,7 +39,9 @@ pub enum Connection {
     Disconnected,
     /// Waiting for the browser sign-in. `authorize_url` is the consent page once it exists,
     /// for machines where no browser opens.
-    Connecting { authorize_url: Option<SharedString> },
+    Connecting {
+        authorize_url: Option<SharedString>,
+    },
     Connected(Account),
     /// The last sign-in failed or the account has to sign in again.
     Failed(SharedString),
@@ -274,16 +276,15 @@ impl YoutubeService {
     /// Asks for a new sign-in after YouTube rejected the stored tokens.
     pub(super) fn require_sign_in(&mut self, cx: &mut Context<Self>) {
         self.client = None;
-        self.set_connection(
-            Connection::Failed("YouTube needs you to connect the account again.".into()),
-            cx,
-        );
+        self.set_connection(Connection::Failed("YouTube needs you to connect the account again.".into()), cx);
     }
 
     fn restore_login(&mut self, cx: &mut Context<Self>) {
         let Ok(config) = &self.config else { return };
         match self.credentials.load() {
-            Ok(Some(SavedLogin { credentials, account: Some(account) })) if account.backend == config.backend_label() => {
+            Ok(Some(SavedLogin { credentials, account: Some(account) }))
+                if account.backend == config.backend_label() =>
+            {
                 self.client = Some(new_client(config.clone(), credentials, self.credentials.clone()));
                 self.connection = Connection::Connected(account);
                 self.refresh_avatar(cx);
@@ -291,7 +292,8 @@ impl YoutubeService {
             // Tokens of another backend, or no account: not usable here.
             Ok(_) => {}
             Err(error) => {
-                self.connection = Connection::Failed(format!("Couldn't read the saved YouTube sign-in: {error}.").into());
+                self.connection =
+                    Connection::Failed(format!("Couldn't read the saved YouTube sign-in: {error}.").into());
             }
         }
     }
@@ -376,7 +378,11 @@ fn sign_in(
     let _ = steps.unbounded_send(SignInStep::Finished(result));
 }
 
-pub(super) fn new_client(config: YoutubeConfig, credentials: Credentials, store: CredentialStore) -> Arc<YoutubeClient> {
+pub(super) fn new_client(
+    config: YoutubeConfig,
+    credentials: Credentials,
+    store: CredentialStore,
+) -> Arc<YoutubeClient> {
     Arc::new(YoutubeClient::new(config, credentials, move |credentials| {
         // A lost save only means one more token refresh after the next start.
         let _ = store.save_credentials(credentials);
@@ -400,7 +406,9 @@ pub fn backend_config(backend: &YoutubeBackend) -> (Result<YoutubeConfig, Shared
             }
         }
         YoutubeBackend::Emulator { google_url, youtube_url } => {
-            let url = |value: &str, default: &str| if value.trim().is_empty() { default.to_owned() } else { value.trim().to_owned() };
+            let url = |value: &str, default: &str| {
+                if value.trim().is_empty() { default.to_owned() } else { value.trim().to_owned() }
+            };
             Ok(YoutubeConfig::emulator(
                 &url(google_url, settings::DEFAULT_EMULATOR_GOOGLE_URL),
                 &url(youtube_url, settings::DEFAULT_EMULATOR_YOUTUBE_URL),
@@ -421,11 +429,8 @@ fn download_avatar(url: &str, path: &Path) -> io::Result<()> {
         return Ok(());
     }
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(AVATAR_TIMEOUT)).build().into();
-    let bytes = agent
-        .get(url)
-        .call()
-        .and_then(|mut response| response.body_mut().read_to_vec())
-        .map_err(io::Error::other)?;
+    let bytes =
+        agent.get(url).call().and_then(|mut response| response.body_mut().read_to_vec()).map_err(io::Error::other)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -473,10 +478,8 @@ mod tests {
 
     #[test]
     fn google_backend_needs_both_client_fields() {
-        let google = |id: &str, secret: &str| YoutubeBackend::Google {
-            client_id: id.into(),
-            client_secret: secret.into(),
-        };
+        let google =
+            |id: &str, secret: &str| YoutubeBackend::Google { client_id: id.into(), client_secret: secret.into() };
         // Only meaningful without the environment override, which the test run does not set.
         if YoutubeConfig::emulator_from_env().is_some() {
             return;

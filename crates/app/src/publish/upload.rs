@@ -289,7 +289,13 @@ impl YoutubeService {
         push_notification(cx, move || Notification::error(message).title(format!("Couldn't upload “{title}”")));
     }
 
-    fn on_uploaded(&mut self, id: UploadId, uploaded: UploadedVideo, client: Arc<YoutubeClient>, cx: &mut Context<Self>) {
+    fn on_uploaded(
+        &mut self,
+        id: UploadId,
+        uploaded: UploadedVideo,
+        client: Arc<YoutubeClient>,
+        cx: &mut Context<Self>,
+    ) {
         let youtube_id = uploaded.id.clone();
         self.update_job(id, cx, |job| job.status = UploadStatus::Processing { video_id: youtube_id.clone() });
         let Some(video_id) = self.job(id).map(|job| job.video_id) else { return };
@@ -317,9 +323,11 @@ impl YoutubeService {
         let title = self.video_title(id, cx);
         let url: SharedString = uploaded.url.clone().into();
         push_notification(cx, move || {
-            Notification::success(format!("“{title}” is on YouTube.")).title("Upload complete").action(move |_, _, _| {
+            Notification::success(format!("“{title}”")).title("Uploaded to YouTube").action(move |_, _, _| {
                 let url = url.clone();
-                Button::new("open-upload-on-youtube").label("Open on YouTube").on_click(move |_, _, cx| cx.open_url(&url))
+                Button::new("open-upload-on-youtube")
+                    .label("Open on YouTube")
+                    .on_click(move |_, _, cx| cx.open_url(&url))
             })
         });
 
@@ -355,7 +363,13 @@ impl YoutubeService {
     }
 
     /// Asks YouTube about the video every few seconds until it is processed.
-    fn follow_processing(&mut self, id: UploadId, client: Arc<YoutubeClient>, youtube_id: String, cx: &mut Context<Self>) {
+    fn follow_processing(
+        &mut self,
+        id: UploadId,
+        client: Arc<YoutubeClient>,
+        youtube_id: String,
+        cx: &mut Context<Self>,
+    ) {
         self.outcomes.insert(id, ProcessingOutcome::Processing);
         cx.spawn(async move |this, cx| {
             for _ in 0..PROCESSING_POLLS {

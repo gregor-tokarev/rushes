@@ -52,12 +52,16 @@ impl Demo {
             (Route::Video { .. }, Route::Video { .. }) => true,
             (route, current) => route == current,
         };
-        Button::new(id).label(label).icon(icon).ghost().w_full().justify_start().selected(selected).on_click(
-            move |_, _, cx| {
+        // A full-width child keeps the icon and label at the leading edge, as in a sidebar.
+        Button::new(id)
+            .ghost()
+            .w_full()
+            .selected(selected)
+            .child(h_flex().w_full().gap_2().child(Icon::new(icon)).child(label))
+            .on_click(move |_, _, cx| {
                 let route = route.clone();
                 state.update(cx, |state, cx| state.navigate(route, cx));
-            },
-        )
+            })
     }
 }
 
@@ -79,9 +83,12 @@ impl Render for Demo {
                 let settings = self.settings.clone();
                 Settings::new("settings")
                     .sidebar_width(window.rem_size() * 14.)
-                    .pages(vec![SettingPage::new("YouTube").icon(Icon::new(IconName::CirclePlay)).default_open(true).group(
-                        SettingGroup::new().item(SettingItem::render(move |_, _, _| settings.clone())),
-                    )])
+                    .pages(vec![
+                        SettingPage::new("YouTube")
+                            .icon(Icon::new(IconName::CirclePlay))
+                            .default_open(true)
+                            .group(SettingGroup::new().item(SettingItem::render(move |_, _, _| settings.clone()))),
+                    ])
                     .into_any_element()
             }
             _ => div()
@@ -127,7 +134,13 @@ impl Render for Demo {
                             .gap_0p5()
                             .child(self.nav_button("nav-publish", "Publish", IconName::Upload, video_route, cx))
                             .child(self.nav_button("nav-uploads", "Uploads", IconName::CloudUpload, Route::Uploads, cx))
-                            .child(self.nav_button("nav-settings", "Settings", IconName::Settings, Route::Settings, cx)),
+                            .child(self.nav_button(
+                                "nav-settings",
+                                "Settings",
+                                IconName::Settings,
+                                Route::Settings,
+                                cx,
+                            )),
                     )
                     .child(div().pt_2().border_t_1().border_color(cx.theme().sidebar_border).child(self.badge.clone())),
             )

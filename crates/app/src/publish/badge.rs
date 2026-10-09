@@ -3,7 +3,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Size, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
@@ -42,21 +42,27 @@ impl AccountBadge {
                 };
                 (display_name(account), Some(detail))
             }
-            Connection::Connecting { .. } => ("Connecting YouTube…".to_owned(), Some("Finish in your browser".to_owned())),
+            Connection::Connecting { .. } => {
+                ("Connecting YouTube…".to_owned(), Some("Finish in your browser".to_owned()))
+            }
             Connection::Failed(_) => ("Reconnect YouTube".to_owned(), Some("Sign-in needed".to_owned())),
             Connection::Disconnected => ("Connect YouTube".to_owned(), None),
         }
     }
 
-    fn leading(&self, cx: &Context<Self>) -> AnyElement {
+    fn leading(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
         let service = self.service.read(cx);
         let theme = cx.theme();
+        // Every state fills the same 2 rem slot, so the label does not move.
         let slot = || div().size_8().flex_shrink_0().flex().items_center().justify_center();
         match service.connection() {
             Connection::Connected(account) => div()
                 .relative()
                 .flex_shrink_0()
-                .child(avatar(account, service.avatar().map(ToOwned::to_owned)))
+                .child(
+                    avatar(account, service.avatar().map(ToOwned::to_owned))
+                        .with_size(Size::Size(window.rem_size() * 2.)),
+                )
                 .child(
                     div()
                         .absolute()
@@ -83,7 +89,7 @@ impl AccountBadge {
 }
 
 impl Render for AccountBadge {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (title, detail) = self.lines(cx);
         let label: SharedString = match &detail {
             Some(detail) => format!("{title}, {detail}. Open YouTube settings").into(),
@@ -98,20 +104,15 @@ impl Render for AccountBadge {
             .py_1p5()
             .accessibility_label(label)
             .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .gap_2()
-                    .child(self.leading(cx))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(div().text_sm().font_weight(FontWeight::MEDIUM).truncate().child(title))
-                            .when_some(detail, |this, detail| {
-                                this.child(div().text_xs().text_color(muted).truncate().child(detail))
-                            }),
-                    ),
+                h_flex().w_full().min_w_0().gap_2().child(self.leading(window, cx)).child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).truncate().child(title))
+                        .when_some(detail, |this, detail| {
+                            this.child(div().text_xs().text_color(muted).truncate().child(detail))
+                        }),
+                ),
             )
             .on_click(|_, _, cx| {
                 let state = AppState::global(cx);
