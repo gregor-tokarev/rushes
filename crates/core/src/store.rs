@@ -12,11 +12,11 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
-use rusqlite::{Connection, OptionalExtension, Row, ToSql, Transaction, params};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, Row, ToSql, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
@@ -33,6 +33,8 @@ use crate::templates::{TemplateKind, script_template};
 
 /// Settings key holding [`AppSettings`].
 const APP_SETTINGS_KEY: &str = "app";
+/// How long a file database waits for another connection's lock.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -40,6 +42,8 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("could not create database folder {path}: {source}")]
     CreateDir { path: PathBuf, source: std::io::Error },
+    #[error("could not create database file {path}: {source}")]
+    CreateFile { path: PathBuf, source: std::io::Error },
     #[error("database schema version {found} is newer than this version of VideoCRM supports ({supported})")]
     UnsupportedSchema { found: i64, supported: i64 },
     #[error("{entity} {id} not found")]
@@ -80,16 +84,18 @@ pub struct Store {
 
 impl Store {
     /// Opens (creating if needed) the database file and its folder, enables WAL
-    /// and foreign keys, and runs pending migrations.
+    /// and foreign keys, and runs pending migrations. A new database file is
+    /// readable by its owner only on Unix.
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Store> {
         let path = path.as_ref();
         if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
             fs::create_dir_all(parent)
                 .map_err(|source| StoreError::CreateDir { path: parent.to_path_buf(), source })?;
         }
+        create_private_file(path).map_err(|source| StoreError::CreateFile { path: path.to_path_buf(), source })?;
         let conn = Connection::open(path)?;
-        conn.busy_timeout(Duration::from_secs(5))?;
-        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        enable_wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         Self::init(conn)
     }
@@ -535,6 +541,38 @@ impl Store {
     }
 }
 
+/// Creates an empty database file with mode 0600 unless it exists. The
+/// database holds the OAuth client secret and resumable upload URLs, and
+/// SQLite gives the `-wal` / `-shm` files the database file's mode.
+#[cfg(unix)]
+fn create_private_file(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    match fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path) {
+        Err(err) if err.kind() != std::io::ErrorKind::AlreadyExists => Err(err),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+fn create_private_file(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Switches to WAL. Converting a new database needs an exclusive lock and
+/// SQLite reports `SQLITE_BUSY` without waiting when another connection is
+/// converting it at the same time, so this retries until [`BUSY_TIMEOUT`].
+fn enable_wal(conn: &Connection) -> rusqlite::Result<()> {
+    let deadline = Instant::now() + BUSY_TIMEOUT;
+    loop {
+        match conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0)) {
+            Err(err) if err.sqlite_error_code() == Some(ErrorCode::DatabaseBusy) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            result => return result.map(drop),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
@@ -546,19 +584,27 @@ type Migration = fn(&Transaction<'_>) -> rusqlite::Result<()>;
 const MIGRATIONS: &[Migration] = &[migration_1];
 
 fn migrate(conn: &mut Connection) -> StoreResult<()> {
-    let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let supported = MIGRATIONS.len() as i64;
-    let applied = usize::try_from(current)
-        .ok()
-        .filter(|&applied| applied <= MIGRATIONS.len())
-        .ok_or(StoreError::UnsupportedSchema { found: current, supported })?;
-    for (index, migration) in MIGRATIONS.iter().enumerate().skip(applied) {
-        let tx = conn.transaction()?;
-        migration(&tx)?;
-        tx.pragma_update(None, "user_version", index as i64 + 1)?;
+    while pending_migration(conn)?.is_some() {
+        // IMMEDIATE takes the write lock before the version is read again, so
+        // two processes opening a new database at once apply each migration once.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(index) = pending_migration(&tx)? {
+            MIGRATIONS[index](&tx)?;
+            tx.pragma_update(None, "user_version", index as i64 + 1)?;
+        }
         tx.commit()?;
     }
     Ok(())
+}
+
+/// Index of the next migration to apply, or `None` when the schema is current.
+fn pending_migration(conn: &Connection) -> StoreResult<Option<usize>> {
+    let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let applied = usize::try_from(current)
+        .ok()
+        .filter(|&applied| applied <= MIGRATIONS.len())
+        .ok_or(StoreError::UnsupportedSchema { found: current, supported: MIGRATIONS.len() as i64 })?;
+    Ok((applied < MIGRATIONS.len()).then_some(applied))
 }
 
 /// Initial schema and the default views.

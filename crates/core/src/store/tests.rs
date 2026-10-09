@@ -108,6 +108,43 @@ fn file_database_uses_wal_and_persists_without_reseeding() {
 }
 
 #[test]
+fn concurrent_first_opens_migrate_once() {
+    for _ in 0..5 {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("videocrm.db");
+        let barrier = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            let opens: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        Store::open(&path).map(|store| store.list_views().unwrap().len())
+                    })
+                })
+                .collect();
+            for open in opens {
+                assert_eq!(open.join().unwrap().unwrap(), 2, "every open succeeds and views are seeded once");
+            }
+        });
+        assert_eq!(Store::open(&path).unwrap().schema_version().unwrap(), 1);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn new_database_files_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("videocrm.db");
+    let mut store = Store::open(&path).unwrap();
+    insert(&mut store, "Secret plans", 0.0);
+    for file in ["videocrm.db", "videocrm.db-wal", "videocrm.db-shm"] {
+        let mode = std::fs::metadata(dir.path().join(file)).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{file}");
+    }
+}
+
+#[test]
 fn rejects_databases_from_newer_versions() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("videocrm.db");
