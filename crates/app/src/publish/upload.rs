@@ -328,12 +328,16 @@ impl YoutubeService {
         let title = self.video_title(id, cx);
         let url: SharedString = uploaded.url.clone().into();
         push_notification(cx, move || {
-            Notification::success(format!("“{title}”")).title("Uploaded to YouTube").action(move |_, _, _| {
-                let url = url.clone();
-                Button::new("open-upload-on-youtube")
-                    .label("Open on YouTube")
-                    .on_click(move |_, _, cx| cx.open_url(&url))
-            })
+            Notification::success(format!("“{title}”"))
+                .title("Uploaded to YouTube")
+                .action(move |_, _, _| {
+                    let url = url.clone();
+                    Button::new("open-upload-on-youtube")
+                        .label("Open on YouTube")
+                        .on_click(move |_, _, cx| cx.open_url(&url))
+                })
+                // The Upload card and the Uploads page keep the link; the toast need not stay.
+                .autohide(true)
         });
 
         if let Some(thumbnail) = thumbnail {

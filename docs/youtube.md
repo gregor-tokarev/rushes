@@ -192,14 +192,16 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   notification, not a failed upload. `get_video` is polled every 5 s for about two minutes
   to report processing → ready.
 - `cancel_upload` stops at the next chunk read and keeps the session; `resume_upload`
-  continues from the offset YouTube reports. At startup, jobs a previous run left
+  continues from the offset YouTube reports. A session the current connection refuses
+  (another backend's after a switch, or a file that changed) is dropped, so the job stops
+  offering Resume. At startup, jobs a previous run left
   `Pending` or `Uploading` become `Failed { "Interrupted — you can resume" }` (resumable
   when a session URL was stored) and jobs left `Processing` become `Done`.
 
 ### Publish tab
 
 - Form edits are saved into `video.publish` 500 ms after the last change (and when the tab
-  closes). Changes made elsewhere, such as "Use for upload" in AI edit, replace the form
+  closes or the app quits). Changes made elsewhere, such as "Use for upload" in AI edit, replace the form
   unless it has unsaved edits.
 - **Insert chapters from script** turns the Script document's Heading 2 blocks into a
   `Chapters:` list with timestamps from the spoken words before each heading
@@ -209,6 +211,9 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   The timestamps are estimates; the button says so.
 - **Schedule** forces private (YouTube makes the video public at the publish time) and
   restores the earlier visibility when turned off.
+- The Upload card lists what blocks an upload in every state, so a disabled **Upload to
+  YouTube**, **Upload again** or **Start over** always says why. A chosen file counts as
+  missing only once the background check finds it gone.
 - The file menu offers the AI edit outputs (`final.mp4`, then `preview.mp4`), then the
   footage videos, then **Choose file…** (`cx.prompt_for_paths`; on Linux that needs the
   desktop portal, and its absence is reported). The list refreshes when the window is

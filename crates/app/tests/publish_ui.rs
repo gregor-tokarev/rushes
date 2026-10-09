@@ -297,6 +297,13 @@ fn youtube_settings_choose_the_backend_and_save_the_oauth_client(cx: &mut TestAp
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         assert!(window.try_find("youtube-google-url").is_none());
+        // Connect keeps its place but is disabled (an enabled one would fail to connect).
+        window.within("youtube-connection").click("connect", cx);
+    });
+    assert_eq!(workspace.service.read_with(cx, |service, _| service.connection().clone()), Connection::Disconnected);
+
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
         window.click("youtube-client-id", cx);
         window.input("1234-abc.apps.googleusercontent.com", cx);
         window.click("youtube-client-secret", cx);
