@@ -18,15 +18,19 @@ pub enum PathInputError {
 
 /// Turns a typed path into an absolute one: trims whitespace, expands a leading `~` or `~/`
 /// to the home directory, and rejects empty and relative paths (they would resolve against
-/// the process working directory, which the creator never sees).
+/// the process working directory, which the creator never sees). What file managers copy
+/// works too: a path in matching quotes, and a `file://` location.
 pub fn expand_user_path(input: &str) -> Result<PathBuf, PathInputError> {
     expand_with_home(input, dirs::home_dir())
 }
 
 fn expand_with_home(input: &str, home: Option<PathBuf>) -> Result<PathBuf, PathInputError> {
-    let input = input.trim();
+    let input = unquote(input.trim()).trim();
     if input.is_empty() {
         return Err(PathInputError::Empty);
+    }
+    if let Some(path) = file_uri_path(input) {
+        return Ok(path);
     }
     let path = if input == "~" {
         home.ok_or(PathInputError::NoHome)?
@@ -36,6 +40,62 @@ fn expand_with_home(input: &str, home: Option<PathBuf>) -> Result<PathBuf, PathI
         PathBuf::from(input)
     };
     if path.is_absolute() { Ok(path) } else { Err(PathInputError::Relative) }
+}
+
+/// `text` without one pair of matching quotes around it, as "Copy as path" puts them.
+fn unquote(text: &str) -> &str {
+    ['"', '\''].into_iter().find_map(|quote| text.strip_prefix(quote)?.strip_suffix(quote)).unwrap_or(text)
+}
+
+/// The local path a `file://` location names (`file:///home/me/My%20Videos`,
+/// `file://localhost/…`), percent-decoded. `None` for anything else, including
+/// a location on another host.
+fn file_uri_path(text: &str) -> Option<PathBuf> {
+    let scheme = text.get(..7).filter(|scheme| scheme.eq_ignore_ascii_case("file://"))?;
+    let rest = &text[scheme.len()..];
+    let rest = rest.strip_prefix("localhost").filter(|rest| rest.starts_with('/')).unwrap_or(rest);
+    if !rest.starts_with('/') {
+        return None;
+    }
+    // A query or fragment isn't part of the path.
+    let encoded = rest.split(['?', '#']).next().unwrap_or(rest);
+    Some(path_from_bytes(percent_decode(encoded)))
+}
+
+/// `%XX` escapes as the bytes they stand for; a `%` without two hex digits stays.
+fn percent_decode(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut ix = 0;
+    while ix < bytes.len() {
+        let escaped = (bytes[ix] == b'%')
+            .then(|| text.get(ix + 1..ix + 3))
+            .flatten()
+            .filter(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match escaped {
+            Some(byte) => {
+                decoded.push(byte);
+                ix += 3;
+            }
+            None => {
+                decoded.push(bytes[ix]);
+                ix += 1;
+            }
+        }
+    }
+    decoded
+}
+
+#[cfg(unix)]
+fn path_from_bytes(bytes: Vec<u8>) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt as _;
+    PathBuf::from(std::ffi::OsString::from_vec(bytes))
+}
+
+#[cfg(not(unix))]
+fn path_from_bytes(bytes: Vec<u8>) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Shortens a path under the home directory to `~/…` for display.
@@ -166,6 +226,27 @@ mod tests {
         assert_eq!(expand_with_home("~other/x", home()), Err(PathInputError::Relative));
         assert_eq!(expand_with_home("   ", home()), Err(PathInputError::Empty));
         assert_eq!(expand_with_home("~/x", None), Err(PathInputError::NoHome));
+    }
+
+    #[test]
+    fn takes_what_file_managers_copy() {
+        let take = Ok(PathBuf::from("/tmp/footage/take 1.mp4"));
+        assert_eq!(expand_with_home("\"/tmp/footage/take 1.mp4\"", home()), take);
+        assert_eq!(expand_with_home(" '/tmp/footage/take 1.mp4' ", home()), take);
+        assert_eq!(expand_with_home("\"~/Videos\"", home()), Ok(PathBuf::from("/home/creator/Videos")));
+        assert_eq!(expand_with_home("file:///tmp/footage/take%201.mp4", home()), take);
+        assert_eq!(expand_with_home("FILE://localhost/tmp/footage/take%201.mp4", home()), take);
+        assert_eq!(expand_with_home("'file:///tmp/footage/take%201.mp4'", home()), take);
+        assert_eq!(
+            expand_with_home("file:///home/creator/V%C3%ADdeos/50%25%20off.mp4", home()),
+            Ok(PathBuf::from("/home/creator/Vídeos/50% off.mp4"))
+        );
+        // A stray percent sign stays as typed.
+        assert_eq!(expand_with_home("file:///tmp/100%+5%", home()), Ok(PathBuf::from("/tmp/100%+5%")));
+        // Unmatched quotes, other hosts and relative locations aren't full paths.
+        assert_eq!(expand_with_home("\"/tmp/take.mp4", home()), Err(PathInputError::Relative));
+        assert_eq!(expand_with_home("file://nas/videos/take.mp4", home()), Err(PathInputError::Relative));
+        assert_eq!(expand_with_home("\"\"", home()), Err(PathInputError::Empty));
     }
 
     #[test]
