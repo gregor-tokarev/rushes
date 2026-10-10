@@ -130,13 +130,15 @@ impl AppState {
     }
 
     /// Drops the history entries of videos that no longer exist, and the repeats
-    /// that leaves, so Back and Forward never land on a missing page.
+    /// that leaves, so Back and Forward never land on a missing page or one that
+    /// looks like the page they leave.
     fn prune_history(&mut self, known: &[VideoId]) {
         let exists = |route: &Route| !matches!(route, Route::Video { id, .. } if !known.contains(id));
+        let current = shown_route(&self.route, &self.views);
         for stack in [&mut self.back, &mut self.forward] {
             stack.retain(exists);
-            stack.dedup();
-            while stack.last() == Some(&self.route) {
+            stack.dedup_by(|a, b| shown_route(a, &self.views) == shown_route(b, &self.views));
+            while stack.last().is_some_and(|last| shown_route(last, &self.views) == current) {
                 stack.pop();
             }
         }
@@ -251,8 +253,9 @@ impl AppState {
         self.write(cx, |store| ids.iter().try_for_each(|id| store.delete_video(*id)));
         let leaves_current_page = matches!(&self.route, Route::Video { id, .. } if ids.contains(id));
         if leaves_current_page {
-            // The deleted page is replaced, not kept in the history.
-            self.route = Route::default();
+            // The deleted page is replaced by the page the creator came from, so
+            // the next Back shows another page rather than this one again.
+            self.route = self.back.pop().unwrap_or_default();
             let known: Vec<VideoId> = self.rows.iter().map(|row| row.video.id).collect();
             self.prune_history(&known);
             self.on_route_changed(cx);
@@ -317,7 +320,9 @@ impl AppState {
     pub fn delete_view(&mut self, id: ViewId, cx: &mut Context<Self>) {
         self.write(cx, |store| store.delete_view(id));
         if matches!(self.route, Route::Database { view: Some(view) } if view == id) {
-            self.navigate(Route::default(), cx);
+            // The first view takes the deleted one's place, in the history too.
+            self.route = Route::default();
+            self.on_route_changed(cx);
         }
     }
 
@@ -370,7 +375,7 @@ impl AppState {
     }
 
     pub fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
-        if route == self.route {
+        if shown_route(&route, &self.views) == shown_route(&self.route, &self.views) {
             return;
         }
         let previous = std::mem::replace(&mut self.route, route);
@@ -456,6 +461,21 @@ impl AppState {
         self.forward.clear();
         self.route = Route::default();
         self.on_route_changed(cx);
+    }
+}
+
+/// `route` as the main area shows it: the database names the view it shows,
+/// which is the first one when the route names none or one that was deleted.
+/// Routes to one page compare equal this way.
+fn shown_route(route: &Route, views: &[DatabaseView]) -> Route {
+    match route {
+        Route::Database { view } => {
+            let view = view
+                .filter(|id| views.iter().any(|known| known.id == *id))
+                .or_else(|| views.iter().min_by_key(|known| known.position).map(|known| known.id));
+            Route::Database { view }
+        }
+        route => route.clone(),
     }
 }
 

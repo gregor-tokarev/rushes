@@ -12,7 +12,6 @@ use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::calendar::Matcher;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState, DateTime as PickerValue};
-use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::link::Link;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -33,7 +32,6 @@ use gpui_kit::{
     StyledImage as _, Subscription, Task, Window, canvas, div, img, rems,
 };
 use videocrm_core::document::DEFAULT_WPM;
-use videocrm_core::input::{PathInputError, expand_user_path};
 use videocrm_core::media::{self, MediaKind};
 use videocrm_core::{
     DocumentKind, Privacy, PublishSettings, UploadJob, UploadStatus, Video, VideoFormat, VideoId, VideoStatus,
@@ -50,6 +48,8 @@ use super::transfer::{format_bytes, format_duration, format_eta, format_speed};
 use super::ui::{ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, status_line, youtube_link};
 use super::upload::{ProcessingOutcome, UploadError};
 use crate::state::{AppEvent, AppState};
+use crate::ui::path_prompt::{self, PathKind, PathRequest};
+use crate::ui::warning_text;
 
 /// Form edits are saved this long after the last keystroke.
 const SAVE_DELAY: Duration = Duration::from_millis(500);
@@ -105,36 +105,6 @@ impl FileTarget {
             FileTarget::Video => "~/Videos/VideoCRM/final.mp4",
             FileTarget::Thumbnail => "~/Pictures/thumbnail.png",
         }
-    }
-}
-
-/// The path field of the "Couldn't open the file chooser" dialog.
-struct PathPrompt {
-    input: Entity<InputState>,
-    error: Option<SharedString>,
-    target: FileTarget,
-}
-
-impl PathPrompt {
-    /// The file the typed path names, or what is wrong with it.
-    fn path(&self, cx: &App) -> Result<PathBuf, SharedString> {
-        typed_file(&self.input.read(cx).value(), self.target).map_err(SharedString::from)
-    }
-}
-
-impl Render for PathPrompt {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let help = match self.target {
-            FileTarget::Video => "Paste the path of the video instead, or drag the file onto the Video file card.",
-            FileTarget::Thumbnail => "Paste the path of the image instead, or drag the file onto the Thumbnail card.",
-        };
-        v_flex()
-            .gap_2()
-            .child(help_text(help, cx))
-            .child(Input::new(&self.input).id("file-path-input"))
-            .when_some(self.error.clone(), |this, error| {
-                this.child(div().text_sm().text_color(cx.theme().danger).child(error))
-            })
     }
 }
 
@@ -600,40 +570,31 @@ impl PublishPanel {
 
     /// Asks for the path of the file in a dialog: what is left when no file chooser opens.
     fn prompt_for_path(&mut self, target: FileTarget, window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder(target.placeholder()));
-        let prompt = cx.new(|_| PathPrompt { input: input.clone(), error: None, target });
+        let request = match target {
+            FileTarget::Video => PathRequest::new(
+                PathKind::File,
+                "Type the path of the video instead, or drop the file on the Video file card.",
+                target.placeholder(),
+            ),
+            FileTarget::Thumbnail => PathRequest::new(
+                PathKind::File,
+                "Type the path of the image instead, or drop the file on the Thumbnail card.",
+                target.placeholder(),
+            )
+            .check(|path| {
+                if is_thumbnail_image(path) { Ok(()) } else { Err("Choose a JPG, PNG, GIF or BMP image.".into()) }
+            }),
+        };
         let panel = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, window, _| {
-            let (panel, prompt) = (panel.clone(), prompt.clone());
-            dialog
-                .title("Couldn't open the file chooser")
-                .width(window.rem_size() * 30.)
-                .child(prompt.clone())
-                .footer(
-                    DialogFooter::new()
-                        .child(DialogClose::new().child(Button::new("file-path-cancel").outline().label("Cancel")))
-                        .child(DialogAction::new().child(Button::new("file-path-use").primary().label("Use file"))),
-                )
-                .on_ok(move |_, window, cx| match prompt.read(cx).path(cx) {
-                    Ok(path) => {
-                        panel
-                            .update(cx, |panel, cx| match target {
-                                FileTarget::Video => panel.set_file(Some(path), cx),
-                                FileTarget::Thumbnail => panel.set_thumbnail(Some(path), window, cx),
-                            })
-                            .ok();
-                        true
-                    }
-                    Err(error) => {
-                        prompt.update(cx, |prompt, cx| {
-                            prompt.error = Some(error);
-                            cx.notify();
-                        });
-                        false
-                    }
-                })
+        path_prompt::open(request, window, cx, move |path, _, _| {
+            let panel = panel.clone();
+            path_prompt::accept_now(move |window, cx| {
+                _ = panel.update(cx, |panel, cx| match target {
+                    FileTarget::Video => panel.set_file(Some(path), cx),
+                    FileTarget::Thumbnail => panel.set_thumbnail(Some(path), window, cx),
+                });
+            })
         });
-        input.update(cx, |input, cx| input.focus(window, cx));
     }
 
     /// Takes the first dropped file for the video file or the thumbnail.
@@ -777,7 +738,7 @@ impl PublishPanel {
         };
         let chapters_help = match (&self.chapters, past_the_end) {
             (Err(reason), _) => help_text(*reason, cx).id("chapters-unavailable"),
-            (Ok(_), Some(warning)) => help_text(warning, cx).text_color(cx.theme().warning).id("chapters-past-the-end"),
+            (Ok(_), Some(warning)) => help_text(warning, cx).text_color(warning_text(cx)).id("chapters-past-the-end"),
             (Ok(_), None) => {
                 help_text(format!("Timestamps are estimated from the script at {DEFAULT_WPM} words per minute."), cx)
                     .id("chapters-estimate")
@@ -1530,22 +1491,6 @@ fn file_choices(footage_dir: &Path) -> Vec<FileChoice> {
     choices
 }
 
-/// The existing file a typed path names: `~` expands, relative paths are refused.
-fn typed_file(text: &str, target: FileTarget) -> Result<PathBuf, String> {
-    let path = match expand_user_path(text) {
-        Ok(path) => path,
-        Err(PathInputError::Empty) => return Err("Enter the path of the file.".to_owned()),
-        Err(error) => return Err(error.to_string()),
-    };
-    if !path.is_file() {
-        return Err(format!("There's no file at {}.", path.display()));
-    }
-    if target == FileTarget::Thumbnail && !is_thumbnail_image(&path) {
-        return Err("Choose a JPG, PNG, GIF or BMP image.".to_owned());
-    }
-    Ok(path)
-}
-
 fn is_thumbnail_image(path: &Path) -> bool {
     let extension = path.extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase);
     extension.is_some_and(|ext| THUMBNAIL_EXTENSIONS.contains(&ext.as_str()))
@@ -1609,29 +1554,6 @@ mod tests {
         assert_eq!(merged.file, stored.file, "the final cut AI edit chose stays");
         edited.insert(Field::File);
         assert_eq!(edited.merge(&stored, &draft).file, None, "unless the form changed the file too");
-    }
-
-    #[test]
-    fn typed_paths_must_name_an_existing_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let image = temp.path().join("thumb.PNG");
-        std::fs::write(&image, b"png").unwrap();
-        let typed = |text: &str, target| typed_file(text, target);
-        assert_eq!(typed(&format!("  {}  ", image.display()), FileTarget::Thumbnail), Ok(image.clone()));
-        assert_eq!(typed("", FileTarget::Video), Err("Enter the path of the file.".to_owned()));
-        assert!(typed("thumb.png", FileTarget::Thumbnail).unwrap_err().starts_with("Use a full path"));
-        assert!(
-            typed(&temp.path().join("gone.mp4").display().to_string(), FileTarget::Video)
-                .unwrap_err()
-                .starts_with("There's no file at")
-        );
-        let notes = temp.path().join("notes.txt");
-        std::fs::write(&notes, b"x").unwrap();
-        assert_eq!(
-            typed(&notes.display().to_string(), FileTarget::Thumbnail),
-            Err("Choose a JPG, PNG, GIF or BMP image.".to_owned())
-        );
-        assert!(typed(&notes.display().to_string(), FileTarget::Video).is_ok());
     }
 
     #[test]

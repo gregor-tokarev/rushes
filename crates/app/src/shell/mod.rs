@@ -218,6 +218,11 @@ impl Workspace {
         self.onboarding.as_ref()
     }
 
+    /// The settings, once they have been opened.
+    pub fn settings_page(&self) -> Option<&Entity<SettingsPage>> {
+        self.settings.as_ref()
+    }
+
     /// The page the main area currently shows.
     pub fn page(&self, cx: &App) -> Page {
         Page::of(self.state.read(cx).route())

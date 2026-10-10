@@ -17,7 +17,8 @@ use videocrm::publish::YoutubeService;
 use videocrm::route::{Route, SettingsSection, VideoTab};
 use videocrm::shell::{self, Page, Workspace};
 use videocrm::state::AppState;
-use videocrm::video_page::SAVE_DELAY;
+use videocrm::ui::path_prompt;
+use videocrm::video_page::{DocumentTab, PathPurpose, SAVE_DELAY};
 use videocrm_core::settings::{AppSettings, ThemeMode};
 use videocrm_core::templates::TemplateKind;
 use videocrm_core::{
@@ -332,15 +333,20 @@ fn completing_onboarding_starts_the_workspace(cx: &mut TestAppContext) {
     let step = |cx: &mut TestAppContext| cx.read(|cx| onboarding.read(cx).step());
     app.click(cx, "onboarding-next");
     assert_eq!(step(cx), Step::MediaFolder);
+    assert_eq!(app.label_of(cx, "onboarding-next".into()).as_deref(), Some("Continue"));
     app.click(cx, "onboarding-next");
     assert_eq!(step(cx), Step::Youtube);
-    app.click(cx, "onboarding-skip");
+    // Nothing connected: the one way on says that it skips the step.
+    assert_eq!(app.label_of(cx, "onboarding-next".into()).as_deref(), Some("Skip for now"));
+    assert!(!app.has(cx, "onboarding-skip"));
+    app.click(cx, "onboarding-next");
     assert_eq!(step(cx), Step::AiEditing);
     app.click(cx, "onboarding-back");
     assert_eq!(step(cx), Step::Youtube);
-    app.click(cx, "onboarding-skip");
-    app.click(cx, "onboarding-skip");
+    app.click(cx, "onboarding-next");
+    app.click(cx, "onboarding-next");
     assert_eq!(step(cx), Step::GetStarted);
+    assert_eq!(app.label_of(cx, "onboarding-next".into()).as_deref(), Some("Get started"));
     app.click(cx, "start-empty");
     app.click(cx, "onboarding-next");
 
@@ -589,9 +595,10 @@ fn going_back_to_a_deleted_view_shows_the_first_view(cx: &mut TestAppContext) {
     app.step(cx, move |_, cx| state.update(cx, |state, cx| state.delete_view(shorts.id, cx)));
     app.press(cx, "alt-left");
 
-    assert_eq!(app.route(cx), Route::Database { view: Some(shorts.id) });
     let shown = cx.read(|cx| app.workspace.read(cx).database().read(cx).active_view().map(|view| view.id));
     assert_eq!(shown, Some(first));
+    // The deleted view and the first view it fell back to were one page.
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_back()));
 }
 
 #[gpui_kit::test]
@@ -702,6 +709,113 @@ fn importing_markdown_can_replace_the_script(cx: &mut TestAppContext) {
     assert_eq!(app.stored_first_block(cx, id, DocumentKind::Script), "Cold open");
     let words = cx.read(|cx| script.read(cx).stats().words);
     assert_eq!(words, 7);
+}
+
+impl Fixture {
+    fn script_tab(&self, cx: &mut TestAppContext) -> Entity<DocumentTab> {
+        cx.read(|cx| {
+            self.workspace.read(cx).video_page().expect("video page").read(cx).script().cloned().expect("script tab")
+        })
+    }
+
+    fn prompt_for_path(&self, cx: &mut TestAppContext, purpose: PathPurpose) {
+        let tab = self.script_tab(cx);
+        self.step(cx, move |window, cx| tab.update(cx, |tab, cx| tab.prompt_for_path(purpose, window, cx)));
+    }
+
+    fn notifications(&self, cx: &mut TestAppContext) -> usize {
+        cx.update_window(self.window, |_, window, cx| window.notifications(cx).len()).expect("window is open")
+    }
+
+    /// Replaces the text of the focused field and presses Enter.
+    fn submit_text(&self, cx: &mut TestAppContext, text: &str) {
+        self.press(cx, "ctrl-a");
+        self.type_text(cx, text);
+        self.press(cx, "enter");
+    }
+}
+
+#[gpui_kit::test]
+fn exporting_to_a_typed_path_never_replaces_a_file_unasked(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
+    let important = app._media.path().join("important.md");
+    std::fs::write(&important, "MY IMPORTANT NOTES").expect("write file");
+
+    app.prompt_for_path(cx, PathPurpose::Export);
+    app.submit_text(cx, &important.display().to_string());
+    assert!(app.has_dialog(cx), "the dialog asks first");
+    assert_eq!(
+        app.label_of(cx, path_prompt::REPLACE_ID.into()).as_deref(),
+        Some("“important.md” already exists. Replace it?")
+    );
+    assert_eq!(std::fs::read_to_string(&important).expect("read file"), "MY IMPORTANT NOTES");
+    assert_eq!(app.notifications(cx), 0);
+
+    // Another name is written without asking; the file stays as it was.
+    let fresh = app._media.path().join("desk.md");
+    app.submit_text(cx, &fresh.display().to_string());
+    assert!(!app.has_dialog(cx));
+    assert!(fresh.is_file());
+    assert_eq!(std::fs::read_to_string(&important).expect("read file"), "MY IMPORTANT NOTES");
+
+    // Saying Replace replaces it.
+    app.prompt_for_path(cx, PathPurpose::Export);
+    app.submit_text(cx, &important.display().to_string());
+    app.click(cx, path_prompt::COMMIT_ID);
+    assert!(!app.has_dialog(cx));
+    assert_ne!(std::fs::read_to_string(&important).expect("read file"), "MY IMPORTANT NOTES");
+}
+
+#[gpui_kit::test]
+fn a_typed_markdown_path_that_cant_be_read_is_explained_in_place(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
+
+    app.prompt_for_path(cx, PathPurpose::Import);
+    let missing = app._media.path().join("nope/missing.md");
+    app.submit_text(cx, &missing.display().to_string());
+    assert!(app.has_dialog(cx), "the path can be fixed in place");
+    let reason = app.label_of(cx, path_prompt::ERROR_ID.into()).unwrap_or_default();
+    assert!(reason.starts_with("There’s no file at ") && !reason.contains("os error"), "{reason}");
+    assert_eq!(app.notifications(cx), 0);
+
+    // Not text: read before the dialog closes, and said the same way.
+    let binary = app._media.path().join("cover.md");
+    std::fs::write(&binary, [0xff, 0xfe, 0x00, 0x9f]).expect("write file");
+    app.submit_text(cx, &binary.display().to_string());
+    assert!(app.has_dialog(cx));
+    assert_eq!(app.label_of(cx, path_prompt::ERROR_ID.into()).as_deref(), Some("“cover.md” isn’t a text file."));
+
+    let source = app._media.path().join("desk.md");
+    std::fs::write(&source, "## Cold open\n\nEverything on this desk earned its spot.\n").expect("write file");
+    app.submit_text(cx, &source.display().to_string());
+    assert!(app.has(cx, "import-append"), "the typed file goes on to Append or Replace");
+}
+
+#[gpui_kit::test]
+fn without_a_folder_chooser_the_media_folder_is_typed_in_a_dialog(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+    let field = cx.read(|cx| app.workspace.read(cx).settings_page().expect("settings").read(cx).media_folder().clone());
+    app.step(cx, move |window, cx| field.update(cx, |field, cx| field.prompt_for_folder(window, cx)));
+    assert!(app.has_dialog(cx));
+
+    let file = app._media.path().join("notes.txt");
+    std::fs::write(&file, "").expect("write file");
+    app.submit_text(cx, &file.join("VideoCRM").display().to_string());
+    assert!(app.has_dialog(cx));
+    let reason = app.label_of(cx, path_prompt::ERROR_ID.into()).unwrap_or_default();
+    assert!(reason.ends_with("is a file, not a folder."), "{reason}");
+
+    let footage = app._media.path().join("Typed footage");
+    app.submit_text(cx, &footage.display().to_string());
+    assert!(!app.has_dialog(cx));
+    assert_eq!(app.media_root(cx), Some(footage.clone()));
+    assert!(footage.is_dir());
+    assert_eq!(app.field_value(cx, "settings-media-root"), Some(footage.display().to_string()));
 }
 
 #[gpui_kit::test]
@@ -827,6 +941,43 @@ fn settings_controls_end_on_one_edge(cx: &mut TestAppContext) {
         .unwrap();
     assert_eq!(select, choose, "the select ends where the text field's button does");
     assert_eq!(open, choose);
+}
+
+#[gpui_kit::test]
+fn the_data_folder_can_be_copied_and_opened(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+    assert!(app.has(cx, "open-data-folder"));
+    app.click(cx, "copy-data-folder");
+    let copied = cx.read_from_clipboard().and_then(|item| item.text());
+    assert_eq!(copied, Some(videocrm_core::settings::data_dir().display().to_string()));
+}
+
+#[gpui_kit::test]
+fn the_settings_list_keeps_its_width_when_the_window_is_resized(cx: &mut TestAppContext) {
+    let content_left = |app: &Fixture, cx: &mut TestAppContext| {
+        for _ in 0..2 {
+            cx.run_until_parked();
+            cx.update_window(app.window, |_, window, cx| window.render_frame(cx)).unwrap();
+        }
+        cx.update_window(app.window, |_, window, _| window.find("settings-media-root").bounds().left()).unwrap()
+    };
+    let wide = size(px(1440.), px(900.));
+    let opened_wide = {
+        let app = Fixture::open_sized(cx, true, &[], wide);
+        app.navigate(cx, Route::Settings { section: SettingsSection::General });
+        content_left(&app, cx)
+    };
+
+    // Opened in a small window, then made larger, and back.
+    let app = Fixture::open_sized(cx, true, &[], size(px(960.), px(600.)));
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+    let opened_small = content_left(&app, cx);
+    cx.simulate_window_resize(app.window, wide);
+    assert_eq!(content_left(&app, cx), opened_wide, "the list doesn't grow with the window");
+    cx.simulate_window_resize(app.window, size(px(960.), px(600.)));
+    assert_eq!(content_left(&app, cx), opened_small, "nor shrink with it");
+    assert_eq!(opened_small, opened_wide);
 }
 
 #[gpui_kit::test]
@@ -1002,11 +1153,11 @@ fn history_skips_deleted_videos(cx: &mut TestAppContext) {
     app.navigate(cx, video(desk));
     app.navigate(cx, video(rust));
 
-    // Deleting the open video leaves its page without keeping it in the history.
+    // Deleting the open video goes back to where the creator came from,
+    // without keeping the deleted page in the history.
     delete(&app, cx, rust);
-    assert_eq!(app.route(cx), Route::default());
-    app.press(cx, "alt-left");
     assert_eq!(app.route(cx), video(desk));
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_forward()));
     app.press(cx, "alt-left");
     assert_eq!(app.route(cx), Route::Pipelines);
 
@@ -1028,6 +1179,29 @@ fn history_skips_deleted_videos(cx: &mut TestAppContext) {
     app.press(cx, "alt-left");
     assert_eq!(app.route(cx), Route::default());
     assert!(!cx.read(|cx| app.state.read(cx).can_go_back()));
+}
+
+#[gpui_kit::test]
+fn back_after_deleting_the_open_video_shows_another_page(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    let views = cx.read(|cx| app.state.read(cx).views().to_vec());
+    let (all_videos, board) = (views[0].id, views[1].id);
+    // The sidebar names the view; the first route named none. Both show All videos.
+    app.navigate(cx, Route::Database { view: Some(board) });
+    app.navigate(cx, Route::Database { view: Some(all_videos) });
+    app.press(cx, "ctrl-n");
+    app.type_text(cx, "Del test");
+    app.press(cx, "enter");
+    let id = app.video_id(cx, "Del test");
+    assert_eq!(app.route(cx), Route::Video { id, tab: VideoTab::Script });
+
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| state.update(cx, |state, cx| state.delete_videos(&[id], cx)));
+    assert_eq!(app.route(cx), Route::Database { view: Some(all_videos) });
+    app.press(cx, "alt-left");
+    assert_eq!(app.route(cx), Route::Database { view: Some(board) }, "the first Back shows another page");
+    app.press(cx, "alt-left");
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_back()), "All videos under its other name is skipped");
 }
 
 #[gpui_kit::test]

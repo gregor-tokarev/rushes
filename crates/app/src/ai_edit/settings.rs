@@ -22,6 +22,7 @@ use super::brief::{COLOR_GRADES, color_grade_label};
 use super::doctor::DoctorChecklist;
 use super::service::PipelineService;
 use crate::state::{AppEvent, AppState};
+use crate::ui::path_prompt::{self, PathKind, PathRequest};
 use crate::ui::settings::{SettingsField, SettingsSection};
 
 /// How long typing pauses before text fields are saved.
@@ -85,8 +86,6 @@ pub struct AiSettings {
     model: ModelChoice,
     /// Why the typed skill folder was not saved.
     skill_dir_error: Option<SharedString>,
-    /// The folder chooser could not open; the field takes a typed path instead.
-    chooser_failed: bool,
     doctor: Entity<DoctorChecklist>,
     save_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -131,9 +130,8 @@ impl AiSettings {
             // The skill check result shows next to the folder field.
             cx.observe(&PipelineService::global(cx), |_, _, cx| cx.notify()),
             cx.subscribe(&skill_dir, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) && (this.skill_dir_error.is_some() || this.chooser_failed) {
+                if matches!(event, InputEvent::Change) && this.skill_dir_error.is_some() {
                     this.skill_dir_error = None;
-                    this.chooser_failed = false;
                     cx.notify();
                 }
             }),
@@ -159,7 +157,6 @@ impl AiSettings {
             target_length,
             model,
             skill_dir_error: None,
-            chooser_failed: false,
             doctor,
             save_task: None,
             _subscriptions: subscriptions,
@@ -245,7 +242,7 @@ impl AiSettings {
         .detach();
     }
 
-    /// Saves the folder the chooser returned, or offers the field instead when the
+    /// Saves the folder the chooser returned, or asks for its path when the
     /// chooser could not open (no desktop portal, for example).
     fn on_skill_dir_picked(
         &mut self,
@@ -254,19 +251,30 @@ impl AiSettings {
         cx: &mut Context<Self>,
     ) {
         match picked.map(|paths| paths.and_then(|paths| paths.into_iter().next())) {
-            Ok(Some(dir)) => {
-                self.skill_dir_error = None;
-                self.chooser_failed = false;
-                self.update(cx, |pipeline| pipeline.skill_dir = Some(dir));
-            }
+            Ok(Some(dir)) => self.use_skill_dir(dir, cx),
             Ok(None) => {}
             Err(error) => {
                 eprintln!("videocrm: folder chooser failed: {error}");
-                self.chooser_failed = true;
-                self.skill_dir.update(cx, |input, cx| input.focus(window, cx));
-                cx.notify();
+                let request = PathRequest::new(
+                    PathKind::Folder,
+                    "Type the path of the video-use folder instead.",
+                    "~/.claude/skills/video-use",
+                )
+                .value(self.skill_dir.read(cx).value().to_string());
+                let settings = cx.weak_entity();
+                path_prompt::open(request, window, cx, move |dir, _, _| {
+                    let settings = settings.clone();
+                    path_prompt::accept_now(move |_, cx| {
+                        _ = settings.update(cx, |settings, cx| settings.use_skill_dir(dir, cx));
+                    })
+                });
             }
         }
+    }
+
+    fn use_skill_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        self.skill_dir_error = None;
+        self.update(cx, |pipeline| pipeline.skill_dir = Some(dir));
     }
 
     /// Shows settings changed elsewhere (onboarding, the folder picker) in the fields
@@ -292,18 +300,12 @@ impl AiSettings {
         cx.notify();
     }
 
-    /// Under the skill folder field: why it was not saved, how to choose without the
-    /// chooser, or that the folder has no `SKILL.md`.
+    /// Under the skill folder field: why it was not saved, or that the folder has
+    /// no `SKILL.md`.
     fn render_skill_dir_status(&self, cx: &App) -> Option<impl IntoElement + use<>> {
         let theme = cx.theme();
         let (id, message, color): (_, SharedString, _) = if let Some(error) = &self.skill_dir_error {
             ("ai-settings-skill-dir-error", error.clone(), theme.danger)
-        } else if self.chooser_failed {
-            (
-                "ai-settings-skill-dir-chooser-failed",
-                "Couldn’t open the folder chooser. Type the folder path here instead.".into(),
-                theme.muted_foreground,
-            )
         } else {
             let service = PipelineService::global(cx);
             let service = service.read(cx);
@@ -521,6 +523,7 @@ impl Render for AiSettings {
 
 #[cfg(test)]
 mod tests {
+    use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{Bounds, ElementId, TestAppContext, WindowBounds, WindowOptions, px, size};
     use videocrm_core::Store;
@@ -530,6 +533,7 @@ mod tests {
     #[gpui_kit::test]
     fn without_a_folder_chooser_the_skill_folder_is_typed(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let state = cx.new(|_| AppState::new(Store::open_in_memory().unwrap()).unwrap());
         cx.update(|cx| {
             AppState::set_global(state.clone(), cx);
@@ -542,25 +546,31 @@ mod tests {
         let (window, settings) = cx
             .update(|cx| gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| AiSettings::new(window, cx))))
             .unwrap();
-        let status = ElementId::Name("ai-settings-skill-dir-chooser-failed".into());
+        let skill = tempfile::tempdir().unwrap();
+        let step = |cx: &mut TestAppContext, interact: &dyn Fn(&mut Window, &mut App)| {
+            cx.update_window(window, |_, window, cx| interact(window, cx)).unwrap();
+            cx.run_until_parked();
+            cx.update_window(window, |_, window, cx| window.render_frame(cx)).unwrap();
+        };
 
-        cx.update_window(window, |_, window, cx| {
+        step(cx, &|window, cx| {
             let failed = Err(std::io::Error::other("ZBus Error: no bus").into());
             settings.update(cx, |settings, cx| settings.on_skill_dir_picked(failed, window, cx));
-        })
-        .unwrap();
-        cx.update_window(window, |_, window, cx| {
-            window.render_frame(cx);
-            assert!(window.find(status.clone()).visible(), "the field is offered instead");
-            assert_eq!(window.find("ai-settings-skill-dir").focused(), Some(true));
-            window.input("/opt/video-use", cx);
-        })
-        .unwrap();
-        cx.update_window(window, |_, window, cx| {
-            window.render_frame(cx);
-            assert!(window.try_find(status).is_none_or(|status| !status.visible()), "typing clears it");
-        })
-        .unwrap();
+        });
+        assert!(cx.update_window(window, |_, window, cx| window.has_active_dialog(cx)).unwrap());
+        let missing = skill.path().join("missing").display().to_string();
+        step(cx, &|window, cx| window.input(&missing, cx));
+        step(cx, &|window, cx| window.press("enter", cx));
+        let error = ElementId::Name(path_prompt::ERROR_ID.into());
+        assert!(cx.update_window(window, |_, window, _| window.try_find(error.clone()).is_some()).unwrap());
+
+        let typed = skill.path().display().to_string();
+        step(cx, &|window, cx| window.press("secondary-a", cx));
+        step(cx, &|window, cx| window.input(&typed, cx));
+        step(cx, &|window, cx| window.press("enter", cx));
+        assert!(!cx.update_window(window, |_, window, cx| window.has_active_dialog(cx)).unwrap());
+        let saved = cx.read(|cx| state.read(cx).settings().pipeline.skill_dir.clone());
+        assert_eq!(saved.as_deref(), Some(skill.path()));
     }
 
     #[test]

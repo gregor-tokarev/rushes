@@ -22,6 +22,7 @@ use videocrm_core::media::default_media_root;
 
 use crate::route::SettingsSection;
 use crate::state::{AppEvent, AppState, Problem, Remedy, folder_error_reason};
+use crate::ui::path_prompt::{self, PathKind};
 
 /// Emitted after a typed folder was saved or turned down.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -216,20 +217,50 @@ impl MediaFolderField {
                 Ok(Ok(Some(paths))) => paths.into_iter().next(),
                 Ok(Ok(None)) | Err(_) => None,
                 Ok(Err(error)) => {
-                    eprintln!("videocrm: folder picker failed: {error}");
-                    let message = "Couldn’t open the folder picker. Type the path instead.";
-                    _ = this.update(cx, |this, cx| this.state.update(cx, |state, cx| state.report_error(message, cx)));
+                    eprintln!("videocrm: folder chooser failed: {error}");
+                    _ = this.update_in(cx, |this, window, cx| this.prompt_for_folder(window, cx));
                     None
                 }
             };
             if let Some(path) = chosen {
-                _ = this.update_in(cx, |this, window, cx| {
-                    this.input.update(cx, |input, cx| input.set_value(display_user_path(&path), window, cx));
-                    this.commit(Commit::Keep, false, window, cx).detach();
-                });
+                _ = this.update_in(cx, |this, window, cx| this.use_folder(&path, window, cx));
             }
         })
         .detach();
+    }
+
+    /// Asks for the folder's path when the system's folder dialog can't open.
+    /// The folder is created and checked before the dialog closes.
+    pub fn prompt_for_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let request = path_prompt::PathRequest::new(
+            PathKind::NewFolder,
+            "Type the path of the folder for your videos instead.",
+            display_user_path(&default_media_root()),
+        )
+        .value(self.input.read(cx).value().to_string());
+        let field = cx.weak_entity();
+        path_prompt::open(request, window, cx, move |folder, _, cx| {
+            let field = field.clone();
+            let check = cx.background_spawn({
+                let folder = folder.clone();
+                async move { prepare_media_folder(&folder) }
+            });
+            cx.foreground_executor().spawn(async move {
+                check.await.map_err(|error| {
+                    eprintln!("videocrm: media folder {} can't be used: {error}", folder.display());
+                    SharedString::from(folder_error_reason(&folder, &error))
+                })?;
+                Ok(Box::new(move |window: &mut Window, cx: &mut App| {
+                    _ = field.update(cx, |field, cx| field.use_folder(&folder, window, cx));
+                }) as path_prompt::Finish)
+            })
+        });
+    }
+
+    /// Puts `folder` in the field and saves it.
+    fn use_folder(&mut self, folder: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_value(display_user_path(folder), window, cx));
+        self.commit(Commit::Keep, false, window, cx).detach();
     }
 }
 

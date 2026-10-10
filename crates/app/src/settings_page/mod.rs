@@ -4,7 +4,8 @@
 mod media_folder;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::setting::{SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
@@ -132,7 +133,7 @@ impl SettingsPage {
                             .keywords(["footage", "path"]),
                         SettingItem::new("Data folder", data_folder_field())
                             .layout(Axis::Vertical)
-                            .description("The database and YouTube credentials. Set VIDEOCRM_DATA_DIR to move it.")
+                            .description("Where VideoCRM keeps its database and your YouTube sign-in.")
                             .keywords(["database", "path"]),
                     ]),
                 ]),
@@ -215,11 +216,18 @@ fn data_folder_field() -> SettingField<SharedString> {
                     .child(shown),
             )
             .child(
+                Clipboard::new("copy-data-folder")
+                    .with_size(options.size())
+                    .value(dir.display().to_string())
+                    .tooltip("Copy path")
+                    .accessibility_label("Copy path"),
+            )
+            .child(
                 Button::new("open-data-folder")
-                    .outline()
+                    .ghost()
                     .with_size(options.size())
                     .icon(IconName::FolderOpen)
-                    .label("Open")
+                    .label("Open folder")
                     .on_click(move |_, _, cx| cx.open_with_system(&dir)),
             )
     })
@@ -228,9 +236,13 @@ fn data_folder_field() -> SettingField<SharedString> {
 impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page_ix = SettingsSection::ALL.iter().position(|section| *section == self.section).unwrap_or(0);
+        let sidebar_width = window.rem_size() * 14.;
         Settings::new(("settings", self.opened))
             .default_selected_index(SelectIndex { page_ix, group_ix: None })
-            .sidebar_width(window.rem_size() * 14.)
+            // One width at every window size: resizing the window widens or
+            // narrows the content, not both panes in proportion.
+            .sidebar_width(sidebar_width)
+            .sidebar_size_range(sidebar_width..sidebar_width)
             .pages(self.pages(cx))
     }
 }

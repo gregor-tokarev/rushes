@@ -540,7 +540,7 @@ impl VideoPage {
                                 .gap_1()
                                 .px_2()
                                 .text_xs()
-                                .text_color(cx.theme().warning)
+                                .text_color(crate::ui::warning_text(cx))
                                 .child(Icon::new(IconName::CircleAlert).xsmall())
                                 .child("Not saved — retrying"),
                         )
