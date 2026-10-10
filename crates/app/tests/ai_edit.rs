@@ -1633,6 +1633,55 @@ fn an_edited_brief_survives_a_restart(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_brief_written_while_another_program_locks_the_database_survives_a_quit(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let database = dir.path().join("videocrm.db");
+    let fx = Fixture::with_store(cx, Store::open(&database).expect("database file"), &[], false);
+    let errors = Rc::new(RefCell::new(Vec::new()));
+    let sink = errors.clone();
+    cx.update(|cx| {
+        cx.subscribe(&fx.state, move |_, event: &AppEvent, _| {
+            if let AppEvent::Error(message) = event {
+                sink.borrow_mut().push(message.to_string());
+            }
+        })
+        .detach()
+    });
+    let video = fx.video;
+    let (window, _host) = open_host(cx, move |window, cx| cx.new(|cx| AiEditPanel::new(video, window, cx)).into());
+    wait_for_window(cx, window, "the composer", |window, _| shows(window, "brief"));
+
+    // Another program holds the write lock, as a backup or sync tool does.
+    let lock = rusqlite::Connection::open(&database).expect("second connection");
+    lock.execute_batch("BEGIN EXCLUSIVE").expect("lock the database");
+    click(cx, window, "brief");
+    cx.update_window(window, |_, window, cx| {
+        window.press("ctrl-end", cx);
+        window.input(" Keep the bloopers.", cx);
+    })
+    .unwrap();
+    // The pause after typing saves the brief: it joins the write queue, as every
+    // other change does, instead of waiting for the lock and giving up.
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    let drafts = |state: &AppState| state.read_setting::<serde_json::Value>("ai_edit.brief_drafts");
+    let queued = cx.read(|cx| drafts(fx.state.read(cx))).expect("read drafts").expect("drafts");
+    assert!(queued.to_string().contains("Keep the bloopers."), "{queued}");
+    assert!(cx.read(|cx| fx.state.read(cx).has_unsaved_changes()), "queued until the lock ends");
+    assert!(!errors.borrow().iter().any(|error| error.contains("brief")), "{:?}", errors.borrow());
+
+    // Quitting during the lock keeps it for the next start.
+    cx.update(|cx| cx.shutdown());
+    let unsaved = fs::read_to_string(dir.path().join("unsaved-changes.json")).expect("kept changes");
+    assert!(unsaved.contains("ai_edit.brief_drafts") && unsaved.contains("Keep the bloopers."), "{unsaved}");
+    lock.execute_batch("COMMIT").expect("release the lock");
+
+    let next = AppState::new(Store::open(&database).expect("open again")).expect("load state");
+    let restored = drafts(&next).expect("read drafts").expect("drafts");
+    assert!(restored.to_string().contains("Keep the bloopers."), "{restored}");
+}
+
+#[gpui_kit::test]
 fn the_brief_follows_the_video_until_the_creator_edits_it(cx: &mut TestAppContext) {
     if !tools_available() {
         return;
