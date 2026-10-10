@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use futures::channel::mpsc;
@@ -37,6 +37,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const CLIENT_ID_SUFFIX: &str = ".apps.googleusercontent.com";
 const UPLOAD_SCOPE: &str = "https://www.googleapis.com/auth/youtube.upload";
 const AVATAR_TIMEOUT: Duration = Duration::from_secs(15);
+/// The Publish tab asks YouTube about its video again when it is shown, at
+/// most this often: each answer costs a unit of the daily quota.
+const REMOTE_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Where the YouTube account stands.
 #[derive(Clone, Debug, PartialEq)]
@@ -85,6 +88,9 @@ pub struct YoutubeService {
     /// Cancel flag of the sign-in in progress.
     sign_in: Option<Arc<AtomicBool>>,
     sign_in_attempt: u64,
+    /// The account a sign-in in progress signs in again: cancelling it leaves
+    /// that account asking for a new sign-in, as before.
+    reconnecting: Option<Account>,
     avatar: Option<PathBuf>,
     /// Every upload job, newest first, as stored.
     pub(super) jobs: Vec<UploadJob>,
@@ -102,6 +108,8 @@ pub struct YoutubeService {
     /// removed by YouTube), by YouTube video id.
     gone: HashSet<String>,
     remote_requests: HashSet<String>,
+    /// When YouTube was last asked about an uploaded video, by YouTube video id.
+    remote_asked: HashMap<String, Instant>,
     _subscription: Subscription,
 }
 
@@ -231,6 +239,7 @@ impl YoutubeService {
             tokens: None,
             sign_in: None,
             sign_in_attempt: 0,
+            reconnecting: None,
             avatar: None,
             jobs: Vec::new(),
             active: HashMap::new(),
@@ -241,6 +250,7 @@ impl YoutubeService {
             remote: HashMap::new(),
             gone: HashSet::new(),
             remote_requests: HashSet::new(),
+            remote_asked: HashMap::new(),
             _subscription: subscription,
         };
         service.restore_login(cx);
@@ -273,6 +283,7 @@ impl YoutubeService {
         match &self.connection {
             _ if self.is_connected() => AccountAccess::Connected,
             Connection::NeedsSignIn(_) => AccountAccess::NeedsSignIn,
+            Connection::Connecting { .. } => AccountAccess::SigningIn,
             _ => AccountAccess::NotConnected,
         }
     }
@@ -313,6 +324,10 @@ impl YoutubeService {
         let cancel = Arc::new(AtomicBool::new(false));
         self.sign_in = Some(cancel.clone());
         self.sign_in_attempt += 1;
+        self.reconnecting = match &self.connection {
+            Connection::NeedsSignIn(account) => Some(account.clone()),
+            _ => None,
+        };
         let attempt = self.sign_in_attempt;
         self.set_connection(Connection::Connecting { authorize_url: None }, cx);
 
@@ -338,12 +353,19 @@ impl YoutubeService {
         .detach();
     }
 
-    /// Stops waiting for the browser sign-in.
+    /// Stops waiting for the browser sign-in. An account that was signing in
+    /// again still needs its new sign-in; otherwise nothing is connected.
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
         self.cancel_sign_in();
         if matches!(self.connection, Connection::Connecting { .. }) {
-            self.set_connection(Connection::Disconnected, cx);
+            let connection = self.connection_before_sign_in();
+            self.set_connection(connection, cx);
         }
+    }
+
+    /// Where the account stood before the sign-in that ended without one.
+    fn connection_before_sign_in(&mut self) -> Connection {
+        self.reconnecting.take().map_or(Connection::Disconnected, Connection::NeedsSignIn)
     }
 
     /// Signs out: forgets the tokens and revokes them with Google, best effort.
@@ -365,6 +387,7 @@ impl YoutubeService {
             cx.background_spawn(async move { client.revoke() }).detach();
         }
         self.avatar = None;
+        self.reconnecting = None;
         self.set_connection(Connection::Disconnected, cx);
     }
 
@@ -375,6 +398,8 @@ impl YoutubeService {
     }
 
     fn set_connection(&mut self, connection: Connection, cx: &mut Context<Self>) {
+        // Another account may see the videos differently.
+        self.remote_asked.clear();
         self.connection = connection;
         cx.emit(YoutubeEvent::ConnectionChanged);
         cx.notify();
@@ -411,13 +436,20 @@ impl YoutubeService {
                 });
                 match signed_in {
                     Ok(SignedIn { client, tokens, account }) => {
+                        self.reconnecting = None;
                         self.client = Some(client);
                         self.tokens = Some(tokens);
                         self.set_connection(Connection::Connected(account), cx);
                         self.refresh_avatar(cx);
                     }
-                    Err(SignInError::Cancelled) => self.set_connection(Connection::Disconnected, cx),
-                    Err(SignInError::Failed(message)) => self.set_connection(Connection::Failed(message.into()), cx),
+                    Err(SignInError::Cancelled) => {
+                        let connection = self.connection_before_sign_in();
+                        self.set_connection(connection, cx);
+                    }
+                    Err(SignInError::Failed(message)) => {
+                        self.reconnecting = None;
+                        self.set_connection(Connection::Failed(message.into()), cx);
+                    }
                 }
             }
         }
@@ -558,12 +590,16 @@ impl YoutubeService {
     }
 
     /// Asks YouTube about an uploaded video in the background (one quota unit), so the
-    /// Publish tab shows what YouTube has rather than what was asked for.
+    /// Publish tab shows what YouTube has rather than what was asked for. An answer
+    /// younger than [`REMOTE_REFRESH_INTERVAL`] is kept instead.
     pub fn refresh_youtube_video(&mut self, youtube_id: &str, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else { return };
-        if !self.remote_requests.insert(youtube_id.to_owned()) {
+        let now = cx.background_executor().now();
+        let recent = self.remote_asked.get(youtube_id).is_some_and(|asked| now < *asked + REMOTE_REFRESH_INTERVAL);
+        if recent || !self.remote_requests.insert(youtube_id.to_owned()) {
             return;
         }
+        self.remote_asked.insert(youtube_id.to_owned(), now);
         let youtube_id = youtube_id.to_owned();
         cx.spawn(async move |this, cx| {
             let lookup = youtube_id.clone();
@@ -805,7 +841,7 @@ pub(super) fn describe_error(error: &YoutubeError) -> String {
         }
         YoutubeError::Api { .. } => "YouTube couldn’t handle the request. Try again in a few minutes.",
         YoutubeError::SessionExpired => {
-            "YouTube can’t continue this upload. Start over to send the video from the beginning."
+            "YouTube can’t continue this upload. Upload the video again to send it from the beginning."
         }
         YoutubeError::Io { .. } => "Couldn’t read the file. Check that it’s still there and readable, then try again.",
         YoutubeError::Protocol(_) | YoutubeError::Json(_) => {

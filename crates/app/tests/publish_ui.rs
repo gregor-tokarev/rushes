@@ -1061,10 +1061,31 @@ fn an_expired_sign_in_blocks_the_upload_with_reconnect(cx: &mut TestAppContext) 
         assert!(window.find(("upload-blocker", 0usize)).visible());
         window.within("upload-blockers").click("upload-reconnect", cx);
     });
-    let url = wait_until(cx, "the consent page", |cx| match service.read_with(cx, |s, _| s.connection().clone()) {
-        Connection::Connecting { authorize_url: Some(url) } => Some(url.to_string()),
-        _ => None,
+    let consent_page = |cx: &mut TestAppContext| {
+        wait_until(cx, "the consent page", |cx| match service.read_with(cx, |s, _| s.connection().clone()) {
+            Connection::Connecting { authorize_url: Some(url) } => Some(url.to_string()),
+            _ => None,
+        })
+    };
+    consent_page(cx);
+    // While the browser is open, the card says to finish there, and nothing else.
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), [BlockingReason::SigningIn]);
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find(("upload-blocker", 0usize)).visible());
+        assert!(window.try_find(("upload-blocker", 1usize)).is_none());
+        // Cancelling goes back to where the account stood: it still needs a sign-in.
+        window.within("publish-account").click("cancel", cx);
     });
+    cx.run_until_parked();
+    assert!(matches!(service.read_with(cx, |s, _| s.connection().clone()), Connection::NeedsSignIn(_)));
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), [BlockingReason::NeedsSignIn]);
+
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.within("upload-blockers").click("upload-reconnect", cx);
+    });
+    let url = consent_page(cx);
     publish_support::consent_in_browser(&url, "creator@example.com");
     wait_until(cx, "the connection", |cx| service.read_with(cx, |s, _| s.is_connected().then_some(())));
     assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), []);
@@ -1177,6 +1198,69 @@ fn drop_files(window: &mut Window, id: &'static str, paths: Vec<std::path::PathB
     let paths = ExternalPaths(paths.into());
     window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Entered { position, paths }), cx);
     window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Submit { position }), cx);
+}
+
+#[gpui_kit::test]
+fn the_publish_tab_asks_youtube_again_when_it_is_shown_again(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "final-1.mp4");
+    let video_id = workspace.create_video(cx, "Why Every Developer Should Learn SQLite", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.privacy = Privacy::Private;
+    });
+    let upload = |cx: &mut TestAppContext| {
+        let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+        wait_until(cx, "the processed upload", |cx| {
+            cx.executor().advance_clock(Duration::from_secs(5));
+            match service.read_with(cx, |s, _| s.job(upload).map(|job| job.status.clone())) {
+                Some(UploadStatus::Done { video_id }) => Some(video_id),
+                Some(UploadStatus::Failed { error }) => panic!("upload failed: {error}"),
+                _ => None,
+            }
+        })
+    };
+    let token = |cx: &mut TestAppContext| service.read_with(cx, |s, _| s.client()).unwrap().credentials().access_token;
+    let linked = |cx: &mut TestAppContext| workspace.video(cx, video_id).youtube.is_some();
+    let first = upload(cx);
+
+    // The page shows the Publish tab; it asked YouTube when it opened.
+    workspace.state.update(cx, |state, cx| state.open_video(video_id, VideoTab::Publish, cx));
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    window(cx, handle, |window, _| window.activate_window());
+    wait_until(cx, "YouTube's answer", |cx| service.read_with(cx, |s, _| s.youtube_video(&first).map(drop)));
+
+    // Deleted in YouTube Studio. Switching tabs right away keeps the answer
+    // that just came: each question costs quota.
+    emulators.delete_video(&token(cx), &first);
+    let show_again = |cx: &mut TestAppContext| {
+        workspace.state.update(cx, |state, cx| {
+            state.open_video(video_id, VideoTab::Script, cx);
+            state.open_video(video_id, VideoTab::Publish, cx);
+        })
+    };
+    show_again(cx);
+    cx.run_until_parked();
+    std::thread::sleep(Duration::from_millis(300));
+    cx.run_until_parked();
+    assert!(linked(cx), "asked again too soon");
+    // A little later, showing the tab again asks YouTube, which has no such video.
+    cx.executor().advance_clock(Duration::from_secs(30));
+    show_again(cx);
+    wait_until(cx, "the dropped link", |cx| (!linked(cx)).then_some(()));
+
+    // Uploaded again and deleted again, while the creator is in the browser:
+    // coming back to VideoCRM asks YouTube.
+    let second = upload(cx);
+    assert!(linked(cx));
+    emulators.delete_video(&token(cx), &second);
+    let (browser, _) = open(cx, |_, cx| cx.new(|_| gpui_kit::EmptyView));
+    window(cx, browser, |window, _| window.activate_window());
+    cx.run_until_parked();
+    window(cx, handle, |window, _| window.activate_window());
+    wait_until(cx, "the dropped link", |cx| (!linked(cx)).then_some(()));
 }
 
 #[gpui_kit::test]

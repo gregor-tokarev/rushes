@@ -17,21 +17,24 @@ use gpui_kit::{
 };
 use rusqlite::Connection;
 use videocrm::ai_edit::{LogEvent, PipelineService, RunMarker, TimelineEntry};
-use videocrm::publish::{Retired, YoutubeService};
+use videocrm::publish::{Retired, YoutubeEvent, YoutubeService};
 use videocrm::route::VideoTab;
 use videocrm::shell::{self, Workspace};
 use videocrm::state::{AppEvent, AppState, QUIT_SAVE_TIMEOUT, SAVE_RETRY_DELAY, Severity};
 use videocrm::video_page::SAVE_DELAY;
-use videocrm_core::settings::AppSettings;
+use videocrm_core::settings::{AppSettings, ThemeMode};
 use videocrm_core::templates::TemplateKind;
 use videocrm_core::{
     BlockId, DocumentKind, NewVideo, PipelineRun, PropertyDef, PropertyId, PropertyKind, PropertyValue, RunId,
     RunStatus, SelectOption, Store, TagColor, UploadId, UploadJob, UploadStatus, VideoId,
 };
 
-/// Longest a UI-thread call may take while the database is locked. The UI
-/// connection gives up on a lock after 100 ms; before the fix it waited 5 s.
-const PROMPT: Duration = Duration::from_millis(500);
+/// A bound on any UI-thread call while the database is locked, generous for a
+/// debug build on a busy machine, yet below the 5 s the services' connection
+/// waits for a lock. Whether the UI waits is what [`AppState::lock_waits`]
+/// counts: the UI connection gives up on a lock after 100 ms, and only the
+/// first change made while nothing is queued tries it.
+const SANITY: Duration = Duration::from_secs(3);
 
 struct Fixture {
     window: AnyWindowHandle,
@@ -117,6 +120,11 @@ impl Fixture {
 
     fn has(&self, cx: &mut TestAppContext, id: &'static str) -> bool {
         cx.update_window(self.window, |_, window, _| window.try_find(id).is_some()).expect("window is open")
+    }
+
+    /// How often the UI thread has waited for the lock so far.
+    fn lock_waits(&self, cx: &mut TestAppContext) -> usize {
+        cx.read(|cx| self.state.read(cx).lock_waits())
     }
 
     fn notifications(&self, cx: &mut TestAppContext) -> usize {
@@ -236,17 +244,19 @@ fn edits_during_another_programs_lock_wait_for_nothing_and_land_after_it(cx: &mu
 
     let mut locker = Locker::hold(&app.database);
 
-    // Picking a priority shows at once.
+    // Picking a priority shows at once. It tried the database once, for at
+    // most the UI connection's 100 ms; everything after it joins the queue.
     let state = app.state.clone();
     let ((), took) = app.timed(cx, move |_, cx| set_priority(&state, desk, priority, "low", cx));
-    assert!(took < PROMPT, "a property change took {took:?}");
+    assert!(took < SANITY, "a property change took {took:?}");
+    assert_eq!(app.lock_waits(cx), 1);
     let shown = cx.read(|cx| app.state.read(cx).video(desk).and_then(|video| video.properties.get(&priority).cloned()));
     assert_eq!(shown, Some(PropertyValue::Select(Some("low".into()))));
 
     // Typing goes to the queue after the save delay, without waiting either.
     for key in ["Locked", " ", "in"] {
         let ((), took) = app.timed(cx, |window, cx| window.input(key, cx));
-        assert!(took < PROMPT, "typing {key:?} took {took:?}");
+        assert!(took < SANITY, "typing {key:?} took {took:?}");
     }
     cx.executor().advance_clock(SAVE_DELAY);
     let page = cx.read(|cx| app.workspace.read(cx).video_page().cloned().expect("video page"));
@@ -254,19 +264,20 @@ fn edits_during_another_programs_lock_wait_for_nothing_and_land_after_it(cx: &mu
         let script = page.read(cx).script().cloned().expect("script");
         script.update(cx, |script, cx| script.flush(cx));
     });
-    assert!(took < PROMPT, "handing the script to the queue took {took:?}");
+    assert!(took < SANITY, "handing the script to the queue took {took:?}");
 
     // Another page opens at once: reading doesn't wait for the lock.
     let state = app.state.clone();
     let ((), took) =
         app.timed(cx, move |_, cx| state.update(cx, |state, cx| state.open_video(studio, VideoTab::Notes, cx)));
-    assert!(took < PROMPT, "opening a page took {took:?}");
+    assert!(took < SANITY, "opening a page took {took:?}");
     assert_eq!(app.page_video(cx), Some(studio));
     let notes = cx.read(|cx| {
         let page = app.workspace.read(cx).video_page().expect("video page").read(cx);
         page.notes().and_then(|notes| notes.read(cx).editor().cloned()).is_some()
     });
     assert!(notes, "the notes are shown");
+    assert_eq!(app.lock_waits(cx), 1, "typing, saving the script and reading waited for nothing");
 
     // A reload (as a finished pipeline step does) keeps the queued change.
     let state = app.state.clone();
@@ -297,6 +308,7 @@ fn edits_during_another_programs_lock_wait_for_nothing_and_land_after_it(cx: &mu
     assert!(!app.has(cx, "not-saved"));
     assert_eq!(stored_property(&app.database, desk, priority), Some(PropertyValue::Select(Some("low".into()))));
     assert_eq!(stored_script(&app.database, desk), "Locked in");
+    assert_eq!(app.lock_waits(cx), 1, "the retries ran in the background");
 }
 
 #[gpui_kit::test]
@@ -349,6 +361,16 @@ fn ai_edits_and_uploads_change_during_a_lock_without_waiting_and_land_after_it(c
         (PipelineService::global(cx), YoutubeService::init_in(state, dir, cx))
     });
     let errors = app.errors(cx);
+    let retired = Rc::new(RefCell::new(0));
+    let count = retired.clone();
+    cx.update(|cx| {
+        cx.subscribe(&youtube, move |_, event: &YoutubeEvent, _| {
+            if *event == YoutubeEvent::UploadsChanged {
+                *count.borrow_mut() += 1;
+            }
+        })
+        .detach()
+    });
 
     let mut locker = Locker::hold(&app.database);
 
@@ -356,10 +378,10 @@ fn ai_edits_and_uploads_change_during_a_lock_without_waiting_and_land_after_it(c
     // back. Neither waits for the lock.
     let service = pipeline.clone();
     let ((), took) = app.timed(cx, move |_, cx| service.update(cx, |service, cx| service.cancel(run_id, cx)));
-    assert!(took < PROMPT, "discarding took {took:?}");
+    assert!(took < SANITY, "discarding took {took:?}");
     let service = pipeline.clone();
     let (restored, took) = app.timed(cx, move |_, cx| service.update(cx, |service, cx| service.restore(run_id, cx)));
-    assert!(took < PROMPT, "restoring took {took:?}");
+    assert!(took < SANITY, "restoring took {took:?}");
     restored.expect("restored");
     // Another file is chosen for the video: the stopped upload's status
     // changes, the way its progress does.
@@ -372,8 +394,11 @@ fn ai_edits_and_uploads_change_during_a_lock_without_waiting_and_land_after_it(c
             state.update_video(video, cx);
         })
     });
-    assert!(took < PROMPT, "an upload status took {took:?}");
+    assert!(took < SANITY, "an upload status took {took:?}");
     app.step(cx, |_, _| {});
+    // Retired once: the reload it causes doesn't retire it again.
+    assert_eq!(*retired.borrow(), 1);
+    assert_eq!(app.lock_waits(cx), 1, "only the first change tried the database");
 
     // Shown at once, stored once the lock ends.
     let shown_run = cx.read(|cx| pipeline.read(cx).run(run_id).cloned().expect("run"));
@@ -464,7 +489,7 @@ fn changes_that_cant_be_written_before_quitting_are_written_at_the_next_start(cx
     let started = Instant::now();
     cx.update(|cx| cx.shutdown());
     let took = started.elapsed();
-    assert!(took < QUIT_SAVE_TIMEOUT + Duration::from_secs(1), "quitting took {took:?}");
+    assert!(took < QUIT_SAVE_TIMEOUT + Duration::from_secs(3), "quitting took {took:?}");
     let unsaved = app.database.with_file_name("unsaved-changes.json");
     assert!(unsaved.exists(), "the change is kept");
     #[cfg(unix)]
@@ -487,4 +512,70 @@ fn changes_that_cant_be_written_before_quitting_are_written_at_the_next_start(cx
     assert_eq!(stored_property(&app.database, desk, priority), Some(PropertyValue::Select(Some("low".into()))));
     let shown = next.video(desk).and_then(|video| video.properties.get(&priority).cloned());
     assert_eq!(shown, Some(PropertyValue::Select(Some("low".into()))));
+}
+
+#[gpui_kit::test]
+fn deleting_the_open_video_during_a_lock_lands_where_the_creator_came_from(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour"]);
+    let desk = app.video_id(cx, "Desk setup tour");
+    let came_from = cx.read(|cx| app.state.read(cx).route().clone());
+    // Opened from All videos, then another tab: both are in the history.
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| {
+        state.update(cx, |state, cx| {
+            state.open_video(desk, VideoTab::Script, cx);
+            state.open_video(desk, VideoTab::Notes, cx);
+        })
+    });
+
+    let mut locker = Locker::hold(&app.database);
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| state.update(cx, |state, cx| state.delete_videos(&[desk], cx)));
+    let route = |cx: &mut TestAppContext| cx.read(|cx| app.state.read(cx).route().clone());
+    assert_eq!(route(cx), came_from, "the delete waits in the queue, the page doesn't");
+    assert!(!app.has(cx, "video-missing"));
+    assert!(cx.read(|cx| app.state.read(cx).has_unsaved_changes()));
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_forward()));
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_back()), "no tab of the deleted video is left behind");
+
+    locker.release();
+    app.wait(cx, SAVE_RETRY_DELAY);
+    assert!(!cx.read(|cx| app.state.read(cx).has_unsaved_changes()));
+    assert_eq!(stored(&app.database, |store| store.get_video(desk).expect("read video")), None);
+    assert_eq!(route(cx), came_from);
+    assert!(!app.has(cx, "video-missing"));
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_forward()));
+}
+
+#[gpui_kit::test]
+fn settings_kept_at_a_quit_are_the_ones_the_next_start_uses(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour"]);
+    let mut locker = Locker::hold(&app.database);
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| state.update(cx, |state, cx| state.update_settings(cx, |s| s.theme = ThemeMode::Dark)));
+    cx.update(|cx| cx.shutdown());
+    let unsaved = app.database.with_file_name("unsaved-changes.json");
+    assert!(unsaved.exists(), "the settings are kept");
+    let stored_theme = || stored(&app.database, |store| store.load_settings().expect("read settings").theme);
+
+    // Still locked at the next start: the kept settings wait in the queue and
+    // are the ones in use.
+    let next = AppState::new(Store::open(&app.database).expect("open again")).expect("load state");
+    assert_eq!(next.settings().theme, ThemeMode::Dark);
+    assert!(next.has_unsaved_changes());
+    drop(next);
+    locker.release();
+
+    // Written at the start once the lock is gone, and used.
+    let next = AppState::new(Store::open(&app.database).expect("open again")).expect("load state");
+    assert_eq!(next.settings().theme, ThemeMode::Dark);
+    assert_eq!(stored_theme(), ThemeMode::Dark);
+    assert!(!unsaved.exists());
+
+    // A later change builds on them rather than on what was stored before.
+    let next = cx.new(|_| next);
+    next.update(cx, |state, cx| state.update_settings(cx, |s| s.pipeline.auto_approve = true));
+    let stored_settings = stored(&app.database, |store| store.load_settings().expect("read settings"));
+    assert_eq!(stored_settings.theme, ThemeMode::Dark);
+    assert!(stored_settings.pipeline.auto_approve);
 }

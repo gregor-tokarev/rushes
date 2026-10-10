@@ -39,7 +39,7 @@ const PERSISTED_STEPS: f32 = 10.0;
 /// Why a video's upload file can't be changed now, wherever it is chosen.
 pub const UPLOAD_FILE_LOCKED: &str = "The upload file can’t change while the video uploads. Cancel the upload first.";
 /// What a stopped upload says once YouTube no longer takes the rest of its file.
-const SESSION_GONE: &str = "YouTube can’t continue this upload. Start over to send the video from the beginning.";
+const SESSION_GONE: &str = "YouTube can’t continue this upload. Upload the video again to send it from the beginning.";
 
 /// Why an upload did not start.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,7 +73,10 @@ impl fmt::Display for UploadError {
                 )
             }
             UploadError::Stale(Retired::FileChanged) => {
-                write!(f, "The file changed since this upload started. Start over to upload the new version.")
+                write!(
+                    f,
+                    "The file changed since this upload started. Upload it to YouTube again to send the new version."
+                )
             }
             UploadError::Stale(Retired::Replaced) => write!(f, "A newer upload of this video took its place."),
             UploadError::Storage => write!(
@@ -180,8 +183,16 @@ enum Request {
 
 enum UploadMessage {
     Started(String),
-    Progress { at: Instant, sent: u64, total: u64 },
-    Retrying(Retry),
+    Progress {
+        at: Instant,
+        sent: u64,
+        total: u64,
+    },
+    /// `confirmed` is what YouTube holds as the retry begins.
+    Retrying {
+        retry: Retry,
+        confirmed: u64,
+    },
     Finished(Result<UploadedVideo, YoutubeError>),
 }
 
@@ -327,6 +338,7 @@ impl YoutubeService {
     fn account_blocker(&self) -> BlockingReason {
         match self.account_access() {
             AccountAccess::NeedsSignIn => BlockingReason::NeedsSignIn,
+            AccountAccess::SigningIn => BlockingReason::SigningIn,
             _ => BlockingReason::NotConnected,
         }
     }
@@ -491,10 +503,8 @@ impl YoutubeService {
                 }
                 cx.notify();
             }
-            UploadMessage::Retrying(retry) => {
+            UploadMessage::Retrying { retry, confirmed } => {
                 let Some(upload) = self.active.get_mut(&id) else { return };
-                // The worker reported what YouTube holds just before.
-                let confirmed = upload.transfer.sent();
                 let mark = upload.retry.map_or(upload.high_water, |retrying| retrying.mark);
                 upload.retry = Some(Retrying { retry, mark, confirmed });
                 cx.notify();
@@ -786,7 +796,9 @@ impl YoutubeService {
     }
 }
 
-/// Upload worker: sends the file and reports progress at most every [`PROGRESS_INTERVAL`].
+/// Upload worker: sends the file and reports progress at most every
+/// [`PROGRESS_INTERVAL`], except a step back to what YouTube holds after a
+/// failed request, which is always reported, as is the end.
 fn transfer_file(
     client: &YoutubeClient,
     file: &Path,
@@ -799,16 +811,21 @@ fn transfer_file(
         let _ = messages.unbounded_send(message);
     };
     let mut throttle = Throttle::new(PROGRESS_INTERVAL);
+    // The worker's latest count; before it reports a retry it steps back to
+    // what YouTube holds, which the bar must not stay ahead of.
+    let mut latest = 0;
     let mut progress = |event: UploadProgress| match event {
         UploadProgress::Started { session_url } => send(UploadMessage::Started(session_url)),
         UploadProgress::Bytes { sent, total } => {
             let at = Instant::now();
-            if sent == total || throttle.ready(at) {
+            let stepped_back = sent < latest;
+            latest = sent;
+            if sent == total || stepped_back || throttle.ready(at) {
                 send(UploadMessage::Progress { at, sent, total });
             }
         }
         UploadProgress::Retrying { attempt, max_retries, cause, .. } => {
-            send(UploadMessage::Retrying(Retry { attempt, max_retries, cause }))
+            send(UploadMessage::Retrying { retry: Retry { attempt, max_retries, cause }, confirmed: latest })
         }
         UploadProgress::Finished => {}
     };
@@ -883,7 +900,7 @@ mod tests {
         assert_eq!(UploadError::NotResumable.to_string(), "This upload can’t be resumed. Upload the video again.");
         assert_eq!(
             UploadError::Stale(Retired::FileChanged).to_string(),
-            "The file changed since this upload started. Start over to upload the new version."
+            "The file changed since this upload started. Upload it to YouTube again to send the new version."
         );
     }
 }

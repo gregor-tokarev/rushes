@@ -158,6 +158,9 @@ impl UploadsPage {
                         RowAction::Resume if access == AccountAccess::NeedsSignIn => {
                             button.disabled(true).tooltip("Sign in to YouTube again to resume")
                         }
+                        RowAction::Resume if access == AccountAccess::SigningIn => {
+                            button.disabled(true).tooltip("Finish signing in with your browser to resume")
+                        }
                         RowAction::Resume if access == AccountAccess::NotConnected => {
                             button.disabled(true).tooltip("Connect YouTube to resume")
                         }

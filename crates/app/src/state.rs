@@ -70,6 +70,8 @@ pub struct AppState {
     script_focus: Option<VideoId>,
     /// Problems found while loading, shown once the window is open.
     startup_problems: Vec<Problem>,
+    /// How often the UI thread waited for another program's lock.
+    lock_waits: usize,
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -84,16 +86,24 @@ impl AppState {
     /// the background writer and for [`AppState::store`]; an in-memory one is
     /// shared by all three.
     pub fn new(store: Store) -> Result<Self, StoreError> {
-        let (settings, settings_problem) = load_settings(&store)?;
-        let route = if settings.onboarding_completed { Route::default() } else { Route::Onboarding };
         let database = store.path();
         let services = store.reopen()?;
         let writer = store.reopen()?;
-        store.set_busy_timeout(UI_BUSY_TIMEOUT)?;
         let ui = Arc::new(Mutex::new(store));
         let shared = |store: Option<Store>| store.map_or_else(|| ui.clone(), |store| Arc::new(Mutex::new(store)));
         let (services, writer) = (shared(services), shared(writer));
+        // Changes kept at the last quit are written first, so the settings read
+        // next are the ones the creator chose last; those that still wait for
+        // the database are used as queued.
         let (writes, unsaved_problem) = Writes::new(writer, database.as_deref());
+        let store = ui.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (stored, settings_problem) = load_settings(&store)?;
+        store.set_busy_timeout(UI_BUSY_TIMEOUT)?;
+        drop(store);
+        let queued = writes.queued().read().settings().cloned();
+        let settings_problem = settings_problem.filter(|_| queued.is_none());
+        let settings = queued.unwrap_or(stored);
+        let route = if settings.onboarding_completed { Route::default() } else { Route::Onboarding };
         let mut state = Self {
             ui,
             services,
@@ -108,6 +118,7 @@ impl AppState {
             recent: Vec::new(),
             script_focus: None,
             startup_problems: settings_problem.into_iter().chain(unsaved_problem).collect(),
+            lock_waits: 0,
         };
         state.load()?;
         Ok(state)
@@ -216,6 +227,13 @@ impl AppState {
         self.writes.queued()
     }
 
+    /// How often the UI thread waited for another program's lock, each time at
+    /// most [`UI_BUSY_TIMEOUT`]: only a change made while nothing is queued
+    /// tries the database first; the ones after it join the queue at once.
+    pub fn lock_waits(&self) -> usize {
+        self.lock_waits
+    }
+
     /// Whether changes wait to be written.
     pub fn has_unsaved_changes(&self) -> bool {
         !self.writes.is_empty()
@@ -287,9 +305,12 @@ impl AppState {
         let leaves_current_page = matches!(&self.route, Route::Video { id, .. } if ids.contains(id));
         if leaves_current_page {
             // The deleted page is replaced by the page the creator came from, so
-            // the next Back shows another page rather than this one again.
-            self.route = self.back.pop().unwrap_or_default();
+            // the next Back shows another page rather than this one again. Its
+            // other tabs leave the history first: a delete that waits in the
+            // queue gets no reload that would drop them.
             let known: Vec<VideoId> = self.rows.iter().map(|row| row.video.id).collect();
+            self.prune_history(&known);
+            self.route = self.back.pop().unwrap_or_default();
             self.prune_history(&known);
             self.on_route_changed(cx);
         }

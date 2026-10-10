@@ -180,7 +180,10 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   answering…"). Then `begin_authorization` and the wait (up to 5 minutes) run, the consent
   page opens with `cx.open_url` and its URL is exposed for **Copy link**; `cancel` sets the
   wait's cancel flag. While waiting, the panel says to finish in the browser and, for
-  Google, that "Error 401: invalid_client" there means a wrong client ID or secret.
+  Google, that "Error 401: invalid_client" there means a wrong client ID or secret; the
+  Upload card's blocker says the same ("Finish signing in with your browser."). Cancelling
+  a reconnect of a `NeedsSignIn` account leaves it `NeedsSignIn`; any other cancelled
+  sign-in leaves VideoCRM disconnected.
 - The sign-in thread only produces the client and account. The service saves the login
   when it accepts the result, so a cancelled or superseded sign-in leaves no file behind.
   Refreshed tokens go to the file only while that sign-in lasts: a request still running
@@ -222,8 +225,9 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   youtube.com/verify). `get_video` is polled every 5 s for about two minutes to report
   processing → ready.
 - The Upload card of an uploaded video says who can watch it as YouTube reports it
-  (`refresh_youtube_video`, one `videos.list` when the tab opens or connects, and every
-  processing poll): "Private · goes public Mon, 12 Oct at 09:00", "Unlisted", ... It links
+  (`refresh_youtube_video`, one `videos.list` when the tab opens, is shown again, the
+  window is activated while it shows, or the account connects, at most every 30 s per
+  video; and every processing poll): "Private · goes public Mon, 12 Oct at 09:00", "Unlisted", ... It links
   to the video and to YouTube Studio, and the form says that its changes apply to the next
   upload. When YouTube answers that it has no such video (deleted in YouTube Studio, or
   removed by YouTube) and the connected channel is the one it was uploaded to, the video's
@@ -254,7 +258,7 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   one. A session YouTube refuses on resume (`400`, such as `badContent` for a file of
   another length, or `404`/`410`), or one the current connection can't use (another
   backend's after a switch), is dropped as well: "YouTube can’t continue this upload.
-  Start over…". Starting a new upload of a video (**Start over**, **Upload again…**)
+  Upload the video again…". Starting a new upload of a video (**Start over**, **Upload again…**)
   drops the sessions of its stopped uploads, and `resume_upload` refuses while another
   upload of the same video runs, so one video never goes up twice by accident. The
   video file can't be changed while it uploads. At startup, jobs a previous run left

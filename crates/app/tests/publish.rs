@@ -207,8 +207,11 @@ fn a_cancelled_upload_resumes_where_youtube_stopped(cx: &mut TestAppContext) {
     wait_until(cx, "the upload session", |cx| {
         service.read_with(cx, |s, _| s.job(upload).and_then(|job| job.session_url.clone()))
     });
-    // The whole file went out in one chunk, twice, and YouTube kept none of it: the
-    // progress is what YouTube holds, not the bytes that were in flight.
+    // The whole file went out in one chunk and YouTube kept none of it: the
+    // progress is what YouTube holds, not the bytes that were in flight, from
+    // the first retry on.
+    wait_until(cx, "the first retry", |cx| service.read_with(cx, |s, _| s.retry(upload)));
+    assert_eq!(service.read_with(cx, |s, _| s.progress(upload)), Some(0.0));
     wait_until(cx, "the second retry", |cx| {
         service.read_with(cx, |s, _| s.retry(upload).filter(|retry| retry.attempt >= 2))
     });
@@ -418,7 +421,7 @@ fn a_session_youtube_refuses_on_resume_is_dropped(cx: &mut TestAppContext) {
     assert_eq!(
         failed.status,
         UploadStatus::Failed {
-            error: "YouTube can’t continue this upload. Start over to send the video from the beginning.".into()
+            error: "YouTube can’t continue this upload. Upload the video again to send it from the beginning.".into()
         }
     );
     assert_eq!(failed.session_url, None);

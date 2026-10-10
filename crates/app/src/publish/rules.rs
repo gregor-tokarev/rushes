@@ -54,6 +54,8 @@ pub enum AccountAccess {
     Connected,
     /// The account is known, but YouTube wants a new sign-in.
     NeedsSignIn,
+    /// A sign-in in the browser is under way.
+    SigningIn,
     NotConnected,
 }
 
@@ -62,6 +64,7 @@ pub enum AccountAccess {
 pub enum BlockingReason {
     NotConnected,
     NeedsSignIn,
+    SigningIn,
     NoFile,
     FileMissing,
     EmptyTitle,
@@ -80,6 +83,7 @@ impl fmt::Display for BlockingReason {
         match self {
             BlockingReason::NotConnected => write!(f, "Connect a YouTube account."),
             BlockingReason::NeedsSignIn => write!(f, "Sign in to YouTube again to upload."),
+            BlockingReason::SigningIn => write!(f, "Finish signing in with your browser."),
             BlockingReason::NoFile => write!(f, "Choose the video file to upload."),
             BlockingReason::FileMissing => write!(f, "The chosen video file no longer exists. Choose it again."),
             BlockingReason::EmptyTitle => write!(f, "Add a title."),
@@ -114,6 +118,7 @@ pub fn blocking_reasons(
     match account {
         AccountAccess::Connected => {}
         AccountAccess::NeedsSignIn => reasons.push(BlockingReason::NeedsSignIn),
+        AccountAccess::SigningIn => reasons.push(BlockingReason::SigningIn),
         AccountAccess::NotConnected => reasons.push(BlockingReason::NotConnected),
     }
     match (&publish.file, file_exists) {
@@ -233,6 +238,12 @@ mod tests {
             vec![BlockingReason::NeedsSignIn]
         );
         assert_eq!(BlockingReason::NeedsSignIn.to_string(), "Sign in to YouTube again to upload.");
+        // Waiting for the browser: that is the one thing to do, not connecting.
+        assert_eq!(
+            blocking_reasons(&video, AccountAccess::SigningIn, true, Utc::now()),
+            vec![BlockingReason::SigningIn]
+        );
+        assert_eq!(BlockingReason::SigningIn.to_string(), "Finish signing in with your browser.");
         video.publish.file = None;
         assert_eq!(blocking_reasons(&video, AccountAccess::Connected, false, Utc::now()), vec![BlockingReason::NoFile]);
     }
