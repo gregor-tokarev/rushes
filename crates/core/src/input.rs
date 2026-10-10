@@ -12,7 +12,7 @@ pub enum PathInputError {
     Empty,
     #[error("Use a full path, like ~/Videos/VideoCRM or /home/you/Videos.")]
     Relative,
-    #[error("Couldn't find your home folder to expand \"~\".")]
+    #[error("Couldn’t find your home folder to expand “~”. Type the full path instead.")]
     NoHome,
 }
 
