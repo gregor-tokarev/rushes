@@ -36,6 +36,9 @@
 //!   for every emoji the app offers, the text for any other emoji, and one
 //!   neutral page glyph for a video without an icon.
 //! - **Dates.** Timestamps read [`format_when`]: `Today, 14:02`.
+//! - **Focus.** Every row, card and control the app makes focusable itself
+//!   takes focus through [`KeyboardFocus`]: a click doesn't take the keyboard,
+//!   and the focus ring shows only focus the keyboard gave.
 //!
 //! # Button sizes
 //!
@@ -54,6 +57,7 @@ mod choice_card;
 pub mod contrast;
 pub mod dialog;
 mod empty_state;
+mod focus;
 mod page;
 mod page_icon;
 pub mod path_prompt;
@@ -66,6 +70,7 @@ mod time;
 pub use choice_card::ChoiceCard;
 pub use contrast::warning_text;
 pub use empty_state::EmptyState;
+pub use focus::KeyboardFocus;
 pub use page::{PAGE_INSET, PageHeader, page_frame};
 pub use page_icon::{Assets, PageIcon, has_page_icon_image, video_icon};
 pub use row_button::{RowButton, section_label};

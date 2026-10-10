@@ -3,12 +3,14 @@
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, ThemeStyled as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, ClickEvent, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Rems, RenderOnce, Role,
     SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
 };
+
+use super::KeyboardFocus as _;
 
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
@@ -63,7 +65,6 @@ impl RenderOnce for RowButton {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let focus =
             window.use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle().tab_stop(true)).read(cx).clone();
-        let focused = focus.is_focused(window);
         let hover = cx.theme().secondary_hover;
         let active = cx.theme().secondary_active;
         h_flex()
@@ -71,7 +72,7 @@ impl RenderOnce for RowButton {
             .test_support()
             .role(Role::Button)
             .aria_label(self.label.clone())
-            .track_focus(&focus)
+            .keyboard_focus(&focus, window, cx)
             .w_full()
             .min_w_0()
             .h_7()
@@ -83,7 +84,6 @@ impl RenderOnce for RowButton {
             .when(self.muted, |this| this.text_color(cx.theme().muted_foreground))
             .hover(move |this| this.bg(hover))
             .active(move |this| this.bg(active))
-            .when(focused, |this| this.focus_ring_style(window, cx))
             .when_some(self.icon, |this, icon| {
                 this.child(Icon::new(icon).small().text_color(cx.theme().muted_foreground))
             })
