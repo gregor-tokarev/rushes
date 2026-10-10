@@ -105,6 +105,8 @@ impl UploadsPage {
         let title = video.map_or_else(|| "Deleted video".to_owned(), |video| display_title(video.upload_title()));
         let icon = video.and_then(|video| video.icon.clone());
         let transfer = service.transfer(job.id);
+        // While a retry runs, what YouTube confirmed rather than what was in flight.
+        let progress = service.progress(job.id);
         let cancelling = service.is_cancelling(job.id);
         let detail: Option<SharedString> = match (&job.status, transfer) {
             _ if cancelling => Some("Stopping…".into()),
@@ -155,8 +157,7 @@ impl UploadsPage {
             }
             None => None,
         };
-        let status_label =
-            upload_label(&job.status, transfer.map(|transfer| transfer.fraction()), service.is_resumable(job));
+        let status_label = upload_label(&job.status, progress, service.is_resumable(job));
         let [video_column, status, started, updated, actions] = COLUMNS;
         let video_id = job.video_id;
         let row = TableRowButton::new(SharedString::from(format!("upload-{id}")), format!("{title}, {status_label}"))
@@ -178,15 +179,11 @@ impl UploadsPage {
                     .w_full()
                     .min_w_0()
                     .gap_1()
-                    .child(h_flex().child(upload_chip(
-                        &job.status,
-                        transfer.map(|transfer| transfer.fraction()),
-                        service.is_resumable(job),
-                    )))
-                    .when_some(transfer, |this, transfer| {
+                    .child(h_flex().child(upload_chip(&job.status, progress, service.is_resumable(job))))
+                    .when_some(progress, |this, progress| {
                         this.child(
                             Progress::new(SharedString::from(format!("upload-{id}-progress")))
-                                .value(transfer.fraction() * 100.0)
+                                .value(progress * 100.0)
                                 .xsmall()
                                 .accessibility_label("Upload progress"),
                         )

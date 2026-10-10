@@ -4,7 +4,7 @@ use serde_json::json;
 
 use super::*;
 use crate::model::{
-    BlockKind, Privacy, PublishSettings, SelectOption, SortDirection, TagColor, YoutubeLink, YoutubeState,
+    BlockKind, FileStamp, Privacy, PublishSettings, SelectOption, SortDirection, TagColor, YoutubeLink, YoutubeState,
 };
 use crate::settings::{ThemeMode, YoutubeBackend};
 
@@ -42,6 +42,7 @@ fn upload(video_id: VideoId, status: UploadStatus, age_minutes: i64) -> UploadJo
         id: UploadId::new(),
         video_id,
         file: "/media/video/footage/edit/final.mp4".into(),
+        file_stamp: None,
         status,
         session_url: None,
         created_at: at,
@@ -106,7 +107,7 @@ fn file_database_uses_wal_and_persists_without_reseeding() {
     let store = Store::open(&path).unwrap();
     assert_eq!(store.get_video(video.id).unwrap(), Some(video));
     assert_eq!(store.list_views().unwrap().len(), 1, "default views are only seeded on creation");
-    assert_eq!(store.schema_version().unwrap(), 1);
+    assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
 }
 
 #[test]
@@ -128,7 +129,7 @@ fn concurrent_first_opens_migrate_once() {
                 assert_eq!(open.join().unwrap().unwrap(), 2, "every open succeeds and views are seeded once");
             }
         });
-        assert_eq!(Store::open(&path).unwrap().schema_version().unwrap(), 1);
+        assert_eq!(Store::open(&path).unwrap().schema_version().unwrap(), MIGRATIONS.len() as i64);
     }
 }
 
@@ -154,9 +155,46 @@ fn rejects_databases_from_newer_versions() {
     Connection::open(&path).unwrap().pragma_update(None, "user_version", 99).unwrap();
 
     match Store::open(&path) {
-        Err(StoreError::UnsupportedSchema { found: 99, supported: 1 }) => {}
+        Err(StoreError::UnsupportedSchema { found: 99, supported }) if supported == MIGRATIONS.len() as i64 => {}
         other => panic!("expected UnsupportedSchema, got {:?}", other.map(|_| ())),
     }
+}
+
+#[test]
+fn uploads_stored_before_file_stamps_still_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("videocrm.db");
+    let job = upload(VideoId::new(), UploadStatus::Cancelled, 1);
+    {
+        // A database of the first release, with one upload in it.
+        let mut conn = Connection::open(&path).unwrap();
+        let tx = conn.transaction().unwrap();
+        migration_1(&tx).unwrap();
+        tx.pragma_update(None, "user_version", 1).unwrap();
+        tx.commit().unwrap();
+        let mut store = Store { conn };
+        let video = Video { id: job.video_id, ..Video::new("Old upload") };
+        store.insert_video(&video).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO uploads (id, video_id, file, status, session_url, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    job.id,
+                    job.video_id,
+                    SqlPath(&job.file),
+                    Json(&job.status),
+                    job.session_url,
+                    job.created_at,
+                    job.updated_at
+                ],
+            )
+            .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
+    assert_eq!(store.list_uploads(None).unwrap(), vec![job]);
 }
 
 #[test]
@@ -662,6 +700,7 @@ fn uploads_crud() {
 
     job.status = UploadStatus::Uploading { sent: 1 << 20, total: 1 << 30 };
     job.session_url = Some("https://upload.example/session/1".into());
+    job.file_stamp = Some(FileStamp { size: 1 << 30, modified: Some(Utc::now()) });
     store.update_upload(&mut job).unwrap();
     assert_eq!(store.get_upload(job.id).unwrap(), Some(job.clone()));
     assert_eq!(store.list_uploads(Some(video.id)).unwrap(), vec![job.clone()]);

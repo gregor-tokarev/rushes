@@ -227,9 +227,11 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   upload. There is no "update on YouTube": `videos.update` needs the broader `youtube`
   scope, which VideoCRM does not ask for.
 - While the worker retries a passing failure, the Upload card and the Uploads page say so
-  ("YouTube isn't responding · Retrying (2 of 5)…", or "Can't reach YouTube" when offline)
+  ("YouTube isn’t responding · Retrying (2 of 5)…", or "Can’t reach YouTube" when offline)
   and the sidebar badge reads "Retrying the upload…", until the upload gets further than
-  before. A failure reads as a
+  before. Meanwhile the progress shows what YouTube confirmed (`YoutubeService::progress`):
+  after a failed request the worker reports `Bytes` back at the server's offset before the
+  retry, and bytes in flight during a retry don't count. A failure reads as a
   plain sentence (`describe_error`; the technical error goes to stderr) and stays
   resumable when YouTube had opened a session.
 - Deleting a video cancels its running upload (the delete confirmations say so, through
@@ -237,9 +239,20 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   deletes them with the video. If the last chunk was already on its way and YouTube
   finishes the upload anyway, a notice links to the video so it can be removed in Studio.
 - `cancel_upload` stops at the next chunk read and keeps the session; `resume_upload`
-  continues from the offset YouTube reports. A session the current connection refuses
-  (another backend's after a switch, or a file that changed) is dropped, so the job stops
-  offering Resume. At startup, jobs a previous run left
+  continues from the offset YouTube reports. A session continues the bytes it was opened
+  for, so each job records its file's size and modification time (`UploadJob::file_stamp`,
+  taken when the upload starts). Resume is offered and allowed only while the job's file
+  is still the video's chosen file and its stamp is unchanged: choosing another file
+  (also AI edit's "Use for upload") or re-exporting the file drops the session
+  (`check_stopped_uploads` runs on data changes, when the window is activated and before
+  every resume), and the Upload card offers a fresh upload with a note about the stopped
+  one. A session YouTube refuses on resume (`400`, such as `badContent` for a file of
+  another length, or `404`/`410`), or one the current connection can't use (another
+  backend's after a switch), is dropped as well: "YouTube can’t continue this upload.
+  Start over…". Starting a new upload of a video (**Start over**, **Upload again…**)
+  drops the sessions of its stopped uploads, and `resume_upload` refuses while another
+  upload of the same video runs, so one video never goes up twice by accident. The
+  video file can't be changed while it uploads. At startup, jobs a previous run left
   `Pending` or `Uploading` become `Failed { "Interrupted — you can resume" }` (resumable
   when a session URL was stored) and jobs left `Processing` become `Done`.
 

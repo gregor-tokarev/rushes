@@ -235,6 +235,7 @@ fn a_finished_upload_says_why_it_cannot_go_up_again(cx: &mut TestAppContext) {
         id: UploadId::new(),
         video_id,
         file: workspace.dir.path().join("final.mp4"),
+        file_stamp: None,
         status: UploadStatus::Done { video_id: youtube_id.into() },
         session_url: None,
         created_at: Utc::now(),
@@ -394,11 +395,15 @@ fn the_uploads_page_offers_what_each_job_allows(cx: &mut TestAppContext) {
     });
     assert_eq!(workspace.state.read_with(cx, |state, _| state.route().clone()), Route::default());
 
-    let video_id = workspace.create_video(cx, "Why I left macOS for Linux", |_| {});
+    // Resume continues the file the video still has chosen.
+    let file = workspace.dir.path().join("final.mp4");
+    let video_id =
+        workspace.create_video(cx, "Why I left macOS for Linux", |video| video.publish.file = Some(file.clone()));
     let job = |status: UploadStatus, session_url: Option<&str>| UploadJob {
         id: UploadId::new(),
         video_id,
         file: workspace.dir.path().join("final.mp4"),
+        file_stamp: None,
         status,
         session_url: session_url.map(str::to_owned),
         created_at: Utc::now(),
@@ -441,11 +446,15 @@ fn the_uploads_page_offers_what_each_job_allows(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_narrow_uploads_page_keeps_each_jobs_action_in_view(cx: &mut TestAppContext) {
     let workspace = Workspace::open(cx, YoutubeBackend::default());
-    let video_id = workspace.create_video(cx, "Why I left macOS for Linux", |_| {});
+    // Resume continues the file the video still has chosen.
+    let file = workspace.dir.path().join("final.mp4");
+    let video_id =
+        workspace.create_video(cx, "Why I left macOS for Linux", |video| video.publish.file = Some(file.clone()));
     let job = UploadJob {
         id: UploadId::new(),
         video_id,
         file: workspace.dir.path().join("final.mp4"),
+        file_stamp: None,
         status: UploadStatus::Uploading { sent: 10, total: 100 },
         session_url: Some("http://127.0.0.1:1/upload/session".into()),
         created_at: Utc::now(),
@@ -679,6 +688,78 @@ fn an_outage_shows_the_retry_on_the_upload_card(cx: &mut TestAppContext) {
             .read_with(cx, |s, _| s.latest_job(video_id).filter(|job| job.status == UploadStatus::Cancelled).cloned())
     });
     assert!(service.read_with(cx, |s, _| s.retry(job.id).is_none() && s.is_resumable(&job)));
+}
+
+#[gpui_kit::test]
+fn a_stopped_upload_offers_resume_only_for_its_own_file(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let take = publish_support::video_file(workspace.dir.path(), "big-take.mp4");
+    let cut = workspace.dir.path().join("real-final.mp4");
+    std::fs::write(&cut, vec![7u8; 200_000]).unwrap();
+    let video_id = workspace.create_video(cx, "Why Every Developer Should Learn SQLite", |video| {
+        video.publish.file = Some(take.clone());
+    });
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    cx.run_until_parked();
+    emulators.inject_fault(json!({"method": "PUT", "path": "/upload/youtube/v3/videos", "status": 503, "times": 1000}));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("upload-to-youtube", cx);
+    });
+    let service = workspace.service.clone();
+    let job = wait_until(cx, "the upload session", |cx| {
+        service.read_with(cx, |s, _| s.latest_job(video_id).filter(|job| job.session_url.is_some()).cloned())
+    });
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        // The card keeps showing the file being sent: Change opens nothing.
+        window.click("choose-video-file", cx);
+        assert!(window.try_find("popup-menu").is_none());
+        drop_files(window, "video-file-drop", vec![cut.clone()], cx);
+        assert_eq!(window.notifications(cx).len(), 1, "a dropped file is refused with a note");
+        window.clear_notifications(cx);
+        window.click("cancel-upload", cx);
+    });
+    wait_until(cx, "the cancellation", |cx| {
+        service.read_with(cx, |s, _| s.job(job.id).filter(|job| job.status == UploadStatus::Cancelled).map(|_| ()))
+    });
+    emulators.clear_faults();
+    assert_eq!(workspace.video(cx, video_id).publish.file, Some(take.clone()));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("resume-upload").visible());
+        window.click("choose-video-file", cx);
+        assert!(window.try_find("popup-menu").is_some(), "Change works again once the upload stopped");
+        window.press("escape", cx);
+    });
+
+    // AI edit's "Use for upload" switches to the newer cut.
+    workspace.state.update(cx, |state, cx| {
+        let mut video = state.video(video_id).unwrap().clone();
+        video.publish.file = Some(cut.clone());
+        state.update_video(video, cx);
+    });
+    cx.run_until_parked();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        // Resume would send big-take.mp4; a fresh upload sends the chosen cut.
+        assert!(window.try_find("resume-upload").is_none());
+        assert!(window.find("upload-cancelled-note").visible());
+        window.click("upload-to-youtube", cx);
+    });
+    let youtube_id = wait_until(cx, "the upload", |cx| {
+        match service.read_with(cx, |s, _| s.latest_job(video_id).map(|job| job.status.clone())) {
+            Some(UploadStatus::Processing { video_id } | UploadStatus::Done { video_id }) => Some(video_id),
+            Some(UploadStatus::Failed { error }) => panic!("upload failed: {error}"),
+            _ => None,
+        }
+    });
+    let received = emulators.uploads();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0]["videoId"], youtube_id.as_str());
+    assert_eq!(received[0]["sha256"], publish_support::sha256(&cut));
 }
 
 #[gpui_kit::test]

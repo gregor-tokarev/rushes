@@ -23,7 +23,7 @@ use videocrm_youtube::{
     begin_authorization, check_client,
 };
 
-use super::upload::{ActiveUpload, ProcessingOutcome};
+use super::upload::{ActiveUpload, ProcessingOutcome, Retired};
 use crate::state::{AppEvent, AppState, SharedStore};
 
 const CREDENTIALS_FILE: &str = "credentials.json";
@@ -91,6 +91,10 @@ pub struct YoutubeService {
     pub(super) outcomes: HashMap<UploadId, ProcessingOutcome>,
     /// Why the custom thumbnail of a finished upload wasn't set, for this run of the app.
     pub(super) thumbnail_problems: HashMap<UploadId, String>,
+    /// Why stopped uploads stopped offering Resume, for this run of the app.
+    pub(super) retired: HashMap<UploadId, Retired>,
+    /// A background check of the files of stopped uploads is running.
+    pub(super) checking_files: bool,
     /// What YouTube last said about uploaded videos, by YouTube video id.
     pub(super) remote: HashMap<String, VideoInfo>,
     remote_requests: HashSet<String>,
@@ -206,7 +210,10 @@ impl YoutubeService {
         let (config, env_override) = backend_config(&state.read(cx).settings().youtube);
         let subscription = cx.subscribe(&state, |this, _, event: &AppEvent, cx| match event {
             AppEvent::SettingsChanged => this.on_settings_changed(cx),
-            AppEvent::DataChanged => this.forget_deleted_videos(cx),
+            AppEvent::DataChanged => {
+                this.forget_deleted_videos(cx);
+                this.check_stopped_uploads(cx);
+            }
             _ => {}
         });
         let mut service = Self {
@@ -225,12 +232,15 @@ impl YoutubeService {
             active: HashMap::new(),
             outcomes: HashMap::new(),
             thumbnail_problems: HashMap::new(),
+            retired: HashMap::new(),
+            checking_files: false,
             remote: HashMap::new(),
             remote_requests: HashSet::new(),
             _subscription: subscription,
         };
         service.restore_login(cx);
         service.recover_interrupted_uploads(cx);
+        service.check_stopped_uploads(cx);
         service
     }
 

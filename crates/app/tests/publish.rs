@@ -6,19 +6,21 @@
 mod publish_support;
 
 use std::cell::RefCell;
+use std::io::Write as _;
 use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::Utc;
-use gpui_kit::TestAppContext;
+use gpui_kit::{Entity, TestAppContext};
 use publish_support::{Emulators, Workspace, wait_until};
 use serde_json::json;
 use videocrm::publish::{
-    Connection, INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, UploadError, delete_upload_notice,
+    Connection, INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, Retired, UploadError, YoutubeService,
+    delete_upload_notice,
 };
 use videocrm::state::AppEvent;
 use videocrm_core::settings::YoutubeBackend;
-use videocrm_core::{Privacy, UploadId, UploadJob, UploadStatus, VideoStatus};
+use videocrm_core::{Privacy, UploadId, UploadJob, UploadStatus, VideoId, VideoStatus};
 use videocrm_youtube::{Account, CredentialStore, Credentials, SavedLogin};
 
 #[gpui_kit::test]
@@ -199,6 +201,12 @@ fn a_cancelled_upload_resumes_where_youtube_stopped(cx: &mut TestAppContext) {
     wait_until(cx, "the upload session", |cx| {
         service.read_with(cx, |s, _| s.job(upload).and_then(|job| job.session_url.clone()))
     });
+    // The whole file went out in one chunk, twice, and YouTube kept none of it: the
+    // progress is what YouTube holds, not the bytes that were in flight.
+    wait_until(cx, "the second retry", |cx| {
+        service.read_with(cx, |s, _| s.retry(upload).filter(|retry| retry.attempt >= 2))
+    });
+    assert_eq!(service.read_with(cx, |s, _| s.progress(upload)), Some(0.0));
     service.update(cx, |service, cx| service.cancel_upload(upload, cx));
     assert!(service.read_with(cx, |s, _| s.is_cancelling(upload)));
     let job = wait_until(cx, "the cancellation", |cx| {
@@ -220,6 +228,173 @@ fn a_cancelled_upload_resumes_where_youtube_stopped(cx: &mut TestAppContext) {
     assert_eq!(service.update(cx, |service, cx| service.resume_upload(upload, cx)), Err(UploadError::NotResumable));
 }
 
+/// Starts an upload of `video_id` that YouTube keeps failing, then cancels it once
+/// the session is open. Returns the cancelled job.
+fn cancel_a_failing_upload(
+    cx: &mut TestAppContext,
+    emulators: &Emulators,
+    service: &Entity<YoutubeService>,
+    video_id: VideoId,
+) -> UploadJob {
+    emulators.inject_fault(json!({"method": "PUT", "path": "/upload/youtube/v3/videos", "status": 503, "times": 1000}));
+    let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    wait_until(cx, "the upload session", |cx| {
+        service.read_with(cx, |s, _| s.job(upload).and_then(|job| job.session_url.clone()))
+    });
+    service.update(cx, |service, cx| service.cancel_upload(upload, cx));
+    let job = wait_until(cx, "the cancellation", |cx| {
+        service.read_with(cx, |s, _| s.job(upload).filter(|job| job.status == UploadStatus::Cancelled).cloned())
+    });
+    assert!(service.read_with(cx, |s, _| s.is_resumable(&job)));
+    emulators.clear_faults();
+    job
+}
+
+#[gpui_kit::test]
+fn a_stopped_upload_resumes_only_the_file_it_started_with(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let take = publish_support::video_file(workspace.dir.path(), "big-take.mp4");
+    let cut = workspace.dir.path().join("real-final.mp4");
+    std::fs::write(&cut, vec![7u8; 200_000]).unwrap();
+    let video_id = workspace.create_video(cx, "Why Every Developer Should Learn SQLite", |video| {
+        video.publish.file = Some(take.clone());
+    });
+    let job = cancel_a_failing_upload(cx, &emulators, &service, video_id);
+    assert_eq!(job.file_stamp.map(|stamp| stamp.size), Some(std::fs::metadata(&take).unwrap().len()));
+
+    // AI edit's "Use for upload" picks the newer cut.
+    workspace.state.update(cx, |state, cx| {
+        let mut video = state.video(video_id).unwrap().clone();
+        video.publish.file = Some(cut.clone());
+        state.update_video(video, cx);
+    });
+    cx.run_until_parked();
+    let job = service.read_with(cx, |s, _| s.job(job.id).cloned()).unwrap();
+    assert_eq!(job.session_url, None, "the session of the other file is dropped");
+    assert!(!service.read_with(cx, |s, _| s.is_resumable(&job)));
+    assert_eq!(service.read_with(cx, |s, _| s.retired(job.id)), Some(Retired::OtherFile));
+    assert_eq!(service.update(cx, |service, cx| service.resume_upload(job.id, cx)), Err(UploadError::NotResumable));
+
+    // A fresh upload sends the chosen cut, and only that reaches YouTube.
+    let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    wait_until(cx, "the upload", |cx| {
+        let status = service.read_with(cx, |s, _| s.job(upload).map(|job| job.status.clone()));
+        matches!(status, Some(UploadStatus::Processing { .. } | UploadStatus::Done { .. })).then_some(())
+    });
+    let received = emulators.uploads();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0]["sha256"], publish_support::sha256(&cut));
+}
+
+#[gpui_kit::test]
+fn a_file_changed_after_the_upload_stopped_starts_over(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Keychron Q1 Max review", |video| {
+        video.publish.file = Some(file.clone());
+    });
+
+    // Re-exported with a different length: Resume refuses before YouTube splices two files.
+    let job = cancel_a_failing_upload(cx, &emulators, &service, video_id);
+    std::fs::OpenOptions::new().append(true).open(&file).unwrap().write_all(&[0; 1000]).unwrap();
+    assert_eq!(
+        service.update(cx, |service, cx| service.resume_upload(job.id, cx)),
+        Err(UploadError::Stale(Retired::FileChanged))
+    );
+    let stored = workspace.stored_jobs(cx).into_iter().find(|stored| stored.id == job.id).unwrap();
+    assert_eq!(stored.session_url, None);
+    assert!(!service.read_with(cx, |s, _| s.is_resumable(&stored)));
+
+    // Same size, other bytes: the modification time tells. Coming back to the
+    // app finds it without a Resume attempt.
+    let job = cancel_a_failing_upload(cx, &emulators, &service, video_id);
+    let mut bytes = std::fs::read(&file).unwrap();
+    bytes[0] ^= 0xff;
+    std::fs::write(&file, &bytes).unwrap();
+    let later = std::time::SystemTime::now() + Duration::from_secs(60);
+    std::fs::File::options().write(true).open(&file).unwrap().set_modified(later).unwrap();
+    service.update(cx, |service, cx| service.check_stopped_uploads(cx));
+    wait_until(cx, "the changed file to be noticed", |cx| {
+        service.read_with(cx, |s, _| (s.retired(job.id) == Some(Retired::FileChanged)).then_some(()))
+    });
+    assert!(!service.read_with(cx, |s, _| s.is_resumable(s.job(job.id).unwrap())));
+    assert!(emulators.uploads().is_empty(), "nothing spliced reached YouTube");
+}
+
+#[gpui_kit::test]
+fn a_session_youtube_refuses_on_resume_is_dropped(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Keychron Q1 Max review", |video| {
+        video.publish.file = Some(file.clone());
+    });
+    let job = cancel_a_failing_upload(cx, &emulators, &workspace.service, video_id);
+    // A job stored before file stamps existed, whose file then grew: only YouTube can tell.
+    let store = workspace.state.read_with(cx, |state, _| state.store());
+    let mut legacy = job.clone();
+    legacy.file_stamp = None;
+    store.lock().unwrap().update_upload(&mut legacy).unwrap();
+    std::fs::OpenOptions::new().append(true).open(&file).unwrap().write_all(&[0; 1000]).unwrap();
+    let service = workspace.restart(cx);
+
+    service.update(cx, |service, cx| service.resume_upload(job.id, cx)).unwrap();
+    let failed = wait_until(cx, "the refused resume", |cx| {
+        service.read_with(cx, |s, _| {
+            s.job(job.id).filter(|job| matches!(job.status, UploadStatus::Failed { .. })).cloned()
+        })
+    });
+    // 400 badContent: said plainly, and Resume is not offered again.
+    assert_eq!(
+        failed.status,
+        UploadStatus::Failed {
+            error: "YouTube can’t continue this upload. Start over to send the video from the beginning.".into()
+        }
+    );
+    assert_eq!(failed.session_url, None);
+    assert!(!service.read_with(cx, |s, _| s.is_resumable(&failed)));
+}
+
+#[gpui_kit::test]
+fn starting_over_retires_the_stopped_upload(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Stop Using print() to Debug Python", |video| {
+        video.publish.file = Some(file.clone());
+    });
+    let stopped = cancel_a_failing_upload(cx, &emulators, &service, video_id);
+
+    // "Start over" while YouTube still fails, so the new upload keeps running.
+    emulators.inject_fault(json!({"method": "PUT", "path": "/upload/youtube/v3/videos", "status": 503, "times": 1000}));
+    let fresh = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    let stopped = service.read_with(cx, |s, _| s.job(stopped.id).cloned()).unwrap();
+    assert_eq!(stopped.session_url, None, "the abandoned session can't send a second copy");
+    assert_eq!(service.read_with(cx, |s, _| s.retired(stopped.id)), Some(Retired::Replaced));
+    assert!(!service.read_with(cx, |s, _| s.is_resumable(&stopped)));
+    // Like starting, resuming refuses while the video uploads.
+    assert_eq!(
+        service.update(cx, |service, cx| service.resume_upload(stopped.id, cx)),
+        Err(UploadError::AlreadyUploading)
+    );
+
+    emulators.clear_faults();
+    wait_until(cx, "the new upload", |cx| {
+        let status = service.read_with(cx, |s, _| s.job(fresh).map(|job| job.status.clone()));
+        matches!(status, Some(UploadStatus::Processing { .. } | UploadStatus::Done { .. })).then_some(())
+    });
+    assert_eq!(emulators.uploads().len(), 1, "one copy on YouTube");
+}
+
 #[gpui_kit::test]
 fn a_session_the_connection_cannot_use_is_not_offered_again(cx: &mut TestAppContext) {
     let Some(emulators) = Emulators::start() else { return };
@@ -234,6 +409,7 @@ fn a_session_the_connection_cannot_use_is_not_offered_again(cx: &mut TestAppCont
         id: UploadId::new(),
         video_id,
         file,
+        file_stamp: None,
         status: UploadStatus::Cancelled,
         session_url: Some("http://127.0.0.1:1/upload/youtube/v3/videos?uploadType=resumable&upload_id=old".into()),
         created_at: Utc::now(),
@@ -284,11 +460,15 @@ fn refuses_uploads_that_youtube_would_reject(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn interrupted_uploads_become_resumable_failures_at_startup(cx: &mut TestAppContext) {
     let workspace = Workspace::open(cx, YoutubeBackend::default());
-    let video_id = workspace.create_video(cx, "Why I left macOS for Linux", |_| {});
+    // Resume continues the file the video still has chosen.
+    let file = workspace.dir.path().join("final.mp4");
+    let video_id =
+        workspace.create_video(cx, "Why I left macOS for Linux", |video| video.publish.file = Some(file.clone()));
     let job = |status: UploadStatus, session_url: Option<&str>| UploadJob {
         id: UploadId::new(),
         video_id,
         file: workspace.dir.path().join("final.mp4"),
+        file_stamp: None,
         status,
         session_url: session_url.map(str::to_owned),
         created_at: Utc::now(),
@@ -412,6 +592,7 @@ fn the_uploads_of_a_deleted_video_leave_the_list(cx: &mut TestAppContext) {
         id: UploadId::new(),
         video_id,
         file: workspace.dir.path().join("final.mp4"),
+        file_stamp: None,
         status: UploadStatus::Done { video_id: "abc".into() },
         session_url: None,
         created_at: Utc::now(),
