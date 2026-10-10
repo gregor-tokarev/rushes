@@ -497,6 +497,7 @@ fn production_summary(rows: &[VideoRow], today: NaiveDate) -> String {
 fn apply_database_event(state: &mut AppState, event: DatabaseEvent, cx: &mut Context<AppState>) {
     match event {
         DatabaseEvent::OpenVideo(id) => state.open_video(id, VideoTab::Script, cx),
+        DatabaseEvent::OpenScript(id) => state.open_script(id, cx),
         DatabaseEvent::UpdateVideo(video) => state.update_video(video, cx),
         DatabaseEvent::DeleteVideos(ids) => state.delete_videos(&ids, cx),
         DatabaseEvent::DuplicateVideo(id) => {

@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::{TimeZone as _, Utc};
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, Bounds, ElementId, Entity, InputEvent as _, Modifiers, MouseButton,
@@ -441,6 +442,25 @@ fn titles_open_the_video_and_new_video_reports_its_status(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
+fn board_cards_are_reached_with_tab_and_open_with_enter(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+    db.step(cx, |window, cx| db.panel.update(cx, |panel, cx| panel.set_active_view(db.board, window, cx)));
+    db.with_window(cx, |window, _| window.activate_window());
+    db.step(cx, |window, cx| window.click("database-search", cx));
+
+    let card = format!("card-{}", db.desk);
+    for _ in 0..60 {
+        if db.with_window(cx, |window, _| window.find(card.clone()).focused()) == Some(true) {
+            break;
+        }
+        db.step(cx, |window, cx| window.press("tab", cx));
+    }
+    assert_eq!(db.with_window(cx, |window, _| window.find(card.clone()).focused()), Some(true));
+    db.step(cx, |window, cx| window.press("enter", cx));
+    assert_eq!(db.take_events(), vec![DatabaseEvent::OpenScript(db.desk)]);
+}
+
+#[gpui_kit::test]
 fn sorting_from_a_column_header_saves_the_view(cx: &mut TestAppContext) {
     let db = Fixture::open(cx);
 
@@ -486,8 +506,53 @@ fn keyboard_renames_and_opens_the_selected_row(cx: &mut TestAppContext) {
     assert_eq!(video.title, "Desk setup 2026 tour");
     assert!(db.with_window(cx, |window, _| window.try_find("cell-input").is_none()));
 
+    // Opened from the keyboard, to write in its script.
     db.step(cx, |window, cx| window.press("enter", cx));
-    assert_eq!(db.take_events(), vec![DatabaseEvent::OpenVideo(db.desk)]);
+    assert_eq!(db.take_events(), vec![DatabaseEvent::OpenScript(db.desk)]);
+}
+
+#[gpui_kit::test]
+fn an_emptied_title_is_not_saved_from_the_table(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+    let title = |db: &Fixture, cx: &mut TestAppContext, id: VideoId| {
+        cx.read(|cx| db.panel.read(cx).video(id).map(|video| video.title.clone()))
+    };
+
+    // Rename from the row menu: Open, Rename, …
+    db.step(cx, |window, cx| window.right_click(row_id(db.ownership), cx));
+    db.step(cx, |window, cx| window.within("popup-menu").click(1usize, cx));
+    db.with_window(cx, |window, _| {
+        assert_eq!(window.find("cell-input").focused(), Some(true), "the title takes the keyboard");
+    });
+    db.step(cx, |window, cx| {
+        window.press("ctrl-a", cx);
+        window.press("backspace", cx);
+        window.press("enter", cx);
+    });
+    assert!(db.take_events().is_empty(), "an empty title is not saved");
+    assert_eq!(title(&db, cx, db.ownership).as_deref(), Some("Rust ownership in 60 seconds"));
+    assert!(db.with_window(cx, |window, _| window.try_find("cell-input").is_none()));
+
+    // F2 on the selected row, with only spaces left. Between the title text
+    // and the Open button, which both open the video.
+    db.step(cx, |window, cx| window.click_at(row_id(db.desk), point(px(190.), px(16.)), cx));
+    db.step(cx, |window, cx| window.press("f2", cx));
+    db.step(cx, |window, cx| {
+        window.press("ctrl-a", cx);
+        window.input("   ", cx);
+        window.press("enter", cx);
+    });
+    assert!(db.take_events().is_empty(), "a blank title is not saved");
+    assert_eq!(title(&db, cx, db.desk).as_deref(), Some("Desk setup 2026"));
+
+    // Runs of spaces collapse, as on the video page.
+    db.step(cx, |window, cx| window.press("f2", cx));
+    db.step(cx, |window, cx| {
+        window.press("ctrl-a", cx);
+        window.input("  Desk   setup  ", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(title(&db, cx, db.desk).as_deref(), Some("Desk setup"));
 }
 
 #[gpui_kit::test]
@@ -512,7 +577,7 @@ fn escape_cancels_an_inline_edit_at_once(cx: &mut TestAppContext) {
 
     // Keyboard focus is back on the table: Enter opens the row.
     db.step(cx, |window, cx| window.press("enter", cx));
-    assert_eq!(db.take_events(), vec![DatabaseEvent::OpenVideo(db.desk)]);
+    assert_eq!(db.take_events(), vec![DatabaseEvent::OpenScript(db.desk)]);
 }
 
 #[gpui_kit::test]
@@ -577,6 +642,46 @@ fn a_typed_option_is_kept_without_pressing_enter(cx: &mut TestAppContext) {
     };
     let names: Vec<&str> = property.kind.options().iter().map(|option| option.name.as_str()).collect();
     assert_eq!(names, ["NordVPN", "Brilliant"]);
+}
+
+#[gpui_kit::test]
+fn number_cells_read_a_decimal_comma_and_say_what_they_refuse(cx: &mut TestAppContext) {
+    // Wide enough that the new column is not under the table's edge.
+    let db = Fixture::open_sized(cx, size(px(2600.), px(900.)));
+    db.step(cx, |window, cx| window.click("properties", cx));
+    db.step(cx, |window, cx| window.click("new-property", cx));
+    db.step(cx, |window, cx| {
+        window.click("property-name", cx);
+        window.input("Budget", cx);
+    });
+    // Text, Number, …
+    db.press_and_release(cx, "property-kind");
+    db.step(cx, |window, cx| window.within("popup-menu").click(1usize, cx));
+    db.step(cx, |window, cx| window.click("property-commit", cx));
+    let events = db.take_events();
+    let Some(DatabaseEvent::CreateProperty(budget)) = events.first() else {
+        panic!("expected CreateProperty first, got {events:?}");
+    };
+    assert_eq!(budget.kind, PropertyKind::Number);
+    let cell = format!("text-{}-{}", budget.id, db.desk);
+
+    let mut edit = |typed: &str| {
+        db.press_and_release(cx, cell.clone());
+        db.step(cx, |window, cx| {
+            window.input(typed, cx);
+            window.press("enter", cx);
+        });
+        db.take_events()
+    };
+    let events = edit("3,5");
+    let [DatabaseEvent::UpdateVideo(video)] = events.as_slice() else {
+        panic!("expected the new value, got {events:?}");
+    };
+    assert_eq!(video.properties.get(&budget.id), Some(&videocrm_core::PropertyValue::Number(3.5)));
+
+    assert!(edit("1,2,3").is_empty(), "nothing is saved");
+    let notifications = db.with_window(cx, |window, cx| window.notifications(cx).len());
+    assert_eq!(notifications, 1, "the refusal is said");
 }
 
 #[gpui_kit::test]

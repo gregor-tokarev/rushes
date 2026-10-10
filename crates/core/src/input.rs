@@ -12,7 +12,7 @@ pub enum PathInputError {
     Empty,
     #[error("Use a full path, like ~/Videos/VideoCRM or /home/you/Videos.")]
     Relative,
-    #[error("Couldn't find your home folder to expand \"~\".")]
+    #[error("Couldn’t find your home folder to expand “~”. Type the full path instead.")]
     NoHome,
 }
 
@@ -87,6 +87,68 @@ pub fn normalize_link(input: &str) -> Option<String> {
     is_host.then(|| format!("https://{input}"))
 }
 
+/// A video title as it is saved: one line, with line breaks and runs of
+/// whitespace as single spaces. `None` for a title of only whitespace, which
+/// is never saved: the stored title stays.
+pub fn normalize_title(input: &str) -> Option<String> {
+    let title = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!title.is_empty()).then_some(title)
+}
+
+/// Reads a number typed into a Number property. Commas that group thousands
+/// are dropped (`1,234,567`, and `1,500` as the app shows numbers); a comma
+/// that can't be grouping is the decimal point (`3,5` is 3.5, `1,25` is 1.25),
+/// as is a comma after thousands grouped with dots (`1.234,5`). Anything else,
+/// such as `1,2,3`, `12,34.5` or `abc`, is `None`, as are infinities and NaN.
+pub fn parse_number(input: &str) -> Option<f64> {
+    let input = input.trim();
+    let (sign, digits) = match input.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", input.strip_prefix('+').unwrap_or(input)),
+    };
+    let commas = digits.matches(',').count();
+    let dots = digits.matches('.').count();
+    let (whole, _) = digits.split_once('.').unwrap_or((digits, ""));
+    let plain = if commas == 0 {
+        digits.to_string()
+    } else if dots <= 1 && is_grouped(whole, ',') {
+        // `1,234` or `1,234,567.89`: the commas group thousands.
+        digits.replace(',', "")
+    } else if commas > 1 {
+        return None;
+    } else if dots > 0 {
+        // `1.234,5`: the dots group thousands and the comma is the decimal point.
+        let (whole, fraction) = digits.split_once(',')?;
+        if !is_grouped(whole, '.') {
+            return None;
+        }
+        format!("{}.{fraction}", whole.replace('.', ""))
+    } else {
+        // `3,5`, `1,25`, `1234,5`: a lone comma that can't be grouping.
+        digits.replacen(',', ".", 1)
+    };
+    let is_plain = plain.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.');
+    if !is_plain || !plain.bytes().any(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    format!("{sign}{plain}").parse::<f64>().ok().filter(|number| number.is_finite())
+}
+
+/// Whether `whole` is digits grouped in threes by `separator`, like
+/// `1,234,567`: a leading group of one to three digits, not starting with a
+/// zero, then at least one group of exactly three.
+fn is_grouped(whole: &str, separator: char) -> bool {
+    let mut groups = whole.split(separator);
+    let lead = groups.next().unwrap_or_default();
+    let rest: Vec<&str> = groups.collect();
+    let all_digits = |group: &str| group.bytes().all(|byte| byte.is_ascii_digit());
+    (1..=3).contains(&lead.len())
+        && all_digits(lead)
+        && !lead.starts_with('0')
+        && !rest.is_empty()
+        && rest.iter().all(|group| group.len() == 3 && all_digits(group))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +192,38 @@ mod tests {
         assert_eq!(normalize_link("just words"), None);
         assert_eq!(normalize_link("notes"), None);
         assert_eq!(normalize_link(""), None);
+    }
+
+    #[test]
+    fn titles_are_one_line_and_never_blank() {
+        assert_eq!(normalize_title("  Desk   setup\ntour ").as_deref(), Some("Desk setup tour"));
+        assert_eq!(normalize_title(" \n\t "), None);
+        assert_eq!(normalize_title(""), None);
+    }
+
+    #[test]
+    fn reads_numbers_with_grouping_or_a_decimal_comma() {
+        assert_eq!(parse_number("12000"), Some(12000.));
+        assert_eq!(parse_number(" -2.5 "), Some(-2.5));
+        assert_eq!(parse_number("+.5"), Some(0.5));
+        // Grouping commas, as the app shows numbers.
+        assert_eq!(parse_number("1,500"), Some(1500.));
+        assert_eq!(parse_number("1,234,567"), Some(1_234_567.));
+        assert_eq!(parse_number("1,234,567.89"), Some(1_234_567.89));
+        // A comma that can't be grouping is the decimal point.
+        assert_eq!(parse_number("3,5"), Some(3.5));
+        assert_eq!(parse_number("1,25"), Some(1.25));
+        assert_eq!(parse_number("-0,75"), Some(-0.75));
+        assert_eq!(parse_number("0,500"), Some(0.5));
+        assert_eq!(parse_number("1234,567"), Some(1234.567));
+        assert_eq!(parse_number("1.234,5"), Some(1234.5));
+        assert_eq!(parse_number("1.234.567,89"), Some(1_234_567.89));
+    }
+
+    #[test]
+    fn refuses_what_is_not_clearly_a_number() {
+        for text in ["", "abc", "1,2,3", "12,34.5", "1.2,5", "1,234.5.6", "--5", "1 000", "nan", "inf", "1e5", "."] {
+            assert_eq!(parse_number(text), None, "{text:?}");
+        }
     }
 }

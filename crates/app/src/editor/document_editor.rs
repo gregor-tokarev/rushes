@@ -704,7 +704,8 @@ impl DocumentEditor {
 
     /// Multi-line text is read like an imported Markdown file, so callouts,
     /// cues and the app's own export paste back as the blocks they were;
-    /// single lines and code blocks use the input's own paste.
+    /// single lines and code blocks use the input's own paste. How the pasted
+    /// blocks meet the text around the caret is [`blocks::paste`].
     fn on_paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         let Some((ix, input)) = self.editing(window, cx) else { return };
         if self.document.blocks[ix].kind == BlockKind::Code {
@@ -714,7 +715,7 @@ impl DocumentEditor {
         if !pasted.trim_end().contains('\n') {
             return;
         }
-        let mut pasted = parse_pasted(&pasted);
+        let pasted = parse_pasted(&pasted);
         if pasted.is_empty() {
             return;
         }
@@ -724,45 +725,17 @@ impl DocumentEditor {
             let state = input.read(cx);
             (state.value().to_string(), state.selected_range())
         };
-        let (before, after) = (&text[..selection.start], &text[selection.end..]);
-        let first = pasted.remove(0);
-        let block = &mut self.document.blocks[ix];
-        let id = block.id;
-        // An empty paragraph becomes the first pasted block. Otherwise the
-        // first line joins the text before the caret, unless it is a block
-        // that cannot be inlined (a divider or code), which goes below.
-        if before.is_empty() && block.kind == BlockKind::Paragraph {
-            block.kind = first.kind;
-            block.checked = first.checked;
-            block.indent = first.indent;
-            block.text = first.text;
-        } else if first.kind.has_text() && first.kind != BlockKind::Code {
-            block.text = format!("{before}{}", first.text);
-        } else {
-            block.text = before.to_owned();
-            pasted.insert(0, first);
+        let id = self.document.blocks[ix].id;
+        self.document.blocks[ix].text = text;
+        let (last, caret) = blocks::paste(&mut self.document.blocks, ix, selection, pasted);
+        // The block pasted into may have become a divider, or given way to the pasted blocks.
+        match self.index(id) {
+            Some(at) if self.document.blocks[at].kind.has_text() => self.sync_input(id, window, cx),
+            _ => {
+                self.inputs.remove(&id);
+            }
         }
-
-        let mut last = ix;
-        for block in pasted {
-            last += 1;
-            self.document.blocks.insert(last, block);
-        }
-        // The caret needs a text block after a divider, and the text after
-        // it must not end up inside pasted code.
-        let trailing = self.document.blocks[last].kind;
-        if !trailing.has_text() || (trailing == BlockKind::Code && !after.is_empty()) {
-            last += 1;
-            self.document.blocks.insert(last, Block::paragraph(""));
-        }
-        let caret = self.document.blocks[last].text.len();
-        self.document.blocks[last].text.push_str(after);
         let last_id = self.document.blocks[last].id;
-        if self.document.blocks[ix].kind.has_text() {
-            self.sync_input(id, window, cx);
-        } else {
-            self.inputs.remove(&id);
-        }
         self.focus_block(last_id, Caret::At(caret), window, cx);
         self.changed(cx);
     }

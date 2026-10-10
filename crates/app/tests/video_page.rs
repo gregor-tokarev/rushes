@@ -21,7 +21,7 @@ use videocrm_core::settings::AppSettings;
 use videocrm_core::templates::TemplateKind;
 use videocrm_core::{
     BlockId, Column, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, Store,
-    TagColor, VideoId, ViewKind,
+    TagColor, VideoFormat, VideoId, ViewKind,
 };
 
 struct Fixture {
@@ -201,6 +201,41 @@ fn enter_on_an_empty_title_says_what_is_missing(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_format_is_chosen_with_the_keyboard(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &[]);
+    let format = |app: &Fixture, cx: &mut TestAppContext| {
+        cx.update_window(app.window, |_, window, _| {
+            let control = window.find("new-video-format");
+            (control.focused(), control.label().map(str::to_string))
+        })
+        .expect("window is open")
+    };
+    app.press(cx, "ctrl-n");
+    app.type_text(cx, "Quick tip");
+    // Title, Hook, then Format.
+    app.press(cx, "tab");
+    app.press(cx, "tab");
+    assert_eq!(format(&app, cx), (Some(true), Some("Format: Long-form".into())));
+
+    app.press(cx, "right");
+    app.press(cx, "right");
+    assert_eq!(format(&app, cx).1.as_deref(), Some("Format: Livestream"));
+    app.press(cx, "right");
+    assert_eq!(format(&app, cx).1.as_deref(), Some("Format: Livestream"), "the last format stays");
+    app.press(cx, "left");
+    assert_eq!(format(&app, cx).1.as_deref(), Some("Format: Short"));
+
+    // Tab goes on to Status; Enter creates the video.
+    app.press(cx, "tab");
+    assert_eq!(format(&app, cx).0, Some(false));
+    app.press(cx, "shift-tab");
+    app.press(cx, "enter");
+    assert!(!app.has_dialog(cx));
+    let id = app.video_id(cx, "Quick tip");
+    assert_eq!(cx.read(|cx| app.state.read(cx).video(id).map(|video| video.format)), Some(VideoFormat::Short));
+}
+
+#[gpui_kit::test]
 fn a_created_video_keeps_the_caret_in_its_script(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, &["Desk setup tour"]);
     for (title, template) in [("Launch day vlog", "template-blank"), ("Build a home studio", "template-tutorial")] {
@@ -311,6 +346,67 @@ fn numbers_read_like_the_database_and_edit_raw(cx: &mut TestAppContext) {
     app.click(cx, "page-hook");
     assert_eq!(stored_property(&app, cx, id, precise), Some(PropertyValue::Number(1.234)));
     assert_eq!(field_text(&app, cx, property_input(precise)), "1.23");
+}
+
+/// Sets a number property of a video through the app state.
+fn set_number(app: &Fixture, cx: &mut TestAppContext, video: VideoId, id: PropertyId, number: f64) {
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| {
+        state.update(cx, |state, cx| {
+            let mut stored = state.video(video).cloned().expect("video");
+            stored.properties.insert(id, PropertyValue::Number(number));
+            state.update_video(stored, cx);
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn a_decimal_comma_is_the_decimal_point(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    let budget = add_property(&app, cx, "Budget", PropertyKind::Number);
+    app.open_video(cx, id, VideoTab::Script);
+
+    for (typed, number) in [("3,5", 3.5), ("1,25", 1.25), ("1,500", 1500.)] {
+        app.click(cx, property_input(budget));
+        app.press(cx, "ctrl-a");
+        app.type_text(cx, typed);
+        app.press(cx, "enter");
+        assert_eq!(stored_property(&app, cx, id, budget), Some(PropertyValue::Number(number)), "{typed}");
+    }
+    assert_eq!(app.notifications(cx), 0);
+}
+
+#[gpui_kit::test]
+fn a_refused_number_shows_the_stored_one_and_is_reported_once(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    let views = add_property(&app, cx, "Views", PropertyKind::Number);
+    set_number(&app, cx, id, views, 1500.);
+    app.open_video(cx, id, VideoTab::Script);
+
+    // Refused on Enter: the field shows the stored number again.
+    app.click(cx, property_input(views));
+    app.press(cx, "ctrl-a");
+    app.type_text(cx, "abc");
+    app.press(cx, "enter");
+    assert_eq!(app.notifications(cx), 1);
+    assert_eq!(field_text(&app, cx, property_input(views)), "1500");
+    // Saving the page's edits on tab switches and navigation reports nothing new.
+    app.open_video(cx, id, VideoTab::Notes);
+    app.open_video(cx, id, VideoTab::Script);
+    assert_eq!(app.notifications(cx), 1);
+
+    // Refused when a tab switch saves the field: reported once, too.
+    app.click(cx, property_input(views));
+    app.press(cx, "ctrl-a");
+    app.type_text(cx, "1,2,3");
+    app.open_video(cx, id, VideoTab::Notes);
+    assert_eq!(field_text(&app, cx, property_input(views)), "1500");
+    app.open_video(cx, id, VideoTab::Script);
+    app.navigate(cx, Route::default());
+    assert_eq!(app.notifications(cx), 2);
+    assert_eq!(stored_property(&app, cx, id, views), Some(PropertyValue::Number(1500.)));
 }
 
 #[gpui_kit::test]
@@ -433,6 +529,38 @@ fn backspace_in_the_empty_tag_field_removes_the_last_tag(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+fn a_tag_remove_button_sits_after_the_tag_name(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    app.open_video(cx, id, VideoTab::Script);
+    app.click(cx, "property-tags-input");
+    for tag in ["ai", "programming"] {
+        app.type_text(cx, tag);
+        app.press(cx, "enter");
+    }
+
+    for tag in ["ai", "programming"] {
+        let chip = ElementId::Name(format!("tag-{tag}").into());
+        let at_rest = bounds(&app, cx, chip.clone());
+        let hover = chip.clone();
+        app.step(cx, move |window, cx| window.hover(hover, cx));
+        let hovered = bounds(&app, cx, chip);
+        let remove = bounds(&app, cx, ElementId::Name(format!("remove-tag-{tag}").into()));
+        assert_eq!(hovered, at_rest, "{tag}: the chip keeps room for the button, so nothing moves");
+        assert!(remove.right() <= hovered.right() && remove.left() >= hovered.left(), "{tag}: inside the chip");
+        // The name and the chip's leading padding come before the button.
+        assert!(
+            remove.left() - hovered.left() >= remove.size.width,
+            "{tag}: {remove:?} covers the name in {hovered:?}"
+        );
+    }
+
+    app.step(cx, |window, cx| window.hover("tag-ai", cx));
+    app.click(cx, "remove-tag-ai");
+    assert_eq!(cx.read(|cx| app.state.read(cx).video(id).expect("video").tags.clone()), ["programming"]);
+}
+
+#[gpui_kit::test]
 fn the_publish_date_opens_a_calendar_and_clears_from_it(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, &["Desk setup tour"]);
     let id = app.video_id(cx, "Desk setup tour");
@@ -543,6 +671,28 @@ fn switching_tabs_keeps_the_header_and_tabs_in_place(cx: &mut TestAppContext) {
         assert_eq!(here.0.left(), on_script.0.left(), "{tab:?}: the tab strip stays put");
         assert_eq!(here.1.left(), on_script.1.left(), "{tab:?}: the header stays put");
     }
+}
+
+#[gpui_kit::test]
+fn tabs_other_than_the_script_use_the_rails_width(cx: &mut TestAppContext) {
+    // Wide enough for the script rail, too narrow for the column beside it.
+    let app = Fixture::open_sized(cx, &["Desk setup tour"], 1160., 800.);
+    let id = app.video_id(cx, "Desk setup tour");
+    app.open_video(cx, id, VideoTab::Script);
+    assert!(app.has(cx, "script-rail"));
+    let rail = bounds(&app, cx, "script-rail");
+    let script = (bounds(&app, cx, "page-hook"), bounds(&app, cx, "page-menu"));
+    assert!(script.1.right() <= rail.left(), "the script's column ends before the rail");
+
+    app.open_video(cx, id, VideoTab::Publish);
+    // A frame for the panel to measure itself.
+    app.step(cx, |_, _| {});
+    let publish = (bounds(&app, cx, "page-hook"), bounds(&app, cx, "page-menu"));
+    assert_eq!(publish.0.left(), script.0.left(), "the header starts where it did");
+    assert!(publish.1.right() > script.1.right(), "the column takes the rail's room");
+    // 39rem: the form and the side column next to each other.
+    let panel = bounds(&app, cx, "publish-panel");
+    assert!(panel.size.width >= px(624.), "Publish has room for two columns: {panel:?}");
 }
 
 #[gpui_kit::test]
@@ -663,6 +813,27 @@ fn enter_and_down_in_the_hook_continue_in_the_script(cx: &mut TestAppContext) {
             Some("Cheap gear, real sound")
         );
     }
+}
+
+#[gpui_kit::test]
+fn enter_on_a_table_row_opens_the_script_to_write(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &[]);
+    let id = create_video(&app, cx, "Build a home studio", TemplateKind::Tutorial);
+    let row = ElementId::Name(format!("video-row-{id}").into());
+    for typed in ["K5 ", "K6 "] {
+        app.navigate(cx, Route::default());
+        // Selects the row: beside the title, before its Open button.
+        let select = row.clone();
+        app.step(cx, move |window, cx| window.click_at(select, gpui_kit::point(px(240.), px(16.)), cx));
+        app.press(cx, "enter");
+        assert_eq!(app.route(cx), Route::Video { id, tab: VideoTab::Script });
+        let first = app.script_blocks(cx)[0];
+        assert_eq!(app.script_focused_block(cx), Some(first), "the caret is in the script");
+        app.type_text(cx, typed);
+    }
+    app.navigate(cx, Route::default());
+    let stored = app.stored_blocks(cx, id, DocumentKind::Script);
+    assert!(stored[0].starts_with("K6 K5 "), "both openings typed into the script: {stored:?}");
 }
 
 #[gpui_kit::test]

@@ -27,6 +27,7 @@ use gpui_kit::{
     ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _,
     Window, div, point, px, rems,
 };
+use videocrm_core::input::normalize_title;
 use videocrm_core::{DocumentKind, Video, VideoId};
 
 use crate::ai_edit::AiEditPanel;
@@ -49,9 +50,13 @@ const COLUMN_MAX_WIDTH: Rems = Rems(46. + 2. * COLUMN_INSET.0);
 /// Narrower windows leave the script rail out so the script keeps its width;
 /// its content moves to the script menu next to the tabs.
 const RAIL_MIN_WINDOW_WIDTH: Rems = Rems(72.);
-/// Width of the script rail. Wide windows keep this lane free on every tab,
-/// so switching tabs never moves the header or the tab strip.
+/// Width of the script rail.
 const RAIL_WIDTH: Rems = Rems(16.);
+/// In windows wide enough for the rail, the page column and the rail's width
+/// form a lane that is centred, with the column at its leading edge: the
+/// header and the tab strip start at the same place on every tab, the Script
+/// tab keeps the rail's part of the lane free, and the other tabs may use it.
+const LANE_MAX_WIDTH: Rems = Rems(COLUMN_MAX_WIDTH.0 + RAIL_WIDTH.0);
 /// Side of the page icon above the title.
 const PAGE_ICON_SIZE: Rems = Rems(3.5);
 /// The tab strip's index among the scrolled page's children: header,
@@ -171,12 +176,19 @@ impl VideoPage {
             if take_tab_reveal(video_id, tab, cx) {
                 page.reveal_tab_strip();
             }
-            let focus_script = state.update(cx, |state, _| state.take_script_focus(video_id));
-            if focus_script && let Some(script) = page.script.clone() {
-                window.defer(cx, move |window, cx| script.update(cx, |script, cx| script.focus_start(window, cx)));
-            }
+            page.take_script_focus(window, cx);
         }
         page
+    }
+
+    /// Puts the caret at the start of the script when someone asked for it,
+    /// e.g. for a video just created or opened from the keyboard.
+    fn take_script_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.video_id;
+        let requested = self.state.update(cx, |state, _| state.take_script_focus(id));
+        if requested && let Some(script) = self.script.clone() {
+            window.defer(cx, move |window, cx| script.update(cx, |script, cx| script.focus_start(window, cx)));
+        }
     }
 
     pub fn video_id(&self) -> VideoId {
@@ -228,6 +240,7 @@ impl VideoPage {
         let reveal = take_tab_reveal(self.video_id, tab, cx);
         if tab != self.tab {
             self.flush(cx);
+            self.properties.update(cx, |properties, cx| properties.show_refused(window, cx));
             let scrolled = self.scroll_top();
             self.scrolled.insert(self.tab, scrolled);
             self.tab = tab;
@@ -242,6 +255,7 @@ impl VideoPage {
         if reveal {
             self.reveal_tab_strip();
         }
+        self.take_script_focus(window, cx);
         cx.notify();
     }
 
@@ -321,11 +335,9 @@ impl VideoPage {
     /// dialog requires one; the field shows the stored title again.
     fn commit_title(&mut self, cx: &mut Context<Self>) {
         // Titles are one line; pasted line breaks become spaces.
-        let title = self.title.read(cx).value().split_whitespace().collect::<Vec<_>>().join(" ");
-        if title.is_empty() {
-            return;
+        if let Some(title) = normalize_title(&self.title.read(cx).value()) {
+            self.edit(cx, |video| video.title = title);
         }
-        self.edit(cx, |video| video.title = title);
     }
 
     fn commit_hook(&mut self, cx: &mut Context<Self>) {
@@ -556,11 +568,14 @@ impl VideoPage {
             }))
     }
 
+    /// The current tab's content, as wide as the page column: documents bring
+    /// their own gutters, panels get the column's inset.
     fn render_content(&self) -> AnyElement {
+        let document = || div().w_full().max_w(COLUMN_MAX_WIDTH);
         let column = || v_flex().w_full().max_w(COLUMN_MAX_WIDTH).px(COLUMN_INSET);
         match self.tab {
-            VideoTab::Script => self.script.clone().map(IntoElement::into_any_element),
-            VideoTab::Notes => self.notes.clone().map(IntoElement::into_any_element),
+            VideoTab::Script => self.script.clone().map(|tab| document().child(tab).into_any_element()),
+            VideoTab::Notes => self.notes.clone().map(|tab| document().child(tab).into_any_element()),
             VideoTab::Footage => self.footage.clone().map(|panel| column().child(panel).into_any_element()),
             VideoTab::Publish => self.publish.clone().map(|panel| column().child(panel).into_any_element()),
         }
@@ -604,10 +619,17 @@ fn take_tab_reveal(video: VideoId, tab: VideoTab, cx: &mut App) -> bool {
 impl Render for VideoPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(video) = self.video(cx).cloned() else { return self.render_missing(cx) };
-        let column = || v_flex().flex_none().w_full().max_w(COLUMN_MAX_WIDTH).px(COLUMN_INSET);
         let wide = window.viewport_size().width >= RAIL_MIN_WINDOW_WIDTH.to_pixels(window.rem_size());
         let rail = self.rail.clone().filter(|_| wide && self.tab == VideoTab::Script);
         let has_document = self.document().is_some();
+        let lane = || {
+            v_flex()
+                .flex_none()
+                .w_full()
+                .max_w(if wide { LANE_MAX_WIDTH } else { COLUMN_MAX_WIDTH })
+                .when(rail.is_some(), |this| this.pr(RAIL_WIDTH))
+        };
+        let column = || v_flex().w_full().max_w(COLUMN_MAX_WIDTH).px(COLUMN_INSET);
 
         div()
             .relative()
@@ -623,11 +645,10 @@ impl Render for VideoPage {
                     .track_scroll(&self.scroll)
                     .items_center()
                     .pt_12()
-                    .when(wide, |this| this.pr(RAIL_WIDTH))
-                    .child(column().child(self.render_header(&video, cx)))
-                    .child(column().pt_4().child(self.properties.clone()))
-                    .child(column().pt_6().child(self.render_tabs(wide, cx)))
-                    .child(div().flex_none().w_full().pt_4().flex().justify_center().child(self.render_content()))
+                    .child(lane().child(column().child(self.render_header(&video, cx))))
+                    .child(lane().pt_4().child(column().child(self.properties.clone())))
+                    .child(lane().pt_6().child(column().child(self.render_tabs(wide, cx))))
+                    .child(lane().pt_4().child(self.render_content()))
                     .child(div().id("page-end").test_support().w_full().flex_1().min_h_24().when(
                         has_document,
                         |this| {

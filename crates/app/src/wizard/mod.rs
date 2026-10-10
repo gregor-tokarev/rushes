@@ -8,12 +8,16 @@ use gpui_kit::component::form::{Field, Form};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, Icon, Side, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, Side, Sizable as _, StyledExt as _, ThemeStyled as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, TestSupportExt as _, Window, div,
+    App, AppContext as _, Context, Entity, FocusHandle, Global, InteractiveElement as _, IntoElement, KeyBinding,
+    MouseButton, ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, TestSupportExt as _, Window, actions, div,
 };
+use videocrm_core::input::normalize_title;
 use videocrm_core::templates::TemplateKind;
 use videocrm_core::{NewVideo, VideoFormat, VideoStatus};
 
@@ -22,11 +26,34 @@ use crate::state::AppState;
 use crate::ui::dialog::form_footer;
 use crate::ui::{ChoiceCard, PageIcon};
 
+actions!(new_video, [PreviousFormat, NextFormat]);
+
+/// Key context of the Format choice, where the arrow keys pick a format.
+const FORMAT_CONTEXT: &str = "NewVideoFormat";
+
+struct KeyBindingsInstalled;
+
+impl Global for KeyBindingsInstalled {}
+
+fn bind_keys(cx: &mut App) {
+    if cx.has_global::<KeyBindingsInstalled>() {
+        return;
+    }
+    cx.set_global(KeyBindingsInstalled);
+    cx.bind_keys([
+        KeyBinding::new("left", PreviousFormat, Some(FORMAT_CONTEXT)),
+        KeyBinding::new("up", PreviousFormat, Some(FORMAT_CONTEXT)),
+        KeyBinding::new("right", NextFormat, Some(FORMAT_CONTEXT)),
+        KeyBinding::new("down", NextFormat, Some(FORMAT_CONTEXT)),
+    ]);
+}
+
 /// Opens the new-video dialog. `status` preselects the stage (board column "+").
 pub fn open_new_video_dialog(status: Option<VideoStatus>, window: &mut Window, cx: &mut App) {
     if window.has_active_dialog(cx) {
         return;
     }
+    bind_keys(cx);
     let form = cx.new(|cx| NewVideoForm::new(status.unwrap_or_default(), window, cx));
     let title = form.read(cx).title.clone();
     let width = window.rem_size() * 36.;
@@ -52,6 +79,8 @@ struct NewVideoForm {
     title: Entity<InputState>,
     hook: Entity<InputState>,
     format: VideoFormat,
+    /// The Format choice is one Tab stop; the arrow keys move within it.
+    format_focus: FocusHandle,
     template: TemplateKind,
     /// Whether the user picked the template, so a format change keeps it.
     template_chosen: bool,
@@ -85,6 +114,7 @@ impl NewVideoForm {
             title,
             hook,
             format: VideoFormat::LongForm,
+            format_focus: cx.focus_handle().tab_stop(true),
             template: TemplateKind::Blank,
             template_chosen: false,
             status,
@@ -101,6 +131,15 @@ impl NewVideoForm {
             self.template = default_template(format);
         }
         cx.notify();
+    }
+
+    /// Picks the format `delta` places before or after the current one.
+    fn step_format(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let current = VideoFormat::ALL.iter().position(|format| *format == self.format).unwrap_or(0);
+        let next = current.saturating_add_signed(delta).min(VideoFormat::ALL.len() - 1);
+        if next != current {
+            self.set_format(VideoFormat::ALL[next], cx);
+        }
     }
 
     fn set_template(&mut self, template: TemplateKind, cx: &mut Context<Self>) {
@@ -120,12 +159,11 @@ impl NewVideoForm {
     /// close hands focus back to the element focused before the dialog once
     /// the animation ends, which would take the caret out of the new script.
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let title = self.title.read(cx).value().trim().to_string();
-        if title.is_empty() {
+        let Some(title) = normalize_title(&self.title.read(cx).value()) else {
             self.error = Some("Give the video a title.".into());
             cx.notify();
             return;
-        }
+        };
         window.close_dialog(cx);
         let new = NewVideo {
             title,
@@ -144,22 +182,40 @@ impl NewVideoForm {
                 video.status = status;
                 state.update_video(video, cx);
             }
-            state.open_new_video(id, cx);
+            state.open_script(id, cx);
         });
     }
 
-    fn render_format(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A segmented control that is one Tab stop: the arrow keys pick the
+    /// format, and a click picks one without taking the keyboard.
+    fn render_format(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = VideoFormat::ALL.iter().position(|format| *format == self.format).unwrap_or(0);
-        TabBar::new("new-video-format")
-            .segmented()
-            .small()
-            .selected_index(selected)
-            .children(VideoFormat::ALL.iter().map(|format| Tab::new().label(format.label())))
-            .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                if let Some(format) = VideoFormat::ALL.get(*ix) {
-                    this.set_format(*format, cx);
-                }
-            }))
+        let focused = self.format_focus.is_focused(window);
+        div()
+            .id("new-video-format")
+            .test_support()
+            .role(Role::RadioGroup)
+            .aria_label(format!("Format: {}", self.format.label()))
+            .track_focus(&self.format_focus)
+            .key_context(FORMAT_CONTEXT)
+            .on_action(cx.listener(|this, _: &PreviousFormat, _, cx| this.step_format(-1, cx)))
+            .on_action(cx.listener(|this, _: &NextFormat, _, cx| this.step_format(1, cx)))
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            // The segmented bar's own radius, so the ring follows its outline.
+            .rounded(cx.theme().radius)
+            .when(focused, |this| this.focus_ring_style(window, cx))
+            .child(
+                TabBar::new("new-video-format-tabs")
+                    .segmented()
+                    .small()
+                    .selected_index(selected)
+                    .children(VideoFormat::ALL.iter().map(|format| Tab::new().label(format.label())))
+                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                        if let Some(format) = VideoFormat::ALL.get(*ix) {
+                            this.set_format(*format, cx);
+                        }
+                    })),
+            )
     }
 
     fn render_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -212,7 +268,7 @@ fn default_template(format: VideoFormat) -> TemplateKind {
 }
 
 impl Render for NewVideoForm {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .id("new-video-form")
             // The dialog spaces its title from the body by a field gap; a form
@@ -235,7 +291,7 @@ impl Render for NewVideoForm {
                                     v_flex()
                                         .gap_1()
                                         .child(div().text_sm().font_medium().child("Format"))
-                                        .child(self.render_format(cx)),
+                                        .child(self.render_format(window, cx)),
                                 )
                                 .child(
                                     v_flex()

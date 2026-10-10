@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use chrono::{NaiveDate, Utc};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::calendar::{Calendar, CalendarEvent, CalendarState, Date};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Backspace, Input, InputEvent, InputState};
@@ -18,9 +18,9 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, TestSupportExt as _, Window, div,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, TestSupportExt as _, Window, div, rems,
 };
-use videocrm_core::input::normalize_link;
+use videocrm_core::input::{normalize_link, parse_number};
 use videocrm_core::{
     Column, PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, Video, VideoFormat, VideoId,
     VideoStatus, ViewKind,
@@ -50,6 +50,9 @@ pub struct PropertiesPanel {
     /// Editors of text, number and URL properties, each with the subscription
     /// that commits it, so both go away when the property changes type.
     inputs: HashMap<PropertyId, (Entity<InputState>, Subscription)>,
+    /// Text a field still holds after its number was refused, until the
+    /// field shows the stored value again; saving it again is not reported again.
+    refused: HashMap<PropertyId, String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -99,6 +102,7 @@ impl PropertiesPanel {
             folder_exists: false,
             folder_check: None,
             inputs: HashMap::new(),
+            refused: HashMap::new(),
             _subscriptions: subscriptions,
         };
         panel.sync(window, cx);
@@ -166,6 +170,9 @@ impl PropertiesPanel {
     fn commit_input(&mut self, id: PropertyId, cx: &mut Context<Self>) {
         let Some((input, _)) = self.inputs.get(&id) else { return };
         let text = input.read(cx).value().trim().to_string();
+        if self.refused.get(&id) == Some(&text) {
+            return;
+        }
         let stored = self.video(cx).and_then(|video| video.properties.get(&id)).cloned();
         let unchanged = match &stored {
             Some(value) => text == property_text(value) || text == display_text(value),
@@ -176,14 +183,26 @@ impl PropertiesPanel {
         }
     }
 
-    /// Shows the stored value in a field that is not being edited.
+    /// Shows the stored value again in the fields whose number was refused.
+    pub fn show_refused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<PropertyId> = self.refused.keys().copied().collect();
+        for id in ids {
+            self.show_stored(id, window, cx);
+        }
+    }
+
+    /// Shows the stored value in a field that is not being edited, and in one
+    /// whose number was refused: as it is edited while the field has focus.
     fn show_stored(&mut self, id: PropertyId, window: &mut Window, cx: &mut Context<Self>) {
         let Some((input, _)) = self.inputs.get(&id) else { return };
         let input = input.clone();
-        if input.read(cx).focus_handle(cx).is_focused(window) {
+        let focused = input.read(cx).focus_handle(cx).is_focused(window);
+        let refused = self.refused.remove(&id).is_some();
+        if focused && !refused {
             return;
         }
-        let text = self.video(cx).and_then(|video| video.properties.get(&id)).map(display_text).unwrap_or_default();
+        let stored = self.video(cx).and_then(|video| video.properties.get(&id));
+        let text = stored.map(if focused { property_text } else { display_text }).unwrap_or_default();
         if input.read(cx).value().as_ref() != text {
             input.update(cx, |input, cx| input.set_value(text, window, cx));
         }
@@ -259,6 +278,7 @@ impl PropertiesPanel {
 
         self.inputs
             .retain(|id, _| properties.iter().any(|property| property.id == *id && is_text_like(&property.kind)));
+        self.refused.retain(|id, _| self.inputs.contains_key(id));
         if let Some(DateField::Custom(id)) = self.date_open
             && !properties.iter().any(|property| property.id == id && property.kind == PropertyKind::Date)
         {
@@ -307,12 +327,13 @@ impl PropertiesPanel {
             None
         } else {
             match property.kind {
-                PropertyKind::Number => match text.replace(',', "").parse::<f64>() {
-                    Ok(number) => Some(PropertyValue::Number(number)),
-                    Err(_) => {
-                        let message = format!("“{text}” isn’t a number, so {} wasn’t changed.", property.name);
+                PropertyKind::Number => match parse_number(&text) {
+                    Some(number) => Some(PropertyValue::Number(number)),
+                    None => {
+                        let message = format::not_a_number(&text, &property.name);
                         self.state.update(cx, |state, cx| state.report_error(message, cx));
-                        self.state.update(cx, |state, cx| state.reload(cx));
+                        self.refused.insert(id, text);
+                        cx.notify();
                         return;
                     }
                 },
@@ -408,8 +429,9 @@ impl PropertiesPanel {
             })
     }
 
-    /// Tags as chips. A chip's remove button shows on hover; from the
-    /// keyboard, Backspace in the empty tag field removes the last tag.
+    /// Tags as chips. A chip keeps room at its end for its remove button,
+    /// which shows on hover; from the keyboard, Backspace in the empty tag
+    /// field removes the last tag.
     fn render_tags(&self, video: &Video, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .flex_wrap()
@@ -421,32 +443,23 @@ impl PropertiesPanel {
                 let name = tag.clone();
                 let group = SharedString::from(format!("tag-chip-{tag}"));
                 let colors = tag_colors(free_tag_color(tag), cx);
-                h_flex()
-                    .id(SharedString::from(format!("tag-{tag}")))
-                    .group(group.clone())
-                    .relative()
-                    .child(Chip::new(tag.clone(), free_tag_color(tag)))
-                    .child(
-                        // Over the chip's end, in the chip's own colors.
-                        h_flex()
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .right_0()
-                            .rounded(cx.theme().radius_tokens().sm)
-                            .bg(colors.background)
-                            .invisible()
-                            .group_hover(group, |this| this.visible())
-                            .child(
-                                Button::new(SharedString::from(format!("remove-tag-{tag}")))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(Icon::new(IconName::X).text_color(colors.foreground))
-                                    .tab_stop(false)
-                                    .accessibility_label(format!("Remove tag {tag}"))
-                                    .on_click(cx.listener(move |this, _, _, cx| this.remove_tag(&name, cx))),
-                            ),
-                    )
+                // Pressed and hovered in the chip's own color, a shade darker.
+                let fill = ButtonCustomVariant::new(cx)
+                    .foreground(colors.foreground)
+                    .hover(colors.foreground.opacity(0.15))
+                    .active(colors.foreground.opacity(0.25));
+                let remove = Button::new(SharedString::from(format!("remove-tag-{tag}")))
+                    .custom(fill)
+                    .size(rems(0.875))
+                    .rounded(cx.theme().radius_tokens().sm)
+                    .icon(Icon::new(IconName::X).xsmall())
+                    .tab_stop(false)
+                    .accessibility_label(format!("Remove tag {tag}"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.remove_tag(&name, cx)));
+                h_flex().id(SharedString::from(format!("tag-{tag}"))).test_support().group(group.clone()).child(
+                    Chip::new(tag.clone(), free_tag_color(tag))
+                        .suffix(div().invisible().group_hover(group, |this| this.visible()).child(remove)),
+                )
             }))
             .child(
                 div().capture_action(cx.listener(Self::on_tag_backspace)).child(

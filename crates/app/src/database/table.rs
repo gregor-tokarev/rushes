@@ -711,9 +711,13 @@ pub(crate) fn video_menu(
             .on_click(command(|panel, id, _, cx| panel.open_video(id, cx))),
     )
     .when(renamable, |menu| {
-        menu.item(PopupMenuItem::new("Rename").icon(IconName::Pencil).on_click(command(|panel, id, window, cx| {
-            let cell = CellRef { video: id, column: Column::Builtin(BuiltinField::Title) };
-            panel.start_editing(cell, window, cx);
+        menu.item(PopupMenuItem::new("Rename").icon(IconName::Pencil).on_click(command(|_, id, window, cx| {
+            // Once the menu has closed: it takes the keyboard back while it is open.
+            let panel = cx.weak_entity();
+            window.defer(cx, move |window, cx| {
+                let cell = CellRef { video: id, column: Column::Builtin(BuiltinField::Title) };
+                _ = panel.update(cx, |panel, cx| panel.start_editing(cell, window, cx));
+            });
         })))
     })
     .item(
