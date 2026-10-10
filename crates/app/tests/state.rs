@@ -352,7 +352,7 @@ fn changes_that_cant_be_written_before_quitting_are_written_at_the_next_start(cx
     let started = Instant::now();
     cx.update(|cx| cx.shutdown());
     let took = started.elapsed();
-    assert!(took < QUIT_SAVE_TIMEOUT + Duration::from_secs(2), "quitting took {took:?}");
+    assert!(took < QUIT_SAVE_TIMEOUT + Duration::from_secs(1), "quitting took {took:?}");
     let unsaved = app.database.with_file_name("unsaved-changes.json");
     assert!(unsaved.exists(), "the change is kept");
     #[cfg(unix)]

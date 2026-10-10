@@ -275,6 +275,10 @@ impl Queue {
         self.entries.is_empty()
     }
 
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     fn writes(&self) -> Vec<(u64, Write)> {
         self.entries.iter().map(|entry| (entry.revision, entry.write.clone())).collect()
     }
@@ -478,6 +482,8 @@ pub(super) struct Writes {
     unsaved_file: Option<PathBuf>,
     /// Whether that file holds writes, to be removed once they landed.
     unsaved_kept: bool,
+    /// How many writes quitting kept last, so each quit hook doesn't log them again.
+    logged_kept: usize,
     _quit: Option<Subscription>,
 }
 
@@ -510,6 +516,7 @@ impl Writes {
             quit_deadline: None,
             unsaved_file,
             unsaved_kept,
+            logged_kept: 0,
             _quit: None,
         };
         if writes.is_empty() {
@@ -548,9 +555,14 @@ impl Writes {
     /// once nothing is left.
     fn keep_unsaved(&mut self) {
         let writes: Vec<Write> = lock(&self.queue).entries.iter().map(|entry| entry.write.clone()).collect();
+        let changes = match writes.len() {
+            1 => "1 change".to_string(),
+            count => format!("{count} changes"),
+        };
+        let log = std::mem::replace(&mut self.logged_kept, writes.len()) != writes.len();
         let Some(file) = &self.unsaved_file else {
-            if !writes.is_empty() {
-                eprintln!("videocrm: {} changes couldn’t be saved before quitting", writes.len());
+            if log && !writes.is_empty() {
+                eprintln!("videocrm: {changes} couldn’t be saved before quitting");
             }
             return;
         };
@@ -567,15 +579,14 @@ impl Writes {
         match write_private_json(file, &writes) {
             Ok(()) => {
                 self.unsaved_kept = true;
-                eprintln!(
-                    "videocrm: {} changes couldn’t be saved before quitting; kept in {} and saved at the next start",
-                    writes.len(),
-                    file.display()
-                );
+                if log {
+                    eprintln!(
+                        "videocrm: {changes} couldn’t be saved before quitting; kept in {} for the next start",
+                        file.display()
+                    );
+                }
             }
-            Err(error) => {
-                eprintln!("videocrm: {} changes are lost, can't write {}: {error}", writes.len(), file.display())
-            }
+            Err(error) => eprintln!("videocrm: {changes} are lost, can't write {}: {error}", file.display()),
         }
     }
 }
@@ -706,17 +717,20 @@ impl AppState {
         let deadline = *self.writes.quit_deadline.get_or_insert_with(|| Instant::now() + QUIT_SAVE_TIMEOUT);
         // A pass in flight finishes first: it holds the writer's connection.
         self.writes.worker = None;
+        let mut failure = None;
         while !self.writes.is_empty() {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if let Err(error) = lock(&self.writes.store).set_busy_timeout(remaining) {
+            // Taking the connection waits for a pass in flight, within the deadline.
+            let store = lock(&self.writes.store);
+            if let Err(error) = store.set_busy_timeout(deadline.saturating_duration_since(Instant::now())) {
                 eprintln!("videocrm: can't set the writer's busy timeout: {error}");
             }
+            drop(store);
             let pass = write_queue(&self.writes.store, &self.writes.queue);
             log_refused(&pass);
             match pass.failed {
                 Some(error) if error.is_busy() && Instant::now() < deadline => {}
                 Some(error) => {
-                    eprintln!("videocrm: couldn’t save before quitting: {error}");
+                    failure = Some(error);
                     break;
                 }
                 None if pass.written == 0 && pass.refused.is_empty() => break,
@@ -725,6 +739,11 @@ impl AppState {
         }
         if let Err(error) = lock(&self.writes.store).set_busy_timeout(WRITE_BUSY_TIMEOUT) {
             eprintln!("videocrm: can't set the writer's busy timeout: {error}");
+        }
+        if let Some(error) = failure
+            && lock(&self.writes.queue).len() != self.writes.logged_kept
+        {
+            eprintln!("videocrm: couldn’t save before quitting: {error}");
         }
         self.writes.keep_unsaved();
     }
