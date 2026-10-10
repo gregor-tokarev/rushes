@@ -105,7 +105,7 @@ impl DatabasePanel {
                 .px_1()
                 .text_color(cx.theme().muted_foreground)
                 .child(Icon::new(IconName::Plus).xsmall())
-                .child("New"),
+                .child("New video…"),
         );
         let card_elements: Vec<AnyElement> = cards.iter().map(|row| self.render_card(row, status, now, cx)).collect();
 
