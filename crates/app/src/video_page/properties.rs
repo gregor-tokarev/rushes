@@ -47,13 +47,22 @@ pub struct PropertiesPanel {
     /// Whether the media folder exists, checked off the UI thread after each data change.
     folder_exists: bool,
     folder_check: Option<Task<()>>,
-    /// Editors of text, number and URL properties, each with the subscription
-    /// that commits it, so both go away when the property changes type.
-    inputs: HashMap<PropertyId, (Entity<InputState>, Subscription)>,
+    /// Editors of text, number and URL properties.
+    inputs: HashMap<PropertyId, PropertyField>,
     /// Text a field still holds after its number was refused, until the
     /// field shows the stored value again; saving it again is not reported again.
     refused: HashMap<PropertyId, String>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// The editor of a text, number or URL property.
+struct PropertyField {
+    input: Entity<InputState>,
+    /// What the field last showed from the video or last saved: text that
+    /// differs was typed since and isn't saved yet.
+    shown: String,
+    /// Commits the field; it goes away with the field when the property changes type.
+    _subscription: Subscription,
 }
 
 /// A date row of the panel.
@@ -166,10 +175,16 @@ impl PropertiesPanel {
         self.add_tag(tag, cx);
     }
 
-    /// Commits a text, number or URL field when its text differs from the stored value.
+    /// Commits a text, number or URL field when text was typed into it since
+    /// it last showed the stored value, and the text differs from that value.
     fn commit_input(&mut self, id: PropertyId, cx: &mut Context<Self>) {
-        let Some((input, _)) = self.inputs.get(&id) else { return };
-        let text = input.read(cx).value().trim().to_string();
+        let Some(field) = self.inputs.get_mut(&id) else { return };
+        let typed = field.input.read(cx).value().to_string();
+        if typed == field.shown {
+            return;
+        }
+        let text = typed.trim().to_string();
+        field.shown = typed;
         if self.refused.get(&id) == Some(&text) {
             return;
         }
@@ -193,10 +208,16 @@ impl PropertiesPanel {
 
     /// Shows the stored value in a field that is not being edited, and in one
     /// whose number was refused: as it is edited while the field has focus.
+    /// A field left with typed text still unsaved, which happens when the
+    /// window isn't told it lost focus, has that text saved first rather
+    /// than replaced.
     fn show_stored(&mut self, id: PropertyId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((input, _)) = self.inputs.get(&id) else { return };
-        let input = input.clone();
+        let Some(field) = self.inputs.get(&id) else { return };
+        let input = field.input.clone();
         let focused = input.read(cx).focus_handle(cx).is_focused(window);
+        if !focused {
+            self.commit_input(id, cx);
+        }
         let refused = self.refused.remove(&id).is_some();
         if focused && !refused {
             return;
@@ -204,21 +225,26 @@ impl PropertiesPanel {
         let stored = self.video(cx).and_then(|video| video.properties.get(&id));
         let text = stored.map(if focused { property_text } else { display_text }).unwrap_or_default();
         if input.read(cx).value().as_ref() != text {
-            input.update(cx, |input, cx| input.set_value(text, window, cx));
+            input.update(cx, |input, cx| input.set_value(text.clone(), window, cx));
+        }
+        if let Some(field) = self.inputs.get_mut(&id) {
+            field.shown = text;
         }
     }
 
     /// A number is edited as typed, without the grouping it is shown with.
     fn show_for_editing(&mut self, id: PropertyId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((input, _)) = self.inputs.get(&id) else { return };
-        let input = input.clone();
         let Some(value @ PropertyValue::Number(_)) =
             self.video(cx).and_then(|video| video.properties.get(&id)).cloned()
         else {
             return;
         };
-        if input.read(cx).value().as_ref() == display_text(&value) {
-            input.update(cx, |input, cx| input.set_value(property_text(&value), window, cx));
+        let Some(field) = self.inputs.get_mut(&id) else { return };
+        let shown = field.input.read(cx).value().to_string();
+        if shown == field.shown && shown == display_text(&value) {
+            field.shown = property_text(&value);
+            let text = field.shown.clone();
+            field.input.update(cx, |input, cx| input.set_value(text, window, cx));
         }
     }
 
@@ -291,7 +317,7 @@ impl PropertiesPanel {
                 continue;
             }
             let text = video.properties.get(&id).map(display_text).unwrap_or_default();
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Empty").default_value(text));
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Empty").default_value(text.clone()));
             let subscription =
                 cx.subscribe_in(&input, window, move |this, _, event: &InputEvent, window, cx| match event {
                     InputEvent::Focus => this.show_for_editing(id, window, cx),
@@ -301,7 +327,7 @@ impl PropertiesPanel {
                     }
                     InputEvent::Change => {}
                 });
-            self.inputs.insert(id, (input, subscription));
+            self.inputs.insert(id, PropertyField { input, shown: text, _subscription: subscription });
         }
         cx.notify();
     }
@@ -553,7 +579,7 @@ impl PropertiesPanel {
         let id = property.id;
         match &property.kind {
             PropertyKind::Text | PropertyKind::Number | PropertyKind::Url => {
-                let Some((input, _)) = self.inputs.get(&id) else { return div().into_any_element() };
+                let Some(PropertyField { input, .. }) = self.inputs.get(&id) else { return div().into_any_element() };
                 let url = match value {
                     Some(PropertyValue::Url(url)) if !url.trim().is_empty() => Some(url.clone()),
                     _ => None,

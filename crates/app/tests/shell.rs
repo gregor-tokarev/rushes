@@ -662,6 +662,35 @@ fn shutting_down_writes_pending_edits(cx: &mut TestAppContext) {
     assert_eq!(script.blocks[0].text, "Last words");
 }
 
+#[gpui_kit::test]
+fn a_table_cell_being_edited_is_saved_on_leaving_and_on_quit(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    let stored_title = |app: &Fixture, cx: &mut TestAppContext| {
+        cx.read(|cx| {
+            let store = app.state.read(cx).store();
+            let store = store.lock().expect("store lock");
+            store.get_video(id).expect("read video").map(|video| video.title)
+        })
+    };
+    let rename = |app: &Fixture, cx: &mut TestAppContext, typed: &str| {
+        app.step(cx, |window, cx| window.double_click(format!("title-text-{id}"), cx));
+        app.type_text(cx, typed);
+    };
+
+    // Left by a route change, not a click that takes the focus.
+    rename(&app, cx, " 2026");
+    app.navigate(cx, Route::Uploads);
+    assert_eq!(stored_title(&app, cx).as_deref(), Some("Desk setup tour 2026"));
+
+    app.navigate(cx, Route::default());
+    rename(&app, cx, " review");
+    let store = cx.read(|cx| app.state.read(cx).store());
+    cx.update(|cx| cx.shutdown());
+    let stored = store.lock().expect("store lock").get_video(id).expect("read video").map(|video| video.title);
+    assert_eq!(stored.as_deref(), Some("Desk setup tour 2026 review"));
+}
+
 /// Creates a video from `template` through the app state, as the wizard does.
 fn create_video(app: &Fixture, cx: &mut TestAppContext, title: &str, template: TemplateKind) -> VideoId {
     let state = app.state.clone();

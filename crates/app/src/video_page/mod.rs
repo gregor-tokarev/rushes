@@ -69,6 +69,10 @@ pub struct VideoPage {
     tab: VideoTab,
     title: Entity<TextareaState>,
     hook: Entity<InputState>,
+    /// What the title and hook fields last showed from the video or last
+    /// saved: text that differs was typed since and isn't saved yet.
+    shown_title: String,
+    shown_hook: String,
     properties: Entity<PropertiesPanel>,
     script: Option<Entity<DocumentTab>>,
     rail: Option<Entity<ScriptRail>>,
@@ -104,17 +108,19 @@ impl VideoPage {
             cx.set_global(TabReveal::default());
         }
         let video = state.read(cx).video(video_id).cloned();
+        let shown_title = video.as_ref().map(|video| video.title.clone()).unwrap_or_default();
+        let shown_hook = video.as_ref().map(|video| video.hook.clone()).unwrap_or_default();
         let title = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 8)
                 .soft_wrap(true)
                 .placeholder("Untitled")
-                .default_value(video.as_ref().map(|video| video.title.clone()).unwrap_or_default())
+                .default_value(shown_title.clone())
         });
         let hook = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("One-line hook — why would someone click?")
-                .default_value(video.as_ref().map(|video| video.hook.clone()).unwrap_or_default())
+                .default_value(shown_hook.clone())
         });
         let properties = cx.new(|cx| PropertiesPanel::new(video_id, window, cx));
         let subscriptions = vec![
@@ -130,7 +136,10 @@ impl VideoPage {
                 }
             }),
             cx.subscribe_in(&hook, window, |this, _, event: &InputEvent, window, cx| match event {
-                InputEvent::Blur => this.commit_hook(cx),
+                InputEvent::Blur => {
+                    this.commit_hook(cx);
+                    this.sync_header(window, cx);
+                }
                 // The hook is one line: Enter continues in the document below it.
                 InputEvent::PressEnter { .. } => {
                     this.commit_hook(cx);
@@ -161,6 +170,8 @@ impl VideoPage {
             tab,
             title,
             hook,
+            shown_title,
+            shown_hook,
             properties,
             script: None,
             rail: None,
@@ -332,17 +343,30 @@ impl VideoPage {
         }
     }
 
-    /// Saves the typed title. An emptied title is not saved, as the New video
-    /// dialog requires one; the field shows the stored title again.
+    /// Saves the title typed since the field last showed the stored one. An
+    /// emptied title is not saved, as the New video dialog requires one; the
+    /// field shows the stored title again.
     fn commit_title(&mut self, cx: &mut Context<Self>) {
+        let typed = self.title.read(cx).value().to_string();
+        if typed == self.shown_title {
+            return;
+        }
         // Titles are one line; pasted line breaks become spaces.
-        if let Some(title) = normalize_title(&self.title.read(cx).value()) {
+        let title = normalize_title(&typed);
+        self.shown_title = typed;
+        if let Some(title) = title {
             self.edit(cx, |video| video.title = title);
         }
     }
 
+    /// Saves the hook typed since the field last showed the stored one.
     fn commit_hook(&mut self, cx: &mut Context<Self>) {
-        let hook = self.hook.read(cx).value().trim().to_string();
+        let typed = self.hook.read(cx).value().to_string();
+        if typed == self.shown_hook {
+            return;
+        }
+        let hook = typed.trim().to_string();
+        self.shown_hook = typed;
         self.edit(cx, |video| video.hook = hook);
     }
 
@@ -350,14 +374,31 @@ impl VideoPage {
         self.edit(cx, |video| video.icon = icon);
     }
 
-    /// Shows stored title and hook in the inputs that are not being edited.
+    /// Shows the stored title and hook in the fields that are not being
+    /// edited. A field left with typed text still unsaved, which happens when
+    /// the window isn't told it lost focus, has that text saved first rather
+    /// than replaced; a focused field keeps its text until it is left.
     fn sync_header(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(video) = self.video(cx).cloned() else { return };
-        if !self.title.read(cx).focus_handle(cx).is_focused(window) && self.title.read(cx).value() != video.title {
-            self.title.update(cx, |input, cx| input.set_value(video.title.clone(), window, cx));
+        let title_focused = self.title.read(cx).focus_handle(cx).is_focused(window);
+        let hook_focused = self.hook.read(cx).focus_handle(cx).is_focused(window);
+        if !title_focused {
+            self.commit_title(cx);
         }
-        if !self.hook.read(cx).focus_handle(cx).is_focused(window) && self.hook.read(cx).value() != video.hook {
-            self.hook.update(cx, |input, cx| input.set_value(video.hook.clone(), window, cx));
+        if !hook_focused {
+            self.commit_hook(cx);
+        }
+        let Some(video) = self.video(cx).cloned() else { return };
+        if !title_focused {
+            if self.title.read(cx).value() != video.title {
+                self.title.update(cx, |input, cx| input.set_value(video.title.clone(), window, cx));
+            }
+            self.shown_title = video.title.clone();
+        }
+        if !hook_focused {
+            if self.hook.read(cx).value() != video.hook {
+                self.hook.update(cx, |input, cx| input.set_value(video.hook.clone(), window, cx));
+            }
+            self.shown_hook = video.hook;
         }
     }
 

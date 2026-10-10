@@ -157,6 +157,10 @@ impl Workspace {
             }),
             cx.on_app_quit(|this, cx| {
                 this.flush_pending_saves(cx);
+                // The panel's own events are no longer delivered once the app quits.
+                if let Some(video) = this.database.update(cx, |panel, cx| panel.take_edited_video(cx)) {
+                    this.state.update(cx, |state, cx| state.update_video(video, cx));
+                }
                 if let Some(settings) = &this.settings {
                     settings.update(cx, |settings, cx| settings.commit_before_quit(cx));
                 }
@@ -318,6 +322,9 @@ impl Workspace {
             self.flush_pending_saves(cx);
         }
         let page = Page::of(&route);
+        if self.shown == Some(Page::Database) && page != Page::Database {
+            self.database.update(cx, |panel, cx| panel.save_editing(window, cx));
+        }
         if self.shown == Some(Page::Settings)
             && page != Page::Settings
             && let Some(settings) = &self.settings
