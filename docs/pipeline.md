@@ -20,8 +20,18 @@ over.
 | `Feedback { message }` | apply the feedback (to the strategy if nothing was rendered yet), re-render, summarise | `Rendering -> Succeeded` |
 | `Auto { brief }` | everything in one pass; the creator pre-approved the strategy | `Rendering -> Succeeded` |
 
+A phase that fails, is cancelled or is interrupted (VideoCRM closed) leaves what an
+earlier phase made on offer: a revised strategy that does not finish leaves the
+strategy before it awaiting approval, and a change to a rendered edit leaves the run
+`Succeeded` with its cut. The failure is kept as the run's error and shown next to the
+strategy or the cut, with a retry; only a run with neither ends `Failed` or
+`Cancelled`. The app's "Agent time" is the sum of the phases (the agent's reported
+`duration_ms`, or a phase's first to last event), so waiting for approval does not count.
+
 `Plan` and `Auto` prompts give the absolute `SKILL.md` path, list the footage with
-duration and frame size (when `ffprobe` is available), include the creator's brief and
+duration and frame size (when `ffprobe` is available; the takes are the files with a
+`FOOTAGE_EXTENSIONS` extension, the same list the app's footage card shows, which a
+test keeps in agreement), include the creator's brief and
 tell the agent that it runs headless: it must make sensible choices instead of asking,
 and put open questions at the end of the strategy. All outputs go to `<footage>/edit/`.
 `Approve`/`Feedback` without a session id still work: they point the agent at
@@ -53,11 +63,15 @@ Every render writes the same `edit/final.mp4`, so a later render (an iteration, 
 edit of the same footage) would overwrite a cut that an earlier edit or the upload form
 refers to. `keep_final_cut(footage_dir)` moves the fresh `edit/final.mp4` to
 `edit/cuts/final-<n>.mp4` (numbers only count up) and returns that path; `kept_cuts`
-lists them, newest first. The app keeps the cut of every successful render this way and
-stores the kept path as the run's output; before a render starts, it also moves a cut
-still referenced at the shared path (left by an earlier version) into `edit/cuts/`.
-`edit/preview.mp4`, `edit/project.md` and the transcripts stay shared: they are the
-skill's working state for the footage.
+lists them, newest first. The app keeps the cut of every render this way and stores
+the kept path as the run's output, also when the agent wrote `edit/final.mp4` and then
+ended with an error (the run is done, with "Rendered, but the agent stopped with an
+error" as its error); a cancelled render's file is not offered. The agent's summary is
+saved naming the kept file instead of `edit/final.mp4`. Before a render starts, the app
+moves whatever is left at the shared path (a cancelled render, a cut an earlier version
+kept there) into `edit/cuts/`, so nothing is overwritten; when that fails the render
+does not start. `edit/preview.mp4`, `edit/project.md` and the transcripts stay shared:
+they are the skill's working state for the footage.
 
 ## Agent invocation
 
@@ -84,6 +98,16 @@ claude -p <prompt> --output-format stream-json --verbose [--resume=<id>] [--mode
   whatever is left. The same happens to processes the agent leaves running when it exits,
   and when `run_phase` unwinds (a panicking event callback). On non-Unix platforms only
   the agent process is killed.
+- On Linux the group also dies with the app, even when the app is killed: its leader is
+  a small `/bin/sh` script that starts the agent, gets `SIGTERM` when the app's thread
+  running the phase ends (`PR_SET_PDEATHSIG`, set before it runs) and passes it on to
+  the whole group, and waits for the agent so the group keeps its leader while the
+  agent lives. `run_phase` reports the group first, as a `Spawned` event
+  (`AgentProcess`: leader pid, boot id, start time); the app stores it with the run's
+  events. When an earlier session crashed while an agent worked, startup calls
+  `stop_leftover_agent`, which stops the group (`SIGTERM`, `SIGKILL` after a grace
+  period) only while its leader is still that process (same boot, same start time),
+  before it marks the run interrupted.
 
 ### Events
 
@@ -92,6 +116,7 @@ app can persist them as run events):
 
 | Event | From |
 | --- | --- |
+| `Spawned { process }` | this crate, when the agent starts (before anything it prints) |
 | `Init { session_id, model, cwd, tools }` | `system/init` |
 | `AssistantText { text }`, `Thinking { text }` | assistant content blocks (redacted thinking is skipped) |
 | `ToolUse { id, name, summary }` | `tool_use` blocks; summary = Bash command's first line, file path, skill name, sub-agent description, ... |
@@ -167,7 +192,9 @@ cargo clippy -p videocrm-pipeline --all-targets
   - `FAKE_AGENT_PID_FILE=<path>`, `FAKE_AGENT_ARGV_FILE=<path>`: record pids / argv.
 - `tests/pipeline.rs` runs Plan -> Approve -> Feedback and Auto on generated footage
   (ffmpeg `testsrc` + `sine`), checks session continuity and that `final.mp4` is a valid
-  video, the failure path, and that cancelling kills the whole process tree (Linux).
+  video, the failure path, that cancelling kills the whole process tree, and that the
+  agent and its child die when the app is killed with `SIGKILL` (Linux; the test binary
+  runs itself as the app).
 - `tests/doctor.rs` runs `doctor()` against a fake `PATH` of stub scripts.
 
 The tests never call a model. A real video-use run costs model and ElevenLabs credits;
