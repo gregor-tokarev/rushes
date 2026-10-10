@@ -313,6 +313,67 @@ fn numbers_read_like_the_database_and_edit_raw(cx: &mut TestAppContext) {
     assert_eq!(field_text(&app, cx, property_input(precise)), "1.23");
 }
 
+/// Sets a number property of a video through the app state.
+fn set_number(app: &Fixture, cx: &mut TestAppContext, video: VideoId, id: PropertyId, number: f64) {
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| {
+        state.update(cx, |state, cx| {
+            let mut stored = state.video(video).cloned().expect("video");
+            stored.properties.insert(id, PropertyValue::Number(number));
+            state.update_video(stored, cx);
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn a_decimal_comma_is_the_decimal_point(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    let budget = add_property(&app, cx, "Budget", PropertyKind::Number);
+    app.open_video(cx, id, VideoTab::Script);
+
+    for (typed, number) in [("3,5", 3.5), ("1,25", 1.25), ("1,500", 1500.)] {
+        app.click(cx, property_input(budget));
+        app.press(cx, "ctrl-a");
+        app.type_text(cx, typed);
+        app.press(cx, "enter");
+        assert_eq!(stored_property(&app, cx, id, budget), Some(PropertyValue::Number(number)), "{typed}");
+    }
+    assert_eq!(app.notifications(cx), 0);
+}
+
+#[gpui_kit::test]
+fn a_refused_number_shows_the_stored_one_and_is_reported_once(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    let views = add_property(&app, cx, "Views", PropertyKind::Number);
+    set_number(&app, cx, id, views, 1500.);
+    app.open_video(cx, id, VideoTab::Script);
+
+    // Refused on Enter: the field shows the stored number again.
+    app.click(cx, property_input(views));
+    app.press(cx, "ctrl-a");
+    app.type_text(cx, "abc");
+    app.press(cx, "enter");
+    assert_eq!(app.notifications(cx), 1);
+    assert_eq!(field_text(&app, cx, property_input(views)), "1500");
+    // Saving the page's edits on tab switches and navigation reports nothing new.
+    app.open_video(cx, id, VideoTab::Notes);
+    app.open_video(cx, id, VideoTab::Script);
+    assert_eq!(app.notifications(cx), 1);
+
+    // Refused when a tab switch saves the field: reported once, too.
+    app.click(cx, property_input(views));
+    app.press(cx, "ctrl-a");
+    app.type_text(cx, "1,2,3");
+    app.open_video(cx, id, VideoTab::Notes);
+    assert_eq!(field_text(&app, cx, property_input(views)), "1500");
+    app.open_video(cx, id, VideoTab::Script);
+    app.navigate(cx, Route::default());
+    assert_eq!(app.notifications(cx), 2);
+    assert_eq!(stored_property(&app, cx, id, views), Some(PropertyValue::Number(1500.)));
+}
+
 #[gpui_kit::test]
 fn link_properties_open_web_addresses_and_refuse_other_schemes(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, &["Desk setup tour"]);

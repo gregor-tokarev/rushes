@@ -58,6 +58,11 @@ pub fn number(value: f64) -> String {
     }
 }
 
+/// Why a value typed into a Number property was not saved.
+pub fn not_a_number(text: &str, property: &str) -> String {
+    format!("“{text}” isn’t a number, so {property} wasn’t changed.")
+}
+
 /// A calendar date relative to `today`: "Today", "Tomorrow", "Yesterday",
 /// "Mar 4" within the year, "Mar 4, 2027" otherwise.
 pub fn date(date: NaiveDate, today: NaiveDate) -> String {

@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::{TimeZone as _, Utc};
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, Bounds, ElementId, Entity, InputEvent as _, Modifiers, MouseButton,
@@ -577,6 +578,46 @@ fn a_typed_option_is_kept_without_pressing_enter(cx: &mut TestAppContext) {
     };
     let names: Vec<&str> = property.kind.options().iter().map(|option| option.name.as_str()).collect();
     assert_eq!(names, ["NordVPN", "Brilliant"]);
+}
+
+#[gpui_kit::test]
+fn number_cells_read_a_decimal_comma_and_say_what_they_refuse(cx: &mut TestAppContext) {
+    // Wide enough that the new column is not under the table's edge.
+    let db = Fixture::open_sized(cx, size(px(2600.), px(900.)));
+    db.step(cx, |window, cx| window.click("properties", cx));
+    db.step(cx, |window, cx| window.click("new-property", cx));
+    db.step(cx, |window, cx| {
+        window.click("property-name", cx);
+        window.input("Budget", cx);
+    });
+    // Text, Number, …
+    db.press_and_release(cx, "property-kind");
+    db.step(cx, |window, cx| window.within("popup-menu").click(1usize, cx));
+    db.step(cx, |window, cx| window.click("property-commit", cx));
+    let events = db.take_events();
+    let Some(DatabaseEvent::CreateProperty(budget)) = events.first() else {
+        panic!("expected CreateProperty first, got {events:?}");
+    };
+    assert_eq!(budget.kind, PropertyKind::Number);
+    let cell = format!("text-{}-{}", budget.id, db.desk);
+
+    let mut edit = |typed: &str| {
+        db.press_and_release(cx, cell.clone());
+        db.step(cx, |window, cx| {
+            window.input(typed, cx);
+            window.press("enter", cx);
+        });
+        db.take_events()
+    };
+    let events = edit("3,5");
+    let [DatabaseEvent::UpdateVideo(video)] = events.as_slice() else {
+        panic!("expected the new value, got {events:?}");
+    };
+    assert_eq!(video.properties.get(&budget.id), Some(&videocrm_core::PropertyValue::Number(3.5)));
+
+    assert!(edit("1,2,3").is_empty(), "nothing is saved");
+    let notifications = db.with_window(cx, |window, cx| window.notifications(cx).len());
+    assert_eq!(notifications, 1, "the refusal is said");
 }
 
 #[gpui_kit::test]

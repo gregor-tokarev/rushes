@@ -13,6 +13,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::calendar::{CalendarEvent, CalendarState, Date};
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, Size, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -21,6 +22,7 @@ use gpui_kit::{
     IntoElement, KeyBinding, NoAction, ParentElement as _, Pixels, Render, ScrollHandle, SharedString, Styled as _,
     Subscription, Task, Window, actions, div,
 };
+use videocrm_core::input::parse_number;
 use videocrm_core::{
     BuiltinField, Column, DatabaseView, FilterSpec, PropertyDef, PropertyId, PropertyKind, PropertyValue,
     SortDirection, SortSpec, Video, VideoId, VideoRow, VideoStatus, ViewId, ViewKind,
@@ -409,10 +411,14 @@ impl DatabasePanel {
                 let text = text.trim();
                 let value = match def.kind {
                     _ if text.is_empty() => None,
-                    PropertyKind::Number => match text.replace(',', "").parse::<f64>() {
-                        Ok(number) if number.is_finite() => Some(PropertyValue::Number(number)),
-                        // Not a number: keep the previous value.
-                        _ => return,
+                    PropertyKind::Number => match parse_number(text) {
+                        Some(number) => Some(PropertyValue::Number(number)),
+                        // Not a number: keep the previous value, and say so.
+                        None => {
+                            let message = format::not_a_number(text, &def.name);
+                            window.push_notification(Notification::error(message), cx);
+                            return;
+                        }
                     },
                     PropertyKind::Url => Some(PropertyValue::Url(text.to_string())),
                     _ => Some(PropertyValue::Text(text.to_string())),

@@ -20,7 +20,7 @@ use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, TestSupportExt as _, Window, div,
 };
-use videocrm_core::input::normalize_link;
+use videocrm_core::input::{normalize_link, parse_number};
 use videocrm_core::{
     Column, PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, Video, VideoFormat, VideoId,
     VideoStatus, ViewKind,
@@ -50,6 +50,9 @@ pub struct PropertiesPanel {
     /// Editors of text, number and URL properties, each with the subscription
     /// that commits it, so both go away when the property changes type.
     inputs: HashMap<PropertyId, (Entity<InputState>, Subscription)>,
+    /// Text a field still holds after its number was refused, until the
+    /// field shows the stored value again; saving it again is not reported again.
+    refused: HashMap<PropertyId, String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -99,6 +102,7 @@ impl PropertiesPanel {
             folder_exists: false,
             folder_check: None,
             inputs: HashMap::new(),
+            refused: HashMap::new(),
             _subscriptions: subscriptions,
         };
         panel.sync(window, cx);
@@ -166,6 +170,9 @@ impl PropertiesPanel {
     fn commit_input(&mut self, id: PropertyId, cx: &mut Context<Self>) {
         let Some((input, _)) = self.inputs.get(&id) else { return };
         let text = input.read(cx).value().trim().to_string();
+        if self.refused.get(&id) == Some(&text) {
+            return;
+        }
         let stored = self.video(cx).and_then(|video| video.properties.get(&id)).cloned();
         let unchanged = match &stored {
             Some(value) => text == property_text(value) || text == display_text(value),
@@ -176,14 +183,26 @@ impl PropertiesPanel {
         }
     }
 
-    /// Shows the stored value in a field that is not being edited.
+    /// Shows the stored value again in the fields whose number was refused.
+    pub fn show_refused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<PropertyId> = self.refused.keys().copied().collect();
+        for id in ids {
+            self.show_stored(id, window, cx);
+        }
+    }
+
+    /// Shows the stored value in a field that is not being edited, and in one
+    /// whose number was refused: as it is edited while the field has focus.
     fn show_stored(&mut self, id: PropertyId, window: &mut Window, cx: &mut Context<Self>) {
         let Some((input, _)) = self.inputs.get(&id) else { return };
         let input = input.clone();
-        if input.read(cx).focus_handle(cx).is_focused(window) {
+        let focused = input.read(cx).focus_handle(cx).is_focused(window);
+        let refused = self.refused.remove(&id).is_some();
+        if focused && !refused {
             return;
         }
-        let text = self.video(cx).and_then(|video| video.properties.get(&id)).map(display_text).unwrap_or_default();
+        let stored = self.video(cx).and_then(|video| video.properties.get(&id));
+        let text = stored.map(if focused { property_text } else { display_text }).unwrap_or_default();
         if input.read(cx).value().as_ref() != text {
             input.update(cx, |input, cx| input.set_value(text, window, cx));
         }
@@ -259,6 +278,7 @@ impl PropertiesPanel {
 
         self.inputs
             .retain(|id, _| properties.iter().any(|property| property.id == *id && is_text_like(&property.kind)));
+        self.refused.retain(|id, _| self.inputs.contains_key(id));
         if let Some(DateField::Custom(id)) = self.date_open
             && !properties.iter().any(|property| property.id == id && property.kind == PropertyKind::Date)
         {
@@ -307,12 +327,13 @@ impl PropertiesPanel {
             None
         } else {
             match property.kind {
-                PropertyKind::Number => match text.replace(',', "").parse::<f64>() {
-                    Ok(number) => Some(PropertyValue::Number(number)),
-                    Err(_) => {
-                        let message = format!("“{text}” isn’t a number, so {} wasn’t changed.", property.name);
+                PropertyKind::Number => match parse_number(&text) {
+                    Some(number) => Some(PropertyValue::Number(number)),
+                    None => {
+                        let message = format::not_a_number(&text, &property.name);
                         self.state.update(cx, |state, cx| state.report_error(message, cx));
-                        self.state.update(cx, |state, cx| state.reload(cx));
+                        self.refused.insert(id, text);
+                        cx.notify();
                         return;
                     }
                 },

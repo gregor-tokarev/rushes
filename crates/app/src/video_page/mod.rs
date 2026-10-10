@@ -228,6 +228,7 @@ impl VideoPage {
         let reveal = take_tab_reveal(self.video_id, tab, cx);
         if tab != self.tab {
             self.flush(cx);
+            self.properties.update(cx, |properties, cx| properties.show_refused(window, cx));
             let scrolled = self.scroll_top();
             self.scrolled.insert(self.tab, scrolled);
             self.tab = tab;
