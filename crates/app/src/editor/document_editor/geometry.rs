@@ -80,9 +80,11 @@ impl Geometry {
     /// area, or `None` when the row must be rendered.
     pub fn spacer_height(&self, id: BlockId, fingerprint: u64, rem_size: Pixels) -> Option<Pixels> {
         let viewport = self.viewport?;
-        let row = self.rows.get(&id).filter(|row| row.fingerprint == fingerprint && self.rem_size == rem_size)?;
+        let row =
+            self.rows.get(&id).filter(|row| row.fingerprint == fingerprint && self.rem_size == rem_size)?;
         let margin = viewport.size.height;
-        let far = row.bounds.bottom() < viewport.top() - margin || row.bounds.top() > viewport.bottom() + margin;
+        let far =
+            row.bounds.bottom() < viewport.top() - margin || row.bounds.top() > viewport.bottom() + margin;
         far.then_some(row.bounds.size.height)
     }
 
@@ -112,8 +114,10 @@ impl Geometry {
 
         // A spacer sized for another width, or one scrolled into view, needs
         // its row rendered: draw again with the fresh measurements.
-        let spacer_shown =
-            rendered.iter().zip(bounds).any(|(row, bounds)| row.spacer && (stale || bounds.intersects(&viewport)));
+        let spacer_shown = rendered
+            .iter()
+            .zip(bounds)
+            .any(|(row, bounds)| row.spacer && (stale || bounds.intersects(&viewport)));
         if spacer_shown {
             window.refresh();
         }
@@ -124,7 +128,8 @@ impl Geometry {
         {
             let margin = rem_size * 2.;
             let mut offset = scroll.offset();
-            let to_top = (offset.y + viewport.top() - row.bounds.top() + margin).min(Pixels::ZERO);
+            let to_top =
+                (offset.y + viewport.top() - row.bounds.top() + margin).min(Pixels::ZERO);
             match reveal {
                 Reveal::Top => offset.y = to_top,
                 Reveal::Nearest if row.bounds.bottom() + margin > viewport.bottom() => {
