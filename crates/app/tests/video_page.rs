@@ -1062,6 +1062,10 @@ fn without_a_file_chooser_markdown_exports_to_a_typed_path(cx: &mut TestAppConte
     app.type_text(cx, &source.display().to_string());
     app.press(cx, "enter");
     assert!(app.has(cx, "import-append"), "the import dialog asks Append or Replace");
+    let asked = app.stored_blocks(cx, id, DocumentKind::Script);
+    assert!(!asked.iter().any(|text| text.contains("earned its spot")), "the Return that took the path chose nothing");
+    app.wait(cx, Duration::from_secs(1));
+    assert!(app.has(cx, "import-append"), "the question waits for an answer");
     app.press(cx, "enter");
     assert!(!app.has_dialog(cx));
     let stored = app.stored_blocks(cx, id, DocumentKind::Script);
