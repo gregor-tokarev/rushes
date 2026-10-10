@@ -22,17 +22,25 @@ pub struct Chip {
     label: SharedString,
     color: TagColor,
     dot: bool,
+    suffix: Option<AnyElement>,
 }
 
 impl Chip {
     pub fn new(label: impl Into<SharedString>, color: TagColor) -> Self {
-        Self { label: label.into(), color, dot: false }
+        Self { label: label.into(), color, dot: false, suffix: None }
     }
 
     /// Lead the label with a dot in the chip's color, the way workflow
     /// states (status, pipeline, upload) are told apart from plain options.
     pub fn dot(mut self, dot: bool) -> Self {
         self.dot = dot;
+        self
+    }
+
+    /// Trail the label with `suffix`, such as a remove button, inside the
+    /// chip: the chip makes room for it, so it never covers the label.
+    pub fn suffix(mut self, suffix: impl IntoElement) -> Self {
+        self.suffix = Some(suffix.into_any_element());
         self
     }
 }
@@ -49,6 +57,7 @@ impl RenderOnce for Chip {
             .min_w_0()
             .when(self.dot, |this| this.child(div().size_1p5().rounded_full().bg(colors.dot)))
             .child(div().min_w_0().truncate().child(self.label))
+            .when_some(self.suffix, |this, suffix| this.pr_0p5().child(div().flex_none().child(suffix)))
     }
 }
 

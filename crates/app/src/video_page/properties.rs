@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use chrono::{NaiveDate, Utc};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::calendar::{Calendar, CalendarEvent, CalendarState, Date};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Backspace, Input, InputEvent, InputState};
@@ -18,7 +18,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, TestSupportExt as _, Window, div,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, TestSupportExt as _, Window, div, rems,
 };
 use videocrm_core::input::{normalize_link, parse_number};
 use videocrm_core::{
@@ -429,8 +429,9 @@ impl PropertiesPanel {
             })
     }
 
-    /// Tags as chips. A chip's remove button shows on hover; from the
-    /// keyboard, Backspace in the empty tag field removes the last tag.
+    /// Tags as chips. A chip keeps room at its end for its remove button,
+    /// which shows on hover; from the keyboard, Backspace in the empty tag
+    /// field removes the last tag.
     fn render_tags(&self, video: &Video, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .flex_wrap()
@@ -442,32 +443,23 @@ impl PropertiesPanel {
                 let name = tag.clone();
                 let group = SharedString::from(format!("tag-chip-{tag}"));
                 let colors = tag_colors(free_tag_color(tag), cx);
-                h_flex()
-                    .id(SharedString::from(format!("tag-{tag}")))
-                    .group(group.clone())
-                    .relative()
-                    .child(Chip::new(tag.clone(), free_tag_color(tag)))
-                    .child(
-                        // Over the chip's end, in the chip's own colors.
-                        h_flex()
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .right_0()
-                            .rounded(cx.theme().radius_tokens().sm)
-                            .bg(colors.background)
-                            .invisible()
-                            .group_hover(group, |this| this.visible())
-                            .child(
-                                Button::new(SharedString::from(format!("remove-tag-{tag}")))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(Icon::new(IconName::X).text_color(colors.foreground))
-                                    .tab_stop(false)
-                                    .accessibility_label(format!("Remove tag {tag}"))
-                                    .on_click(cx.listener(move |this, _, _, cx| this.remove_tag(&name, cx))),
-                            ),
-                    )
+                // Pressed and hovered in the chip's own color, a shade darker.
+                let fill = ButtonCustomVariant::new(cx)
+                    .foreground(colors.foreground)
+                    .hover(colors.foreground.opacity(0.15))
+                    .active(colors.foreground.opacity(0.25));
+                let remove = Button::new(SharedString::from(format!("remove-tag-{tag}")))
+                    .custom(fill)
+                    .size(rems(0.875))
+                    .rounded(cx.theme().radius_tokens().sm)
+                    .icon(Icon::new(IconName::X).xsmall())
+                    .tab_stop(false)
+                    .accessibility_label(format!("Remove tag {tag}"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.remove_tag(&name, cx)));
+                h_flex().id(SharedString::from(format!("tag-{tag}"))).test_support().group(group.clone()).child(
+                    Chip::new(tag.clone(), free_tag_color(tag))
+                        .suffix(div().invisible().group_hover(group, |this| this.visible()).child(remove)),
+                )
             }))
             .child(
                 div().capture_action(cx.listener(Self::on_tag_backspace)).child(

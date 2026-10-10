@@ -494,6 +494,38 @@ fn backspace_in_the_empty_tag_field_removes_the_last_tag(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+fn a_tag_remove_button_sits_after_the_tag_name(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    app.open_video(cx, id, VideoTab::Script);
+    app.click(cx, "property-tags-input");
+    for tag in ["ai", "programming"] {
+        app.type_text(cx, tag);
+        app.press(cx, "enter");
+    }
+
+    for tag in ["ai", "programming"] {
+        let chip = ElementId::Name(format!("tag-{tag}").into());
+        let at_rest = bounds(&app, cx, chip.clone());
+        let hover = chip.clone();
+        app.step(cx, move |window, cx| window.hover(hover, cx));
+        let hovered = bounds(&app, cx, chip);
+        let remove = bounds(&app, cx, ElementId::Name(format!("remove-tag-{tag}").into()));
+        assert_eq!(hovered, at_rest, "{tag}: the chip keeps room for the button, so nothing moves");
+        assert!(remove.right() <= hovered.right() && remove.left() >= hovered.left(), "{tag}: inside the chip");
+        // The name and the chip's leading padding come before the button.
+        assert!(
+            remove.left() - hovered.left() >= remove.size.width,
+            "{tag}: {remove:?} covers the name in {hovered:?}"
+        );
+    }
+
+    app.step(cx, |window, cx| window.hover("tag-ai", cx));
+    app.click(cx, "remove-tag-ai");
+    assert_eq!(cx.read(|cx| app.state.read(cx).video(id).expect("video").tags.clone()), ["programming"]);
+}
+
+#[gpui_kit::test]
 fn the_publish_date_opens_a_calendar_and_clears_from_it(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, &["Desk setup tour"]);
     let id = app.video_id(cx, "Desk setup tour");
