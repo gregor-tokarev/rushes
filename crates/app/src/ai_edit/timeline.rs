@@ -3,10 +3,11 @@
 //! Every [`AgentEvent`] is persisted as a run event, together with a [`PhaseStarted`]
 //! marker each time the app starts a phase (with the creator's notes or feedback) and a
 //! [`RunMarker`] when a run stops or changes outside a phase (cancelled, interrupted,
-//! strategy discarded or restored). [`fold_timeline`] pairs tool calls with their
+//! strategy discarded or restored, a render's cut kept). [`fold_timeline`] pairs tool calls with their
 //! results and collapses noise (stderr, sub-agent lifecycle and other unknown lines)
 //! into single rows.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -63,6 +64,8 @@ pub enum MarkerKind {
     Discarded,
     /// The creator brought a discarded strategy back.
     Restored,
+    /// The cut a render made was kept, at [`RunMarker::cut`].
+    CutKept,
 }
 
 /// Marker the app appends to the event log when a run stops or changes outside a phase.
@@ -70,6 +73,20 @@ pub enum MarkerKind {
 #[serde(tag = "type", rename = "run_marker")]
 pub struct RunMarker {
     pub kind: MarkerKind,
+    /// Where the cut is kept, for [`MarkerKind::CutKept`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut: Option<PathBuf>,
+}
+
+impl RunMarker {
+    pub fn new(kind: MarkerKind) -> Self {
+        Self { kind, cut: None }
+    }
+
+    /// A render's cut was kept at `cut`.
+    pub fn cut_kept(cut: PathBuf) -> Self {
+        Self { kind: MarkerKind::CutKept, cut: Some(cut) }
+    }
 }
 
 /// One persisted run event.
@@ -126,6 +143,8 @@ pub enum TimelineItem {
     Marker {
         seq: u32,
         kind: MarkerKind,
+        /// The kept cut, for [`MarkerKind::CutKept`].
+        cut: Option<PathBuf>,
     },
     Message {
         seq: u32,
@@ -202,7 +221,7 @@ pub fn fold_timeline(entries: &[TimelineEntry]) -> Vec<TimelineItem> {
                 continue;
             }
             LogEvent::Marker(marker) => {
-                items.push(TimelineItem::Marker { seq, kind: marker.kind });
+                items.push(TimelineItem::Marker { seq, kind: marker.kind, cut: marker.cut.clone() });
                 continue;
             }
             LogEvent::Agent(event) => event,
@@ -271,7 +290,9 @@ pub fn agent_time(entries: &[TimelineEntry], now: Option<DateTime<Utc>>) -> Dura
             (None, false) => phase
                 .iter()
                 .rev()
-                .find(|entry| !matches!(&entry.event, LogEvent::Marker(RunMarker { kind: MarkerKind::Interrupted })))
+                .find(|entry| {
+                    !matches!(&entry.event, LogEvent::Marker(RunMarker { kind: MarkerKind::Interrupted, .. }))
+                })
                 .map(|entry| entry.at),
         };
         total += end.and_then(|end| (end - start.at).to_std().ok()).unwrap_or_default();
@@ -474,11 +495,11 @@ mod tests {
             // A change cancelled after 4 s.
             entry(5, 41_000, phase(PhaseKind::Feedback)),
             entry(6, 41_003, text()),
-            entry(7, 41_004, LogEvent::Marker(RunMarker { kind: MarkerKind::Cancelled })),
+            entry(7, 41_004, LogEvent::Marker(RunMarker::new(MarkerKind::Cancelled))),
             // A retry the app was closed during; the marker comes at the next start.
             entry(8, 50_000, phase(PhaseKind::Feedback)),
             entry(9, 50_007, text()),
-            entry(10, 90_000, LogEvent::Marker(RunMarker { kind: MarkerKind::Interrupted })),
+            entry(10, 90_000, LogEvent::Marker(RunMarker::new(MarkerKind::Interrupted))),
         ];
         assert_eq!(agent_time(&log, None), Duration::from_secs(25 + 9 + 4 + 7));
 
@@ -492,14 +513,14 @@ mod tests {
     fn retries_and_markers_become_their_own_rows() {
         let log = entries(vec![
             LogEvent::Phase(PhaseStarted { phase: PhaseKind::Revise, text: Some("Shorter".into()), retry: false }),
-            LogEvent::Marker(RunMarker { kind: MarkerKind::Cancelled }),
+            LogEvent::Marker(RunMarker::new(MarkerKind::Cancelled)),
             LogEvent::Phase(PhaseStarted { phase: PhaseKind::Revise, text: Some("Shorter".into()), retry: true }),
         ]);
         assert_eq!(
             fold_timeline(&log),
             vec![
                 TimelineItem::Phase { seq: 1, phase: PhaseKind::Revise, text: Some("Shorter".into()), retry: false },
-                TimelineItem::Marker { seq: 2, kind: MarkerKind::Cancelled },
+                TimelineItem::Marker { seq: 2, kind: MarkerKind::Cancelled, cut: None },
                 TimelineItem::Phase { seq: 3, phase: PhaseKind::Revise, text: Some("Shorter".into()), retry: true },
             ]
         );
@@ -515,7 +536,8 @@ mod tests {
             }),
             LogEvent::Phase(PhaseStarted { phase: PhaseKind::Plan, text: None, retry: false }),
             LogEvent::Phase(PhaseStarted { phase: PhaseKind::Revise, text: Some("Keep it".into()), retry: true }),
-            LogEvent::Marker(RunMarker { kind: MarkerKind::Interrupted }),
+            LogEvent::Marker(RunMarker::new(MarkerKind::Interrupted)),
+            LogEvent::Marker(RunMarker::cut_kept("/videos/desk/footage/edit/cuts/final-2.mp4".into())),
             agent(AgentEvent::AssistantText { text: "Hi".into() }),
             unknown("system/task_started"),
         ];
@@ -526,8 +548,10 @@ mod tests {
         }
         let marker = LogEvent::Phase(PhaseStarted { phase: PhaseKind::Approve, text: None, retry: false }).to_payload();
         assert_eq!(marker, serde_json::json!({ "type": "phase_started", "phase": "approve" }));
-        let marker = LogEvent::Marker(RunMarker { kind: MarkerKind::Discarded }).to_payload();
+        let marker = LogEvent::Marker(RunMarker::new(MarkerKind::Discarded)).to_payload();
         assert_eq!(marker, serde_json::json!({ "type": "run_marker", "kind": "discarded" }));
+        let marker = LogEvent::Marker(RunMarker::cut_kept("/cuts/final-1.mp4".into())).to_payload();
+        assert_eq!(marker, serde_json::json!({ "type": "run_marker", "kind": "cut_kept", "cut": "/cuts/final-1.mp4" }));
 
         let garbage = RunEvent {
             run_id: videocrm_core::RunId::new(),

@@ -22,6 +22,8 @@ const FINAL_CUT: &str = "final.mp4";
 const PREVIEW: &str = "preview.mp4";
 /// Where [`keep_final_cut`] moves finished renders, inside the edit folder.
 const CUTS_DIR: &str = "cuts";
+/// Where [`set_aside_final_cut`] moves renders nobody can use, inside the edit folder.
+const LEFTOVERS_DIR: &str = "leftovers";
 
 const HEADLESS_NOTE: &str = "You are running headless inside the VideoCRM app: nobody can \
 answer questions mid-run. Where something is ambiguous, make the most sensible choice and \
@@ -145,11 +147,24 @@ pub fn run_phase(
 /// returns the new path. Each render keeps its own file this way: the next render
 /// writes a new `final.mp4` instead of overwriting one a run or an upload refers to.
 pub fn keep_final_cut(footage_dir: &Path) -> io::Result<PathBuf> {
+    move_final_cut(footage_dir, CUTS_DIR)
+}
+
+/// Moves a `<footage_dir>/edit/final.mp4` that is no finished render (a cancelled or
+/// interrupted render may have written half of it, or something else left it there)
+/// to `<footage_dir>/edit/leftovers/final-<n>.mp4` and returns the new path, so the
+/// next render does not overwrite it and [`kept_cuts`] never offers it.
+pub fn set_aside_final_cut(footage_dir: &Path) -> io::Result<PathBuf> {
+    move_final_cut(footage_dir, LEFTOVERS_DIR)
+}
+
+/// Moves `edit/final.mp4` into `edit/<dir_name>/`, numbered after the files there.
+fn move_final_cut(footage_dir: &Path, dir_name: &str) -> io::Result<PathBuf> {
     let edit_dir = footage_dir.join(EDIT_DIR);
-    let cuts_dir = edit_dir.join(CUTS_DIR);
-    fs::create_dir_all(&cuts_dir)?;
-    let next = cut_numbers(&cuts_dir).max().unwrap_or(0) + 1;
-    let dest = (next..).map(|n| cuts_dir.join(cut_name(n))).find(|path| !path.exists()).unwrap_or_default();
+    let dir = edit_dir.join(dir_name);
+    fs::create_dir_all(&dir)?;
+    let next = cut_numbers(&dir).max().unwrap_or(0) + 1;
+    let dest = (next..).map(|n| dir.join(cut_name(n))).find(|path| !path.exists()).unwrap_or_default();
     fs::rename(edit_dir.join(FINAL_CUT), &dest)?;
     Ok(dest)
 }
@@ -166,9 +181,9 @@ fn cut_name(n: u32) -> String {
     format!("final-{n}.mp4")
 }
 
-/// Numbers of the `final-<n>.mp4` files in `cuts_dir`.
-fn cut_numbers(cuts_dir: &Path) -> impl Iterator<Item = u32> {
-    fs::read_dir(cuts_dir).into_iter().flatten().filter_map(|entry| {
+/// Numbers of the `final-<n>.mp4` files in `dir`.
+fn cut_numbers(dir: &Path) -> impl Iterator<Item = u32> {
+    fs::read_dir(dir).into_iter().flatten().filter_map(|entry| {
         let name = entry.ok()?.file_name().into_string().ok()?;
         name.strip_prefix("final-")?.strip_suffix(".mp4")?.parse().ok()
     })
@@ -334,6 +349,30 @@ mod tests {
         assert_eq!(fs::read_to_string(&first).unwrap(), "first");
         assert_eq!(fs::read_to_string(&second).unwrap(), "second");
         assert_eq!(kept_cuts(footage.path()), [second, edit.join("cuts/final-7.mp4"), first]);
+    }
+
+    #[test]
+    fn unfinished_renders_are_set_aside_where_cuts_are_not_listed() {
+        let footage = tempfile::tempdir().unwrap();
+        let edit = footage.path().join(EDIT_DIR);
+        fs::create_dir_all(&edit).unwrap();
+        fs::write(edit.join(FINAL_CUT), "finished").unwrap();
+        let cut = keep_final_cut(footage.path()).unwrap();
+        assert!(set_aside_final_cut(footage.path()).is_err(), "nothing left at the shared path");
+
+        fs::write(edit.join(FINAL_CUT), "half a render").unwrap();
+        let first = set_aside_final_cut(footage.path()).unwrap();
+        assert_eq!(first, edit.join("leftovers/final-1.mp4"));
+        fs::write(edit.join(FINAL_CUT), "another half").unwrap();
+        let second = set_aside_final_cut(footage.path()).unwrap();
+        assert_eq!(second, edit.join("leftovers/final-2.mp4"));
+        assert_eq!(fs::read_to_string(&first).unwrap(), "half a render");
+        assert!(!edit.join(FINAL_CUT).exists());
+        assert_eq!(kept_cuts(footage.path()), [cut], "only finished renders are listed");
+
+        // The cuts count on from their own numbers.
+        fs::write(edit.join(FINAL_CUT), "finished again").unwrap();
+        assert_eq!(keep_final_cut(footage.path()).unwrap(), edit.join("cuts/final-2.mp4"));
     }
 
     #[test]

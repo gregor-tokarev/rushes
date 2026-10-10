@@ -19,7 +19,7 @@ use videocrm_core::settings::PipelineSettings;
 use videocrm_core::{PipelineRun, RunEvent, RunId, RunStatus, StoreError, VideoId, VideoStatus};
 use videocrm_pipeline::{
     AgentConfig, AgentEvent, AgentProcess, Doctor, Phase, PhaseOutcome, PipelineError, RunContext, default_skill_dir,
-    doctor, keep_final_cut, run_phase, stop_leftover_agent,
+    doctor, keep_final_cut, run_phase, set_aside_final_cut, stop_leftover_agent,
 };
 
 use super::brief::BriefDraft;
@@ -167,6 +167,8 @@ pub struct PipelineService {
     timelines: HashMap<RunId, Vec<TimelineEntry>>,
     /// How long the agent worked on runs whose log is not loaded, read once.
     agent_times: RefCell<HashMap<RunId, Duration>>,
+    /// The cuts the logs not loaded say were kept, read once.
+    logged_cuts: RefCell<HashMap<RunId, Vec<PathBuf>>>,
     doctor: Option<Doctor>,
     doctor_task: Option<Task<()>>,
     /// The settings the last requirement check ran with.
@@ -220,6 +222,7 @@ impl PipelineService {
                 live: HashMap::new(),
                 timelines: HashMap::new(),
                 agent_times: RefCell::default(),
+                logged_cuts: RefCell::default(),
                 doctor: None,
                 doctor_task: None,
                 checked: None,
@@ -320,6 +323,35 @@ impl PipelineService {
         };
         self.agent_times.borrow_mut().insert(id, time);
         time
+    }
+
+    /// The cuts the AI edits of `video_id` rendered, earlier ones included: every
+    /// run's output and the cuts its log says were kept. Nothing else in
+    /// `edit/cuts/` is an AI edit's cut.
+    pub fn rendered_cuts(&self, video_id: VideoId, cx: &App) -> Vec<PathBuf> {
+        let mut cuts = Vec::new();
+        for run in self.video_runs(video_id) {
+            cuts.extend(run.output.clone());
+            if let Some(timeline) = self.timelines.get(&run.id) {
+                cuts.extend(kept_cuts_in(timeline));
+                continue;
+            }
+            let mut logged = self.logged_cuts.borrow_mut();
+            let kept = logged.entry(run.id).or_insert_with(|| match self.state.read(cx).read_run_events(run.id) {
+                Ok(events) => {
+                    let entries: Vec<TimelineEntry> = events.into_iter().map(TimelineEntry::from).collect();
+                    kept_cuts_in(&entries).collect()
+                }
+                Err(error) => {
+                    log_line!("videocrm: couldn't read the log of run {}: {error}", run.id);
+                    Vec::new()
+                }
+            });
+            cuts.extend(kept.iter().cloned());
+        }
+        cuts.sort();
+        cuts.dedup();
+        cuts
     }
 
     /// Asks the AI edit panel of the run's video to select it.
@@ -510,10 +542,9 @@ impl PipelineService {
     /// Whether the run's strategy was discarded and can be brought back: nothing
     /// happened to the run since. Reads the loaded event log.
     pub fn can_restore(&self, id: RunId) -> bool {
-        let discarded = self
-            .timeline(id)
-            .last()
-            .is_some_and(|entry| matches!(&entry.event, LogEvent::Marker(RunMarker { kind: MarkerKind::Discarded })));
+        let discarded = self.timeline(id).last().is_some_and(|entry| {
+            matches!(&entry.event, LogEvent::Marker(RunMarker { kind: MarkerKind::Discarded, .. }))
+        });
         discarded && self.run(id).is_some_and(|run| run.status == RunStatus::Cancelled && run.summary.is_some())
     }
 
@@ -534,7 +565,7 @@ impl PipelineService {
             .iter()
             .rev()
             .take_while(|entry| !matches!(entry.event, LogEvent::Phase(_)))
-            .any(|entry| matches!(&entry.event, LogEvent::Marker(RunMarker { kind: MarkerKind::Cancelled })));
+            .any(|entry| matches!(&entry.event, LogEvent::Marker(RunMarker { kind: MarkerKind::Cancelled, .. })));
         stopped.then_some(Setback::Stopped)
     }
 
@@ -545,7 +576,7 @@ impl PipelineService {
         if !self.can_restore(id) {
             return Err(RunError::NotAvailable(status));
         }
-        self.append_event(id, LogEvent::Marker(RunMarker { kind: MarkerKind::Restored }), cx);
+        self.append_event(id, LogEvent::Marker(RunMarker::new(MarkerKind::Restored)), cx);
         self.update_run(id, cx, |run| run.status = RunStatus::AwaitingApproval);
         self.after_status_change(cx);
         Ok(())
@@ -564,7 +595,7 @@ impl PipelineService {
             cx.notify();
         } else if self.run(id).is_some_and(|run| run.status == RunStatus::AwaitingApproval) {
             self.load_timeline(id, cx);
-            self.append_event(id, LogEvent::Marker(RunMarker { kind: MarkerKind::Discarded }), cx);
+            self.append_event(id, LogEvent::Marker(RunMarker::new(MarkerKind::Discarded)), cx);
             self.update_run(id, cx, |run| {
                 run.status = RunStatus::Cancelled;
                 run.error = None;
@@ -627,7 +658,8 @@ impl PipelineService {
             );
             // A render phase can write its cut and still end with an error (a turn
             // limit, an API error during the self-check): that cut is kept too. A
-            // cancelled render may have left half a file, which is not offered.
+            // cancelled render may have left half a file, which is set aside where no
+            // list of cuts offers it.
             let rendered = match &result {
                 Ok(outcome) => outcome.rendered,
                 Err(PipelineError::AgentFailed { .. }) => {
@@ -635,7 +667,15 @@ impl PipelineService {
                 }
                 Err(_) => false,
             };
-            let kept = (renders && rendered).then(|| keep_final_cut(&context.footage_dir).unwrap_or(shared_cut));
+            let kept =
+                (renders && rendered).then(|| keep_final_cut(&context.footage_dir).unwrap_or(shared_cut.clone()));
+            if renders && kept.is_none() && shared_cut.is_file() {
+                match set_aside_final_cut(&context.footage_dir) {
+                    Ok(path) => log_line!("videocrm: an unfinished render was set aside in {}", path.display()),
+                    // The next render tries again before it starts.
+                    Err(error) => log_line!("videocrm: couldn't set aside the unfinished render: {error}"),
+                }
+            }
             send(&events, AgentMessage::Finished { result, kept });
             // The quit handler may already have stopped waiting.
             _ = stopped_tx.send(());
@@ -697,7 +737,7 @@ impl PipelineService {
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(PipelineError::Cancelled) => {
-                self.append_event(id, LogEvent::Marker(RunMarker { kind: MarkerKind::Cancelled }), cx);
+                self.append_event(id, LogEvent::Marker(RunMarker::new(MarkerKind::Cancelled)), cx);
                 return self.settle_unfinished(id, Some(phase), None, cx);
             }
             Err(PipelineError::AgentFailed { message, stderr_tail, session_id, no_result }) => {
@@ -771,6 +811,8 @@ impl PipelineService {
         cx: &mut Context<Self>,
     ) {
         self.live.remove(&id);
+        // The log says which file each render is, so an earlier one stays on offer.
+        self.append_event(id, LogEvent::Marker(RunMarker::cut_kept(cut.clone())), cx);
         self.update_run(id, cx, |run| {
             run.status = RunStatus::Succeeded;
             run.output = Some(cut.clone());
@@ -808,10 +850,11 @@ impl PipelineService {
         self.after_status_change(cx);
     }
 
-    /// A cut left at the shared `edit/final.mp4` moves to `edit/cuts/` before a render
-    /// can overwrite it, whoever made it: an earlier version kept cuts there, a render
-    /// may have been cancelled, keeping one may have failed. A run or the upload form
-    /// that refers to it follows it.
+    /// A file left at the shared `edit/final.mp4` is moved before a render can
+    /// overwrite it. A cut a run or the upload form refers to (an earlier version kept
+    /// cuts there, keeping one may have failed) moves to `edit/cuts/`, and they follow
+    /// it. Anything else (an unfinished render, a file made outside VideoCRM) is set
+    /// aside in `edit/leftovers/`, where no list of cuts offers it.
     fn keep_shared_cut(
         &mut self,
         video_id: VideoId,
@@ -819,16 +862,24 @@ impl PipelineService {
         cx: &mut Context<Self>,
     ) -> Result<(), RunError> {
         let Some(shared) = media::edit_outputs(footage_dir).final_cut else { return Ok(()) };
+        let owner = self.video_runs(video_id).find(|run| run.output.as_ref() == Some(&shared)).map(|run| run.id);
+        let uploads =
+            self.state.read(cx).video(video_id).is_some_and(|video| video.publish.file.as_ref() == Some(&shared));
+        if owner.is_none() && !uploads {
+            let set_aside = set_aside_final_cut(footage_dir).map_err(|error| {
+                log_line!("videocrm: couldn't set aside {}: {error}", shared.display());
+                RunError::CutNotKept
+            })?;
+            log_line!("videocrm: {} was set aside in {}", shared.display(), set_aside.display());
+            return Ok(());
+        }
         let kept = keep_final_cut(footage_dir).map_err(|error| {
             log_line!("videocrm: couldn't keep the earlier cut {}: {error}", shared.display());
             RunError::CutNotKept
         })?;
-        let owner = self.video_runs(video_id).find(|run| run.output.as_ref() == Some(&shared)).map(|run| run.id);
         if let Some(owner) = owner {
             self.update_run(owner, cx, |run| run.output = Some(kept.clone()));
         }
-        let uploads =
-            self.state.read(cx).video(video_id).is_some_and(|video| video.publish.file.as_ref() == Some(&shared));
         if uploads {
             self.state.update(cx, |state, cx| {
                 let Some(mut video) = state.video(video_id).cloned() else { return };
@@ -871,6 +922,7 @@ impl PipelineService {
             return;
         };
         self.agent_times.borrow_mut().remove(&id);
+        self.logged_cuts.borrow_mut().remove(&id);
         self.load_timeline(id, cx);
         // Without its log (it couldn't be read, which was reported) the entry has no number.
         let Some(timeline) = self.timelines.get_mut(&id) else { return };
@@ -923,7 +975,7 @@ impl PipelineService {
                 run.status = unfinished_status(last_phase, &run, true);
                 run.error = Some(INTERRUPTED.to_owned());
                 run.updated_at = Utc::now();
-                let marker = LogEvent::Marker(RunMarker { kind: MarkerKind::Interrupted });
+                let marker = LogEvent::Marker(RunMarker::new(MarkerKind::Interrupted));
                 let marker = RunEvent {
                     run_id: run.id,
                     seq: events.last().map_or(1, |entry| entry.seq + 1),
@@ -940,7 +992,7 @@ impl PipelineService {
             }
             // A discarded strategy stays discarded.
             let discarded = events.last().is_some_and(|entry| {
-                matches!(&entry.event, LogEvent::Marker(RunMarker { kind: MarkerKind::Discarded }))
+                matches!(&entry.event, LogEvent::Marker(RunMarker { kind: MarkerKind::Discarded, .. }))
             });
             let status = unfinished_status(last_phase, &run, run.status == RunStatus::Failed);
             if !discarded && status != run.status {
@@ -1061,6 +1113,14 @@ fn send(events: &UnboundedSender<AgentMessage>, message: AgentMessage) {
 fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     Some((meta.modified().ok()?, meta.len()))
+}
+
+/// The cuts a run's log says were kept.
+fn kept_cuts_in(entries: &[TimelineEntry]) -> impl Iterator<Item = PathBuf> + '_ {
+    entries.iter().filter_map(|entry| match &entry.event {
+        LogEvent::Marker(RunMarker { kind: MarkerKind::CutKept, cut }) => cut.clone(),
+        _ => None,
+    })
 }
 
 /// The status of a run whose last phase did not finish (`failed`, or was cancelled):

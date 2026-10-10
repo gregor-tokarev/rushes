@@ -214,6 +214,23 @@ exit 0
     path
 }
 
+/// An agent that starts a render, writes the first 40 kB of the take to
+/// edit/final.mp4 and then works silently, as Claude does while ffmpeg renders.
+fn partial_render_agent(dir: &Path) -> PathBuf {
+    let path = dir.join("partial-render-agent");
+    write_executable(
+        &path,
+        r#"#!/bin/sh
+case "$*" in *--version*) echo "2.1.284 (Claude Code)"; exit 0;; esac
+echo '{"type":"system","subtype":"init","session_id":"partial-session","cwd":"/","tools":[],"model":"partial"}'
+mkdir -p edit && head -c 40000 take1.mp4 > edit/final.mp4
+echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Rendering edit/final.mp4."}]}}'
+exec sleep 60
+"#,
+    );
+    path
+}
+
 /// An agent with a real run's log shape: a few dozen tool calls, then a final summary
 /// far taller than the activity box, then the result. It renders nothing.
 fn chatty_agent(dir: &Path) -> PathBuf {
@@ -286,7 +303,7 @@ fn markers(events: &[TimelineEntry]) -> Vec<String> {
         .filter_map(|entry| match &entry.event {
             LogEvent::Phase(started) if started.retry => Some(format!("retry {:?}", started.phase)),
             LogEvent::Phase(started) => Some(format!("{:?}", started.phase)),
-            LogEvent::Marker(RunMarker { kind }) => Some(format!("{kind:?}")),
+            LogEvent::Marker(RunMarker { kind, .. }) => Some(format!("{kind:?}")),
             LogEvent::Agent(_) => None,
         })
         .collect()
@@ -825,9 +842,74 @@ fn a_render_that_leaves_an_old_final_cut_fails(cx: &mut TestAppContext) {
     assert!(failed.error.as_deref().is_some_and(|error| error.contains("without rendering")), "{failed:?}");
     assert_eq!(failed.output, None);
     assert_eq!(fx.upload_file(cx), None, "the old cut is not offered for upload");
-    // Nobody referred to the old cut, but a render must not overwrite it either.
-    assert_eq!(fs::read(fx.cut(1)).unwrap(), fs::read(fx.footage.join("take1.mp4")).unwrap());
+    // Nobody referred to the old file: a render must not overwrite it, and it is no
+    // AI edit's cut either, so it is set aside where no list of cuts offers it.
+    let set_aside = fx.footage.join("edit/leftovers/final-1.mp4");
+    assert_eq!(fs::read(set_aside).unwrap(), fs::read(fx.footage.join("take1.mp4")).unwrap());
     assert!(!fx.final_cut().exists());
+    assert_eq!(videocrm_pipeline::kept_cuts(&fx.footage), Vec::<PathBuf>::new());
+}
+
+#[gpui_kit::test]
+fn a_cancelled_render_is_set_aside_and_never_offered_as_a_cut(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let id = fx.start(cx, true);
+    fx.wait_for_status(cx, id, RunStatus::Succeeded);
+    let rendered = |cx: &mut TestAppContext| cx.read(|cx| fx.service.read(cx).rendered_cuts(fx.video, cx));
+    assert_eq!(rendered(cx), [fx.cut(1)]);
+
+    // A change whose render is cancelled halfway through writing edit/final.mp4.
+    let partial = partial_render_agent(fx.root.path());
+    let set_agent = |cx: &mut TestAppContext, agent: &Path| {
+        let agent = agent.display().to_string();
+        cx.update(|cx| {
+            fx.state
+                .update(cx, |state, cx| state.update_settings(cx, |settings| settings.pipeline.agent_command = agent))
+        });
+    };
+    set_agent(cx, &partial);
+    cx.update(|cx| fx.service.update(cx, |service, cx| service.send_feedback(id, "A punchier ending.".into(), cx)))
+        .expect("feedback sent");
+    let final_cut = fx.final_cut();
+    wait_until(cx, "half a render", |_| fs::metadata(&final_cut).is_ok_and(|meta| meta.len() == 40_000));
+    cx.update(|cx| fx.service.update(cx, |service, cx| service.cancel(id, cx)));
+    let stopped = fx.wait_for_status(cx, id, RunStatus::Succeeded);
+    assert_eq!(stopped.output, Some(fx.cut(1)), "the cut from before is still the edit's");
+
+    // Set aside at once: not at the shared path, not among the cuts.
+    let leftover = fx.footage.join("edit/leftovers/final-1.mp4");
+    assert_eq!(fs::metadata(&leftover).map(|meta| meta.len()).ok(), Some(40_000));
+    assert!(!fx.final_cut().exists());
+    assert_eq!(videocrm_pipeline::kept_cuts(&fx.footage), [fx.cut(1)]);
+    assert_eq!(rendered(cx), [fx.cut(1)]);
+
+    // The next render is kept under the next number; the earlier render of the
+    // edit stays on offer, and the log says which render each file is.
+    set_agent(cx, &fake_agent());
+    cx.update(|cx| fx.service.update(cx, |service, cx| service.send_feedback(id, "A punchier ending.".into(), cx)))
+        .expect("feedback sent");
+    let done = fx.wait_for_status(cx, id, RunStatus::Succeeded);
+    assert_eq!(done.output, Some(fx.cut(2)));
+    assert_eq!(videocrm_pipeline::kept_cuts(&fx.footage), [fx.cut(2), fx.cut(1)]);
+    assert_eq!(rendered(cx), [fx.cut(1), fx.cut(2)]);
+    assert_eq!(markers(&fx.stored_events(cx, id)), ["Auto", "CutKept", "Feedback", "Cancelled", "Feedback", "CutKept"]);
+    let kept: Vec<PathBuf> = fx
+        .stored_events(cx, id)
+        .into_iter()
+        .filter_map(|entry| match entry.event {
+            LogEvent::Marker(RunMarker { cut, .. }) => cut,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kept, [fx.cut(1), fx.cut(2)]);
+
+    // A restart reads which cuts are the edit's from the log.
+    cx.update(|cx| PipelineService::init(fx.state.clone(), cx));
+    let service = cx.read(PipelineService::global);
+    assert_eq!(cx.read(|cx| service.read(cx).rendered_cuts(fx.video, cx)), [fx.cut(1), fx.cut(2)]);
 }
 
 #[gpui_kit::test]
@@ -891,6 +973,9 @@ fn a_cut_rendered_before_an_agent_error_is_kept(cx: &mut TestAppContext) {
     let again = fx.wait_for_status(cx, id, RunStatus::Succeeded);
     assert_eq!(again.output, Some(fx.cut(2)));
     assert!(again.error.is_some_and(|error| error.starts_with(RENDERED_WITH_ERROR)));
+    // Both are the edit's cuts, offered for upload.
+    let rendered = cx.read(|cx| fx.service.read(cx).rendered_cuts(fx.video, cx));
+    assert_eq!(rendered, [fx.cut(1), fx.cut(2)]);
     let row = cx.read(|cx| fx.state.read(cx).row(fx.video).cloned().unwrap());
     assert_eq!(row.edit_status(), Some(RunStatus::Succeeded), "the edit reads as done");
 }
@@ -938,7 +1023,7 @@ fn a_change_that_fails_leaves_the_finished_edit_done(cx: &mut TestAppContext) {
     assert_eq!(fx.run(cx, id).status, RunStatus::Rendering);
     let done = fx.wait_for_status(cx, id, RunStatus::Succeeded);
     assert_eq!((done.output, done.error), (Some(fx.cut(2)), None));
-    assert_eq!(markers(&fx.stored_events(cx, id)), ["Auto", "Feedback", "retry Feedback"]);
+    assert_eq!(markers(&fx.stored_events(cx, id)), ["Auto", "CutKept", "Feedback", "retry Feedback", "CutKept"]);
     wait_for_window(cx, window, "the new cut alone", |window, _| {
         shows(window, "run-use-for-upload") && !shows(window, "run-setback")
     });
@@ -1323,7 +1408,7 @@ fn a_cancelled_revision_offers_the_strategy_again(cx: &mut TestAppContext) {
     });
     click(cx, window, "run-approve");
     fx.wait_for_status(cx, id, RunStatus::Succeeded);
-    assert_eq!(markers(&fx.stored_events(cx, id)), ["Plan", "Revise", "Cancelled", "Approve"]);
+    assert_eq!(markers(&fx.stored_events(cx, id)), ["Plan", "Revise", "Cancelled", "Approve", "CutKept"]);
 }
 
 #[gpui_kit::test]

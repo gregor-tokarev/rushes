@@ -19,5 +19,7 @@ pub use doctor::{Check, Doctor, default_skill_dir, doctor};
 pub use error::PipelineError;
 pub use event::{AgentEvent, parse_line};
 pub use media::{FOOTAGE_EXTENSIONS, FootageFile, MediaInfo, list_footage, probe_media};
-pub use pipeline::{Phase, PhaseOutcome, RunContext, build_prompt, keep_final_cut, kept_cuts, run_phase};
+pub use pipeline::{
+    Phase, PhaseOutcome, RunContext, build_prompt, keep_final_cut, kept_cuts, run_phase, set_aside_final_cut,
+};
 pub use process::{AgentProcess, stop_leftover_agent};
