@@ -4,8 +4,8 @@
 #
 #   scripts/daily-release.sh
 #
-# Prints nothing when no commit was made since the newest release tag. Otherwise it
-# tags v<version> and prints that tag. When the workspace version in Cargo.toml has
+# Prints nothing when the commit is released already (tagged v*). Otherwise it tags
+# v<version> and prints that tag. When the workspace version in Cargo.toml has
 # been released already, it first bumps its patch number in Cargo.toml and Cargo.lock
 # and commits that; a version bumped by hand and not released yet is tagged as it is.
 # Needs git with a committer identity and cargo (to update Cargo.lock).
@@ -13,9 +13,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-last=$(git tag --list 'v[0-9]*' --merged HEAD --sort=-v:refname | head -1)
-if [[ -n "$last" && $(git rev-list --count "$last..HEAD") -eq 0 ]]; then
-  echo "Nothing new since $last." >&2
+# A release tags the commit it releases; any commit since leaves HEAD untagged.
+released=$(git tag --points-at HEAD --list 'v[0-9]*' | head -1)
+if [[ -n "$released" ]]; then
+  echo "Nothing new since $released." >&2
   exit 0
 fi
 

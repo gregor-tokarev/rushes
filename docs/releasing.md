@@ -6,10 +6,10 @@ changed.
 
 | Trigger | Result |
 | --- | --- |
-| Daily, 03:30 UTC, when `main` has commits since the newest `v*` tag | Patch version bumped and tagged on `main`, then released like a pushed tag |
+| Daily, 03:30 UTC, when `main`'s head isn't tagged `v*` yet | Patch version bumped and tagged on `main`, then released like a pushed tag |
 | Run workflow on Daily release (Actions tab) | Same as the daily run, now |
 | Tag `v<version>` pushed | GitHub release `v<version>` with all bundles and generated notes |
-| Run workflow on Bundle (Actions tab) | Bundles kept as run artifacts, versioned `<version>-dev.<sha>` |
+| Run workflow on Bundle (Actions tab) | Bundles kept as run artifacts for 7 days, versioned `<version>-dev.<sha>` |
 | Pull request touching the workflow, `scripts/bundle-*.sh` or `assets/icon.svg` | Same as a manual Bundle run |
 
 The Bundle workflow refuses a tag that doesn't match the workspace version in the root
@@ -19,7 +19,8 @@ The Bundle workflow refuses a tag that doesn't match the workspace version in th
 
 The daily run checks out `main` and runs `scripts/daily-release.sh`:
 
-1. No commits since the newest `v*` tag: nothing to release, the run ends.
+1. `main`'s head is tagged `v*` already (no commits since the last release): nothing to
+   release, the run ends.
 2. The workspace version is released already (`v<version>` exists): it bumps the patch
    number in `Cargo.toml` and `Cargo.lock` and commits `chore(release): <version>` as
    `github-actions[bot]`. A version bumped by hand and not tagged yet is kept.
@@ -75,3 +76,8 @@ window, and drew something (the screenshot isn't blank). Screenshots are kept as
 macOS minutes count ten times on private repositories, and the macOS job compiles the
 app twice (one per architecture). That's why bundles build on tags (at most one daily
 release), on demand, and for bundling changes only, not on every push.
+
+Artifacts count against the account's Actions storage quota (500 MB on the Free plan,
+shared by all its private repositories). When it's full, uploading the bundles fails
+and so does the release. A release's bundles move between its jobs as artifacts kept
+for one day (the release has its own copy); other runs keep them for 7 days.

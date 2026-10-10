@@ -127,6 +127,8 @@ jobs:
           name: videocrm-macos
           path: target/bundle/*.dmg
           if-no-files-found: error
+          # A release keeps its own copy; the Actions storage quota is small.
+          retention-days: ${{ needs.version.outputs.tag != '' && 1 || 7 }}
 
       - uses: actions/upload-artifact@v7
         if: always()
@@ -181,6 +183,8 @@ jobs:
             target/bundle/*.tar.gz
             target/bundle/*.AppImage
           if-no-files-found: error
+          # A release keeps its own copy; the Actions storage quota is small.
+          retention-days: ${{ needs.version.outputs.tag != '' && 1 || 7 }}
 
   linux-smoke:
     name: Linux smoke test
