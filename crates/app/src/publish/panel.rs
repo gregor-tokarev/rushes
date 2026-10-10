@@ -716,10 +716,15 @@ impl PublishPanel {
         self.description.update(cx, |input, cx| input.replace_all(description, window, cx));
     }
 
+    /// Whether the video is on YouTube already, so another upload makes a second copy
+    /// and asks first.
+    fn uploaded_before(&self, cx: &App) -> bool {
+        self.state.read(cx).video(self.video_id).is_some_and(|video| video.youtube.is_some())
+    }
+
     fn start_upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.save_pending(cx);
-        let uploaded_before = self.state.read(cx).video(self.video_id).is_some_and(|video| video.youtube.is_some());
-        if !uploaded_before {
+        if !self.uploaded_before(cx) {
             self.upload_now(window, cx);
             return;
         }
@@ -1177,7 +1182,8 @@ impl PublishPanel {
                             )
                             .child(
                                 Button::new("upload-again")
-                                    .label("Start over")
+                                    // Over a copy on YouTube, it asks first.
+                                    .label(if self.uploaded_before(cx) { "Start over…" } else { "Start over" })
                                     .small()
                                     .ghost()
                                     .disabled(!reasons.is_empty())
@@ -1216,7 +1222,9 @@ impl PublishPanel {
             .child(
                 h_flex().child(
                     Button::new("upload-to-youtube")
-                        .label("Upload to YouTube")
+                        // The same command as on the done card: over a copy on YouTube,
+                        // it makes a second one and asks first.
+                        .label(if self.uploaded_before(cx) { "Upload again…" } else { "Upload to YouTube" })
                         .icon(IconName::Upload)
                         .primary()
                         .small()

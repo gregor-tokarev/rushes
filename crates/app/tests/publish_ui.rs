@@ -256,6 +256,48 @@ fn a_finished_upload_says_why_it_cannot_go_up_again(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn after_a_failed_reupload_the_button_still_says_upload_again(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let youtube_id = "dQw4w9WgXcQ";
+    let video_id = workspace.create_video(cx, "Rust Ownership Explained", |video| {
+        video.publish.file = Some(file.clone());
+        video.youtube = Some(YoutubeLink {
+            video_id: youtube_id.into(),
+            url: format!("https://www.youtube.com/watch?v={youtube_id}"),
+            channel_id: "UC1".into(),
+            privacy: Privacy::Private,
+            uploaded_at: Utc::now(),
+        });
+    });
+    // "Upload again…" ran out of quota.
+    let failed = UploadJob {
+        id: UploadId::new(),
+        video_id,
+        file: file.clone(),
+        file_stamp: None,
+        status: UploadStatus::Failed { error: "The YouTube API quota for today is used up.".into() },
+        session_url: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    workspace.insert_jobs(cx, &[&failed]);
+    let service = workspace.restart(cx);
+    wait_until(cx, "the connection", |cx| service.read_with(cx, |s, _| s.is_connected().then_some(())));
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    cx.run_until_parked();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("upload-to-youtube").label(), Some("Upload again…"));
+        // It opens the confirmation, as its ellipsis says.
+        window.click("upload-to-youtube", cx);
+        assert!(window.has_active_dialog(cx));
+    });
+}
+
+#[gpui_kit::test]
 fn quitting_saves_the_last_form_edits(cx: &mut TestAppContext) {
     let workspace = Workspace::open(cx, YoutubeBackend::default());
     let video_id = workspace.create_video(cx, "Desk setup 2026", |_| {});
