@@ -258,7 +258,10 @@ impl FootageCard {
             Ok(None) => {}
             Err(error) => {
                 eprintln!("videocrm: file chooser failed: {error}");
+                // The hint names the folder to copy takes into, so it has to exist.
+                self.state.update(cx, |state, cx| state.ensure_video_folder(self.video_id, cx));
                 self.chooser_failed = true;
+                self.refresh(cx);
                 cx.notify();
             }
         }
