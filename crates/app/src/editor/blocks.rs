@@ -3,6 +3,8 @@
 //! Pure functions over `Vec<Block>` so the editing rules are testable without
 //! a window. Offsets are UTF-8 byte offsets into `Block::text`.
 
+use std::ops::Range;
+
 use videocrm_core::{Block, BlockId, BlockKind};
 
 use super::markdown::is_list;
@@ -47,6 +49,59 @@ pub fn split(blocks: &mut Vec<Block>, ix: usize, at: usize) -> usize {
     let next = continuation(&blocks[ix], tail);
     blocks.insert(ix + 1, next);
     ix + 1
+}
+
+/// Pastes `pasted` (at least one block) over the byte range `selection` of
+/// the text block at `ix`, like a split at the caret with the pasted blocks
+/// in between:
+///
+/// - an empty block, or a paragraph pasted into at its start, becomes the
+///   first pasted block;
+/// - otherwise a pasted paragraph joins the text before the caret, while any
+///   other first block (a cue, callout, heading, list item, divider or code)
+///   stays a block of its own below that text;
+/// - the text after the caret joins the last pasted block when it is of the
+///   same kind as the block pasted into, and otherwise stays in a block of
+///   that kind, so a cue's text is never read out as a paragraph.
+///
+/// Returns the index of the block the caret goes to and its byte offset there:
+/// the end of the pasted text.
+pub fn paste(blocks: &mut Vec<Block>, ix: usize, selection: Range<usize>, mut pasted: Vec<Block>) -> (usize, usize) {
+    let target = blocks[ix].clone();
+    let (before, after) = (&target.text[..selection.start], &target.text[selection.end..]);
+    let mut kept = Vec::with_capacity(pasted.len() + 2);
+    if before.is_empty() && (target.kind == BlockKind::Paragraph || after.is_empty()) {
+        let first = pasted.remove(0);
+        kept.push(Block { id: target.id, ..first });
+    } else if pasted[0].kind == BlockKind::Paragraph {
+        let first = pasted.remove(0);
+        kept.push(Block { text: format!("{before}{}", first.text), ..target.clone() });
+    } else if !before.is_empty() {
+        kept.push(Block { text: before.to_owned(), ..target.clone() });
+    }
+    // An empty start of the target is dropped: the pasted blocks take its place.
+    let dropped_target = kept.is_empty();
+    kept.extend(pasted);
+
+    let last = kept.last_mut().expect("at least one pasted block");
+    let caret = if after.is_empty() {
+        // The caret needs a text block after a divider.
+        if !last.kind.has_text() {
+            kept.push(Block::paragraph(""));
+        }
+        (kept.len() - 1, kept.last().map_or(0, |block| block.text.len()))
+    } else if last.kind == target.kind {
+        let offset = last.text.len();
+        last.text.push_str(after);
+        (kept.len() - 1, offset)
+    } else {
+        let id = if dropped_target { target.id } else { BlockId::new() };
+        let checked = dropped_target && target.checked;
+        kept.push(Block { id, text: after.to_owned(), checked, ..target });
+        (kept.len() - 1, 0)
+    };
+    blocks.splice(ix..=ix, kept);
+    (ix + caret.0, caret.1)
 }
 
 /// Where the caret goes after two blocks were merged.
@@ -114,8 +169,7 @@ pub fn indent(blocks: &mut [Block], ix: usize, delta: i8) -> bool {
         _ => 0,
     };
     let current = blocks[ix].indent;
-    let target =
-        if delta > 0 { current.saturating_add(1).min(limit).max(current) } else { current.saturating_sub(1) };
+    let target = if delta > 0 { current.saturating_add(1).min(limit).max(current) } else { current.saturating_sub(1) };
     if target == current {
         return false;
     }
@@ -229,6 +283,66 @@ mod tests {
         blocks.iter().map(|b| b.text.as_str()).collect()
     }
 
+    fn kinds_and_texts(blocks: &[Block]) -> Vec<(BlockKind, &str)> {
+        blocks.iter().map(|b| (b.kind, b.text.as_str())).collect()
+    }
+
+    #[test]
+    fn paste_keeps_pasted_blocks_whole_unless_they_are_paragraphs() {
+        use BlockKind::*;
+        let paste_into = |target: Block, at: Range<usize>, pasted: Vec<Block>| {
+            let mut blocks = vec![block(Paragraph, "above"), target, block(Paragraph, "below")];
+            let caret = paste(&mut blocks, 1, at, pasted);
+            (blocks, caret)
+        };
+
+        // A cue after text is its own block; the text after the caret joins the
+        // last pasted paragraph.
+        let (blocks, caret) =
+            paste_into(block(Paragraph, "line Crest"), 6..6, vec![block(BRoll, "Drone"), block(Paragraph, "Next ")]);
+        assert_eq!(
+            kinds_and_texts(&blocks),
+            [
+                (Paragraph, "above"),
+                (Paragraph, "line C"),
+                (BRoll, "Drone"),
+                (Paragraph, "Next rest"),
+                (Paragraph, "below")
+            ]
+        );
+        assert_eq!(caret, (3, 5));
+
+        // A paragraph joins the text before the caret; a heading at the end
+        // leaves the rest of the line in a block of its own kind.
+        let (blocks, caret) =
+            paste_into(block(BRoll, "Drone shot"), 6..6, vec![block(Paragraph, "over"), block(Heading2, "Section")]);
+        assert_eq!(&kinds_and_texts(&blocks)[1..4], [(BRoll, "Drone over"), (Heading2, "Section"), (BRoll, "shot")]);
+        assert_eq!(caret, (3, 0));
+
+        // An empty block, or a paragraph pasted into at its start, becomes the
+        // first pasted block, keeping its id.
+        let target = block(Bulleted, "");
+        let id = target.id;
+        let (blocks, caret) = paste_into(target, 0..0, vec![block(Callout, "Note"), block(Paragraph, "x")]);
+        assert_eq!(&kinds_and_texts(&blocks)[1..3], [(Callout, "Note"), (Paragraph, "x")]);
+        assert_eq!((blocks[1].id, caret), (id, (2, 1)));
+        let (blocks, _) = paste_into(block(Paragraph, "world"), 0..0, vec![block(OnScreen, "cue")]);
+        assert_eq!(&kinds_and_texts(&blocks)[1..3], [(OnScreen, "cue"), (Paragraph, "world")]);
+
+        // At the start of another kind of block, the pasted blocks go above it.
+        let target = block(Heading2, "Intro");
+        let id = target.id;
+        let (blocks, caret) = paste_into(target, 0..0, vec![block(BRoll, "cue"), block(Paragraph, "said")]);
+        assert_eq!(&kinds_and_texts(&blocks)[1..4], [(BRoll, "cue"), (Paragraph, "said"), (Heading2, "Intro")]);
+        assert_eq!((blocks[3].id, caret), (id, (3, 0)));
+
+        // The selection is replaced, and a trailing divider gets a line after it.
+        let (blocks, caret) =
+            paste_into(block(Paragraph, "a[sel]"), 1..6, vec![block(Paragraph, "b"), block(Divider, "")]);
+        assert_eq!(&kinds_and_texts(&blocks)[1..4], [(Paragraph, "ab"), (Divider, ""), (Paragraph, "")]);
+        assert_eq!(caret, (3, 0));
+    }
+
     #[test]
     fn split_moves_the_tail_and_continues_lists() {
         let mut blocks = vec![nested(BlockKind::Bulleted, "onetwo", 1), block(BlockKind::Paragraph, "end")];
@@ -287,11 +401,8 @@ mod tests {
 
     #[test]
     fn indents_list_items_one_level_below_their_parent() {
-        let mut blocks = vec![
-            block(BlockKind::Bulleted, "a"),
-            block(BlockKind::Bulleted, "b"),
-            block(BlockKind::Paragraph, "p"),
-        ];
+        let mut blocks =
+            vec![block(BlockKind::Bulleted, "a"), block(BlockKind::Bulleted, "b"), block(BlockKind::Paragraph, "p")];
         assert!(!indent(&mut blocks, 0, 1), "the first item has no parent");
         assert!(indent(&mut blocks, 1, 1));
         assert!(!indent(&mut blocks, 1, 1), "at most one level deeper than its parent");
@@ -344,10 +455,7 @@ mod tests {
     fn convert_resets_fields_that_no_longer_apply() {
         let mut todo = Block { checked: true, indent: 2, ..block(BlockKind::Todo, "x") };
         convert(&mut todo, BlockKind::Heading1);
-        assert_eq!(
-            (todo.kind, todo.checked, todo.indent, todo.text.as_str()),
-            (BlockKind::Heading1, false, 0, "x")
-        );
+        assert_eq!((todo.kind, todo.checked, todo.indent, todo.text.as_str()), (BlockKind::Heading1, false, 0, "x"));
         convert(&mut todo, BlockKind::Divider);
         assert_eq!(todo.text, "");
     }

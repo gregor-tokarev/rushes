@@ -579,6 +579,60 @@ fn pasted_dividers_and_code_keep_their_own_blocks(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn pasted_cues_callouts_and_headings_keep_their_kind_after_text(cx: &mut TestAppContext) {
+    let cases = [
+        (
+            "> [!broll] Drone shot over the city\n\nNext paragraph after the cue\n",
+            vec![
+                (BlockKind::Paragraph, "line C"),
+                (BlockKind::BRoll, "Drone shot over the city"),
+                (BlockKind::Paragraph, "Next paragraph after the cue"),
+            ],
+        ),
+        (
+            "## Section 1\n\nFirst line of it\n",
+            vec![
+                (BlockKind::Paragraph, "line C"),
+                (BlockKind::Heading2, "Section 1"),
+                (BlockKind::Paragraph, "First line of it"),
+            ],
+        ),
+        (
+            "> [!note] Pin the Rust version in rust-toolchain.toml\n\n> [!onscreen] rustup show\n",
+            vec![
+                (BlockKind::Paragraph, "line C"),
+                (BlockKind::Callout, "Pin the Rust version in rust-toolchain.toml"),
+                (BlockKind::OnScreen, "rustup show"),
+            ],
+        ),
+        // A paragraph still joins the text before the caret.
+        ("and more\n\nNew line\n", vec![(BlockKind::Paragraph, "line Cand more"), (BlockKind::Paragraph, "New line")]),
+    ];
+    for (pasted, expected) in cases {
+        let f = Fixture::new(cx, vec![paragraph("line C")]);
+        f.focus_last(cx);
+        cx.write_to_clipboard(ClipboardItem::new_string(pasted.into()));
+        f.press(cx, &["secondary-v"]);
+        assert_eq!(f.summary(cx), owned(&expected), "pasting {pasted:?}");
+        let last = f.blocks(cx).last().map(|block| block.id);
+        assert_eq!(f.focused(cx), last, "the caret ends after the pasted text");
+    }
+
+    // Text after the caret stays in a block of its own kind when the pasted
+    // text doesn't end in one: a cue's text is not read out.
+    let f = Fixture::new(cx, vec![block(BlockKind::BRoll, "Drone shot")]);
+    f.focus_first(cx);
+    f.press(cx, &["right"; 6]);
+    cx.write_to_clipboard(ClipboardItem::new_string("over\n\n## Section\n".into()));
+    f.press(cx, &["secondary-v"]);
+    f.type_text(cx, "X");
+    assert_eq!(
+        f.summary(cx),
+        owned(&[(BlockKind::BRoll, "Drone over"), (BlockKind::Heading2, "Section"), (BlockKind::BRoll, "Xshot")])
+    );
+}
+
+#[gpui_kit::test]
 fn slash_menu_scrolls_to_the_keyboard_selection(cx: &mut TestAppContext) {
     let f = Fixture::new(cx, vec![paragraph("")]);
     f.focus_first(cx);
