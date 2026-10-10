@@ -406,6 +406,7 @@ fn deleting_from_the_row_menu_asks_first(cx: &mut TestAppContext) {
 fn dragging_a_card_moves_it_between_columns(cx: &mut TestAppContext) {
     let db = Fixture::open(cx);
     db.step(cx, |window, cx| db.panel.update(cx, |panel, cx| panel.set_active_view(db.board, window, cx)));
+    db.with_window(cx, |window, _| window.activate_window());
 
     // Onto the Filming column's only card: Filming, ordered before it.
     db.step(cx, |window, cx| window.drag_to(format!("card-{}", db.tokyo), format!("card-slot-{}", db.desk), cx));
@@ -416,6 +417,9 @@ fn dragging_a_card_moves_it_between_columns(cx: &mut TestAppContext) {
     assert_eq!(video.id, db.tokyo);
     assert_eq!(video.status, VideoStatus::Filming);
     assert!(video.position < 2.0, "placed before the desk video, got {}", video.position);
+    // The mouse doesn't take the keyboard focus, whose ring would make the card look selected.
+    let focused = db.with_window(cx, |window, _| window.find(format!("card-{}", db.tokyo)).focused());
+    assert_ne!(focused, Some(true), "a dragged card doesn't take the focus");
     db.with_window(cx, |window, _| {
         let moved = window.find(format!("card-{}", db.tokyo)).bounds();
         let column = window.find("board-column-filming").bounds();

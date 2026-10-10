@@ -9,8 +9,9 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, ThemeStyled as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
+    AnyElement, AppContext as _, Context, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _,
+    Window, div,
 };
 use videocrm_core::{VideoId, VideoRow, VideoStatus};
 
@@ -225,6 +226,9 @@ impl DatabasePanel {
                     .shadow_xs()
                     .hover(|this| this.bg(cx.theme().secondary))
                     .when(focused, |this| this.focus_ring_style(window, cx))
+                    // A click or drag doesn't take the keyboard: the ring would make a
+                    // dropped card look selected.
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .on_click(cx.listener(move |this, _, _, cx| this.open_video(id, cx)))
                     .on_drag(dragged, |card, _, _, cx| cx.new(|_| card.clone()))
                     .child(
