@@ -7,6 +7,8 @@
 //! results and collapses noise (stderr, sub-agent lifecycle and other unknown lines)
 //! into single rows.
 
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use videocrm_core::RunEvent;
@@ -206,7 +208,8 @@ pub fn fold_timeline(entries: &[TimelineEntry]) -> Vec<TimelineItem> {
             LogEvent::Agent(event) => event,
         };
         match agent {
-            AgentEvent::Init { .. } => {}
+            // Bookkeeping: which process ran, which session.
+            AgentEvent::Spawned { .. } | AgentEvent::Init { .. } => {}
             AgentEvent::AssistantText { text } => items.push(TimelineItem::Message { seq, text: text.clone() }),
             AgentEvent::Thinking { text } => items.push(TimelineItem::Thinking { seq, text: text.clone() }),
             AgentEvent::ToolUse { name, summary, .. } => {
@@ -237,6 +240,43 @@ pub fn fold_timeline(entries: &[TimelineEntry]) -> Vec<TimelineItem> {
         }
     }
     items
+}
+
+/// How long the agent worked on a run: the sum of its phases, each as long as the
+/// agent reported (or from its start to its last event when it reported nothing), so
+/// the time the run waited for the creator, or VideoCRM was closed, does not count.
+/// A phase still running counts until `now`.
+pub fn agent_time(entries: &[TimelineEntry], now: Option<DateTime<Utc>>) -> Duration {
+    let mut total = Duration::ZERO;
+    let mut phases =
+        entries.iter().enumerate().filter(|(_, entry)| matches!(entry.event, LogEvent::Phase(_))).peekable();
+    while let Some((start_ix, start)) = phases.next() {
+        let end_ix = phases.peek().map_or(entries.len(), |(ix, _)| *ix);
+        let phase = &entries[start_ix + 1..end_ix];
+        let reported: Option<u64> = phase
+            .iter()
+            .filter_map(|entry| match &entry.event {
+                LogEvent::Agent(AgentEvent::Result { duration_ms, .. }) => *duration_ms,
+                _ => None,
+            })
+            .reduce(|a, b| a + b);
+        let running = end_ix == entries.len() && now.is_some();
+        let end = match (reported, running) {
+            (Some(ms), false) => {
+                total += Duration::from_millis(ms);
+                continue;
+            }
+            (_, true) => now,
+            // The interruption marker is written when VideoCRM starts again.
+            (None, false) => phase
+                .iter()
+                .rev()
+                .find(|entry| !matches!(&entry.event, LogEvent::Marker(RunMarker { kind: MarkerKind::Interrupted })))
+                .map(|entry| entry.at),
+        };
+        total += end.and_then(|end| (end - start.at).to_std().ok()).unwrap_or_default();
+    }
+    total
 }
 
 /// The output slot of the not yet answered call `tool_use_id` among the `earlier`
@@ -407,6 +447,45 @@ mod tests {
             &folded[3],
             TimelineItem::Tool { seq: 4, output: Some(ToolOutput { summary, .. }), .. } if summary == "written"
         ));
+    }
+
+    #[test]
+    fn agent_time_counts_the_phases_not_the_waits() {
+        let at = |secs: i64| DateTime::<Utc>::MIN_UTC + chrono::Duration::seconds(secs);
+        let entry = |seq: u32, secs: i64, event: LogEvent| TimelineEntry { seq, at: at(secs), event };
+        let phase = |kind: PhaseKind| LogEvent::Phase(PhaseStarted { phase: kind, text: None, retry: false });
+        let result = |ms: Option<u64>| {
+            agent(AgentEvent::Result {
+                is_error: false,
+                result_text: String::new(),
+                session_id: "s".into(),
+                cost_usd: None,
+                duration_ms: ms,
+                num_turns: None,
+            })
+        };
+        let text = || agent(AgentEvent::AssistantText { text: "Working.".into() });
+        let log = vec![
+            // Planned in 25 s as the agent reports, then approved the next morning.
+            entry(1, 0, phase(PhaseKind::Plan)),
+            entry(2, 26, result(Some(25_000))),
+            entry(3, 40_000, phase(PhaseKind::Approve)),
+            entry(4, 40_010, result(Some(9_000))),
+            // A change cancelled after 4 s.
+            entry(5, 41_000, phase(PhaseKind::Feedback)),
+            entry(6, 41_003, text()),
+            entry(7, 41_004, LogEvent::Marker(RunMarker { kind: MarkerKind::Cancelled })),
+            // A retry the app was closed during; the marker comes at the next start.
+            entry(8, 50_000, phase(PhaseKind::Feedback)),
+            entry(9, 50_007, text()),
+            entry(10, 90_000, LogEvent::Marker(RunMarker { kind: MarkerKind::Interrupted })),
+        ];
+        assert_eq!(agent_time(&log, None), Duration::from_secs(25 + 9 + 4 + 7));
+
+        // A phase still running counts until now.
+        let live = &log[..6];
+        assert_eq!(agent_time(live, Some(at(41_010))), Duration::from_secs(25 + 9 + 10));
+        assert_eq!(agent_time(&[], None), Duration::ZERO);
     }
 
     #[test]

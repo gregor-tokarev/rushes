@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::process::AgentProcess;
+
 /// Longest tool-call summary, in characters.
 const TOOL_SUMMARY_CHARS: usize = 120;
 /// Longest tool-result summary, in characters.
@@ -20,6 +22,12 @@ const UNKNOWN_EXCERPT_CHARS: usize = 200;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    /// The agent process started. Reported by this crate rather than read from the
+    /// agent, before anything else: its process group, to find it again if the app
+    /// dies while it runs (see [`crate::stop_leftover_agent`]).
+    Spawned {
+        process: AgentProcess,
+    },
     /// First event of every run.
     Init {
         session_id: String,

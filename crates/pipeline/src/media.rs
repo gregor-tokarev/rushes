@@ -9,9 +9,12 @@ use serde::Deserialize;
 
 use crate::exec::{find_executable, run_captured};
 
-/// File extensions video-use can take as source footage (lowercase).
-const MEDIA_EXTENSIONS: [&str; 15] =
-    ["mp4", "mov", "m4v", "mkv", "webm", "avi", "mts", "m2ts", "mxf", "mp3", "wav", "m4a", "aac", "flac", "ogg"];
+/// File extensions of the takes video-use edits (lowercase): video, then audio. The
+/// app lists the same takes in a video's footage folder, so the two lists must agree.
+pub const FOOTAGE_EXTENSIONS: [&str; 23] = [
+    "mp4", "mov", "m4v", "mkv", "webm", "avi", "mts", "m2ts", "mxf", "mpg", "mpeg", "wmv", "3gp", "wav", "mp3", "m4a",
+    "aac", "flac", "ogg", "opus", "aif", "aiff", "wma",
+];
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -61,7 +64,7 @@ pub fn list_footage(dir: &Path) -> io::Result<Vec<FootageFile>> {
         let is_media = Path::new(&name)
             .extension()
             .and_then(OsStr::to_str)
-            .is_some_and(|ext| MEDIA_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()));
+            .is_some_and(|ext| FOOTAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()));
         // `metadata` follows symlinks, so linked takes count too. A dangling link or an
         // unreadable entry is skipped rather than failing the whole listing.
         let is_file = || entry.path().metadata().is_ok_and(|meta| meta.is_file());
@@ -148,6 +151,19 @@ mod tests {
             "format":{}}"#;
         let info = parse_probe(json).expect("audio file");
         assert_eq!((info.duration_secs, info.width, info.has_audio), (61.5, None, true));
+    }
+
+    #[test]
+    fn every_footage_extension_is_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        for ext in FOOTAGE_EXTENSIONS {
+            std::fs::write(dir.path().join(format!("take.{}", ext.to_uppercase())), b"").unwrap();
+        }
+        std::fs::write(dir.path().join("notes.txt"), b"").unwrap();
+        std::fs::write(dir.path().join("cover.jpg"), b"").unwrap();
+        let names: Vec<String> = list_footage(dir.path()).unwrap().into_iter().map(|file| file.name).collect();
+        assert_eq!(names.len(), FOOTAGE_EXTENSIONS.len(), "{names:?}");
+        assert!(names.contains(&"take.MPG".to_owned()) && names.contains(&"take.OPUS".to_owned()), "{names:?}");
     }
 
     #[test]

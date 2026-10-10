@@ -1,5 +1,9 @@
 //! [`AiEditPanel`]: the "Footage & AI edit" tab of a video page.
 
+use std::cell::Cell;
+use std::rc::Rc;
+use std::time::Duration;
+
 use chrono::Local;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -11,12 +15,16 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Subscription, TestSupportExt as _, Window, div,
+    Render, ScrollHandle, SharedString, Styled as _, Subscription, Task, TestSupportExt as _, Window, canvas, div,
+    point, px,
 };
 use videocrm_core::settings::EditPreferences;
 use videocrm_core::{Block, DocumentKind, PipelineRun, RunId, RunStatus, Video, VideoId};
 
-use super::brief::{BriefDraft, COLOR_GRADES, brief_source, color_grade_label, default_brief, with_preferences};
+use super::brief::{
+    BriefDraft, COLOR_GRADES, apply_edits, brief_source, color_grade_label, default_brief, preference_edits,
+    preferences_in, shift_offset,
+};
 use super::doctor::DoctorChecklist;
 use super::footage::{FootageCard, FootageChanged};
 use super::format;
@@ -27,6 +35,22 @@ use crate::database::colors::run_status_color;
 use crate::state::{AppEvent, AppState};
 use crate::ui::format_when;
 use crate::ui::{Card, SectionHeader};
+
+/// How long the brief form waits after a change before it is saved.
+const DRAFT_SAVE_DELAY: Duration = Duration::from_millis(500);
+/// For how many frames a revealed run's section is kept at the top of the page: what
+/// is above it (the page header, the footage list) may still settle after the first.
+const REVEAL_FRAMES: u8 = 10;
+
+/// Scrolling a revealed run into view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reveal {
+    Idle,
+    /// Waiting for the footage list above the section to load.
+    Pending,
+    /// Keeping the section at the top of the page for this many more frames.
+    Pinned(u8),
+}
 
 /// The "Footage & AI edit" tab of a video page: the raw takes, the edit brief, and
 /// the video's AI edits with the selected one in detail.
@@ -45,6 +69,11 @@ pub struct AiEditPanel {
     brief_source: String,
     /// The video changed after the creator edited the brief.
     brief_stale: bool,
+    /// The brief as the panel's own last change left it: the change events that
+    /// change causes are not the creator typing.
+    applied_brief: Option<String>,
+    /// Saves the form shortly after it changes.
+    save_task: Option<Task<()>>,
     target_length: Entity<InputState>,
     preferences: EditPreferences,
     auto_approve: bool,
@@ -53,6 +82,11 @@ pub struct AiEditPanel {
     run_view: Entity<RunView>,
     doctor: Entity<DoctorChecklist>,
     start_error: Option<SharedString>,
+    /// The scrolling page around the panel, if any.
+    page_scroll: Option<ScrollHandle>,
+    /// A run was revealed (from the Pipelines page): the page scrolls the AI edit
+    /// section into view once the footage list above it has its final height.
+    reveal: Rc<Cell<Reveal>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -84,36 +118,37 @@ impl AiEditPanel {
                     this.follow_video(window, cx);
                 }
             }),
-            cx.subscribe(&brief, |this, _, event: &InputEvent, cx| {
-                // `set_value` emits nothing, so a change is the creator typing.
-                if matches!(event, InputEvent::Change) && !this.brief_edited {
+            cx.subscribe_in(&brief, window, |this, brief, event: &InputEvent, window, cx| {
+                if !matches!(event, InputEvent::Change) {
+                    return;
+                }
+                // `set_value` emits nothing, and the panel's own edits leave the brief as
+                // it noted; any other change is the creator typing (or undoing).
+                let value = brief.read(cx).value().to_string();
+                if this.applied_brief.as_deref() != Some(value.as_str()) {
+                    this.applied_brief = None;
                     this.brief_edited = true;
+                    this.follow_brief(&value, window, cx);
+                    this.schedule_save(cx);
                     cx.notify();
                 }
             }),
             cx.subscribe(&footage, |_, _, _: &FootageChanged, cx| cx.notify()),
             cx.subscribe_in(&target_length, window, |this, input, event, window, cx| {
                 if matches!(event, InputEvent::Change) {
-                    this.preferences.target_length = input.read(cx).value().to_string();
-                    this.apply_preferences(window, cx);
+                    let target_length = input.read(cx).value().to_string();
+                    this.set_preferences(window, cx, |preferences| preferences.target_length = target_length);
                 }
             }),
-            cx.on_release(|this, cx| {
-                let draft = BriefDraft {
-                    brief: this.brief.read(cx).value().to_string(),
-                    preferences: this.preferences.clone(),
-                    auto_approve: this.auto_approve,
-                    edited: this.brief_edited,
-                    source: this.brief_source.clone(),
-                };
-                let video_id = this.video_id;
-                this.service.update(cx, |service, _| service.keep_draft(video_id, draft));
+            cx.on_release(|this, cx| this.save_draft(cx)),
+            cx.on_app_quit(|this, cx| {
+                this.save_draft(cx);
+                async {}
             }),
         ];
 
-        let latest = service
-            .update(cx, |service, _| service.take_revealed(video_id))
-            .or_else(|| service.read(cx).video_runs(video_id).next().map(|run| run.id));
+        let revealed = service.update(cx, |service, _| service.take_revealed(video_id));
+        let latest = revealed.or_else(|| service.read(cx).video_runs(video_id).next().map(|run| run.id));
         let mut panel = Self {
             video_id,
             state,
@@ -123,6 +158,8 @@ impl AiEditPanel {
             brief_edited: false,
             brief_source: String::new(),
             brief_stale: false,
+            applied_brief: None,
+            save_task: None,
             target_length,
             preferences,
             auto_approve,
@@ -130,11 +167,14 @@ impl AiEditPanel {
             run_view,
             doctor,
             start_error: None,
+            page_scroll: None,
+            reveal: Rc::new(Cell::new(if revealed.is_some() { Reveal::Pending } else { Reveal::Idle })),
             _subscriptions: subscriptions,
         };
         match draft {
             // A brief the creator wrote stays; one they did not follows what changed meanwhile.
             Some(draft) if draft.edited => {
+                panel.follow_brief(&draft.brief, window, cx);
                 panel.brief.update(cx, |input, cx| input.set_value(draft.brief, window, cx));
                 panel.brief_edited = true;
                 panel.brief_source = draft.source;
@@ -148,6 +188,22 @@ impl AiEditPanel {
 
     pub fn video_id(&self) -> VideoId {
         self.video_id
+    }
+
+    /// The page that scrolls the panel: a run revealed from elsewhere is scrolled into view.
+    pub fn page_scroll(mut self, scroll: ScrollHandle) -> Self {
+        self.page_scroll = Some(scroll);
+        self
+    }
+
+    /// The brief as the form shows it.
+    pub fn brief_text(&self, cx: &App) -> String {
+        self.brief.read(cx).value().to_string()
+    }
+
+    /// The edit preferences the form shows.
+    pub fn preferences(&self) -> &EditPreferences {
+        &self.preferences
     }
 
     /// The video, its script and the standing instructions a brief is drafted from.
@@ -172,7 +228,33 @@ impl AiEditPanel {
         self.brief_source = brief_source(&video, &script, &extra);
         self.brief_edited = false;
         self.brief_stale = false;
+        self.schedule_save(cx);
         cx.notify();
+    }
+
+    /// The form as it is now.
+    fn draft(&self, cx: &App) -> BriefDraft {
+        BriefDraft {
+            brief: self.brief.read(cx).value().to_string(),
+            preferences: self.preferences.clone(),
+            auto_approve: self.auto_approve,
+            edited: self.brief_edited,
+            source: self.brief_source.clone(),
+        }
+    }
+
+    /// Saves the form once the creator pauses.
+    fn schedule_save(&mut self, cx: &mut Context<Self>) {
+        self.save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(DRAFT_SAVE_DELAY).await;
+            _ = this.update(cx, |this, cx| this.save_draft(cx));
+        }));
+    }
+
+    fn save_draft(&mut self, cx: &mut App) {
+        self.save_task = None;
+        let (video_id, draft) = (self.video_id, self.draft(cx));
+        self.service.update(cx, |service, cx| service.keep_draft(video_id, draft, cx));
     }
 
     /// Drafts the brief again when what it was drafted from changed, unless the creator
@@ -193,23 +275,44 @@ impl AiEditPanel {
         }
     }
 
-    /// Rewrites the preferences list of the brief, keeping the creator's other edits.
-    fn apply_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self.brief.read(cx).value().to_string();
-        if let Some(brief) = with_preferences(&current, &self.preferences) {
-            self.brief.update(cx, |input, cx| input.set_value(brief, window, cx));
+    /// Shows the preferences the brief's own preference lines state, after the creator
+    /// changed or undid one of them.
+    fn follow_brief(&mut self, brief: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let preferences = preferences_in(brief, &self.preferences);
+        if preferences.target_length != self.preferences.target_length {
+            let target_length = preferences.target_length.clone();
+            self.target_length.update(cx, |input, cx| input.set_value(target_length, window, cx));
         }
-        cx.notify();
+        self.preferences = preferences;
     }
 
+    /// Changes the preferences and the brief's lines for the ones that changed. The
+    /// creator's own lines stay, and the change can be undone in the brief like typing.
     fn set_preferences(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         change: impl FnOnce(&mut EditPreferences),
     ) {
+        let before = self.preferences.clone();
         change(&mut self.preferences);
-        self.apply_preferences(window, cx);
+        let current = self.brief.read(cx).value().to_string();
+        let edits = preference_edits(&current, &before, &self.preferences);
+        if !edits.is_empty() {
+            self.applied_brief = Some(apply_edits(&current, &edits));
+            self.brief.update(cx, |input, cx| {
+                let selection = input.selected_range();
+                // From the end, so the earlier ranges stay where they are.
+                for (range, text) in edits.iter().rev() {
+                    input.set_selected_range(range.clone(), cx);
+                    input.replace(text.clone(), window, cx);
+                }
+                let (start, end) = (shift_offset(selection.start, &edits), shift_offset(selection.end, &edits));
+                input.set_selected_range(start..end, cx);
+            });
+        }
+        self.schedule_save(cx);
+        cx.notify();
     }
 
     fn runs<'a>(&self, cx: &'a App) -> Vec<&'a PipelineRun> {
@@ -220,6 +323,7 @@ impl AiEditPanel {
     fn on_runs_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.service.update(cx, |service, _| service.take_revealed(self.video_id)) {
             self.select_run(id, window, cx);
+            self.reveal.set(Reveal::Pending);
             return;
         }
         let selected = self.run_view.read(cx).run_id();
@@ -437,6 +541,7 @@ impl AiEditPanel {
                             .checked(self.auto_approve)
                             .on_change(cx.listener(|this, checked: &bool, _, cx| {
                                 this.auto_approve = *checked;
+                                this.schedule_save(cx);
                                 cx.notify();
                             })),
                     )
@@ -466,6 +571,47 @@ impl AiEditPanel {
             .when_some(self.start_error.clone(), |this, error| {
                 this.child(div().text_sm().text_color(theme.danger).child(error))
             })
+    }
+
+    /// While a revealed run waits to be shown: once laid out, scrolls the page so the
+    /// AI edit section starts at its top, unless it is in the upper part of the view
+    /// already, and keeps it there while what is above it settles. Waits for the
+    /// footage list, whose height moves the section.
+    fn render_reveal(&self, cx: &App) -> Option<impl IntoElement + use<>> {
+        if self.reveal.get() == Reveal::Idle || !self.footage.read(cx).is_loaded() {
+            return None;
+        }
+        let scroll = self.page_scroll.clone()?;
+        let reveal = self.reveal.clone();
+        Some(
+            canvas(
+                move |section, window, _| {
+                    let view = scroll.bounds();
+                    let offset = section.top() - view.top();
+                    let frames = match reveal.get() {
+                        Reveal::Pending if offset >= px(0.) && offset <= view.size.height / 3. => 0,
+                        Reveal::Pending => REVEAL_FRAMES,
+                        Reveal::Pinned(frames) => frames,
+                        Reveal::Idle => 0,
+                    };
+                    if frames == 0 {
+                        reveal.set(Reveal::Idle);
+                        return;
+                    }
+                    if offset.abs() >= px(1.) {
+                        let current = scroll.offset();
+                        scroll.set_offset(point(current.x, current.y - offset));
+                    }
+                    reveal.set(Reveal::Pinned(frames - 1));
+                    window.request_animation_frame();
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_0(),
+        )
     }
 }
 
@@ -503,24 +649,28 @@ impl Render for AiEditPanel {
         let composer = self.composing.then(|| self.render_composer(cx));
         let selected = self.run_view.read(cx).run_id().and_then(|id| self.service.read(cx).run(id).cloned());
 
+        let reveal = self.render_reveal(cx);
         v_flex().w_full().gap_10().child(self.footage.clone()).child(
-            v_flex().gap_4().child(header).children(composer).when_some(selected, |this, run| {
-                let color = run_status_color(run.status);
-                this.child(
-                    v_flex()
-                        .gap_4()
-                        .when(self.composing, |this| {
-                            this.child(
-                                h_flex()
-                                    .gap_2()
-                                    .text_sm()
-                                    .child(div().font_weight(FontWeight::MEDIUM).child("Latest edit"))
-                                    .child(Chip::new(run.status.label(), color).dot(true)),
-                            )
-                        })
-                        .child(self.run_view.clone()),
-                )
-            }),
+            v_flex().relative().gap_4().children(reveal).child(header).children(composer).when_some(
+                selected,
+                |this, run| {
+                    let color = run_status_color(run.status);
+                    this.child(
+                        v_flex()
+                            .gap_4()
+                            .when(self.composing, |this| {
+                                this.child(
+                                    h_flex()
+                                        .gap_2()
+                                        .text_sm()
+                                        .child(div().font_weight(FontWeight::MEDIUM).child("Latest edit"))
+                                        .child(Chip::new(run.status.label(), color).dot(true)),
+                                )
+                            })
+                            .child(self.run_view.clone()),
+                    )
+                },
+            ),
         )
     }
 }

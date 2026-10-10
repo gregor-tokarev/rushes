@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
@@ -16,8 +17,8 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Div, Entity, EventEmitter, ExternalPaths, Global, InteractiveElement as _,
-    IntoElement, ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Task, TestSupportExt as _,
+    App, AppContext as _, Context, Div, Entity, EventEmitter, ExternalPaths, InteractiveElement as _, IntoElement,
+    ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Subscription, Task, TestSupportExt as _,
     Window, div,
 };
 use videocrm_core::VideoId;
@@ -26,6 +27,7 @@ use videocrm_pipeline::{MediaInfo, probe_media};
 
 use super::format;
 use super::icons::media_icon;
+use super::service::PipelineService;
 use crate::state::AppState;
 use crate::ui::path_prompt::{self, PathKind, PathRequest};
 use crate::ui::{EmptyState, SectionHeader};
@@ -36,15 +38,11 @@ const COPY_CHUNK: usize = 1 << 20;
 
 /// Suffix of a take that is still being copied in.
 const PARTIAL_SUFFIX: &str = ".part";
+/// How often a copy reports its progress.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
-/// The footage list changed (files added, removed or probed).
+/// The footage list changed (files added, removed or probed), or a copy started or ended.
 pub(crate) struct FootageChanged;
-
-/// Footage folders already cleared of copies an earlier session left unfinished.
-#[derive(Default)]
-struct SweptFolders(HashSet<PathBuf>);
-
-impl Global for SweptFolders {}
 
 struct Take {
     file: MediaFile,
@@ -54,7 +52,8 @@ struct Take {
 }
 
 /// Copy progress of an import.
-struct Import {
+#[derive(Clone)]
+pub(crate) struct Import {
     total_files: usize,
     file_ix: usize,
     name: String,
@@ -68,16 +67,136 @@ enum ImportMessage {
     Done(Result<(), String>),
 }
 
+/// The footage copies of every video. [`PipelineService`] owns it, so a copy
+/// outlives the card that started it: a card shown again follows its progress, and
+/// nothing else touches its file.
+pub(crate) struct FootageImports {
+    running: HashMap<VideoId, Import>,
+    /// Why the last copy into a video's folder failed, until the creator dismisses it.
+    errors: HashMap<VideoId, SharedString>,
+    /// The hidden files running copies write; sweeps leave them alone.
+    partials: Arc<Mutex<HashSet<PathBuf>>>,
+    /// Videos whose footage folder was cleared of copies an earlier session left.
+    swept: HashSet<VideoId>,
+}
+
+impl FootageImports {
+    pub(crate) fn new() -> Self {
+        Self { running: HashMap::new(), errors: HashMap::new(), partials: Arc::default(), swept: HashSet::new() }
+    }
+
+    /// The copy into `video_id`'s footage folder, while one runs.
+    pub(crate) fn running(&self, video_id: VideoId) -> Option<&Import> {
+        self.running.get(&video_id)
+    }
+
+    pub(crate) fn error(&self, video_id: VideoId) -> Option<&SharedString> {
+        self.errors.get(&video_id)
+    }
+
+    pub(crate) fn dismiss_error(&mut self, video_id: VideoId, cx: &mut Context<Self>) {
+        if self.errors.remove(&video_id).is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Removes the hidden `.<take>.<n>.part` files of copies an earlier session left
+    /// unfinished (it quit mid-copy), once per video and session. A video without a
+    /// folder yet counts as swept too: whatever is copied into it later is this
+    /// session's. Files of running copies are never removed.
+    pub(crate) fn sweep(&mut self, video_id: VideoId, footage_dir: Option<PathBuf>, cx: &mut Context<Self>) {
+        if !self.swept.insert(video_id) {
+            return;
+        }
+        let Some(dir) = footage_dir else { return };
+        let partials = self.partials.clone();
+        cx.background_spawn(async move { remove_partial_copies(&dir, &partials) }).detach();
+    }
+
+    /// Copies `media` into `dir`, the footage folder of `video_id`, on a background
+    /// thread; existing names get a numbered suffix. One copy per video at a time.
+    pub(crate) fn start(&mut self, video_id: VideoId, media: Vec<PathBuf>, dir: PathBuf, cx: &mut Context<Self>) {
+        if media.is_empty() || self.running.contains_key(&video_id) {
+            return;
+        }
+        let total_bytes = media.iter().map(|path| fs::metadata(path).map_or(0, |meta| meta.len())).sum();
+        let import =
+            Import { total_files: media.len(), file_ix: 0, name: file_name(&media[0]), copied: 0, total_bytes };
+        self.running.insert(video_id, import);
+        self.errors.remove(&video_id);
+        cx.notify();
+
+        let partials = self.partials.clone();
+        let (sender, mut receiver) = unbounded();
+        let copy = cx.background_spawn(async move {
+            let report = |message| _ = sender.unbounded_send(message);
+            let result = media.iter().enumerate().try_for_each(|(ix, source)| {
+                report(ImportMessage::File { ix, name: file_name(source) });
+                let (mut pending, mut reported) = (0, Instant::now());
+                let copied = copy_into(source, &dir, &partials, &mut |bytes| {
+                    pending += bytes;
+                    if reported.elapsed() >= PROGRESS_INTERVAL {
+                        report(ImportMessage::Copied(std::mem::take(&mut pending)));
+                        reported = Instant::now();
+                    }
+                });
+                report(ImportMessage::Copied(pending));
+                copied.map(drop).map_err(|error| {
+                    eprintln!("videocrm: couldn't copy {} into {}: {error}", source.display(), dir.display());
+                    format!(
+                        "Couldn’t copy {}. Check that the disk has room and the file can be read, then add it again.",
+                        file_name(source)
+                    )
+                })
+            });
+            report(ImportMessage::Done(result));
+        });
+        cx.spawn(async move |this, cx| {
+            let _copy = copy;
+            while let Some(message) = receiver.next().await {
+                let applied = this.update(cx, |this, cx| {
+                    match message {
+                        ImportMessage::File { ix, name } => {
+                            if let Some(import) = this.running.get_mut(&video_id) {
+                                import.file_ix = ix;
+                                import.name = name;
+                            }
+                        }
+                        ImportMessage::Copied(bytes) => {
+                            if let Some(import) = this.running.get_mut(&video_id) {
+                                import.copied += bytes;
+                            }
+                        }
+                        ImportMessage::Done(result) => {
+                            this.running.remove(&video_id);
+                            if let Err(error) = result {
+                                this.errors.insert(video_id, error.into());
+                            }
+                        }
+                    }
+                    cx.notify();
+                });
+                if applied.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+}
+
 /// Lists, probes and imports the raw takes video-use edits.
 pub(crate) struct FootageCard {
     video_id: VideoId,
     state: Entity<AppState>,
+    imports: Entity<FootageImports>,
     takes: Vec<Take>,
     loaded: bool,
     /// ffprobe results by path, valid while the file's modification time matches.
     probes: HashMap<PathBuf, (Option<DateTime<Utc>>, Option<MediaInfo>)>,
-    import: Option<Import>,
-    /// What went wrong adding footage.
+    /// A copy into the folder was running when the card last looked.
+    importing: bool,
+    /// What went wrong adding footage, before a copy started.
     error: Option<SharedString>,
     /// Why the folder can't be read; cleared once it can.
     list_error: Option<SharedString>,
@@ -85,6 +204,7 @@ pub(crate) struct FootageCard {
     refreshing: bool,
     refresh_task: Option<Task<()>>,
     _poll: Task<()>,
+    _subscription: Subscription,
 }
 
 impl EventEmitter<FootageChanged> for FootageCard {}
@@ -99,33 +219,40 @@ impl FootageCard {
                 }
             }
         });
+        let imports = PipelineService::global(cx).read(cx).footage_imports().clone();
+        let subscription = cx.observe(&imports, |this: &mut Self, _, cx| this.follow_import(cx));
         let mut card = Self {
             video_id,
             state: AppState::global(cx),
+            importing: imports.read(cx).running(video_id).is_some(),
+            imports,
             takes: Vec::new(),
             loaded: false,
             probes: HashMap::new(),
-            import: None,
             error: None,
             list_error: None,
             refreshing: false,
             refresh_task: None,
             _poll: poll,
+            _subscription: subscription,
         };
-        card.sweep_partial_copies(cx);
+        let footage_dir = card.footage_dir(cx);
+        card.imports.update(cx, |imports, cx| imports.sweep(video_id, footage_dir, cx));
         card.refresh(cx);
         card
     }
 
-    /// Removes the hidden `.<take>.part` files of copies an earlier session left
-    /// unfinished (it quit mid-copy). Once per folder and session, so the copy of a
-    /// card closed meanwhile keeps its file.
-    fn sweep_partial_copies(&mut self, cx: &mut Context<Self>) {
-        let Some(dir) = self.footage_dir(cx) else { return };
-        if !cx.default_global::<SweptFolders>().0.insert(dir.clone()) {
-            return;
+    /// Lists the folder again once a copy into it ends.
+    fn follow_import(&mut self, cx: &mut Context<Self>) {
+        let importing = self.imports.read(cx).running(self.video_id).is_some();
+        if importing != self.importing {
+            self.importing = importing;
+            if !importing {
+                self.refresh(cx);
+            }
+            cx.emit(FootageChanged);
         }
-        cx.background_spawn(async move { remove_partial_copies(&dir) }).detach();
+        cx.notify();
     }
 
     /// Whether the folder holds at least one video or audio take.
@@ -139,7 +266,7 @@ impl FootageCard {
 
     /// Files are being copied in; the folder holds partial takes until they finish.
     pub(crate) fn is_importing(&self) -> bool {
-        self.import.is_some()
+        self.importing
     }
 
     fn footage_dir(&self, cx: &App) -> Option<PathBuf> {
@@ -281,7 +408,7 @@ impl FootageCard {
     /// Copies media files into the footage folder on a background thread. Other files
     /// are skipped; existing names get a numbered suffix.
     pub(crate) fn import(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        if self.import.is_some() {
+        if self.importing {
             return;
         }
         let (media, skipped): (Vec<PathBuf>, Vec<PathBuf>) =
@@ -296,7 +423,7 @@ impl FootageCard {
             .update(cx, |state, cx| state.ensure_video_folder(self.video_id, cx))
             .map(|folder| folder.join("footage"))
         else {
-            self.error = Some("Couldn't create the video's media folder.".into());
+            self.error = Some("Couldn’t create the video’s media folder. Check the media folder in Settings.".into());
             cx.notify();
             return;
         };
@@ -304,54 +431,9 @@ impl FootageCard {
             let names: Vec<String> = skipped.iter().map(|path| file_name(path)).collect();
             format!("Skipped {}: not a video, audio or image file.", names.join(", ")).into()
         });
-        let total_bytes = media.iter().map(|path| fs::metadata(path).map_or(0, |meta| meta.len())).sum();
-        self.import =
-            Some(Import { total_files: media.len(), file_ix: 0, name: file_name(&media[0]), copied: 0, total_bytes });
+        let video_id = self.video_id;
+        self.imports.update(cx, |imports, cx| imports.start(video_id, media, dir, cx));
         cx.notify();
-
-        let (sender, mut receiver) = unbounded();
-        let copy = cx.background_spawn(async move {
-            let report = |message| _ = sender.unbounded_send(message);
-            let result = media.iter().enumerate().try_for_each(|(ix, source)| {
-                report(ImportMessage::File { ix, name: file_name(source) });
-                copy_into(source, &dir, &mut |bytes| report(ImportMessage::Copied(bytes)))
-                    .map(drop)
-                    .map_err(|error| format!("Couldn’t copy {}: {error}", file_name(source)))
-            });
-            report(ImportMessage::Done(result));
-        });
-        cx.spawn(async move |this, cx| {
-            let _copy = copy;
-            while let Some(message) = receiver.next().await {
-                let applied = this.update(cx, |this, cx| {
-                    match message {
-                        ImportMessage::File { ix, name } => {
-                            if let Some(import) = &mut this.import {
-                                import.file_ix = ix;
-                                import.name = name;
-                            }
-                        }
-                        ImportMessage::Copied(bytes) => {
-                            if let Some(import) = &mut this.import {
-                                import.copied += bytes;
-                            }
-                        }
-                        ImportMessage::Done(result) => {
-                            this.import = None;
-                            if let Err(error) = result {
-                                this.error = Some(error.into());
-                            }
-                            this.refresh(cx);
-                        }
-                    }
-                    cx.notify();
-                });
-                if applied.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
     }
 
     fn open_folder(&mut self, cx: &mut Context<Self>) {
@@ -391,7 +473,7 @@ impl FootageCard {
                     .small()
                     .icon(IconName::Plus)
                     .label("Add footage…")
-                    .disabled(self.import.is_some())
+                    .disabled(self.importing)
                     .on_click(cx.listener(|this, _, window, cx| this.add_footage(window, cx))),
             )
     }
@@ -413,8 +495,9 @@ impl FootageCard {
                 .when(ix + 1 < count, |this| this.border_b_1().border_color(theme.border))
                 .child(Icon::new(media_icon(take.file.kind)).small().text_color(theme.muted_foreground))
                 .child(div().flex_1().min_w_0().truncate().text_sm().child(take.file.name.clone()))
+                // One line whether probed or not, so rows keep their height as probes finish.
                 .child(
-                    div()
+                    h_flex()
                         .flex_shrink_0()
                         .text_sm()
                         .text_color(theme.muted_foreground)
@@ -443,11 +526,13 @@ impl FootageCard {
         )
     }
 
-    fn render_import(&self, import: &Import, cx: &App) -> Div {
+    fn render_import(&self, import: &Import, cx: &App) -> impl IntoElement {
         let theme = cx.theme();
         let value =
             if import.total_bytes == 0 { 0.0 } else { import.copied as f32 / import.total_bytes as f32 * 100.0 };
         v_flex()
+            .id("footage-import")
+            .test_support()
             .gap_2()
             .px_3()
             .py_2p5()
@@ -477,10 +562,14 @@ impl Render for FootageCard {
         } else {
             self.render_list(cx).into_any_element()
         };
-        let dismiss_error = self.error.is_some().then(|| {
+        let import = self.imports.read(cx).running(self.video_id).cloned();
+        let error = self.error.clone().or_else(|| self.imports.read(cx).error(self.video_id).cloned());
+        let dismiss_error = error.is_some().then(|| {
             Button::new("footage-dismiss-error").ghost().xsmall().icon(IconName::X).tooltip("Dismiss").on_click(
                 cx.listener(|this, _, _, cx| {
                     this.error = None;
+                    let video_id = this.video_id;
+                    this.imports.update(cx, |imports, cx| imports.dismiss_error(video_id, cx));
                     cx.notify();
                 }),
             )
@@ -503,11 +592,11 @@ impl Render for FootageCard {
                     .when(self.takes.is_empty(), |this| this.border_dashed())
                     .drag_over::<ExternalPaths>(move |style, _, _, _| style.border_color(drop_border).bg(drop_fill))
                     .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.import(paths.paths().to_vec(), cx)))
-                    .when_some(self.import.as_ref(), |this, import| this.child(self.render_import(import, cx)))
+                    .when_some(import.as_ref(), |this, import| this.child(self.render_import(import, cx)))
                     .child(body),
             )
             .children(self.list_error.clone().map(|error| div().text_sm().text_color(theme.danger).child(error)))
-            .children(self.error.clone().map(|error| {
+            .children(error.map(|error| {
                 h_flex()
                     .gap_2()
                     .child(div().flex_1().min_w_0().text_sm().text_color(theme.danger).child(error))
@@ -521,16 +610,21 @@ fn file_name(path: &Path) -> String {
 }
 
 /// Copies `source` into `dir` under a free name, reporting copied bytes. The copy is
-/// written to a hidden `.<name>.part` file and gets its name only once complete, so a
-/// copy cut short (the app quit) never shows up as a shorter take; a failed copy is
-/// removed.
-fn copy_into(source: &Path, dir: &Path, progress: &mut dyn FnMut(u64)) -> io::Result<PathBuf> {
+/// written to a hidden `.<name>.<n>.part` file of its own, listed in `partials` while
+/// it is written, and gets its name only once complete: a copy cut short (the app
+/// quit) never shows up as a shorter take, and two copies of same-named files never
+/// share a file. A failed copy is removed.
+fn copy_into(
+    source: &Path,
+    dir: &Path,
+    partials: &Mutex<HashSet<PathBuf>>,
+    progress: &mut dyn FnMut(u64),
+) -> io::Result<PathBuf> {
     if source.parent() == Some(dir) {
         return Ok(source.to_owned());
     }
-    let partial = dir.join(format!(".{}{PARTIAL_SUFFIX}", file_name(source)));
+    let (partial, mut out) = create_partial(source, dir, partials)?;
     let result = (|| {
-        let mut out = File::create(&partial)?;
         let mut input = File::open(source)?;
         let mut buffer = vec![0; COPY_CHUNK];
         loop {
@@ -548,7 +642,35 @@ fn copy_into(source: &Path, dir: &Path, progress: &mut dyn FnMut(u64)) -> io::Re
     if result.is_err() {
         _ = fs::remove_file(&partial);
     }
+    lock(partials).remove(&partial);
     result
+}
+
+/// A new hidden file in `dir` to copy `source` into, with its path, listed in
+/// `partials` before it exists so a sweep never takes it for a leftover.
+fn create_partial(source: &Path, dir: &Path, partials: &Mutex<HashSet<PathBuf>>) -> io::Result<(PathBuf, File)> {
+    for n in 1.. {
+        let partial = dir.join(format!(".{}.{n}{PARTIAL_SUFFIX}", file_name(source)));
+        if !lock(partials).insert(partial.clone()) {
+            continue;
+        }
+        match File::create_new(&partial) {
+            Ok(file) => return Ok((partial, file)),
+            // Another copy's, or one an earlier session left.
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                lock(partials).remove(&partial);
+            }
+            Err(error) => {
+                lock(partials).remove(&partial);
+                return Err(error);
+            }
+        }
+    }
+    unreachable!("an unbounded range always yields a free name")
+}
+
+fn lock(partials: &Mutex<HashSet<PathBuf>>) -> std::sync::MutexGuard<'_, HashSet<PathBuf>> {
+    partials.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Gives the finished copy `partial` the name `dir/<source name>`, or `name (2).ext`,
@@ -577,12 +699,14 @@ fn name_free(partial: &Path, dir: &Path, source: &Path) -> io::Result<PathBuf> {
     unreachable!("an unbounded range always yields a free name")
 }
 
-/// Removes the `.<take>.part` files of unfinished copies from `dir`.
-fn remove_partial_copies(dir: &Path) {
+/// Removes the hidden `.part` files of unfinished copies from `dir`, except those of
+/// copies running now (`partials`).
+fn remove_partial_copies(dir: &Path, partials: &Mutex<HashSet<PathBuf>>) {
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') && name.ends_with(PARTIAL_SUFFIX) && entry.path().is_file() {
-            _ = fs::remove_file(entry.path());
+        let (name, path) = (entry.file_name().to_string_lossy().into_owned(), entry.path());
+        if name.starts_with('.') && name.ends_with(PARTIAL_SUFFIX) && path.is_file() && !lock(partials).contains(&path)
+        {
+            _ = fs::remove_file(path);
         }
     }
 }
@@ -604,6 +728,7 @@ mod tests {
         let state = cx.new(|_| AppState::new(Store::open_in_memory().unwrap()).unwrap());
         let video = cx.update(|cx| {
             AppState::set_global(state.clone(), cx);
+            PipelineService::init(state.clone(), cx);
             state.update(cx, |state, cx| {
                 state.update_settings(cx, |settings| settings.media_root = Some(media.path().to_owned()));
                 state.create_video(NewVideo { title: "Desk setup".into(), ..NewVideo::default() }, cx).unwrap()
@@ -653,6 +778,13 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_is_told_about_every_take_the_card_lists() {
+        let listed: HashSet<&str> = media::VIDEO_EXTENSIONS.iter().chain(media::AUDIO_EXTENSIONS).copied().collect();
+        let prompted: HashSet<&str> = videocrm_pipeline::FOOTAGE_EXTENSIONS.into_iter().collect();
+        assert_eq!(listed, prompted);
+    }
+
+    #[test]
     fn imports_never_overwrite_existing_takes() {
         let root = tempfile::tempdir().unwrap();
         let source_dir = root.path().join("card");
@@ -663,9 +795,10 @@ mod tests {
         fs::write(&source, vec![7u8; COPY_CHUNK + 10]).unwrap();
         fs::write(footage.join("take1.mp4"), b"existing").unwrap();
 
+        let partials = Mutex::default();
         let mut copied = 0;
-        let first = copy_into(&source, &footage, &mut |bytes| copied += bytes).unwrap();
-        copy_into(&source, &footage, &mut |_| {}).unwrap();
+        let first = copy_into(&source, &footage, &partials, &mut |bytes| copied += bytes).unwrap();
+        copy_into(&source, &footage, &partials, &mut |_| {}).unwrap();
         assert_eq!(copied, COPY_CHUNK as u64 + 10);
         assert_eq!(first, footage.join("take1 (2).mp4"));
         assert_eq!(fs::read(footage.join("take1.mp4")).unwrap(), b"existing");
@@ -673,7 +806,7 @@ mod tests {
         assert!(footage.join("take1 (3).mp4").is_file());
 
         // A file already in the folder is left alone.
-        copy_into(&footage.join("take1.mp4"), &footage, &mut |_| {}).unwrap();
+        copy_into(&footage.join("take1.mp4"), &footage, &partials, &mut |_| {}).unwrap();
         assert_eq!(fs::read_dir(&footage).unwrap().count(), 3, "no partial copies are left behind");
     }
 
@@ -685,19 +818,52 @@ mod tests {
         let source = root.path().join("take2.mov");
         fs::write(&source, vec![1u8; 3 * COPY_CHUNK]).unwrap();
 
+        let partials = Mutex::default();
         let mut seen = Vec::new();
-        copy_into(&source, &footage, &mut |_| {
+        copy_into(&source, &footage, &partials, &mut |_| {
             seen.push(fs::read_dir(&footage).unwrap().map(|entry| entry.unwrap().file_name()).collect::<Vec<_>>());
+            // A sweep while it copies leaves the copy alone.
+            remove_partial_copies(&footage, &partials);
         })
         .unwrap();
         // While copying, the folder holds only the hidden partial file.
-        assert!(seen.iter().all(|names| names == &[".take2.mov.part"]), "{seen:?}");
-        assert!(footage.join("take2.mov").is_file() && !footage.join(".take2.mov.part").exists());
+        assert!(seen.iter().all(|names| names == &[".take2.mov.1.part"]), "{seen:?}");
+        assert!(footage.join("take2.mov").is_file() && !footage.join(".take2.mov.1.part").exists());
+        assert!(lock(&partials).is_empty());
 
         // A copy an earlier session left unfinished is removed; takes stay.
-        fs::write(footage.join(".take3.mov.part"), b"half").unwrap();
-        remove_partial_copies(&footage);
+        fs::write(footage.join(".take3.mov.1.part"), b"half").unwrap();
+        remove_partial_copies(&footage, &partials);
         let names: Vec<_> = fs::read_dir(&footage).unwrap().map(|entry| entry.unwrap().file_name()).collect();
         assert_eq!(names, ["take2.mov"]);
+    }
+
+    #[test]
+    fn copies_of_same_named_takes_never_share_a_file() {
+        let root = tempfile::tempdir().unwrap();
+        let footage = root.path().join("footage");
+        let (card_a, card_b) = (root.path().join("a"), root.path().join("b"));
+        for dir in [&footage, &card_a, &card_b] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(card_a.join("C0001.MP4"), vec![b'a'; 3 * COPY_CHUNK]).unwrap();
+        fs::write(card_b.join("C0001.MP4"), vec![b'b'; 2 * COPY_CHUNK]).unwrap();
+        // A leftover of an earlier session with the first name a copy would take.
+        fs::write(footage.join(".C0001.MP4.1.part"), b"old").unwrap();
+
+        // Card B's copy starts while card A's is half way.
+        let partials = Mutex::default();
+        let mut second = None;
+        let first = copy_into(&card_a.join("C0001.MP4"), &footage, &partials, &mut |_| {
+            if second.is_none() {
+                second = Some(copy_into(&card_b.join("C0001.MP4"), &footage, &partials, &mut |_| {}).unwrap());
+            }
+        })
+        .unwrap();
+        let second = second.unwrap();
+        assert_eq!((second, first), (footage.join("C0001.MP4"), footage.join("C0001 (2).MP4")));
+        assert_eq!(fs::read(footage.join("C0001.MP4")).unwrap(), vec![b'b'; 2 * COPY_CHUNK]);
+        assert_eq!(fs::read(footage.join("C0001 (2).MP4")).unwrap(), vec![b'a'; 3 * COPY_CHUNK]);
+        assert_eq!(fs::read(footage.join(".C0001.MP4.1.part")).unwrap(), b"old", "not overwritten");
     }
 }

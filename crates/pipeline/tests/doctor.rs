@@ -202,6 +202,6 @@ fn an_agent_that_is_not_claude_code_is_refused() {
     assert!(!report.agent.ok);
     assert_eq!(
         report.agent.detail,
-        format!("{} is not Claude Code: --version printed \"true (GNU coreutils) 9.7\"", other.display())
+        format!("{} is not Claude Code: --version printed “true (GNU coreutils) 9.7”", other.display())
     );
 }

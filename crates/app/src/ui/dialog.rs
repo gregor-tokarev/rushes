@@ -88,7 +88,13 @@ pub fn confirm_delete_videos(
 ) {
     let ids: Vec<VideoId> = videos.iter().map(|(id, _)| *id).collect();
     let titles: Vec<&str> = videos.iter().map(|(_, title)| title.as_str()).collect();
-    let (title, description) = delete_videos_copy(&titles, crate::publish::delete_upload_notice(&ids, cx));
+    let notices: Vec<&str> =
+        [crate::publish::delete_upload_notice(&ids, cx), crate::ai_edit::delete_run_notice(&ids, cx)]
+            .into_iter()
+            .flatten()
+            .collect();
+    let notice = (!notices.is_empty()).then(|| notices.join(" "));
+    let (title, description) = delete_videos_copy(&titles, notice.as_deref());
     let delete = std::rc::Rc::new(delete);
     window.open_alert_dialog(cx, move |alert, _, _| {
         let (ids, delete) = (ids.clone(), delete.clone());

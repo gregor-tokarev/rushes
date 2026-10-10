@@ -23,13 +23,13 @@ use gpui_kit::{
 };
 use tempfile::TempDir;
 use videocrm::ai_edit::{
-    AiEditPanel, AiSettings, INTERRUPTED, LogEvent, PhaseKind, PhaseStarted, PipelineService, PipelinesPage, RunError,
-    RunMarker, TimelineEntry, split_failure,
+    AiEditPanel, AiSettings, INTERRUPTED, LogEvent, PhaseKind, PhaseStarted, PipelineService, PipelinesPage,
+    RENDERED_WITH_ERROR, RunError, RunMarker, TimelineEntry, delete_run_notice, split_failure,
 };
 use videocrm::route::{Route, VideoTab};
 use videocrm::state::{AppEvent, AppState};
 use videocrm_core::{Block, DocumentKind, NewVideo, PipelineRun, RunId, RunStatus, Store, VideoId, VideoStatus};
-use videocrm_pipeline::AgentEvent;
+use videocrm_pipeline::{AgentEvent, AgentProcess};
 
 const TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -178,6 +178,27 @@ fi
     path
 }
 
+/// An agent that renders edit/final.mp4 (a copy of the first take) and then reports
+/// an error, as Claude Code does when it hits its turn limit during the self-check.
+/// With `RENDER_THEN_EXIT=1` it also exits with an error status.
+fn render_then_error_agent(dir: &Path) -> PathBuf {
+    let path = dir.join("render-then-error-agent");
+    fs::write(
+        &path,
+        r#"#!/bin/sh
+echo '{"type":"system","subtype":"init","session_id":"rte-session","cwd":"/","tools":[],"model":"rte"}'
+mkdir -p edit && cp take1.mp4 edit/final.mp4
+echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Rendered edit/final.mp4; running the self-eval now."}]}}'
+echo '{"type":"result","subtype":"error_max_turns","is_error":true,"session_id":"rte-session","total_cost_usd":0.9}'
+[ "$RENDER_THEN_EXIT" = 1 ] && exit 1
+exit 0
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
 /// An agent with a real run's log shape: a few dozen tool calls, then a final summary
 /// far taller than the activity box, then the result. It renders nothing.
 fn chatty_agent(dir: &Path) -> PathBuf {
@@ -303,7 +324,8 @@ fn plan_revise_approve_renders_and_prepares_the_upload(cx: &mut TestAppContext) 
 
     let events = fx.stored_events(cx, id);
     assert_eq!(phases(&events), [(PhaseKind::Plan, None)]);
-    assert!(matches!(events[1].event, LogEvent::Agent(AgentEvent::Init { .. })), "{:?}", events[1]);
+    assert!(matches!(events[1].event, LogEvent::Agent(AgentEvent::Spawned { .. })), "{:?}", events[1]);
+    assert!(matches!(events[2].event, LogEvent::Agent(AgentEvent::Init { .. })), "{:?}", events[2]);
     assert_eq!(tool_names(&events), ["Skill", "Bash", "Bash", "Bash", "Write"]);
     assert!(matches!(events.last().unwrap().event, LogEvent::Agent(AgentEvent::Result { is_error: false, .. })));
     assert_eq!(cx.read(|cx| fx.service.read(cx).timeline(id).to_vec()), events, "live timeline matches the store");
@@ -329,7 +351,9 @@ fn plan_revise_approve_renders_and_prepares_the_upload(cx: &mut TestAppContext) 
     assert!(!fx.final_cut().exists(), "nothing is left where the next render writes");
     assert_eq!(done.session_id.as_deref(), Some(session.as_str()), "phases resume one session");
     assert!((done.cost_usd.unwrap() - 3.0 * 0.0123).abs() < 1e-9, "cost adds up over phases");
-    assert!(done.summary.unwrap().contains("Rendered edit/final.mp4"));
+    // The summary names the file the cut is kept in, not the shared path it was rendered to.
+    let summary = done.summary.unwrap();
+    assert!(summary.contains("Rendered edit/cuts/final-1.mp4") && !summary.contains("edit/final.mp4"), "{summary}");
     assert_eq!(fx.upload_file(cx), Some(fx.cut(1)), "the final cut becomes the upload file");
     assert_eq!(fx.video_status(cx), VideoStatus::Editing);
 
@@ -378,7 +402,7 @@ fn auto_approve_renders_and_feedback_renders_again(cx: &mut TestAppContext) {
     let again = fx.wait_for_status(cx, id, RunStatus::Succeeded);
     assert_eq!(again.output, Some(fx.cut(2)), "the new render is a new file");
     assert_eq!(fs::metadata(fx.cut(1)).unwrap().modified().unwrap(), rendered_at, "the first render is kept");
-    assert!(again.summary.unwrap().contains("feedback applied"));
+    assert!(again.summary.unwrap().contains("rendered to edit/cuts/final-2.mp4 with your feedback applied"));
     assert_eq!(fx.upload_file(cx), Some(chosen));
     assert_eq!(
         phases(&fx.stored_events(cx, id)),
@@ -746,6 +770,9 @@ fn a_render_that_leaves_an_old_final_cut_fails(cx: &mut TestAppContext) {
     assert!(failed.error.as_deref().is_some_and(|error| error.contains("without rendering")), "{failed:?}");
     assert_eq!(failed.output, None);
     assert_eq!(fx.upload_file(cx), None, "the old cut is not offered for upload");
+    // Nobody referred to the old cut, but a render must not overwrite it either.
+    assert_eq!(fs::read(fx.cut(1)).unwrap(), fs::read(fx.footage.join("take1.mp4")).unwrap());
+    assert!(!fx.final_cut().exists());
 }
 
 #[gpui_kit::test]
@@ -766,9 +793,194 @@ fn an_error_result_keeps_the_proposed_strategy(cx: &mut TestAppContext) {
         fx.service.update(cx, |service, cx| service.send_feedback(id, "Shorter.".into(), cx))
     })
     .expect("feedback sent");
-    let failed = fx.wait_for_status(cx, id, RunStatus::Failed);
+    // The revision failed; the strategy from before awaits approval again.
+    let failed = fx.wait_for_status(cx, id, RunStatus::AwaitingApproval);
     assert_eq!(failed.error.as_deref(), Some("Reached the turn limit."));
     assert_eq!(failed.summary, Some(strategy), "the error does not replace the strategy");
+}
+
+#[gpui_kit::test]
+fn a_cut_rendered_before_an_agent_error_is_kept(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let agent = render_then_error_agent(fx.root.path());
+    cx.update(|cx| {
+        fx.state.update(cx, |state, cx| {
+            state.update_settings(cx, |settings| settings.pipeline.agent_command = agent.display().to_string())
+        })
+    });
+
+    let id = fx.start(cx, true);
+    let done = fx.wait_for_status(cx, id, RunStatus::Succeeded);
+    assert_eq!(done.output, Some(fx.cut(1)), "the render is kept like any other");
+    let error = done.error.expect("the agent's error is kept with it");
+    assert!(error.starts_with(RENDERED_WITH_ERROR) && error.ends_with("It reached its turn limit."), "{error}");
+    assert_eq!(done.summary, None, "no summary describes this cut");
+    assert_eq!(fx.upload_file(cx), Some(fx.cut(1)));
+    assert!(!fx.final_cut().exists(), "the next render can't overwrite it");
+
+    // The same when the agent also exits with an error status.
+    let pid_file = fx.pid_file.display().to_string();
+    cx.update(|cx| {
+        fx.service.update(cx, |service, cx| {
+            service.set_agent_env(
+                vec![("RENDER_THEN_EXIT".into(), "1".into()), ("FAKE_AGENT_PID_FILE".into(), pid_file)],
+                cx,
+            );
+            service.send_feedback(id, "Again.".into(), cx)
+        })
+    })
+    .expect("feedback sent");
+    let again = fx.wait_for_status(cx, id, RunStatus::Succeeded);
+    assert_eq!(again.output, Some(fx.cut(2)));
+    assert!(again.error.is_some_and(|error| error.starts_with(RENDERED_WITH_ERROR)));
+    let row = cx.read(|cx| fx.state.read(cx).row(fx.video).cloned().unwrap());
+    assert_eq!(row.edit_status(), Some(RunStatus::Succeeded), "the edit reads as done");
+}
+
+#[gpui_kit::test]
+fn a_change_that_fails_leaves_the_finished_edit_done(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let video = fx.video;
+    let window = open(cx, move |window, cx| AiEditPanel::new(video, window, cx));
+    let id = fx.start(cx, true);
+    fx.wait_for_status(cx, id, RunStatus::Succeeded);
+    wait_for_window(cx, window, "the output card", |window, _| shows(window, "run-use-for-upload"));
+
+    // Iterating fails: the cut from before is still the edit's result.
+    let pid_file = fx.pid_file.display().to_string();
+    let agent_env = |fail: bool| {
+        let mut env = vec![("FAKE_AGENT_PID_FILE".to_owned(), pid_file.clone())];
+        if fail {
+            env.push(("FAKE_AGENT_MODE".to_owned(), "fail".to_owned()));
+        }
+        env
+    };
+    cx.update(|cx| {
+        fx.service.update(cx, |service, cx| {
+            service.set_agent_env(agent_env(true), cx);
+            service.send_feedback(id, "Make it shorter.".into(), cx)
+        })
+    })
+    .expect("feedback sent");
+    let run = fx.wait_for_status(cx, id, RunStatus::Succeeded);
+    assert_eq!(run.output, Some(fx.cut(1)));
+    assert!(run.error.as_deref().is_some_and(|error| error.contains("simulated failure")), "{run:?}");
+    let row = cx.read(|cx| fx.state.read(cx).row(video).cloned().unwrap());
+    assert_eq!((row.latest_run, row.edit_status()), (Some(RunStatus::Succeeded), Some(RunStatus::Succeeded)));
+    wait_for_window(cx, window, "the cut and the failure", |window, _| {
+        shows(window, "run-use-for-upload") && shows(window, "run-setback") && !shows(window, "run-stopped-step")
+    });
+
+    // Retry sends the same change again.
+    cx.update(|cx| fx.service.update(cx, |service, cx| service.set_agent_env(agent_env(false), cx)));
+    click(cx, window, "run-setback-retry");
+    assert_eq!(fx.run(cx, id).status, RunStatus::Rendering);
+    let done = fx.wait_for_status(cx, id, RunStatus::Succeeded);
+    assert_eq!((done.output, done.error), (Some(fx.cut(2)), None));
+    assert_eq!(markers(&fx.stored_events(cx, id)), ["Auto", "Feedback", "retry Feedback"]);
+    wait_for_window(cx, window, "the new cut alone", |window, _| {
+        shows(window, "run-use-for-upload") && !shows(window, "run-setback")
+    });
+}
+
+#[gpui_kit::test]
+fn startup_stops_an_agent_a_crashed_session_left_running(cx: &mut TestAppContext) {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    use std::os::unix::process::CommandExt as _;
+    // Agent process groups a crashed session left: one is the run's, the other has
+    // its id but started at another time.
+    let spawn = || Command::new("sleep").arg("60").process_group(0).spawn().expect("spawn sleep");
+    let (leftover, stranger) = (spawn(), spawn());
+    let (leftover_pid, stranger_pid) = (leftover.id(), stranger.id());
+    let reap = |mut child: std::process::Child| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || _ = tx.send(child.wait()));
+        rx
+    };
+    let (leftover_exit, stranger_exit) = (reap(leftover), reap(stranger));
+
+    let mut store = Store::open_in_memory().unwrap();
+    let video = videocrm_core::Video::new("Crashed while rendering");
+    store.insert_video(&video).unwrap();
+    let run = |status: RunStatus, output: Option<PathBuf>| PipelineRun {
+        id: RunId::new(),
+        video_id: video.id,
+        status,
+        brief: String::new(),
+        footage_dir: PathBuf::from("/nonexistent"),
+        session_id: Some("s".into()),
+        summary: None,
+        output,
+        error: None,
+        cost_usd: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let iterating = run(RunStatus::Rendering, Some(PathBuf::from("/nonexistent/edit/cuts/final-1.mp4")));
+    let planning = run(RunStatus::Planning, None);
+    let stranger_process = AgentProcess {
+        start_ticks: AgentProcess::of(stranger_pid).start_ticks.map(|ticks| ticks + 1),
+        ..AgentProcess::of(stranger_pid)
+    };
+    for (run, phase, process) in [
+        (&iterating, PhaseKind::Feedback, AgentProcess::of(leftover_pid)),
+        (&planning, PhaseKind::Plan, stranger_process),
+    ] {
+        store.insert_run(run).unwrap();
+        let started = LogEvent::Phase(PhaseStarted { phase, text: None, retry: false });
+        store.append_run_event(run.id, &started.to_payload()).unwrap();
+        store.append_run_event(run.id, &LogEvent::Agent(AgentEvent::Spawned { process }).to_payload()).unwrap();
+    }
+
+    let fx = Fixture::with_store(cx, store, &[], false);
+    let status = leftover_exit.recv_timeout(Duration::from_secs(5)).expect("the leftover agent was stopped").unwrap();
+    assert!(!status.success());
+    assert!(stranger_exit.try_recv().is_err(), "a process that only shares the id is left alone");
+    _ = Command::new("kill").arg(stranger_pid.to_string()).status();
+
+    let iterated = fx.stored_run(cx, iterating.id);
+    assert_eq!(
+        (iterated.status, iterated.error.as_deref()),
+        (RunStatus::Succeeded, Some(INTERRUPTED)),
+        "the cut stays"
+    );
+    let planned = fx.stored_run(cx, planning.id);
+    assert_eq!((planned.status, planned.error.as_deref()), (RunStatus::Failed, Some(INTERRUPTED)));
+}
+
+#[gpui_kit::test]
+fn deleting_a_video_whose_edit_runs_says_it_stops_the_agent(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[("FAKE_AGENT_DELAY_MS", "1500")]);
+    let other = cx.update(|cx| {
+        fx.state
+            .update(cx, |state, cx| state.create_video(NewVideo { title: "Other".into(), ..NewVideo::default() }, cx))
+    });
+    let other = other.expect("video created");
+    assert_eq!(cx.read(|cx| delete_run_notice(&[fx.video], cx)), None);
+
+    let id = fx.start(cx, false);
+    let notice = cx.read(|cx| delete_run_notice(&[fx.video], cx));
+    assert!(notice.is_some_and(|notice| notice.contains("stops the agent")), "{notice:?}");
+    assert!(
+        cx.read(|cx| delete_run_notice(&[fx.video, other], cx))
+            .is_some_and(|notice| notice.starts_with("Some of them"))
+    );
+    assert_eq!(cx.read(|cx| delete_run_notice(&[other], cx)), None);
+
+    cx.update(|cx| fx.service.update(cx, |service, cx| service.cancel(id, cx)));
+    fx.wait_for_status(cx, id, RunStatus::Cancelled);
+    assert_eq!(cx.read(|cx| delete_run_notice(&[fx.video], cx)), None, "a stopped edit has nothing to stop");
 }
 
 #[gpui_kit::test]
@@ -936,7 +1148,7 @@ fn the_panel_takes_an_edit_from_brief_to_publish(cx: &mut TestAppContext) {
     let id = latest_run(cx, &fx).expect("the panel started a run");
     let planned = fx.wait_for_status(cx, id, RunStatus::AwaitingApproval);
     assert!(planned.brief.contains("- Burn subtitles into the render."), "{}", planned.brief);
-    assert!(planned.brief.starts_with("Edit \"Desk setup 2026\""), "{}", planned.brief);
+    assert!(planned.brief.starts_with("Edit “Desk setup 2026”"), "{}", planned.brief);
 
     wait_for_window(cx, window, "the strategy card", |window, _| shows(window, "run-approve"));
     let composing = cx.update_window(window, |_, window, _| shows(window, "ai-edit-start")).unwrap();
@@ -1016,6 +1228,50 @@ fn a_discarded_strategy_can_be_restored(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_cancelled_revision_offers_the_strategy_again(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let id = fx.start(cx, false);
+    let strategy = fx.wait_for_status(cx, id, RunStatus::AwaitingApproval).summary;
+    let video = fx.video;
+    let window = open(cx, move |window, cx| AiEditPanel::new(video, window, cx));
+    wait_for_window(cx, window, "the strategy card", |window, _| shows(window, "run-request-changes"));
+
+    // A slow revision, cancelled while the agent works.
+    let pid_file = fx.pid_file.display().to_string();
+    cx.update(|cx| {
+        fx.service.update(cx, |service, cx| {
+            let env =
+                vec![("FAKE_AGENT_DELAY_MS".into(), "1500".into()), ("FAKE_AGENT_PID_FILE".into(), pid_file.clone())];
+            service.set_agent_env(env, cx)
+        })
+    });
+    click(cx, window, "run-request-changes");
+    cx.update_window(window, |_, window, cx| window.input("Shorter please.", cx)).unwrap();
+    click(cx, window, "run-send-feedback");
+    assert_eq!(fx.run(cx, id).status, RunStatus::Planning);
+    wait_for_window(cx, window, "the live status", |window, _| shows(window, "run-cancel"));
+    click(cx, window, "run-cancel");
+
+    let run = fx.wait_for_status(cx, id, RunStatus::AwaitingApproval);
+    assert_eq!((run.summary, run.error), (strategy, None), "the strategy from before awaits approval");
+    assert_eq!(markers(&fx.stored_events(cx, id)), ["Plan", "Revise", "Cancelled"]);
+    wait_for_window(cx, window, "the strategy and the notice", |window, _| {
+        shows(window, "run-approve") && shows(window, "run-setback")
+    });
+
+    // Approving renders it without planning again.
+    cx.update(|cx| {
+        fx.service.update(cx, |service, cx| service.set_agent_env(vec![("FAKE_AGENT_PID_FILE".into(), pid_file)], cx))
+    });
+    click(cx, window, "run-approve");
+    fx.wait_for_status(cx, id, RunStatus::Succeeded);
+    assert_eq!(markers(&fx.stored_events(cx, id)), ["Plan", "Revise", "Cancelled", "Approve"]);
+}
+
+#[gpui_kit::test]
 fn a_running_edit_can_be_cancelled_and_retried(cx: &mut TestAppContext) {
     if !tools_available() {
         return;
@@ -1037,6 +1293,38 @@ fn a_running_edit_can_be_cancelled_and_retried(cx: &mut TestAppContext) {
     assert_eq!(fx.run(cx, id).status, RunStatus::Planning);
     cx.update(|cx| fx.service.update(cx, |service, cx| service.cancel(id, cx)));
     fx.wait_for_status(cx, id, RunStatus::Cancelled);
+}
+
+#[gpui_kit::test]
+fn the_agent_time_leaves_out_the_wait_for_approval(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let id = fx.start(cx, false);
+    fx.wait_for_status(cx, id, RunStatus::AwaitingApproval);
+    // The creator reads the strategy for a while.
+    std::thread::sleep(Duration::from_millis(1500));
+    cx.update(|cx| fx.service.update(cx, |service, cx| service.approve(id, None, cx))).expect("approved");
+    let done = fx.wait_for_status(cx, id, RunStatus::Succeeded);
+
+    let reported: u64 = fx
+        .stored_events(cx, id)
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            LogEvent::Agent(AgentEvent::Result { duration_ms, .. }) => *duration_ms,
+            _ => None,
+        })
+        .sum();
+    let wall_clock = (done.updated_at - done.created_at).to_std().unwrap();
+    let agent_time = cx.read(|cx| fx.service.read(cx).agent_time(id, cx));
+    assert_eq!(agent_time, Duration::from_millis(reported), "the phases as the agent reported them");
+    assert!(agent_time + Duration::from_millis(1400) < wall_clock, "{agent_time:?} of {wall_clock:?}");
+
+    // The same from the stored log after a restart.
+    cx.update(|cx| PipelineService::init(fx.state.clone(), cx));
+    let restarted = cx.read(|cx| PipelineService::global(cx).read(cx).agent_time(id, cx));
+    assert_eq!(restarted, agent_time);
 }
 
 #[gpui_kit::test]
@@ -1203,6 +1491,90 @@ fn the_brief_form_survives_leaving_the_video(cx: &mut TestAppContext) {
     assert!(run.brief.contains("- Burn subtitles into the render."), "{}", run.brief);
     assert_eq!(run.status, RunStatus::Rendering, "the strategy review stays skipped");
     fx.wait_for_status(cx, id, RunStatus::Succeeded);
+}
+
+#[gpui_kit::test]
+fn a_preference_changes_only_its_own_line_of_the_brief(cx: &mut TestAppContext) {
+    let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
+    let video = fx.video;
+    let (window, host) = open_host(cx, move |window, cx| cx.new(|cx| AiEditPanel::new(video, window, cx)).into());
+    let panel: Entity<AiEditPanel> = cx.read(|cx| host.read(cx).view.clone().unwrap().downcast().unwrap());
+    let brief = |cx: &mut TestAppContext| cx.read(|cx| panel.read(cx).brief_text(cx));
+    wait_for_window(cx, window, "the composer", |window, _| shows(window, "brief"));
+    let sponsor = "- Mention the sponsor at the end.";
+
+    // The natural place for an instruction: one more bullet at the end of the list,
+    // on the line the brief ends with.
+    click(cx, window, "brief");
+    cx.update_window(window, |_, window, cx| {
+        window.press("ctrl-end", cx);
+        window.input(sponsor, cx);
+    })
+    .unwrap();
+    let typed = brief(cx);
+    assert!(typed.ends_with(&format!("- No colour grade: keep the original look.\n{sponsor}")), "{typed}");
+
+    click(cx, window, "brief-remove-fillers");
+    click(cx, window, "brief-subtitles");
+    let toggled = brief(cx);
+    assert!(toggled.contains(sponsor), "the creator's line stays: {toggled}");
+    assert!(toggled.contains("- Keep filler words and natural pauses.\n- Burn subtitles into the render.\n"));
+    assert_eq!(toggled.lines().count(), typed.lines().count(), "one line for one line");
+
+    // The brief's undo takes the changes back one at a time, the creator's typing last.
+    click(cx, window, "brief");
+    cx.update_window(window, |_, window, cx| window.press("ctrl-z", cx)).unwrap();
+    assert!(brief(cx).contains("- No subtitles.") && brief(cx).contains(sponsor), "{}", brief(cx));
+    cx.update_window(window, |_, window, cx| window.press("ctrl-z", cx)).unwrap();
+    assert!(brief(cx).contains("- Remove filler words") && brief(cx).contains(sponsor), "{}", brief(cx));
+    let preferences = cx.read(|cx| panel.read(cx).preferences().clone());
+    assert!(preferences.remove_fillers && !preferences.subtitles, "the checkboxes follow the brief: {preferences:?}");
+    cx.update_window(window, |_, window, cx| window.press("ctrl-z", cx)).unwrap();
+    assert!(!brief(cx).contains(sponsor), "{}", brief(cx));
+}
+
+#[gpui_kit::test]
+fn an_edited_brief_survives_a_restart(cx: &mut TestAppContext) {
+    let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
+    let video = fx.video;
+    let panel =
+        move |window: &mut Window, cx: &mut App| -> AnyView { cx.new(|cx| AiEditPanel::new(video, window, cx)).into() };
+    let (window, host) = open_host(cx, panel);
+    let brief = |cx: &mut TestAppContext| {
+        let panel: Entity<AiEditPanel> = cx.read(|cx| host.read(cx).view.clone().unwrap().downcast().unwrap());
+        cx.read(|cx| panel.read(cx).brief_text(cx))
+    };
+    wait_for_window(cx, window, "the composer", |window, _| shows(window, "brief"));
+    click(cx, window, "brief");
+    cx.update_window(window, |_, window, cx| {
+        window.press("ctrl-end", cx);
+        window.input(" Keep it under ten minutes.", cx);
+    })
+    .unwrap();
+    click(cx, window, "brief-subtitles");
+    let edited = brief(cx);
+    // Saved once typing pauses, before the app could be quit or crash.
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+
+    // VideoCRM starts again on the same database.
+    close(cx, &host);
+    cx.update(|cx| PipelineService::init(fx.state.clone(), cx));
+    show(cx, window, &host, panel);
+    wait_for_window(cx, window, "the composer", |window, _| shows(window, "brief"));
+    assert_eq!(brief(cx), edited);
+    assert!(edited.contains("Keep it under ten minutes.") && edited.contains("- Burn subtitles into the render."));
+
+    // It is still the creator's: a script change only notes that it is out of date.
+    cx.update(|cx| {
+        fx.state.update(cx, |state, cx| {
+            let mut script = state.ensure_document(video, DocumentKind::Script, cx).expect("script");
+            script.blocks = vec![Block::paragraph("A new line.")];
+            state.save_document(script, cx);
+        })
+    });
+    wait_for_window(cx, window, "the notice", |window, _| shows(window, "brief-stale"));
+    assert_eq!(brief(cx), edited);
 }
 
 #[gpui_kit::test]

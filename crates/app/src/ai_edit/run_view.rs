@@ -28,7 +28,7 @@ use videocrm_pipeline::{MediaInfo, probe_media};
 
 use super::format;
 use super::icons::tool_icon;
-use super::service::{LivePhase, PipelineService, split_failure};
+use super::service::{INTERRUPTED, LivePhase, PipelineService, RENDERED_WITH_ERROR, Setback, split_failure};
 use super::timeline::{LogEvent, MarkerKind, PhaseKind, TimelineItem, fold_timeline};
 use crate::route::VideoTab;
 use crate::state::AppState;
@@ -611,6 +611,79 @@ impl RunView {
             })
     }
 
+    /// Above a strategy or a cut that is still on offer: why the phase after it did not
+    /// finish, and a retry. Secondary to the card below, which stays usable.
+    fn render_setback(&self, run: &PipelineRun, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let setback = self.service.read(cx).setback(run.id)?;
+        let strategy = run.status == RunStatus::AwaitingApproval;
+        let (failed, title, message, stderr) = match setback {
+            Setback::Stopped => {
+                (false, if strategy { "You stopped the revision" } else { "You stopped your last change" }, "", None)
+            }
+            Setback::Failed(error) => {
+                let (message, stderr) = split_failure(error);
+                match message.strip_prefix(RENDERED_WITH_ERROR) {
+                    Some(detail) => (true, "The agent stopped with an error after rendering", detail.trim(), stderr),
+                    None if message == INTERRUPTED => (
+                        true,
+                        if strategy { "The revision was interrupted" } else { "Your last change was interrupted" },
+                        "VideoCRM closed while the agent worked.",
+                        stderr,
+                    ),
+                    None => (
+                        true,
+                        if strategy { "The revision failed" } else { "Your last change failed" },
+                        message,
+                        stderr,
+                    ),
+                }
+            }
+        };
+        let rendered = matches!(setback, Setback::Failed(error) if error.starts_with(RENDERED_WITH_ERROR));
+        let follow_up = if strategy {
+            "The strategy below is the one from before: approve it, or ask for changes again."
+        } else if rendered {
+            "It may not have checked this cut: watch it before you upload it."
+        } else {
+            "The cut below is the one from before."
+        };
+        let message = if message.is_empty() { follow_up.to_owned() } else { format!("{message} {follow_up}") };
+        let stderr = stderr.map(|stderr| code_block(stderr.to_owned(), cx));
+        let theme = cx.theme();
+        let (icon, color) =
+            if failed { (IconName::CircleX, theme.danger) } else { (IconName::CircleStop, theme.muted_foreground) };
+        Some(
+            h_flex()
+                .id("run-setback")
+                .test_support()
+                .items_start()
+                .gap_3()
+                .px_4()
+                .py_3()
+                .rounded(theme.radius_lg)
+                .bg(theme.muted)
+                .child(div().pt_0p5().child(Icon::new(icon).small().text_color(color)))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
+                        .child(div().text_sm().text_color(theme.muted_foreground).child(message))
+                        .children(stderr.map(|stderr| div().pt_1().child(stderr))),
+                )
+                .child(
+                    Button::new("run-setback-retry")
+                        .outline()
+                        .small()
+                        .icon(IconName::RotateCcw)
+                        .label("Retry")
+                        .on_click(cx.listener(|this, _, _, cx| this.act(cx, |service, id, cx| service.retry(id, cx)))),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The feedback box, when it is open for `purpose`.
     fn render_feedback(&self, purpose: FeedbackPurpose, _: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
         if self.feedback_open != Some(purpose) {
@@ -884,6 +957,7 @@ impl Render for RunView {
             }
             (None, _) => None,
         };
+        let setback = if live.is_none() { self.render_setback(&run, cx) } else { None };
         let timeline = self.render_timeline(live.is_some(), window, cx);
         let error = self.action_error.clone();
         let danger = cx.theme().danger;
@@ -891,6 +965,7 @@ impl Render for RunView {
         v_flex()
             .gap_4()
             .child(stepper)
+            .children(setback)
             .children(state_card)
             .when_some(error, |this, error| this.child(div().text_sm().text_color(danger).child(error)))
             .child(timeline)
