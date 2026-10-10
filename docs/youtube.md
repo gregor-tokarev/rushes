@@ -214,7 +214,8 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   seconds and derives the time left.
 - After the bytes arrive the video gets `video.youtube = YoutubeLink { .. }` and its status
   becomes `Scheduled` (with a publish time), `Published` (public or unlisted) or stays as
-  it was (private). The custom thumbnail is set next; a failure there is a warning
+  it was (private). A scheduled upload also sets the video's Publish date to the local
+  date of the publish time: that is when YouTube publishes it, so the planner follows. The custom thumbnail is set next; a failure there is a warning
   notification, not a failed upload, and its reason stays on the Upload card and the
   Uploads page for the rest of the session ("Thumbnail not set"; `403 forbidden` becomes
   `Error::ThumbnailsNotAllowed`: custom thumbnails need a channel verified at

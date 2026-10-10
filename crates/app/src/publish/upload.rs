@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui_kit::component::button::Button;
@@ -602,8 +602,10 @@ impl YoutubeService {
                 privacy,
                 uploaded_at: Utc::now(),
             });
-            if video.publish.publish_at.is_some() {
+            if let Some(publish_at) = video.publish.publish_at {
                 video.status = VideoStatus::Scheduled;
+                // YouTube publishes it then, whatever the planner said before.
+                video.publish_date = Some(publish_at.with_timezone(&Local).date_naive());
             } else if privacy != Privacy::Private {
                 video.status = VideoStatus::Published;
             }

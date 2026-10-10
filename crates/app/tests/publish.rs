@@ -10,7 +10,7 @@ use std::io::Write as _;
 use std::rc::Rc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{Local, Utc};
 use gpui_kit::{Entity, TestAppContext};
 use publish_support::{Emulators, Workspace, wait_until};
 use serde_json::json;
@@ -166,10 +166,13 @@ fn a_scheduled_private_upload_marks_the_video_scheduled(cx: &mut TestAppContext)
     workspace.sign_in(cx, "creator@example.com");
     let service = workspace.service.clone();
     let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let publish_at = Utc::now() + chrono::TimeDelta::days(2);
     let video_id = workspace.create_video(cx, "Desk setup 2026", |video| {
         video.publish.file = Some(file.clone());
         video.publish.privacy = Privacy::Private;
-        video.publish.publish_at = Some(Utc::now() + chrono::TimeDelta::days(2));
+        video.publish.publish_at = Some(publish_at);
+        // The planner had another day in mind.
+        video.publish_date = Some(Local::now().date_naive());
     });
 
     let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
@@ -177,7 +180,10 @@ fn a_scheduled_private_upload_marks_the_video_scheduled(cx: &mut TestAppContext)
         let status = service.read_with(cx, |s, _| s.job(upload).map(|job| job.status.clone()));
         matches!(status, Some(UploadStatus::Processing { .. } | UploadStatus::Done { .. })).then_some(())
     });
-    assert_eq!(workspace.video(cx, video_id).status, VideoStatus::Scheduled);
+    let video = workspace.video(cx, video_id);
+    assert_eq!(video.status, VideoStatus::Scheduled);
+    // The schedule YouTube got is the publish date the planner shows.
+    assert_eq!(video.publish_date, Some(publish_at.with_timezone(&Local).date_naive()));
     let received = emulators.uploads();
     assert_eq!(received[0]["status"]["privacyStatus"], "private");
     assert!(received[0]["status"]["publishAt"].is_string());
