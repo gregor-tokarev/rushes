@@ -697,9 +697,21 @@ impl AppState {
         eprintln!("videocrm: couldn’t save, retrying: {error}");
         let subject = lock(&self.writes.queue).failing_subject();
         let (what, it) = (subject.name(), if matches!(subject, Subject::Changes) { "them" } else { "it" });
+        let code = match error {
+            StoreError::Sqlite(error) => error.sqlite_error_code(),
+            _ => None,
+        };
         let message = if error.is_busy() {
             format!(
                 "Couldn’t save {what}: another program is using the database. VideoCRM keeps trying and saves {it} when the database is free."
+            )
+        } else if code == Some(ErrorCode::DiskFull) {
+            format!(
+                "Couldn’t save {what}: the disk is full. Free up some space; VideoCRM keeps trying and saves {it} then."
+            )
+        } else if matches!(code, Some(ErrorCode::ReadOnly | ErrorCode::PermissionDenied | ErrorCode::CannotOpen)) {
+            format!(
+                "Couldn’t save {what}: VideoCRM can’t write to its data folder. Check that the folder is yours and not read-only; VideoCRM keeps trying."
             )
         } else if matches!(subject, Subject::Changes) {
             format!("Couldn’t save {what}. VideoCRM keeps trying; keep the app open until they’re saved.")
