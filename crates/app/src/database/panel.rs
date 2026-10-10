@@ -22,7 +22,7 @@ use gpui_kit::{
     IntoElement, KeyBinding, NoAction, ParentElement as _, Pixels, Render, ScrollHandle, SharedString, Styled as _,
     Subscription, Task, Window, actions, div,
 };
-use videocrm_core::input::parse_number;
+use videocrm_core::input::{normalize_title, parse_number};
 use videocrm_core::{
     BuiltinField, Column, DatabaseView, FilterSpec, PropertyDef, PropertyId, PropertyKind, PropertyValue,
     SortDirection, SortSpec, Video, VideoId, VideoRow, VideoStatus, ViewId, ViewKind,
@@ -401,8 +401,12 @@ impl DatabasePanel {
         self.table.focus_handle(cx).focus(window, cx);
 
         match cell.column {
+            // An emptied title is not saved, as on the video page; the cell
+            // shows the stored one again.
             Column::Builtin(BuiltinField::Title) => {
-                self.update_video(cell.video, |video| video.title = text.trim().to_string(), cx);
+                if let Some(title) = normalize_title(&text) {
+                    self.update_video(cell.video, |video| video.title = title, cx);
+                }
             }
             Column::Custom(property) => {
                 let Some(def) = self.properties.iter().find(|def| def.id == property) else {

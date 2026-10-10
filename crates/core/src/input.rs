@@ -87,6 +87,14 @@ pub fn normalize_link(input: &str) -> Option<String> {
     is_host.then(|| format!("https://{input}"))
 }
 
+/// A video title as it is saved: one line, with line breaks and runs of
+/// whitespace as single spaces. `None` for a title of only whitespace, which
+/// is never saved: the stored title stays.
+pub fn normalize_title(input: &str) -> Option<String> {
+    let title = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!title.is_empty()).then_some(title)
+}
+
 /// Reads a number typed into a Number property. Commas that group thousands
 /// are dropped (`1,234,567`, and `1,500` as the app shows numbers); a comma
 /// that can't be grouping is the decimal point (`3,5` is 3.5, `1,25` is 1.25),
@@ -184,6 +192,13 @@ mod tests {
         assert_eq!(normalize_link("just words"), None);
         assert_eq!(normalize_link("notes"), None);
         assert_eq!(normalize_link(""), None);
+    }
+
+    #[test]
+    fn titles_are_one_line_and_never_blank() {
+        assert_eq!(normalize_title("  Desk   setup\ntour ").as_deref(), Some("Desk setup tour"));
+        assert_eq!(normalize_title(" \n\t "), None);
+        assert_eq!(normalize_title(""), None);
     }
 
     #[test]

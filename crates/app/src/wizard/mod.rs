@@ -14,6 +14,7 @@ use gpui_kit::{
     App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     SharedString, Styled as _, Subscription, TestSupportExt as _, Window, div,
 };
+use videocrm_core::input::normalize_title;
 use videocrm_core::templates::TemplateKind;
 use videocrm_core::{NewVideo, VideoFormat, VideoStatus};
 
@@ -120,12 +121,11 @@ impl NewVideoForm {
     /// close hands focus back to the element focused before the dialog once
     /// the animation ends, which would take the caret out of the new script.
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let title = self.title.read(cx).value().trim().to_string();
-        if title.is_empty() {
+        let Some(title) = normalize_title(&self.title.read(cx).value()) else {
             self.error = Some("Give the video a title.".into());
             cx.notify();
             return;
-        }
+        };
         window.close_dialog(cx);
         let new = NewVideo {
             title,

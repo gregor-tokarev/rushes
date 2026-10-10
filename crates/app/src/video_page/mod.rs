@@ -27,6 +27,7 @@ use gpui_kit::{
     ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _,
     Window, div, point, px, rems,
 };
+use videocrm_core::input::normalize_title;
 use videocrm_core::{DocumentKind, Video, VideoId};
 
 use crate::ai_edit::AiEditPanel;
@@ -322,11 +323,9 @@ impl VideoPage {
     /// dialog requires one; the field shows the stored title again.
     fn commit_title(&mut self, cx: &mut Context<Self>) {
         // Titles are one line; pasted line breaks become spaces.
-        let title = self.title.read(cx).value().split_whitespace().collect::<Vec<_>>().join(" ");
-        if title.is_empty() {
-            return;
+        if let Some(title) = normalize_title(&self.title.read(cx).value()) {
+            self.edit(cx, |video| video.title = title);
         }
-        self.edit(cx, |video| video.title = title);
     }
 
     fn commit_hook(&mut self, cx: &mut Context<Self>) {

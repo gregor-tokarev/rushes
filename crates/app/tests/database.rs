@@ -492,6 +492,50 @@ fn keyboard_renames_and_opens_the_selected_row(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn an_emptied_title_is_not_saved_from_the_table(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+    let title = |db: &Fixture, cx: &mut TestAppContext, id: VideoId| {
+        cx.read(|cx| db.panel.read(cx).video(id).map(|video| video.title.clone()))
+    };
+
+    // Rename from the row menu: Open, Rename, …
+    db.step(cx, |window, cx| window.right_click(row_id(db.ownership), cx));
+    db.step(cx, |window, cx| window.within("popup-menu").click(1usize, cx));
+    db.with_window(cx, |window, _| {
+        assert_eq!(window.find("cell-input").focused(), Some(true), "the title takes the keyboard");
+    });
+    db.step(cx, |window, cx| {
+        window.press("ctrl-a", cx);
+        window.press("backspace", cx);
+        window.press("enter", cx);
+    });
+    assert!(db.take_events().is_empty(), "an empty title is not saved");
+    assert_eq!(title(&db, cx, db.ownership).as_deref(), Some("Rust ownership in 60 seconds"));
+    assert!(db.with_window(cx, |window, _| window.try_find("cell-input").is_none()));
+
+    // F2 on the selected row, with only spaces left. Between the title text
+    // and the Open button, which both open the video.
+    db.step(cx, |window, cx| window.click_at(row_id(db.desk), point(px(190.), px(16.)), cx));
+    db.step(cx, |window, cx| window.press("f2", cx));
+    db.step(cx, |window, cx| {
+        window.press("ctrl-a", cx);
+        window.input("   ", cx);
+        window.press("enter", cx);
+    });
+    assert!(db.take_events().is_empty(), "a blank title is not saved");
+    assert_eq!(title(&db, cx, db.desk).as_deref(), Some("Desk setup 2026"));
+
+    // Runs of spaces collapse, as on the video page.
+    db.step(cx, |window, cx| window.press("f2", cx));
+    db.step(cx, |window, cx| {
+        window.press("ctrl-a", cx);
+        window.input("  Desk   setup  ", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(title(&db, cx, db.desk).as_deref(), Some("Desk setup"));
+}
+
+#[gpui_kit::test]
 fn escape_cancels_an_inline_edit_at_once(cx: &mut TestAppContext) {
     let db = Fixture::open(cx);
 
