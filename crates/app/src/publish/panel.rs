@@ -47,6 +47,7 @@ use super::service::{Connection, YoutubeEvent, YoutubeService};
 use super::transfer::{format_bytes, format_duration, format_eta, format_speed};
 use super::ui::{ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, status_line, youtube_link};
 use super::upload::{ProcessingOutcome, Retired, UPLOAD_FILE_LOCKED, UploadError};
+use crate::ai_edit::PipelineService;
 use crate::route::{Route, VideoTab};
 use crate::state::{AppEvent, AppState};
 use crate::ui::path_prompt::{self, PathKind, PathRequest};
@@ -474,8 +475,14 @@ impl PublishPanel {
     /// Lists the AI edit outputs (final cut first) and the footage of the video.
     fn refresh_choices(&mut self, cx: &mut Context<Self>) {
         let Some(dir) = self.state.read(cx).video(self.video_id).and_then(media::footage_dir) else { return };
+        // Only what an AI edit rendered, or the file chosen already: an unfinished
+        // render an earlier version left in edit/cuts is no cut.
+        let mut cuts = PipelineService::try_global(cx)
+            .map(|service| service.read(cx).rendered_cuts(self.video_id, cx))
+            .unwrap_or_default();
+        cuts.extend(self.draft.file.clone());
         cx.spawn(async move |this, cx| {
-            let choices = cx.background_spawn(async move { file_choices(&dir) }).await;
+            let choices = cx.background_spawn(async move { file_choices(&dir, &cuts) }).await;
             this.update(cx, |this, cx| {
                 if this.choices != choices {
                     this.choices = choices;
@@ -1602,10 +1609,13 @@ fn file_meta(size: u64, media: Option<&MediaInfo>) -> String {
     parts.join(" · ")
 }
 
-/// The cuts AI edits kept (newest first), then the footage videos.
-fn file_choices(footage_dir: &Path) -> Vec<FileChoice> {
-    let mut choices: Vec<FileChoice> =
-        kept_cuts(footage_dir).into_iter().map(|path| FileChoice { path, source: "AI edit" }).collect();
+/// The kept cuts among `cuts` (newest first), then the footage videos.
+fn file_choices(footage_dir: &Path, cuts: &[PathBuf]) -> Vec<FileChoice> {
+    let mut choices: Vec<FileChoice> = kept_cuts(footage_dir)
+        .into_iter()
+        .filter(|path| cuts.contains(path))
+        .map(|path| FileChoice { path, source: "AI edit" })
+        .collect();
     // An unreadable footage folder just offers fewer choices.
     let footage = media::list_footage(footage_dir).unwrap_or_default();
     choices.extend(
@@ -1709,11 +1719,20 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path();
         std::fs::create_dir_all(dir.join("edit/cuts")).unwrap();
-        let files = ["edit/cuts/final-1.mp4", "edit/cuts/final-2.mp4", "edit/preview.mp4", "take1.mov", "notes.txt"];
+        let files = [
+            "edit/cuts/final-1.mp4",
+            "edit/cuts/final-2.mp4",
+            "edit/cuts/final-3.mp4",
+            "edit/preview.mp4",
+            "take1.mov",
+            "notes.txt",
+        ];
         for file in files {
             std::fs::write(dir.join(file), b"x").unwrap();
         }
-        let choices = file_choices(dir);
+        // final-3 is no render's: an earlier version moved a cancelled render there.
+        let rendered = [dir.join("edit/cuts/final-1.mp4"), dir.join("edit/cuts/final-2.mp4")];
+        let choices = file_choices(dir, &rendered);
         let names: Vec<(String, &str)> =
             choices.iter().map(|choice| (file_name(&choice.path), choice.source)).collect();
         assert_eq!(

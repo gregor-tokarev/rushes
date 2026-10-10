@@ -161,6 +161,8 @@ impl NewVideoForm {
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(title) = normalize_title(&self.title.read(cx).value()) else {
             self.error = Some("Give the video a title.".into());
+            // The reason sits under the field, which takes the keyboard to fix it.
+            self.title.update(cx, |input, cx| input.focus(window, cx));
             cx.notify();
             return;
         };
@@ -278,7 +280,13 @@ impl Render for NewVideoForm {
             .child(
                 Form::new()
                     .child(
-                        Field::new().label("Title").required(true).child(Input::new(&self.title).id("new-video-title")),
+                        Field::new()
+                            .label("Title")
+                            .required(true)
+                            .child(Input::new(&self.title).id("new-video-title"))
+                            .when_some(self.error.clone(), |field, error| {
+                                field.description_fn(move |_, cx| field_error(error.clone(), cx))
+                            }),
                     )
                     .child(Field::new().label("Hook").child(Input::new(&self.hook).id("new-video-hook")))
                     .child(
@@ -315,17 +323,19 @@ impl Render for NewVideoForm {
                     )
                     .child(Field::new().label("Template").child(self.render_templates(cx))),
             )
-            .when_some(self.error.clone(), |this, error| {
-                this.child(
-                    h_flex()
-                        .id("new-video-error")
-                        .test_support()
-                        .gap_2()
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(Icon::new(IconName::CircleAlert).small())
-                        .child(error),
-                )
-            })
     }
+}
+
+/// Why the Title field can't be used, under it.
+fn field_error(error: SharedString, cx: &App) -> impl IntoElement + use<> {
+    h_flex()
+        .id("new-video-error")
+        .test_support()
+        .role(Role::Alert)
+        .aria_label(error.clone())
+        .gap_1p5()
+        .text_sm()
+        .text_color(cx.theme().danger)
+        .child(Icon::new(IconName::CircleAlert).small())
+        .child(error)
 }

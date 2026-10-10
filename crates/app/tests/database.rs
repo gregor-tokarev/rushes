@@ -406,6 +406,7 @@ fn deleting_from_the_row_menu_asks_first(cx: &mut TestAppContext) {
 fn dragging_a_card_moves_it_between_columns(cx: &mut TestAppContext) {
     let db = Fixture::open(cx);
     db.step(cx, |window, cx| db.panel.update(cx, |panel, cx| panel.set_active_view(db.board, window, cx)));
+    db.with_window(cx, |window, _| window.activate_window());
 
     // Onto the Filming column's only card: Filming, ordered before it.
     db.step(cx, |window, cx| window.drag_to(format!("card-{}", db.tokyo), format!("card-slot-{}", db.desk), cx));
@@ -416,6 +417,9 @@ fn dragging_a_card_moves_it_between_columns(cx: &mut TestAppContext) {
     assert_eq!(video.id, db.tokyo);
     assert_eq!(video.status, VideoStatus::Filming);
     assert!(video.position < 2.0, "placed before the desk video, got {}", video.position);
+    // The mouse doesn't take the keyboard focus, whose ring would make the card look selected.
+    let focused = db.with_window(cx, |window, _| window.find(format!("card-{}", db.tokyo)).focused());
+    assert_ne!(focused, Some(true), "a dragged card doesn't take the focus");
     db.with_window(cx, |window, _| {
         let moved = window.find(format!("card-{}", db.tokyo)).bounds();
         let column = window.find("board-column-filming").bounds();
@@ -844,6 +848,34 @@ fn a_live_video_and_a_finished_edit_win_over_newer_attempts(cx: &mut TestAppCont
         assert!(window.try_find(format!("edit-attempt-{tokyo}")).is_none());
         assert!(window.try_find(format!("open-youtube-{tokyo}")).is_none());
     });
+}
+
+#[gpui_kit::test]
+fn a_video_gone_from_youtube_says_so_in_the_table_and_on_the_board(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+    let desk = db.desk;
+    // Its upload reached YouTube, which no longer has the video: the link was dropped.
+    db.set_data(
+        cx,
+        |rows| {
+            rows.into_iter()
+                .map(|mut row| {
+                    if row.video.id == desk {
+                        row.latest_upload = Some(UploadStatus::Done { video_id: "deleted-in-studio".into() });
+                    }
+                    row
+                })
+                .collect()
+        },
+        |views| views,
+    );
+    let gone = Some("Not on YouTube");
+    assert_eq!(db.label(cx, format!("youtube-{desk}")).as_deref(), gone, "as the Uploads page says it");
+    let never = db.with_window(cx, |window, _| window.try_find(format!("youtube-{}", db.tokyo)).is_some());
+    assert!(!never, "never uploaded: nothing to say");
+
+    db.step(cx, |window, cx| db.panel.update(cx, |panel, cx| panel.set_active_view(db.board, window, cx)));
+    assert_eq!(db.label(cx, format!("card-youtube-{desk}")).as_deref(), gone);
 }
 
 #[gpui_kit::test]

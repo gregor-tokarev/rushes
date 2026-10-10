@@ -3,7 +3,7 @@
 
 use std::cell::Cell;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -832,12 +832,17 @@ impl RunView {
                     this.child(div().mx_8().px_3().py_2().rounded(radius).bg(muted_bg).text_sm().child(text))
                 })
             }
-            TimelineItem::Marker { kind, .. } => {
-                let label = match kind {
-                    MarkerKind::Cancelled => "Cancelled",
-                    MarkerKind::Interrupted => super::INTERRUPTED,
-                    MarkerKind::Discarded => "You discarded the strategy",
-                    MarkerKind::Restored => "You restored the strategy",
+            TimelineItem::Marker { kind, cut, .. } => {
+                let label: SharedString = match kind {
+                    MarkerKind::Cancelled => "Cancelled".into(),
+                    MarkerKind::Interrupted => super::INTERRUPTED.into(),
+                    MarkerKind::Discarded => "You discarded the strategy".into(),
+                    MarkerKind::Restored => "You restored the strategy".into(),
+                    // Which file each render is, as the Publish tab lists them.
+                    MarkerKind::CutKept => match cut.as_deref().and_then(Path::file_name) {
+                        Some(name) => format!("Cut kept as {}", name.to_string_lossy()).into(),
+                        None => "Cut kept".into(),
+                    },
                 };
                 divider(row_id, label, border, muted)
             }
@@ -1008,12 +1013,12 @@ fn log_edges(rows: &ListState, padding: Pixels) -> (bool, bool) {
 }
 
 /// A timeline row that marks a turn of the run: a label between two rules.
-fn divider(id: ElementId, label: &'static str, border: Hsla, muted: Hsla) -> gpui_kit::Stateful<Div> {
+fn divider(id: ElementId, label: impl Into<SharedString>, border: Hsla, muted: Hsla) -> gpui_kit::Stateful<Div> {
     v_flex().id(id).w_full().gap_2().px_4().pt_3().pb_1().child(
         h_flex()
             .gap_3()
             .child(div().flex_1().h(px(1.)).bg(border))
-            .child(div().text_xs().text_color(muted).child(label))
+            .child(div().text_xs().text_color(muted).child(label.into()))
             .child(div().flex_1().h(px(1.)).bg(border)),
     )
 }

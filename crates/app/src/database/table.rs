@@ -32,7 +32,7 @@ use videocrm_core::{
 use super::colors::{format_color, free_tag_color, run_status_color, youtube_color};
 use super::elements::{
     CellButton, Chip, NO_OPTIONS_IN_TABLE, attempt_hint, cell_slot, chip_line, empty_value, multi_select_list,
-    muted_icon, select_menu, static_cell,
+    muted_icon, select_menu, static_cell, youtube_gone,
 };
 use super::format;
 use super::icons::column_icon;
@@ -265,6 +265,9 @@ impl VideoTable {
     /// already on YouTube is a hint beside it.
     fn render_youtube(&self, row: &VideoRow, cx: &mut App) -> AnyElement {
         let Some(state) = row.youtube_state() else {
+            if row.left_youtube() {
+                return static_cell(youtube_gone(element_id("youtube", row.video.id))).into_any_element();
+            }
             return static_cell(empty_value(cx)).into_any_element();
         };
         let id = row.video.id;

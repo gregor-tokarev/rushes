@@ -9,13 +9,14 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, ThemeStyled as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
+    AnyElement, AppContext as _, Context, DispatchPhase, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
+    MouseMoveEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    TestSupportExt as _, Window, canvas, div,
 };
 use videocrm_core::{VideoId, VideoRow, VideoStatus};
 
 use super::colors::{format_color, free_tag_color, run_status_color, tag_colors, youtube_color};
-use super::elements::{Chip, muted_icon};
+use super::elements::{Chip, muted_icon, youtube_gone};
 use super::format;
 use super::panel::{BOARD_CARD_CONTEXT, DatabasePanel, OpenSelected};
 use super::query::status_visible;
@@ -50,6 +51,29 @@ impl Render for DraggedCard {
     }
 }
 
+/// Draws the board again on the next mouse move, wherever it goes. A dropped card
+/// is a new element under the pointer: GPUI draws it hovered but only notices the
+/// pointer leaving once it has moved over the card, so a pointer that leaves in one
+/// move would leave the card highlighted.
+fn redraw_on_next_move(cx: &mut Context<DatabasePanel>) -> impl IntoElement {
+    let panel = cx.weak_entity();
+    canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            window.on_mouse_event(move |_: &MouseMoveEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture {
+                    _ = panel.update(cx, |panel, cx| {
+                        panel.card_dropped = false;
+                        cx.notify();
+                    });
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_0()
+}
+
 impl DatabasePanel {
     pub(super) fn render_board(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.empty_reason(cx) == EmptyReason::NoVideos && self.shown_rows().next().is_none() {
@@ -76,6 +100,7 @@ impl DatabasePanel {
                     self.render_board_column(status, &cards, now, window, cx)
                 },
             )))
+            .when(self.card_dropped, |this| this.child(redraw_on_next_move(cx)))
             .into_any_element()
     }
 
@@ -139,6 +164,7 @@ impl DatabasePanel {
                     .gap_1()
                     .drag_over::<DraggedCard>(|style, _, _, cx| style.bg(cx.theme().drop_target.opacity(0.35)))
                     .on_drop(cx.listener(move |this, card: &DraggedCard, _, cx| {
+                        this.card_dropped = true;
                         this.move_card(card.video, status, None, cx);
                     }))
                     .children(card_elements)
@@ -194,8 +220,9 @@ impl DatabasePanel {
         // YouTube are not hidden by a later failed or cancelled attempt.
         let edit = row.edit_status();
         let youtube = row.youtube_state();
+        let left_youtube = row.left_youtube();
         let scheduled = format::is_scheduled(video.publish.publish_at, now);
-        let has_pipeline = edit.is_some() || youtube.is_some();
+        let has_pipeline = edit.is_some() || youtube.is_some() || left_youtube;
 
         // The transparent top border is the drop indicator's slot, so showing
         // it does not move the card.
@@ -206,6 +233,7 @@ impl DatabasePanel {
             .border_color(cx.theme().transparent)
             .drag_over::<DraggedCard>(|style, _, _, cx| style.border_color(cx.theme().drag_border))
             .on_drop(cx.listener(move |this, card: &DraggedCard, _, cx| {
+                this.card_dropped = true;
                 this.move_card(card.video, status, Some(id), cx);
             }))
             .child(
@@ -225,6 +253,9 @@ impl DatabasePanel {
                     .shadow_xs()
                     .hover(|this| this.bg(cx.theme().secondary))
                     .when(focused, |this| this.focus_ring_style(window, cx))
+                    // A click or drag doesn't take the keyboard: the ring would make a
+                    // dropped card look selected.
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .on_click(cx.listener(move |this, _, _, cx| this.open_video(id, cx)))
                     .on_drag(dragged, |card, _, _, cx| cx.new(|_| card.clone()))
                     .child(
@@ -268,7 +299,8 @@ impl DatabasePanel {
                                         )
                                         .dot(true),
                                     )
-                                }),
+                                })
+                                .when(left_youtube, |this| this.child(youtube_gone(element_id("card-youtube", id)))),
                         )
                     })
                     .context_menu(move |menu, _, _| video_menu(menu, id, false, &panel)),

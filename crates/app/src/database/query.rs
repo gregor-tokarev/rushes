@@ -265,6 +265,8 @@ fn sort_key(row: &VideoRow, column: Column, properties: &[PropertyDef]) -> SortK
                     SortKey::Rank(upload_rank(&UploadStatus::Done { video_id: String::new() }))
                 }
                 Some(YoutubeState::Upload(upload)) => SortKey::Rank(upload_rank(upload)),
+                // Gone from YouTube since: after every upload state.
+                None if row.left_youtube() => SortKey::Rank(LEFT_YOUTUBE_RANK),
                 None => SortKey::Empty,
             },
             BuiltinField::CreatedAt => SortKey::Timestamp(video.created_at),
@@ -325,6 +327,9 @@ fn run_rank(status: RunStatus) -> usize {
 }
 
 /// Upload progression order.
+/// Where a video that left YouTube sorts in the YouTube column, after [`upload_rank`]'s.
+const LEFT_YOUTUBE_RANK: usize = 6;
+
 fn upload_rank(status: &UploadStatus) -> usize {
     match status {
         UploadStatus::Pending => 0,
@@ -560,6 +565,15 @@ mod tests {
         assert_eq!(sorted(&rows, &[sort(youtube, SortDirection::Ascending)], &[]), ["done", "none", "planning"]);
         let script = Column::Builtin(BuiltinField::Script);
         assert_eq!(sorted(&rows, &[sort(script, SortDirection::Descending)], &[]), ["none", "planning", "done"]);
+    }
+
+    #[test]
+    fn a_video_gone_from_youtube_sorts_after_the_uploads_and_before_the_rest() {
+        let mut rows = vec![row("never", 0.0), row("gone", 1.0), row("failed", 2.0)];
+        rows[1].latest_upload = Some(UploadStatus::Done { video_id: "deleted-in-studio".into() });
+        rows[2].latest_upload = Some(UploadStatus::Failed { error: "quota".into() });
+        let youtube = Column::Builtin(BuiltinField::Youtube);
+        assert_eq!(sorted(&rows, &[sort(youtube, SortDirection::Ascending)], &[]), ["failed", "gone", "never"]);
     }
 
     #[test]

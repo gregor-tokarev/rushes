@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
@@ -398,14 +398,11 @@ impl DocumentTab {
                     DialogFooter::new()
                         // The irreversible choice stands apart from the default one.
                         .child(
-                            Button::new("import-replace")
-                                .outline()
-                                .with_variant(ButtonVariant::Danger)
-                                .label("Replace")
-                                .on_click(move |_, window, cx| {
-                                    replace(window, cx);
-                                    window.close_dialog(cx);
-                                }),
+                            // Drawn like the path dialog's Replace and every Delete.
+                            Button::new("import-replace").danger().label("Replace").on_click(move |_, window, cx| {
+                                replace(window, cx);
+                                window.close_dialog(cx);
+                            }),
                         )
                         .child(div().flex_1())
                         .child(

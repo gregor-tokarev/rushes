@@ -134,6 +134,8 @@ pub struct DatabasePanel {
     pub(super) search: Entity<InputState>,
     pub(super) view_name: Entity<InputState>,
     pub(super) board_scroll: ScrollHandle,
+    /// A card was dropped and the board hasn't been drawn since the mouse moved.
+    pub(super) card_dropped: bool,
     editors: CellEditors,
     _subscriptions: Vec<Subscription>,
 }
@@ -236,6 +238,7 @@ impl DatabasePanel {
             search,
             view_name,
             board_scroll: ScrollHandle::new(),
+            card_dropped: false,
             editors,
             _subscriptions: subscriptions,
         }

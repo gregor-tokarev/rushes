@@ -66,12 +66,22 @@ refers to. `keep_final_cut(footage_dir)` moves the fresh `edit/final.mp4` to
 lists them, newest first. The app keeps the cut of every render this way and stores
 the kept path as the run's output, also when the agent wrote `edit/final.mp4` and then
 ended with an error (the run is done, with "Rendered, but the agent stopped with an
-error" as its error); a cancelled render's file is not offered. The agent's summary is
-saved naming the kept file instead of `edit/final.mp4`. Before a render starts, the app
-moves whatever is left at the shared path (a cancelled render, a cut an earlier version
-kept there) into `edit/cuts/`, so nothing is overwritten; when that fails the render
-does not start. `edit/preview.mp4`, `edit/project.md` and the transcripts stay shared:
-they are the skill's working state for the footage.
+error" as its error). The run's log gets a `cut_kept` marker naming the file (the
+activity log shows "Cut kept as final-2.mp4"), so an earlier render of the edit stays
+known after the next one replaces the output. The agent's summary is saved naming the
+kept file instead of `edit/final.mp4`.
+
+A render that does not finish (cancelled, failed or interrupted without a new cut) may
+leave half a file at `edit/final.mp4`. `set_aside_final_cut(footage_dir)` moves it to
+`edit/leftovers/final-<n>.mp4`, where `kept_cuts` doesn't look: the app does so when
+the phase ends, and before a render starts it sets aside anything at the shared path
+that no run and no upload form refers to. A cut that one does refer to (an earlier
+version kept cuts there, keeping one may have failed) moves into `edit/cuts/` and they
+follow it. Either way nothing is overwritten; when the move fails the render does not
+start. The Publish tab offers as "AI edit" only the kept cuts that are a run's output,
+named in a run's log, or the file the upload form already has. `edit/preview.mp4`,
+`edit/project.md` and the transcripts stay shared: they are the skill's working state
+for the footage.
 
 ## Agent invocation
 
