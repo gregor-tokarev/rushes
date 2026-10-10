@@ -1,22 +1,44 @@
 # Releasing
 
 `.github/workflows/bundle.yml` builds the desktop bundles, starts each one once, and
-publishes them.
+publishes them. `.github/workflows/daily-release.yml` releases `main` every day it
+changed.
 
 | Trigger | Result |
 | --- | --- |
+| Daily, 03:30 UTC, when `main` has commits since the newest `v*` tag | Patch version bumped and tagged on `main`, then released like a pushed tag |
+| Run workflow on Daily release (Actions tab) | Same as the daily run, now |
 | Tag `v<version>` pushed | GitHub release `v<version>` with all bundles and generated notes |
-| Run workflow (Actions tab) | Bundles kept as run artifacts, versioned `<version>-dev.<sha>` |
-| Pull request touching the workflow, `scripts/bundle-*.sh` or `assets/icon.svg` | Same as a manual run |
+| Run workflow on Bundle (Actions tab) | Bundles kept as run artifacts, versioned `<version>-dev.<sha>` |
+| Pull request touching the workflow, `scripts/bundle-*.sh` or `assets/icon.svg` | Same as a manual Bundle run |
 
-To release, bump `version` in the root `Cargo.toml` (the app shows it in Settings > About),
-commit, then tag and push:
+The Bundle workflow refuses a tag that doesn't match the workspace version in the root
+`Cargo.toml` (the app shows it in Settings > About).
+
+## Daily release
+
+The daily run checks out `main` and runs `scripts/daily-release.sh`:
+
+1. No commits since the newest `v*` tag: nothing to release, the run ends.
+2. The workspace version is released already (`v<version>` exists): it bumps the patch
+   number in `Cargo.toml` and `Cargo.lock` and commits `chore(release): <version>` as
+   `github-actions[bot]`. A version bumped by hand and not tagged yet is kept.
+3. It tags the commit `v<version>`, pushes the commit and the tag to `main` together, and
+   calls the Bundle workflow with the tag, which builds, smoke-tests and publishes the
+   release.
+
+The push fails, and nothing is released, if `main` moved during the run; the next run
+picks it up. A bundle that fails leaves its tag without a release; the next day's release
+bumps past it. Daily releases only bump the patch number, and only of a plain
+`<major>.<minor>.<patch>` version.
+
+For a minor or major release, bump `version` in the root `Cargo.toml`, run
+`cargo update --workspace` and commit; the next daily run (or a manual run) releases it.
+To release right away by hand, tag and push:
 
 ```sh
 git tag v0.2.0 && git push origin v0.2.0
 ```
-
-The workflow refuses a tag that doesn't match the workspace version.
 
 ## Bundles
 
@@ -51,5 +73,5 @@ window, and drew something (the screenshot isn't blank). Screenshots are kept as
 ## Cost
 
 macOS minutes count ten times on private repositories, and the macOS job compiles the
-app twice (one per architecture). That's why bundles build on tags, on demand, and for
-bundling changes only, not on every push.
+app twice (one per architecture). That's why bundles build on tags (at most one daily
+release), on demand, and for bundling changes only, not on every push.
