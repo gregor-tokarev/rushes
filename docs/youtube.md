@@ -180,7 +180,10 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   answering…"). Then `begin_authorization` and the wait (up to 5 minutes) run, the consent
   page opens with `cx.open_url` and its URL is exposed for **Copy link**; `cancel` sets the
   wait's cancel flag. While waiting, the panel says to finish in the browser and, for
-  Google, that "Error 401: invalid_client" there means a wrong client ID or secret.
+  Google, that "Error 401: invalid_client" there means a wrong client ID or secret; the
+  Upload card's blocker says the same ("Finish signing in with your browser."). Cancelling
+  a reconnect of a `NeedsSignIn` account leaves it `NeedsSignIn`; any other cancelled
+  sign-in leaves VideoCRM disconnected.
 - The sign-in thread only produces the client and account. The service saves the login
   when it accepts the result, so a cancelled or superseded sign-in leaves no file behind.
   Refreshed tokens go to the file only while that sign-in lasts: a request still running

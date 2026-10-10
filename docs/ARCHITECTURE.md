@@ -54,7 +54,8 @@ database's write lock for seconds. The UI thread never waits for it:
 - Quitting (Ctrl+Q, closing the window, SIGTERM/SIGINT/SIGHUP) writes the queue on the
   UI thread, waiting at most 5 s in all for a lock. What still can't be written is kept
   in `unsaved-changes.json` next to the database (mode 0600) and written at the next
-  start, which says so.
+  start, before the settings are read (kept settings that still can't be written are
+  used as queued), which says so.
 - The background services' records take the same queue (`state/records.rs`): AI
   edit runs, every entry of their logs (numbered by the pipeline service), upload jobs
   and their progress, kept brief forms. The services keep them in memory, which is
