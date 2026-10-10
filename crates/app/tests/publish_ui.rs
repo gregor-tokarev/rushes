@@ -478,7 +478,11 @@ fn a_narrow_uploads_page_keeps_each_jobs_action_in_view(cx: &mut TestAppContext)
 fn youtube_settings_start_with_the_google_client_and_hide_the_emulator(cx: &mut TestAppContext) {
     // A fresh install: the creator's own YouTube account, not the developer emulator.
     let workspace = Workspace::open(cx, YoutubeBackend::default());
-    let (handle, _settings) = open(cx, |window, cx| cx.new(|cx| YoutubeSettings::new(window, cx)));
+    let (handle, settings) = open(cx, |window, cx| cx.new(|cx| YoutubeSettings::new(window, cx)));
+    // The Settings page shows a group per section; one that came and went as
+    // the client is typed would scroll the page back to the top.
+    let groups = |cx: &mut TestAppContext| settings.read_with(cx, |settings, cx| settings.sections(cx).len());
+    let groups_before = groups(cx);
     let backend = |cx: &mut TestAppContext| workspace.state.read_with(cx, |state, _| state.settings().youtube.clone());
     let problem = |cx: &mut TestAppContext| {
         workspace.service.read_with(cx, |service, _| service.config().err().map(|problem| problem.to_string()))
@@ -538,6 +542,7 @@ fn youtube_settings_start_with_the_google_client_and_hide_the_emulator(cx: &mut 
     assert!(
         config.is_some_and(|config| config.is_google() && config.client_id == "1234-abc.apps.googleusercontent.com")
     );
+    assert_eq!(groups(cx), groups_before, "a valid client adds no settings group");
     // Connect can be clicked now: what Google will show comes with it.
     window(cx, handle, |window, cx| {
         window.render_frame(cx);

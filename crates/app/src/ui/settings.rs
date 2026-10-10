@@ -81,6 +81,7 @@ enum Item<V> {
 pub struct SettingsSection<V> {
     title: Option<SharedString>,
     description: Option<SharedString>,
+    keywords: Vec<SharedString>,
     items: Vec<Item<V>>,
 }
 
@@ -92,7 +93,7 @@ impl<V: 'static> Default for SettingsSection<V> {
 
 impl<V: 'static> SettingsSection<V> {
     pub fn new() -> Self {
-        Self { title: None, description: None, items: Vec::new() }
+        Self { title: None, description: None, keywords: Vec::new(), items: Vec::new() }
     }
 
     pub fn title(mut self, title: impl Into<SharedString>) -> Self {
@@ -102,6 +103,13 @@ impl<V: 'static> SettingsSection<V> {
 
     pub fn description(mut self, description: impl Into<SharedString>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// Words the Settings page search finds the section's items by, besides
+    /// their labels and its title: free-form parts have no label of their own.
+    pub fn keywords(mut self, keywords: impl IntoIterator<Item = &'static str>) -> Self {
+        self.keywords.extend(keywords.into_iter().map(SharedString::from));
         self
     }
 
@@ -127,6 +135,8 @@ impl<V: 'static> SettingsSection<V> {
     /// The section as a group of the kit's Settings page, rendering its parts
     /// through `view`. The page must re-render when `view` notifies.
     pub fn setting_group(self, view: &Entity<V>) -> SettingGroup {
+        // The kit's search matches items, not group titles.
+        let keywords: Vec<SharedString> = self.title.iter().cloned().chain(self.keywords).collect();
         let mut group = setting_group();
         if let Some(title) = self.title {
             group = group.title(title);
@@ -141,7 +151,7 @@ impl<V: 'static> SettingsSection<V> {
                     let control = view.update(cx, |view, cx| control(view, window, cx));
                     if stacked { div().w_full().max_w(FIELD_MAX_WIDTH).child(control) } else { div().child(control) }
                 });
-                let mut item = SettingItem::new(field.label, control);
+                let mut item = SettingItem::new(field.label, control).keywords(keywords.clone());
                 if let Some(description) = field.description {
                     item = item.description(description);
                 }
@@ -150,6 +160,7 @@ impl<V: 'static> SettingsSection<V> {
             Item::Element(part) => {
                 let view = view.clone();
                 SettingItem::render(move |_, window, cx| view.update(cx, |view, cx| part(view, window, cx)))
+                    .keywords(keywords.clone())
             }
         }))
     }

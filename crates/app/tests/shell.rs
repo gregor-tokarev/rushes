@@ -7,8 +7,9 @@ use std::sync::Arc;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, ElementId, Entity, Focusable as _, Pixels, Size, TestAppContext,
-    Window, WindowBounds, WindowOptions, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, ElementId, Entity, Focusable as _, InputEvent as _, Modifiers,
+    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Size, TestAppContext, Window, WindowBounds, WindowOptions,
+    point, px, size,
 };
 use videocrm::ai_edit::PipelineService;
 use videocrm::onboarding::{StartChoice, Step};
@@ -772,6 +773,40 @@ fn the_account_badge_opens_the_youtube_settings(cx: &mut TestAppContext) {
     // Back returns to the section that was open.
     app.press(cx, "alt-left");
     assert!(app.has(cx, "settings-media-root"));
+}
+
+#[gpui_kit::test]
+fn settings_search_finds_the_youtube_account_and_the_requirements(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    let search = |app: &Fixture, cx: &mut TestAppContext, query: &'static str| {
+        app.step(cx, |window, cx| {
+            // The search field, which has no id of its own, sits right above
+            // the list's first page.
+            let first = window.within("settings-sidebar").find("0-0").bounds();
+            let position = point(first.center().x, first.top() - px(29.));
+            let (button, modifiers) = (MouseButton::Left, Modifiers::default());
+            let press = MouseDownEvent { button, position, modifiers, click_count: 1, first_mouse: false };
+            window.dispatch_event(press.to_platform_input(), cx);
+            let release = MouseUpEvent { button, position, modifiers, click_count: 1 };
+            window.dispatch_event(release.to_platform_input(), cx);
+            window.press("secondary-a", cx);
+            window.input(query, cx);
+        });
+        // The settings list measures its groups in the first frame.
+        app.step(cx, |_, _| {});
+    };
+    let shows_connect = |app: &Fixture, cx: &mut TestAppContext| {
+        cx.update_window(app.window, |_, window, _| window.within("youtube-connection").try_find("connect").is_some())
+            .expect("window is open")
+    };
+    app.click(cx, "account-badge");
+    app.step(cx, |_, _| {});
+    assert!(shows_connect(&app, cx));
+    // The account has no label of its own; its section's words find it.
+    search(&app, cx, "connect");
+    assert!(shows_connect(&app, cx), "searching for connect shows the account");
+    search(&app, cx, "ffmpeg");
+    assert!(app.has(cx, "doctor-recheck"), "searching for a requirement shows the checklist");
 }
 
 #[gpui_kit::test]

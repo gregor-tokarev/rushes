@@ -318,6 +318,8 @@ impl YoutubeSettings {
             .id("youtube-expectations")
             .max_w(FIELD_MAX_WIDTH)
             .gap_1p5()
+            // Labelled like a field: it sits in the account's group.
+            .child(div().text_sm().child("When you connect"))
             .children(GOOGLE_EXPECTATIONS.iter().map(|note| {
                 h_flex()
                     .gap_2()
@@ -403,6 +405,7 @@ impl YoutubeSettings {
             (BackendKind::Google, false, false) => sections.push(
                 SettingsSection::new()
                     .title("OAuth client")
+                    .keywords(["google", "cloud", "credentials"])
                     .description(
                         "VideoCRM uploads through an OAuth client in your own Google Cloud project. Creating one is \
                          free.",
@@ -440,15 +443,17 @@ impl YoutubeSettings {
                     .element(move |this: &mut Self, _, cx| this.render_emulator_check(locked, cx)),
             ),
         }
-        sections
-            .push(SettingsSection::new().title("Account").element(|this: &mut Self, _, cx| this.render_account(cx)));
+        let mut account = SettingsSection::new()
+            .title("Account")
+            .keywords(["connect", "sign in", "google", "youtube", "channel", "upload"])
+            .element(|this: &mut Self, _, cx| this.render_account(cx));
+        // In the account's group rather than a group of its own: a group that
+        // comes and goes as the client ID is typed would scroll the Settings
+        // page back to the top.
         if !emulator && !locked && ready {
-            sections.push(
-                SettingsSection::new()
-                    .title("When you connect")
-                    .element(|this: &mut Self, _, cx| this.render_expectations(cx)),
-            );
+            account = account.element(|this: &mut Self, _, cx| this.render_expectations(cx));
         }
+        sections.push(account);
         if !connected || emulator {
             let mut developer = SettingsSection::new().title("Developer").field(
                 SettingsField::new("Local emulators", move |this: &mut Self, _, cx| {

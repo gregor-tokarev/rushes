@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -359,7 +358,6 @@ impl AiSettings {
                     .child(
                         Button::new("ai-settings-choose-skill")
                             .outline()
-                            .icon(IconName::FolderOpen)
                             .label("Choose…")
                             .on_click(cx.listener(|this, _, window, cx| this.choose_skill_dir(window, cx))),
                     ),
@@ -476,6 +474,8 @@ impl AiSettings {
                 .description(
                     "AI edits run video-use inside Claude Code on this computer. The key and the tools stay local.",
                 )
+                // The checklist's rows, which the search can't see.
+                .keywords(["claude", "video-use", "ffmpeg", "ffprobe", "elevenlabs", "python", "re-check"])
                 .element(|this: &mut Self, _, _| this.doctor.clone()),
         ]
     }
