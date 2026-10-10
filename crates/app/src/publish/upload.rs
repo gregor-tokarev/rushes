@@ -36,6 +36,8 @@ const PROCESSING_POLLS: usize = 24;
 /// Uploading progress is written to the database in this many steps, so the
 /// videos table and an interrupted job show roughly how far it got.
 const PERSISTED_STEPS: f32 = 10.0;
+/// Why a video's upload file can't be changed now, wherever it is chosen.
+pub const UPLOAD_FILE_LOCKED: &str = "The upload file can’t change while the video uploads. Cancel the upload first.";
 /// What a stopped upload says once YouTube no longer takes the rest of its file.
 const SESSION_GONE: &str = "YouTube can’t continue this upload. Start over to send the video from the beginning.";
 

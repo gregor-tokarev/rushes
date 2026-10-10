@@ -23,13 +23,14 @@ use gpui_kit::{
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, TestSupportExt as _,
     Window, canvas, div, list, px, rems,
 };
-use videocrm_core::{PipelineRun, RunId, RunStatus};
+use videocrm_core::{PipelineRun, RunId, RunStatus, VideoId};
 use videocrm_pipeline::{MediaInfo, probe_media};
 
 use super::format;
 use super::icons::tool_icon;
 use super::service::{INTERRUPTED, LivePhase, PipelineService, RENDERED_WITH_ERROR, Setback, split_failure};
 use super::timeline::{LogEvent, MarkerKind, PhaseKind, TimelineItem, fold_timeline};
+use crate::publish::{UPLOAD_FILE_LOCKED, YoutubeService};
 use crate::route::VideoTab;
 use crate::state::AppState;
 use crate::ui::Card;
@@ -79,13 +80,17 @@ pub(crate) struct RunView {
     output_task: Option<Task<()>>,
     action_error: Option<SharedString>,
     ticker: Option<Task<()>>,
-    _subscription: Subscription,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl RunView {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let service = PipelineService::global(cx);
-        let subscription = cx.observe(&service, |this, _, cx| this.sync(cx));
+        let mut subscriptions = vec![cx.observe(&service, |this, _, cx| this.sync(cx))];
+        // "Use for upload" waits while the video uploads.
+        if let Some(youtube) = YoutubeService::try_global(cx) {
+            subscriptions.push(cx.observe(&youtube, |_, _, cx| cx.notify()));
+        }
         Self {
             notes: cx.new(|cx| {
                 TextareaState::new(window, cx)
@@ -106,7 +111,7 @@ impl RunView {
             output_task: None,
             action_error: None,
             ticker: None,
-            _subscription: subscription,
+            _subscriptions: subscriptions,
         }
     }
 
@@ -271,6 +276,10 @@ impl RunView {
         let Some((video_id, output)) = self.run(cx).and_then(|run| Some((run.video_id, run.output.clone()?))) else {
             return;
         };
+        // The upload sends the file it started with; another one can't take its place.
+        if is_uploading(video_id, cx) {
+            return;
+        }
         self.state.update(cx, |state, cx| {
             if let Some(mut video) = state.video(video_id).cloned()
                 && video.publish.file.as_ref() != Some(&output)
@@ -436,6 +445,7 @@ impl RunView {
         let output = run.output.clone().unwrap_or_default();
         let is_upload_file =
             self.state.read(cx).video(run.video_id).is_some_and(|video| video.publish.file.as_ref() == Some(&output));
+        let file_locked = !is_upload_file && is_uploading(run.video_id, cx);
         let facts = self.output.as_ref().filter(|facts| facts.path == output);
         let meta = match facts {
             None => "Reading the file…".to_owned(),
@@ -533,6 +543,8 @@ impl RunView {
                                 .small()
                                 .icon(IconName::Upload)
                                 .label(if is_upload_file { "Go to Publish" } else { "Use for upload" })
+                                .disabled(file_locked)
+                                .when(file_locked, |this| this.tooltip(UPLOAD_FILE_LOCKED))
                                 .on_click(cx.listener(|this, _, _, cx| this.use_for_upload(cx))),
                         ),
                 )
@@ -1037,6 +1049,11 @@ fn expandable(
 /// The trailing lane of timeline rows, where expandable rows show their chevron.
 fn disclosure_lane() -> Div {
     div().w_4().flex_shrink_0().pt_0p5()
+}
+
+/// Whether `video_id` is uploading, so its upload file must stay the one being sent.
+fn is_uploading(video_id: VideoId, cx: &App) -> bool {
+    YoutubeService::try_global(cx).is_some_and(|youtube| youtube.read(cx).is_uploading_any(&[video_id]))
 }
 
 fn code_block(text: impl Into<SharedString>, cx: &App) -> Div {

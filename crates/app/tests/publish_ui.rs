@@ -16,12 +16,16 @@ use gpui_kit::{
 };
 use publish_support::{Emulators, Workspace, wait_until};
 use serde_json::json;
+use videocrm::ai_edit::{AiEditPanel, PipelineService};
 use videocrm::publish::{
     AccountBadge, BlockingReason, CHAPTERS_HEADING, Connection, PublishPanel, UploadsPage, YoutubeSettings,
 };
 use videocrm::route::{Route, SettingsSection, VideoTab};
 use videocrm_core::settings::YoutubeBackend;
-use videocrm_core::{Block, BlockKind, DocumentKind, Privacy, UploadId, UploadJob, UploadStatus, VideoId, YoutubeLink};
+use videocrm_core::{
+    Block, BlockKind, DocumentKind, PipelineRun, Privacy, RunId, RunStatus, UploadId, UploadJob, UploadStatus, VideoId,
+    YoutubeLink,
+};
 use videocrm_youtube::{CredentialStore, RetryCause};
 
 /// Longer than the views' save delay.
@@ -803,6 +807,63 @@ fn an_outage_shows_the_retry_on_the_upload_card(cx: &mut TestAppContext) {
             .read_with(cx, |s, _| s.latest_job(video_id).filter(|job| job.status == UploadStatus::Cancelled).cloned())
     });
     assert!(service.read_with(cx, |s, _| s.retry(job.id).is_none() && s.is_resumable(&job)));
+}
+
+#[gpui_kit::test]
+fn ai_edit_keeps_the_upload_file_while_the_video_uploads(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let take = publish_support::video_file(workspace.dir.path(), "take.mp4");
+    let cut = workspace.dir.path().join("cut.mp4");
+    std::fs::write(&cut, vec![7u8; 200_000]).unwrap();
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |video| video.publish.file = Some(take.clone()));
+    // A finished AI edit of the video made `cut`.
+    let now = Utc::now();
+    let run = PipelineRun {
+        id: RunId::new(),
+        video_id,
+        status: RunStatus::Succeeded,
+        brief: "Cut it tight.".into(),
+        footage_dir: workspace.dir.path().join("footage"),
+        session_id: Some("session".into()),
+        summary: Some("Cut to 8:12.".into()),
+        output: Some(cut.clone()),
+        error: None,
+        cost_usd: None,
+        created_at: now,
+        updated_at: now,
+    };
+    workspace.state.read_with(cx, |state, _| state.store()).lock().unwrap().insert_run(&run).unwrap();
+    let state = workspace.state.clone();
+    cx.update(|cx| PipelineService::init(state, cx));
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| AiEditPanel::new(video_id, window, cx)));
+    cx.run_until_parked();
+
+    // YouTube answers every chunk with 503 Backend Error: the upload keeps going.
+    emulators.inject_fault(json!({"method": "PUT", "path": "/upload/youtube/v3/videos", "status": 503, "times": 1000}));
+    let service = workspace.service.clone();
+    let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    wait_until(cx, "the upload session", |cx| service.read_with(cx, |s, _| s.job(upload)?.session_url.clone()));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        // As on the Publish tab, the file being sent stays the upload file.
+        window.click("run-use-for-upload", cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(workspace.video(cx, video_id).publish.file, Some(take.clone()));
+
+    service.update(cx, |service, cx| service.cancel_upload(upload, cx));
+    wait_until(cx, "the cancellation", |cx| {
+        service.read_with(cx, |s, _| s.job(upload).filter(|job| job.status == UploadStatus::Cancelled).map(|_| ()))
+    });
+    emulators.clear_faults();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("run-use-for-upload", cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(workspace.video(cx, video_id).publish.file, Some(cut), "it works again once the upload stopped");
 }
 
 #[gpui_kit::test]

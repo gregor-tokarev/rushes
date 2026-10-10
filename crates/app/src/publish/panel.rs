@@ -46,7 +46,7 @@ use super::rules::{
 use super::service::{Connection, YoutubeEvent, YoutubeService};
 use super::transfer::{format_bytes, format_duration, format_eta, format_speed};
 use super::ui::{ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, status_line, youtube_link};
-use super::upload::{ProcessingOutcome, Retired, UploadError};
+use super::upload::{ProcessingOutcome, Retired, UPLOAD_FILE_LOCKED, UploadError};
 use crate::state::{AppEvent, AppState};
 use crate::ui::path_prompt::{self, PathKind, PathRequest};
 use crate::ui::warning_text;
@@ -84,7 +84,6 @@ const TOO_FEW_SECTIONS: &str =
     "YouTube shows chapters only for three or more sections of 10 seconds or longer. The script has fewer.";
 const SHORTS_HAVE_NO_CHAPTERS: &str = "Shorts don’t have chapters on YouTube.";
 /// Why the video file can't change right now.
-const FILE_LOCKED: &str = "The file can’t change while it uploads. Cancel the upload first.";
 
 /// Chapters YouTube will show, as description text.
 #[derive(Clone, Debug, PartialEq)]
@@ -611,7 +610,7 @@ impl PublishPanel {
     fn on_drop(&mut self, target: FileTarget, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = paths.paths().iter().find(|path| path.is_file()).cloned() else { return };
         if target == FileTarget::Video && self.is_uploading(cx) {
-            window.push_notification(Notification::warning(FILE_LOCKED), cx);
+            window.push_notification(Notification::warning(UPLOAD_FILE_LOCKED), cx);
             return;
         }
         match target {
@@ -1267,7 +1266,7 @@ impl PublishPanel {
                 .outline()
                 .dropdown_caret(true)
                 .disabled(true)
-                .tooltip(FILE_LOCKED)
+                .tooltip(UPLOAD_FILE_LOCKED)
                 .into_any_element()
         } else {
             Button::new("choose-video-file")
