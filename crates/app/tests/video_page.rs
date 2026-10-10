@@ -201,6 +201,31 @@ fn enter_on_an_empty_title_says_what_is_missing(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_missing_title_is_explained_under_the_field_in_the_smallest_window(cx: &mut TestAppContext) {
+    let app = Fixture::open_sized(cx, &[], 960., 600.);
+    app.press(cx, "ctrl-n");
+    app.type_text(cx, "   ");
+    // The pointer takes the keyboard away from the title.
+    app.click(cx, "template-tutorial");
+    app.click(cx, "new-video-create");
+    assert!(app.has_dialog(cx), "nothing is created");
+
+    cx.update_window(app.window, |_, window, _| {
+        let error = window.find("new-video-error");
+        assert_eq!(error.label(), Some("Give the video a title."));
+        assert!(error.visible());
+        let (error, title, hook) =
+            (error.bounds(), window.find("new-video-title").bounds(), window.find("new-video-hook").bounds());
+        assert!(title.bottom() <= error.top() && error.bottom() <= hook.top(), "under the title: {error:?}");
+        assert!(error.bottom() <= px(600.), "in view without scrolling: {error:?}");
+        assert_eq!(window.find("new-video-title").focused(), Some(true), "the title takes the keyboard");
+    })
+    .expect("window is open");
+    app.type_text(cx, "Desk tour");
+    assert!(!app.has(cx, "new-video-error"));
+}
+
+#[gpui_kit::test]
 fn the_format_is_chosen_with_the_keyboard(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, &[]);
     let format = |app: &Fixture, cx: &mut TestAppContext| {
