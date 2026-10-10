@@ -42,6 +42,9 @@ const AVATAR_TIMEOUT: Duration = Duration::from_secs(15);
 /// most this often: each answer costs a unit of the daily quota.
 const REMOTE_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Settings key of the videos YouTube said it no longer has, by YouTube video id.
+const GONE_KEY: &str = "youtube.gone_videos";
+
 /// Where the YouTube account stands.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Connection {
@@ -106,7 +109,8 @@ pub struct YoutubeService {
     /// What YouTube last said about uploaded videos, by YouTube video id.
     pub(super) remote: HashMap<String, VideoInfo>,
     /// Uploaded videos YouTube says it doesn't have (deleted in YouTube Studio, or
-    /// removed by YouTube), by YouTube video id.
+    /// removed by YouTube), by YouTube video id. Kept across starts: once its
+    /// link is dropped, only this says an earlier upload of a video is gone.
     gone: HashSet<String>,
     remote_requests: HashSet<String>,
     /// When YouTube was last asked about an uploaded video, by YouTube video id.
@@ -259,6 +263,7 @@ impl YoutubeService {
         };
         service.restore_login(cx);
         service.recover_interrupted_uploads(cx);
+        service.load_gone(cx);
         service.check_stopped_uploads(cx);
         service
     }
@@ -642,6 +647,30 @@ impl YoutubeService {
         .detach();
     }
 
+    fn load_gone(&mut self, cx: &mut Context<Self>) {
+        match self.state.read(cx).read_setting::<Vec<String>>(GONE_KEY) {
+            Ok(gone) => self.gone = gone.unwrap_or_default().into_iter().collect(),
+            Err(error) => log_line!("videocrm: couldn't read which uploads left YouTube: {error}"),
+        }
+    }
+
+    /// Keeps which uploads YouTube no longer has, for the next start.
+    fn save_gone(&mut self, cx: &mut Context<Self>) {
+        let mut gone: Vec<&str> = self
+            .jobs
+            .iter()
+            .filter_map(|job| match &job.status {
+                UploadStatus::Processing { video_id } | UploadStatus::Done { video_id } => Some(video_id.as_str()),
+                _ => None,
+            })
+            .filter(|youtube_id| self.gone.contains(*youtube_id))
+            .collect();
+        gone.sort_unstable();
+        gone.dedup();
+        // A refusal is reported by the state; this run still knows.
+        self.state.update(cx, |state, cx| state.save_setting(GONE_KEY, &gone, cx));
+    }
+
     /// YouTube has no video `youtube_id`. Only its owner sees a private video, so
     /// that counts only when the connected channel is the one it was uploaded to.
     /// The videos linking to it stop pointing at a dead page.
@@ -662,6 +691,7 @@ impl YoutubeService {
             return;
         }
         self.gone.insert(youtube_id.to_owned());
+        self.save_gone(cx);
         self.remote.remove(youtube_id);
         self.state.update(cx, |state, cx| {
             for mut video in linked {

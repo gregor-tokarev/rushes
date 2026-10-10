@@ -1300,6 +1300,31 @@ fn the_publish_tab_asks_youtube_again_when_it_is_shown_again(cx: &mut TestAppCon
     cx.run_until_parked();
     window(cx, handle, |window, _| window.activate_window());
     wait_until(cx, "the dropped link", |cx| (!linked(cx)).then_some(()));
+
+    // Neither upload is on YouTube, also after a restart: the Uploads page
+    // says so on both rows, without a link to a deleted video.
+    let store = workspace.state.read_with(cx, |state, _| state.store());
+    let stored: Option<Vec<String>> = store.lock().unwrap().get_setting("youtube.gone_videos").unwrap();
+    let mut both = vec![first.clone(), second.clone()];
+    both.sort();
+    assert_eq!(stored, Some(both), "kept in the database");
+    for restart in [false, true] {
+        let service = if restart { workspace.restart(cx) } else { service.clone() };
+        cx.run_until_parked();
+        let jobs = service.read_with(cx, |s, _| s.jobs().to_vec());
+        assert_eq!(jobs.len(), 2);
+        for job in &jobs {
+            assert!(service.read_with(cx, |s, cx| s.is_off_youtube(job, cx)), "restart {restart}: {:?}", job.status);
+        }
+        let (page, _) = open(cx, |window, cx| cx.new(|cx| UploadsPage::new(window, cx)));
+        window(cx, page, |window, cx| {
+            window.render_frame(cx);
+            for job in &jobs {
+                assert!(window.find(format!("upload-{}", job.id)).visible());
+                assert!(window.try_find(format!("upload-{}-open", job.id)).is_none());
+            }
+        });
+    }
 }
 
 #[gpui_kit::test]
