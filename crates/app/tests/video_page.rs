@@ -21,7 +21,7 @@ use videocrm_core::settings::AppSettings;
 use videocrm_core::templates::TemplateKind;
 use videocrm_core::{
     BlockId, Column, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, Store,
-    TagColor, VideoId, ViewKind,
+    TagColor, VideoFormat, VideoId, ViewKind,
 };
 
 struct Fixture {
@@ -198,6 +198,41 @@ fn enter_on_an_empty_title_says_what_is_missing(cx: &mut TestAppContext) {
     // Typing a title clears it.
     app.type_text(cx, "D");
     assert!(!app.has(cx, "new-video-error"));
+}
+
+#[gpui_kit::test]
+fn the_format_is_chosen_with_the_keyboard(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &[]);
+    let format = |app: &Fixture, cx: &mut TestAppContext| {
+        cx.update_window(app.window, |_, window, _| {
+            let control = window.find("new-video-format");
+            (control.focused(), control.label().map(str::to_string))
+        })
+        .expect("window is open")
+    };
+    app.press(cx, "ctrl-n");
+    app.type_text(cx, "Quick tip");
+    // Title, Hook, then Format.
+    app.press(cx, "tab");
+    app.press(cx, "tab");
+    assert_eq!(format(&app, cx), (Some(true), Some("Format: Long-form".into())));
+
+    app.press(cx, "right");
+    app.press(cx, "right");
+    assert_eq!(format(&app, cx).1.as_deref(), Some("Format: Livestream"));
+    app.press(cx, "right");
+    assert_eq!(format(&app, cx).1.as_deref(), Some("Format: Livestream"), "the last format stays");
+    app.press(cx, "left");
+    assert_eq!(format(&app, cx).1.as_deref(), Some("Format: Short"));
+
+    // Tab goes on to Status; Enter creates the video.
+    app.press(cx, "tab");
+    assert_eq!(format(&app, cx).0, Some(false));
+    app.press(cx, "shift-tab");
+    app.press(cx, "enter");
+    assert!(!app.has_dialog(cx));
+    let id = app.video_id(cx, "Quick tip");
+    assert_eq!(cx.read(|cx| app.state.read(cx).video(id).map(|video| video.format)), Some(VideoFormat::Short));
 }
 
 #[gpui_kit::test]
