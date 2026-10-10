@@ -193,16 +193,24 @@ pub fn muted_icon(icon: IconName, cx: &App) -> Icon {
     Icon::new(icon).xsmall().text_color(cx.theme().muted_foreground)
 }
 
+/// Where a select without options sends the creator, from a table cell.
+pub(crate) const NO_OPTIONS_IN_TABLE: &str = "No options yet. Add them with Edit options… in the column’s menu.";
+/// Where a select without options sends the creator, from the video page.
+pub(crate) const NO_OPTIONS_ON_PAGE: &str =
+    "No options yet. Add them with Edit options… in the property’s column menu in the Videos table.";
+
 /// The menu of a select value, the same in table cells and on the video page:
 /// one item per option, the current one ticked, and Clear once a value is set.
+/// Without options it says `no_options`.
 pub(crate) fn select_menu(
     menu: PopupMenu,
     options: &[SelectOption],
     current: Option<&str>,
+    no_options: &'static str,
     set: impl Fn(Option<String>, &mut App) + Clone + 'static,
 ) -> PopupMenu {
     if options.is_empty() {
-        return menu.label("No options yet. Add them with Edit options… in the column’s menu.");
+        return menu.label(no_options);
     }
     let menu = options.iter().fold(menu.check_side(Side::Right), |menu, option| {
         let (name, color, id) = (option.name.clone(), option.color, option.id.clone());
@@ -222,10 +230,12 @@ pub(crate) fn select_menu(
 }
 
 /// The checklist of a multi-select value, the same in table cells and on the
-/// video page: a popover that stays open while options are ticked.
+/// video page: a popover that stays open while options are ticked. Without
+/// options it says `no_options`.
 pub(crate) fn multi_select_list(
     options: &[SelectOption],
     selected: &[String],
+    no_options: &'static str,
     toggle: impl Fn(&str, &mut App) + Clone + 'static,
     cx: &App,
 ) -> Div {
@@ -242,11 +252,6 @@ pub(crate) fn multi_select_list(
                 .child(h_flex().child(Chip::new(option.name.clone(), option.color)))
         }))
         .when(options.is_empty(), |this| {
-            this.child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("No options yet. Add them with Edit options… in the column’s menu."),
-            )
+            this.child(div().text_sm().text_color(cx.theme().muted_foreground).child(no_options))
         })
 }

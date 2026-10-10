@@ -31,8 +31,8 @@ use videocrm_core::{
 
 use super::colors::{format_color, free_tag_color, run_status_color, youtube_color};
 use super::elements::{
-    CellButton, Chip, attempt_hint, cell_slot, chip_line, empty_value, multi_select_list, muted_icon, select_menu,
-    static_cell,
+    CellButton, Chip, NO_OPTIONS_IN_TABLE, attempt_hint, cell_slot, chip_line, empty_value, multi_select_list,
+    muted_icon, select_menu, static_cell,
 };
 use super::format;
 use super::icons::column_icon;
@@ -476,7 +476,7 @@ impl VideoTable {
                     })
                     .dropdown_menu(move |menu, _, _| {
                         let panel = panel.clone();
-                        select_menu(menu, &options, selected.as_deref(), move |value, cx| {
+                        select_menu(menu, &options, selected.as_deref(), NO_OPTIONS_IN_TABLE, move |value, cx| {
                             let value = PropertyValue::Select(value);
                             _ = panel.update(cx, |panel, cx| panel.set_property_value(id, property, Some(value), cx));
                         })
@@ -505,6 +505,7 @@ impl VideoTable {
                         multi_select_list(
                             &options,
                             &selected,
+                            NO_OPTIONS_IN_TABLE,
                             move |option, cx| {
                                 _ = panel.update(cx, |panel, cx| panel.toggle_multi_option(id, property, option, cx));
                             },

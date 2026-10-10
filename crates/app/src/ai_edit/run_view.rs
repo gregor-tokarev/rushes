@@ -765,8 +765,9 @@ impl RunView {
                     _ => markdown(element_id(&format!("message-{seq}"), run_id), text.clone()).into_any_element(),
                 };
                 let toggle = preview.is_some().then(|| {
+                    // An in-app disclosure: a quiet button, not a link.
                     Button::new(element_id(&format!("message-toggle-{seq}"), run_id))
-                        .link()
+                        .ghost()
                         .xsmall()
                         .label(if expanded { "Show less" } else { "Show more" })
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_row(seq, cx)))
@@ -777,7 +778,8 @@ impl RunView {
                         .min_w_0()
                         .gap_1()
                         .child(body)
-                        .children(toggle.map(|toggle| h_flex().child(toggle))),
+                        // Bleeds out by the button's padding, so its label lines up with the text.
+                        .children(toggle.map(|toggle| h_flex().ml_neg_1().child(toggle))),
                 )
             }
             TimelineItem::Thinking { text, .. } => {

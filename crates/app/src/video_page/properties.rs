@@ -28,7 +28,9 @@ use videocrm_core::{
 
 use crate::database::Chip;
 use crate::database::colors::{format_color, free_tag_color, tag_colors};
-use crate::database::{PropertyEditor, PropertyEditorMode, format, kind_icon, multi_select_list, query, select_menu};
+use crate::database::{
+    NO_OPTIONS_ON_PAGE, PropertyEditor, PropertyEditorMode, format, kind_icon, multi_select_list, query, select_menu,
+};
 use crate::state::{AppEvent, AppState};
 
 /// Retained editors of one video's properties. Values are written through
@@ -598,7 +600,7 @@ impl PropertiesPanel {
                     })
                     .dropdown_menu(move |menu, _, _| {
                         let panel = panel.clone();
-                        select_menu(menu, &options, current.as_deref(), move |value, cx| {
+                        select_menu(menu, &options, current.as_deref(), NO_OPTIONS_ON_PAGE, move |value, cx| {
                             let value = value.map(|option| PropertyValue::Select(Some(option)));
                             _ = panel.update(cx, |panel, cx| panel.set_value(id, value, cx));
                         })
@@ -636,6 +638,7 @@ impl PropertiesPanel {
                         multi_select_list(
                             &options,
                             &selected,
+                            NO_OPTIONS_ON_PAGE,
                             move |option, cx| {
                                 _ = panel.update(cx, |panel, cx| panel.toggle_option(id, option, cx));
                             },

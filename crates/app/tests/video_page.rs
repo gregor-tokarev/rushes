@@ -384,6 +384,12 @@ fn a_multi_select_on_the_page_stays_open_while_options_are_ticked(cx: &mut TestA
         stored_property(&app, cx, id, platforms),
         Some(PropertyValue::MultiSelect(vec!["yt".into(), "tt".into()]))
     );
+    // The open list shows both ticks.
+    let checked = |app: &Fixture, cx: &mut TestAppContext, option: &'static str| {
+        cx.update_window(app.window, |_, window, _| window.find(option).checked()).expect("window is open")
+    };
+    assert_eq!(checked(&app, cx, "option-yt"), Some(true));
+    assert_eq!(checked(&app, cx, "option-tt"), Some(true));
 }
 
 #[gpui_kit::test]
