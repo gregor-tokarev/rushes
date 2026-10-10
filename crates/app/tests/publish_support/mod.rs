@@ -188,6 +188,16 @@ pub fn try_consent_in_browser(authorize_url: &str, email: &str) -> Result<String
     agent.get(&location).call()?.body_mut().read_to_string()
 }
 
+/// Cancels on the consent page: Google sends the browser back to the app with
+/// `error=access_denied`. Returns the page the app shows then.
+pub fn cancel_in_browser(authorize_url: &str) -> String {
+    let url = url::Url::parse(authorize_url).unwrap();
+    let param = |name: &str| url.query_pairs().find(|(key, _)| key == name).map(|(_, value)| value.into_owned());
+    let mut redirect = url::Url::parse(&param("redirect_uri").expect("redirect_uri")).unwrap();
+    redirect.query_pairs_mut().append_pair("error", "access_denied").append_pair("state", &param("state").unwrap());
+    agent().get(redirect.as_str()).call().unwrap().body_mut().read_to_string().unwrap()
+}
+
 /// `(action, hidden fields)` of one `<form ...>...</form>` fragment.
 fn parse_form(fragment: &str) -> (String, HashMap<String, String>) {
     let attribute = |tag: &str, name: &str| {

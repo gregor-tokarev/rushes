@@ -24,8 +24,9 @@ use videocrm_youtube::{
 };
 
 use super::rules::AccountAccess;
+use super::ui::display_name;
 use super::upload::{ActiveUpload, ProcessingOutcome, Retired};
-use crate::state::{AppEvent, AppState, Problem};
+use crate::state::{AppEvent, AppState, Problem, Severity};
 
 const CREDENTIALS_FILE: &str = "credentials.json";
 const AVATAR_DIR: &str = "avatars";
@@ -127,6 +128,8 @@ enum SignInStep {
 /// Why a sign-in ended without an account.
 enum SignInError {
     Cancelled,
+    /// Cancelled on the browser's consent page; what to tell the creator.
+    Denied(String),
     /// What to tell the creator.
     Failed(String),
 }
@@ -135,6 +138,7 @@ impl SignInError {
     fn new(error: YoutubeError, config: &YoutubeConfig) -> Self {
         match error {
             YoutubeError::Cancelled { .. } => SignInError::Cancelled,
+            YoutubeError::AccessDenied => SignInError::Denied(sign_in_message(&error, config)),
             error => SignInError::Failed(sign_in_message(&error, config)),
         }
     }
@@ -446,6 +450,23 @@ impl YoutubeService {
                         let connection = self.connection_before_sign_in();
                         self.set_connection(connection, cx);
                     }
+                    // Cancelled in the browser while signing in again: as with Cancel
+                    // in the app, the account still asks for its new sign-in.
+                    Err(SignInError::Denied(message)) => match self.connection_before_sign_in() {
+                        Connection::NeedsSignIn(account) => {
+                            let notice = Problem::new(
+                                "Sign-in cancelled",
+                                format!(
+                                    "The sign-in was cancelled in the browser. Reconnect to keep uploading as {}.",
+                                    display_name(&account)
+                                ),
+                            )
+                            .with_severity(Severity::Info);
+                            report_problem(&self.state, notice, cx);
+                            self.set_connection(Connection::NeedsSignIn(account), cx);
+                        }
+                        _ => self.set_connection(Connection::Failed(message.into()), cx),
+                    },
                     Err(SignInError::Failed(message)) => {
                         self.reconnecting = None;
                         self.set_connection(Connection::Failed(message.into()), cx);

@@ -5,6 +5,8 @@
 
 mod publish_support;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -21,6 +23,7 @@ use videocrm::publish::{
     AccountBadge, BlockingReason, CHAPTERS_HEADING, Connection, PublishPanel, UploadsPage, YoutubeSettings,
 };
 use videocrm::route::{Route, SettingsSection, VideoTab};
+use videocrm::state::{AppEvent, Severity};
 use videocrm_core::settings::YoutubeBackend;
 use videocrm_core::{
     Block, BlockKind, DocumentKind, PipelineRun, Privacy, RunId, RunStatus, UploadId, UploadJob, UploadStatus, VideoId,
@@ -1090,6 +1093,32 @@ fn an_expired_sign_in_blocks_the_upload_with_reconnect(cx: &mut TestAppContext) 
     cx.run_until_parked();
     assert!(matches!(service.read_with(cx, |s, _| s.connection().clone()), Connection::NeedsSignIn(_)));
     assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), [BlockingReason::NeedsSignIn]);
+
+    // So does Cancel on the browser's consent page, with a note.
+    let notices = Rc::new(RefCell::new(Vec::new()));
+    let sink = notices.clone();
+    cx.update(|cx| {
+        cx.subscribe(&workspace.state, move |_, event: &AppEvent, _| {
+            if let AppEvent::Problem(problem) = event {
+                sink.borrow_mut().push((problem.title().to_string(), problem.severity()));
+            }
+        })
+        .detach()
+    });
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.within("upload-blockers").click("upload-reconnect", cx);
+    });
+    let url = consent_page(cx);
+    publish_support::cancel_in_browser(&url);
+    let account =
+        wait_until(cx, "the cancelled sign-in", |cx| match service.read_with(cx, |s, _| s.connection().clone()) {
+            Connection::NeedsSignIn(account) => Some(account),
+            _ => None,
+        });
+    assert_eq!(account.channel_handle.as_deref(), Some("@creator"), "the account is remembered");
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), [BlockingReason::NeedsSignIn]);
+    assert_eq!(*notices.borrow(), [("Sign-in cancelled".to_owned(), Severity::Info)]);
 
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
