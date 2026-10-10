@@ -166,8 +166,11 @@ the agent's `PATH` (`config.env` first).
 - **Python**: the skill's `.venv`, else `uv`, else `python3` (dependencies unverified).
 
 An app started from a desktop launcher (Finder, a `.desktop` file) often gets a minimal
-`PATH` without `~/.local/bin` or `/opt/homebrew/bin`. Set `command` to the agent's full
-path and put a complete `PATH` in `AgentConfig::env`; the agent's shell inherits it.
+`PATH` without `~/.local/bin` or `/opt/homebrew/bin`. The VideoCRM app appends the usual
+install folders that exist (Homebrew, `/usr/local/bin`, `~/.local/bin`, `~/.claude/local`,
+`~/.npm-global/bin`, `~/.cargo/bin`, `~/bin`) to its own `PATH` at startup
+(`shell::extend_tool_path`), and the agent's shell inherits it. Tools elsewhere need
+`command` set to the agent's full path, or a complete `PATH` in `AgentConfig::env`.
 
 ## Configuration
 
