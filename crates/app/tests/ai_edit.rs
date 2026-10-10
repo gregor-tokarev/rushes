@@ -24,7 +24,7 @@ use gpui_kit::{
 use tempfile::TempDir;
 use videocrm::ai_edit::{
     AiEditPanel, AiSettings, INTERRUPTED, LogEvent, PhaseKind, PhaseStarted, PipelineService, PipelinesPage,
-    RENDERED_WITH_ERROR, RunError, RunMarker, TimelineEntry, split_failure,
+    RENDERED_WITH_ERROR, RunError, RunMarker, TimelineEntry, delete_run_notice, split_failure,
 };
 use videocrm::route::{Route, VideoTab};
 use videocrm::state::{AppEvent, AppState};
@@ -954,6 +954,33 @@ fn startup_stops_an_agent_a_crashed_session_left_running(cx: &mut TestAppContext
     );
     let planned = fx.stored_run(cx, planning.id);
     assert_eq!((planned.status, planned.error.as_deref()), (RunStatus::Failed, Some(INTERRUPTED)));
+}
+
+#[gpui_kit::test]
+fn deleting_a_video_whose_edit_runs_says_it_stops_the_agent(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[("FAKE_AGENT_DELAY_MS", "1500")]);
+    let other = cx.update(|cx| {
+        fx.state
+            .update(cx, |state, cx| state.create_video(NewVideo { title: "Other".into(), ..NewVideo::default() }, cx))
+    });
+    let other = other.expect("video created");
+    assert_eq!(cx.read(|cx| delete_run_notice(&[fx.video], cx)), None);
+
+    let id = fx.start(cx, false);
+    let notice = cx.read(|cx| delete_run_notice(&[fx.video], cx));
+    assert!(notice.is_some_and(|notice| notice.contains("stops the agent")), "{notice:?}");
+    assert!(
+        cx.read(|cx| delete_run_notice(&[fx.video, other], cx))
+            .is_some_and(|notice| notice.starts_with("Some of them"))
+    );
+    assert_eq!(cx.read(|cx| delete_run_notice(&[other], cx)), None);
+
+    cx.update(|cx| fx.service.update(cx, |service, cx| service.cancel(id, cx)));
+    fx.wait_for_status(cx, id, RunStatus::Cancelled);
+    assert_eq!(cx.read(|cx| delete_run_notice(&[fx.video], cx)), None, "a stopped edit has nothing to stop");
 }
 
 #[gpui_kit::test]

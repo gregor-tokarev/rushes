@@ -28,3 +28,18 @@ pub use settings::AiSettings;
 pub use timeline::{
     LogEvent, MarkerKind, PhaseKind, PhaseStarted, RunMarker, TimelineEntry, TimelineItem, ToolOutput, fold_timeline,
 };
+
+use gpui_kit::App;
+use videocrm_core::VideoId;
+
+/// A sentence for delete confirmations when an AI edit of one of `video_ids` is
+/// running: deleting a video stops its agent. `None` when none is.
+pub fn delete_run_notice(video_ids: &[VideoId], cx: &App) -> Option<&'static str> {
+    let service = PipelineService::try_global(cx)?;
+    let running = video_ids.iter().any(|id| service.read(cx).live_run_of(*id).is_some());
+    running.then_some(if video_ids.len() == 1 {
+        "Its AI edit is running right now: deleting it stops the agent mid-edit."
+    } else {
+        "Some of them have an AI edit running right now: deleting them stops those edits mid-way."
+    })
+}

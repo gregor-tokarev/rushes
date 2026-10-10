@@ -226,6 +226,11 @@ impl PipelineService {
         cx.global::<GlobalPipelineService>().0.clone()
     }
 
+    /// The service, once [`Self::init`] ran.
+    pub fn try_global(cx: &App) -> Option<Entity<PipelineService>> {
+        cx.try_global::<GlobalPipelineService>().map(|global| global.0.clone())
+    }
+
     pub fn state(&self) -> &Entity<AppState> {
         &self.state
     }
