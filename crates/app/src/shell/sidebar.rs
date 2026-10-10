@@ -20,6 +20,7 @@ use super::{NewVideo, OpenCommandPalette, Workspace};
 use crate::route::{Route, SettingsSection, VideoTab};
 use crate::state::AppState;
 use crate::ui::PageIcon;
+use crate::ui::contrast::warning_badge;
 
 /// One block of the sidebar. The kit's sidebar takes a single item type, so
 /// menus, labelled groups and the recent-pages list share this enum.
@@ -128,7 +129,9 @@ fn count_badge(count: usize, cx: &App) -> AnyElement {
 /// The Pipelines row's counts: edits waiting for the creator's approval stand
 /// out from the ones still working on their own.
 fn pipeline_badges(running: usize, awaiting: usize, cx: &App) -> AnyElement {
-    let theme = cx.theme();
+    // Read against the selected row's fill, the stronger of the row's two
+    // backgrounds, so the count also reads on the plain sidebar.
+    let (fill, text) = warning_badge(cx.theme().sidebar_accent, cx);
     h_flex()
         .gap_1()
         .when(awaiting > 0, |this| {
@@ -142,8 +145,8 @@ fn pipeline_badges(running: usize, awaiting: usize, cx: &App) -> AnyElement {
                     .rounded_full()
                     .text_xs()
                     .font_medium()
-                    .bg(theme.warning)
-                    .text_color(theme.warning_foreground)
+                    .bg(fill)
+                    .text_color(text)
                     .tooltip(move |window, cx| Tooltip::new(waiting.clone()).build(window, cx))
                     .child(awaiting.to_string()),
             )

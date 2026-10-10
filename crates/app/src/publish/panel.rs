@@ -49,6 +49,7 @@ use super::ui::{ConnectionPanel, FieldRow, card, file_name, help_text, section_h
 use super::upload::{ProcessingOutcome, UploadError};
 use crate::state::{AppEvent, AppState};
 use crate::ui::path_prompt::{self, PathKind, PathRequest};
+use crate::ui::warning_text;
 
 /// Form edits are saved this long after the last keystroke.
 const SAVE_DELAY: Duration = Duration::from_millis(500);
@@ -737,7 +738,7 @@ impl PublishPanel {
         };
         let chapters_help = match (&self.chapters, past_the_end) {
             (Err(reason), _) => help_text(*reason, cx).id("chapters-unavailable"),
-            (Ok(_), Some(warning)) => help_text(warning, cx).text_color(cx.theme().warning).id("chapters-past-the-end"),
+            (Ok(_), Some(warning)) => help_text(warning, cx).text_color(warning_text(cx)).id("chapters-past-the-end"),
             (Ok(_), None) => {
                 help_text(format!("Timestamps are estimated from the script at {DEFAULT_WPM} words per minute."), cx)
                     .id("chapters-estimate")
