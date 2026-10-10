@@ -903,6 +903,59 @@ fn the_done_card_shows_what_youtube_has_and_what_did_not_work(cx: &mut TestAppCo
     });
 }
 
+#[gpui_kit::test]
+fn a_video_deleted_on_youtube_offers_a_plain_upload(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "final-1.mp4");
+    let video_id = workspace.create_video(cx, "Rust Ownership Explained", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.privacy = Privacy::Private;
+    });
+    let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    let youtube_id = wait_until(cx, "the processed upload", |cx| {
+        cx.executor().advance_clock(Duration::from_secs(5));
+        match service.read_with(cx, |s, _| s.job(upload).map(|job| job.status.clone())) {
+            Some(UploadStatus::Done { video_id }) => Some(video_id),
+            Some(UploadStatus::Failed { error }) => panic!("upload failed: {error}"),
+            _ => None,
+        }
+    });
+    assert!(workspace.video(cx, video_id).youtube.is_some());
+
+    // Deleted in YouTube Studio.
+    let token = service.read_with(cx, |s, _| s.client()).unwrap().credentials().access_token;
+    emulators.delete_video(&token, &youtube_id);
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    // Opening the tab asks YouTube; the answer "no such video" drops the dead link.
+    wait_until(cx, "the dropped link", |cx| workspace.video(cx, video_id).youtube.is_none().then_some(()));
+    let job = service.read_with(cx, |s, _| s.job(upload).cloned()).unwrap();
+    assert!(service.read_with(cx, |s, cx| s.is_off_youtube(&job, cx)));
+    window(cx, handle, |window, cx| {
+        window.clear_notifications(cx);
+        window.render_frame(cx);
+        assert!(window.find("youtube-video-gone").visible());
+        assert!(window.try_find("open-on-youtube").is_none());
+        assert!(window.try_find("publish-next-upload-note").is_none());
+        // Not "Upload again…": there is no first copy left to warn about.
+        window.click("upload-to-youtube", cx);
+        assert!(!window.has_active_dialog(cx));
+    });
+    wait_until(cx, "the new upload", |cx| {
+        service.read_with(cx, |s, _| s.latest_job(video_id).filter(|job| job.id != upload).map(|_| ()))
+    });
+
+    // The Uploads page no longer links to the deleted video.
+    let (handle, _page) = open(cx, |window, cx| cx.new(|cx| UploadsPage::new(window, cx)));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find(format!("upload-{upload}")).visible());
+        assert!(window.try_find(format!("upload-{upload}-open")).is_none());
+    });
+}
+
 /// Drops `paths` from the file manager onto the element `id`.
 fn drop_files(window: &mut Window, id: &'static str, paths: Vec<std::path::PathBuf>, cx: &mut App) {
     let position = window.find(id).bounds().center();

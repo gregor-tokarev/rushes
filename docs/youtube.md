@@ -225,7 +225,11 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   (`refresh_youtube_video`, one `videos.list` when the tab opens or connects, and every
   processing poll): "Private · goes public Mon, 12 Oct at 09:00", "Unlisted", ... It links
   to the video and to YouTube Studio, and the form says that its changes apply to the next
-  upload. There is no "update on YouTube": `videos.update` needs the broader `youtube`
+  upload. When YouTube answers that it has no such video (deleted in YouTube Studio, or
+  removed by YouTube) and the connected channel is the one it was uploaded to, the video's
+  link is dropped (`is_off_youtube`): the card says "Not on YouTube anymore" and offers a
+  plain **Upload to YouTube**, the Uploads row stops linking to it and the videos table
+  shows no YouTube state. A failed lookup (offline) keeps the stored link. There is no "update on YouTube": `videos.update` needs the broader `youtube`
   scope, which VideoCRM does not ask for.
 - While the worker retries a passing failure, the Upload card and the Uploads page say so
   ("YouTube isn’t responding · Retrying (2 of 5)…", or "Can’t reach YouTube" when offline)

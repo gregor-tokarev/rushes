@@ -346,6 +346,16 @@ fn video_rows_derive_script_stats_and_latest_statuses() {
 }
 
 #[test]
+fn a_video_gone_from_youtube_has_no_youtube_state() {
+    let mut store = store();
+    let video = insert(&mut store, "Deleted in YouTube Studio", 0.0);
+    store.insert_upload(&upload(video.id, UploadStatus::Done { video_id: "yt1".into() }, 2)).unwrap();
+    // The app drops the link once YouTube no longer has the video; "Uploaded" would be wrong.
+    let row = store.list_video_rows().unwrap().remove(0);
+    assert_eq!(row.youtube_state(), None);
+}
+
+#[test]
 fn a_failed_retry_does_not_hide_a_finished_edit_or_a_live_video() {
     let mut store = store();
     let mut video = insert(&mut store, "Retried", 0.0);

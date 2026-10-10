@@ -127,6 +127,16 @@ impl Emulators {
         assert_eq!(response.status(), 201);
     }
 
+    /// Deletes a video the way YouTube Studio does, as the account `token` belongs to.
+    pub fn delete_video(&self, token: &str, youtube_id: &str) {
+        let response = agent()
+            .delete(&format!("{}/youtube/v3/videos?id={youtube_id}", self.youtube_url))
+            .header("Authorization", format!("Bearer {token}"))
+            .call()
+            .unwrap();
+        assert_eq!(response.status(), 204);
+    }
+
     pub fn clear_faults(&self) {
         let response = agent().delete(&format!("{}/_emulator/faults", self.youtube_url)).call().unwrap();
         assert!(response.status().is_success());

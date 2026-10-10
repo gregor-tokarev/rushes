@@ -17,7 +17,7 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Subscription};
 use videocrm_core::settings::{self, YoutubeBackend};
-use videocrm_core::{Store, UploadId, UploadJob};
+use videocrm_core::{Store, UploadId, UploadJob, UploadStatus, Video};
 use videocrm_youtube::{
     Account, CredentialStore, Credentials, Error as YoutubeError, SavedLogin, VideoInfo, YoutubeClient, YoutubeConfig,
     begin_authorization, check_client,
@@ -97,6 +97,9 @@ pub struct YoutubeService {
     pub(super) checking_files: bool,
     /// What YouTube last said about uploaded videos, by YouTube video id.
     pub(super) remote: HashMap<String, VideoInfo>,
+    /// Uploaded videos YouTube says it doesn't have (deleted in YouTube Studio, or
+    /// removed by YouTube), by YouTube video id.
+    gone: HashSet<String>,
     remote_requests: HashSet<String>,
     _subscription: Subscription,
 }
@@ -235,6 +238,7 @@ impl YoutubeService {
             retired: HashMap::new(),
             checking_files: false,
             remote: HashMap::new(),
+            gone: HashSet::new(),
             remote_requests: HashSet::new(),
             _subscription: subscription,
         };
@@ -519,6 +523,19 @@ impl YoutubeService {
         self.remote.get(youtube_id)
     }
 
+    /// Whether the video a finished upload put on YouTube is no longer there.
+    pub fn is_off_youtube(&self, job: &UploadJob, cx: &App) -> bool {
+        let (UploadStatus::Processing { video_id: youtube_id } | UploadStatus::Done { video_id: youtube_id }) =
+            &job.status
+        else {
+            return false;
+        };
+        // Once YouTube said so, the video's link is cleared, also for later runs.
+        self.gone.contains(youtube_id)
+            || (self.latest_job(job.video_id).is_some_and(|latest| latest.id == job.id)
+                && self.state.read(cx).video(job.video_id).is_some_and(|video| video.youtube.is_none()))
+    }
+
     /// Asks YouTube about an uploaded video in the background (one quota unit), so the
     /// Publish tab shows what YouTube has rather than what was asked for.
     pub fn refresh_youtube_video(&mut self, youtube_id: &str, cx: &mut Context<Self>) {
@@ -532,15 +549,50 @@ impl YoutubeService {
             let info = cx.background_spawn(async move { client.get_video(&lookup) }).await;
             this.update(cx, |this, cx| {
                 this.remote_requests.remove(&youtube_id);
-                // Offline, the stored link is what the tab shows.
-                if let Ok(Some(info)) = info {
-                    this.remote.insert(youtube_id, info);
-                    cx.notify();
+                match info {
+                    Ok(Some(info)) => {
+                        this.remote.insert(youtube_id, info);
+                        cx.notify();
+                    }
+                    Ok(None) => this.on_video_gone(&youtube_id, cx),
+                    // Offline, the stored link is what the tab shows.
+                    Err(_) => {}
                 }
             })
             .ok();
         })
         .detach();
+    }
+
+    /// YouTube has no video `youtube_id`. Only its owner sees a private video, so
+    /// that counts only when the connected channel is the one it was uploaded to.
+    /// The videos linking to it stop pointing at a dead page.
+    fn on_video_gone(&mut self, youtube_id: &str, cx: &mut Context<Self>) {
+        let Some(channel) = self.account().and_then(|account| account.channel_id.clone()) else { return };
+        let linked: Vec<Video> = self
+            .state
+            .read(cx)
+            .rows()
+            .iter()
+            .map(|row| &row.video)
+            .filter(|video| {
+                video.youtube.as_ref().is_some_and(|link| link.video_id == youtube_id && link.channel_id == channel)
+            })
+            .cloned()
+            .collect();
+        if linked.is_empty() {
+            return;
+        }
+        self.gone.insert(youtube_id.to_owned());
+        self.remote.remove(youtube_id);
+        self.state.update(cx, |state, cx| {
+            for mut video in linked {
+                video.youtube = None;
+                state.update_video(video, cx);
+            }
+        });
+        cx.emit(YoutubeEvent::UploadsChanged);
+        cx.notify();
     }
 
     pub(super) fn store(&self, cx: &App) -> SharedStore {

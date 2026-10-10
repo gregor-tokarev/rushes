@@ -12,12 +12,13 @@ use gpui_kit::{
     AnyElement, App, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
 };
-use videocrm_core::{UploadJob, UploadStatus};
+use videocrm_core::{TagColor, UploadJob, UploadStatus};
 
 use super::service::YoutubeService;
 use super::transfer::{format_bytes, format_eta, format_speed};
 use super::ui::{file_name, upload_chip, upload_label, youtube_link};
 use super::upload::ProcessingOutcome;
+use crate::database::Chip;
 use crate::route::{Route, VideoTab};
 use crate::state::AppState;
 use crate::ui::{
@@ -73,6 +74,8 @@ impl UploadsPage {
             Some(RowAction::Cancel)
         } else if service.is_resumable(job) {
             Some(RowAction::Resume)
+        } else if service.is_off_youtube(job, cx) {
+            None
         } else {
             watch_url(job).map(|_| RowAction::Open)
         }
@@ -108,8 +111,10 @@ impl UploadsPage {
         // While a retry runs, what YouTube confirmed rather than what was in flight.
         let progress = service.progress(job.id);
         let cancelling = service.is_cancelling(job.id);
+        let off_youtube = service.is_off_youtube(job, cx);
         let detail: Option<SharedString> = match (&job.status, transfer) {
             _ if cancelling => Some("Stopping…".into()),
+            _ if off_youtube => Some("YouTube no longer has this video.".into()),
             _ if let Some(retry) = service.retry(job.id) => {
                 Some(format!("{}. {}", retry.headline(), retry.detail()).into())
             }
@@ -122,6 +127,7 @@ impl UploadsPage {
                 Some(parts.join(" · ").into())
             }
             (UploadStatus::Failed { error }, None) => Some(error.clone().into()),
+            (UploadStatus::Cancelled, None) => service.retired(job.id).map(|reason| reason.message().into()),
             (UploadStatus::Processing { .. }, None) => Some("YouTube is processing the video.".into()),
             (UploadStatus::Done { .. }, None) if let Some(problem) = service.thumbnail_problem(job.id) => {
                 Some(format!("Thumbnail not set. {problem}").into())
@@ -157,7 +163,11 @@ impl UploadsPage {
             }
             None => None,
         };
-        let status_label = upload_label(&job.status, progress, service.is_resumable(job));
+        let status_label = if off_youtube {
+            "Not on YouTube".to_owned()
+        } else {
+            upload_label(&job.status, progress, service.is_resumable(job))
+        };
         let [video_column, status, started, updated, actions] = COLUMNS;
         let video_id = job.video_id;
         let row = TableRowButton::new(SharedString::from(format!("upload-{id}")), format!("{title}, {status_label}"))
@@ -179,7 +189,11 @@ impl UploadsPage {
                     .w_full()
                     .min_w_0()
                     .gap_1()
-                    .child(h_flex().child(upload_chip(&job.status, progress, service.is_resumable(job))))
+                    .child(h_flex().child(if off_youtube {
+                        Chip::new("Not on YouTube", TagColor::Gray).dot(true)
+                    } else {
+                        upload_chip(&job.status, progress, service.is_resumable(job))
+                    }))
                     .when_some(progress, |this, progress| {
                         this.child(
                             Progress::new(SharedString::from(format!("upload-{id}-progress")))

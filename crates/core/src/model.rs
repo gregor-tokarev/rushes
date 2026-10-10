@@ -789,6 +789,9 @@ impl VideoRow {
     pub fn youtube_state(&self) -> Option<YoutubeState<'_>> {
         match (&self.video.youtube, &self.latest_upload) {
             (Some(link), _) => Some(YoutubeState::Live(link)),
+            // The upload reached YouTube, but the app dropped the link since because
+            // YouTube no longer has the video: it isn't on YouTube.
+            (None, Some(UploadStatus::Processing { .. } | UploadStatus::Done { .. })) => None,
             (None, Some(upload)) => Some(YoutubeState::Upload(upload)),
             (None, None) => None,
         }

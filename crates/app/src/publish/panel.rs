@@ -1030,7 +1030,9 @@ impl PublishPanel {
                     ))
                     .into_any_element()
             }
-            Some(job @ UploadJob { status: UploadStatus::Processing { .. } | UploadStatus::Done { .. }, .. }) => {
+            Some(job @ UploadJob { status: UploadStatus::Processing { .. } | UploadStatus::Done { .. }, .. })
+                if !service.is_off_youtube(job, cx) =>
+            {
                 let processing = matches!(job.status, UploadStatus::Processing { .. });
                 let (icon, headline, detail) = match (processing, service.processing(job.id)) {
                     (true, _) | (false, Some(ProcessingOutcome::Processing)) => {
@@ -1260,6 +1262,18 @@ impl PublishPanel {
                 );
                 // Tests check that the note is on screen.
                 Some(div().child(note.id("upload-cancelled-note").test_support()))
+            }
+            // It reached YouTube, and is gone from there since.
+            UploadStatus::Processing { .. } | UploadStatus::Done { .. } => {
+                let note = status_line(
+                    IconName::CircleAlert,
+                    theme.warning,
+                    "Not on YouTube anymore",
+                    Some("YouTube no longer has this video. It may have been deleted in YouTube Studio.".into()),
+                    cx,
+                );
+                // Tests check that the note is on screen.
+                Some(div().child(note.id("youtube-video-gone").test_support()))
             }
             _ => None,
         }
