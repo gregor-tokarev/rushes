@@ -669,7 +669,7 @@ impl PropertiesPanel {
     fn open_add_property(&self, window: &mut Window, cx: &mut Context<Self>) {
         let position = self.state.read(cx).properties().iter().map(|property| property.position + 1).max().unwrap_or(0);
         let editor = cx.new(|cx| PropertyEditor::new(None, PropertyEditorMode::Create, position, window, cx));
-        PropertyEditor::open(editor, |property, cx| add_property_to_tables(property, cx), window, cx);
+        PropertyEditor::open(editor, add_property_to_tables, window, cx);
     }
 }
 

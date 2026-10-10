@@ -158,8 +158,11 @@ pub struct TableRowButton {
     id: ElementId,
     label: SharedString,
     cells: Vec<(TableColumn, AnyElement)>,
-    on_open: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_open: Option<OpenRow>,
 }
+
+/// What activating a row does.
+type OpenRow = Rc<dyn Fn(&mut Window, &mut App)>;
 
 impl TableRowButton {
     /// `label` names the row for assistive technology.
