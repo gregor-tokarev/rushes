@@ -21,9 +21,11 @@ const FOOTAGE_DIR: &str = "footage";
 const EDIT_DIR: &str = "edit";
 const MAX_SLUG_LEN: usize = 48;
 
-const VIDEO_EXTENSIONS: &[&str] =
+/// Video files the footage folder lists (lowercase).
+pub const VIDEO_EXTENSIONS: &[&str] =
     &["mp4", "mov", "m4v", "mkv", "webm", "avi", "mts", "m2ts", "mxf", "mpg", "mpeg", "wmv", "3gp"];
-const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "m4a", "aac", "flac", "ogg", "opus", "aif", "aiff", "wma"];
+/// Audio files the footage folder lists (lowercase).
+pub const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "m4a", "aac", "flac", "ogg", "opus", "aif", "aiff", "wma"];
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "tif", "tiff", "bmp"];
 
 #[derive(Debug, Error)]

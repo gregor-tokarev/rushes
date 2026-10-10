@@ -711,6 +711,13 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_is_told_about_every_take_the_card_lists() {
+        let listed: HashSet<&str> = media::VIDEO_EXTENSIONS.iter().chain(media::AUDIO_EXTENSIONS).copied().collect();
+        let prompted: HashSet<&str> = videocrm_pipeline::FOOTAGE_EXTENSIONS.into_iter().collect();
+        assert_eq!(listed, prompted);
+    }
+
+    #[test]
     fn imports_never_overwrite_existing_takes() {
         let root = tempfile::tempdir().unwrap();
         let source_dir = root.path().join("card");

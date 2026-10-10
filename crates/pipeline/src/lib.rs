@@ -17,5 +17,5 @@ pub use agent::{AgentConfig, DEFAULT_ALLOWED_TOOLS, DEFAULT_COMMAND, DEFAULT_PER
 pub use doctor::{Check, Doctor, default_skill_dir, doctor};
 pub use error::PipelineError;
 pub use event::{AgentEvent, parse_line};
-pub use media::{FootageFile, MediaInfo, list_footage, probe_media};
+pub use media::{FOOTAGE_EXTENSIONS, FootageFile, MediaInfo, list_footage, probe_media};
 pub use pipeline::{Phase, PhaseOutcome, RunContext, build_prompt, keep_final_cut, kept_cuts, run_phase};
