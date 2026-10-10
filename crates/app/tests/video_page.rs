@@ -759,6 +759,27 @@ fn enter_and_down_in_the_hook_continue_in_the_script(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn enter_on_a_table_row_opens_the_script_to_write(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &[]);
+    let id = create_video(&app, cx, "Build a home studio", TemplateKind::Tutorial);
+    let row = ElementId::Name(format!("video-row-{id}").into());
+    for typed in ["K5 ", "K6 "] {
+        app.navigate(cx, Route::default());
+        // Selects the row: beside the title, before its Open button.
+        let select = row.clone();
+        app.step(cx, move |window, cx| window.click_at(select, gpui_kit::point(px(240.), px(16.)), cx));
+        app.press(cx, "enter");
+        assert_eq!(app.route(cx), Route::Video { id, tab: VideoTab::Script });
+        let first = app.script_blocks(cx)[0];
+        assert_eq!(app.script_focused_block(cx), Some(first), "the caret is in the script");
+        app.type_text(cx, typed);
+    }
+    app.navigate(cx, Route::default());
+    let stored = app.stored_blocks(cx, id, DocumentKind::Script);
+    assert!(stored[0].starts_with("K6 K5 "), "both openings typed into the script: {stored:?}");
+}
+
+#[gpui_kit::test]
 fn tab_from_the_page_controls_reaches_the_script(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, &["Desk setup tour"]);
     let id = app.video_id(cx, "Desk setup tour");

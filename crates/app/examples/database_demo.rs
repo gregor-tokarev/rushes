@@ -50,7 +50,7 @@ impl Demo {
         cx: &mut Context<Self>,
     ) {
         match event {
-            DatabaseEvent::OpenVideo(id) => {
+            DatabaseEvent::OpenVideo(id) | DatabaseEvent::OpenScript(id) => {
                 if let Some(row) = self.rows.iter().find(|row| row.video.id == *id) {
                     window.push_notification(format!("Opening “{}”", row.video.title), cx);
                 }

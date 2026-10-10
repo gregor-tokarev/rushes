@@ -172,12 +172,19 @@ impl VideoPage {
             if take_tab_reveal(video_id, tab, cx) {
                 page.reveal_tab_strip();
             }
-            let focus_script = state.update(cx, |state, _| state.take_script_focus(video_id));
-            if focus_script && let Some(script) = page.script.clone() {
-                window.defer(cx, move |window, cx| script.update(cx, |script, cx| script.focus_start(window, cx)));
-            }
+            page.take_script_focus(window, cx);
         }
         page
+    }
+
+    /// Puts the caret at the start of the script when someone asked for it,
+    /// e.g. for a video just created or opened from the keyboard.
+    fn take_script_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.video_id;
+        let requested = self.state.update(cx, |state, _| state.take_script_focus(id));
+        if requested && let Some(script) = self.script.clone() {
+            window.defer(cx, move |window, cx| script.update(cx, |script, cx| script.focus_start(window, cx)));
+        }
     }
 
     pub fn video_id(&self) -> VideoId {
@@ -244,6 +251,7 @@ impl VideoPage {
         if reveal {
             self.reveal_tab_strip();
         }
+        self.take_script_focus(window, cx);
         cx.notify();
     }
 

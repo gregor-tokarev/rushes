@@ -39,6 +39,9 @@ actions!(video_database, [OpenSelected, RenameSelected, DeleteSelected, CancelEd
 
 const KEY_CONTEXT: &str = "VideoDatabase";
 
+/// Key context of a board card, which opens on Enter like a table row.
+pub(crate) const BOARD_CARD_CONTEXT: &str = "BoardCard";
+
 /// How long a click on a title waits before opening the video, so the second
 /// click of a double-click can rename it instead. Just under GPUI's
 /// double-click interval (400 ms) counted from the first click's release.
@@ -62,6 +65,9 @@ pub(crate) const TEXT_ENTRY_CONTEXT: &str = "VideoDatabaseTextEntry";
 pub enum DatabaseEvent {
     /// Show the video's page.
     OpenVideo(VideoId),
+    /// Show the video's page with the caret at the start of its script: the
+    /// creator opened it from the keyboard, with Enter on a row or a card.
+    OpenScript(VideoId),
     /// Create a video, in the given status when created from a board column.
     /// The panel shows it once the owner hands it back through `set_data`.
     CreateVideo {
@@ -153,6 +159,7 @@ fn bind_keys(cx: &mut App) {
     let text_entry = Some(TEXT_ENTRY_CONTEXT);
     cx.bind_keys([
         KeyBinding::new("enter", OpenSelected, table),
+        KeyBinding::new("enter", OpenSelected, Some("VideoDatabase > BoardCard")),
         KeyBinding::new("f2", RenameSelected, table),
         KeyBinding::new("backspace", DeleteSelected, table),
         KeyBinding::new("delete", DeleteSelected, table),
@@ -326,6 +333,12 @@ impl DatabasePanel {
     pub fn open_video(&mut self, id: VideoId, cx: &mut Context<Self>) {
         self.pending_open = None;
         cx.emit(DatabaseEvent::OpenVideo(id));
+    }
+
+    /// Opens a video from the keyboard, to write: the caret goes to its script.
+    pub fn open_script(&mut self, id: VideoId, cx: &mut Context<Self>) {
+        self.pending_open = None;
+        cx.emit(DatabaseEvent::OpenScript(id));
     }
 
     /// Opens a video once a click on its title can no longer turn into a
@@ -972,7 +985,7 @@ impl DatabasePanel {
             return;
         }
         if let Some(id) = self.selected {
-            self.open_video(id, cx);
+            self.open_script(id, cx);
         }
     }
 

@@ -144,7 +144,7 @@ impl NewVideoForm {
                 video.status = status;
                 state.update_video(video, cx);
             }
-            state.open_new_video(id, cx);
+            state.open_script(id, cx);
         });
     }
 

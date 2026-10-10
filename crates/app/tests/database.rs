@@ -442,6 +442,25 @@ fn titles_open_the_video_and_new_video_reports_its_status(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
+fn board_cards_are_reached_with_tab_and_open_with_enter(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+    db.step(cx, |window, cx| db.panel.update(cx, |panel, cx| panel.set_active_view(db.board, window, cx)));
+    db.with_window(cx, |window, _| window.activate_window());
+    db.step(cx, |window, cx| window.click("database-search", cx));
+
+    let card = format!("card-{}", db.desk);
+    for _ in 0..60 {
+        if db.with_window(cx, |window, _| window.find(card.clone()).focused()) == Some(true) {
+            break;
+        }
+        db.step(cx, |window, cx| window.press("tab", cx));
+    }
+    assert_eq!(db.with_window(cx, |window, _| window.find(card.clone()).focused()), Some(true));
+    db.step(cx, |window, cx| window.press("enter", cx));
+    assert_eq!(db.take_events(), vec![DatabaseEvent::OpenScript(db.desk)]);
+}
+
+#[gpui_kit::test]
 fn sorting_from_a_column_header_saves_the_view(cx: &mut TestAppContext) {
     let db = Fixture::open(cx);
 
@@ -487,8 +506,9 @@ fn keyboard_renames_and_opens_the_selected_row(cx: &mut TestAppContext) {
     assert_eq!(video.title, "Desk setup 2026 tour");
     assert!(db.with_window(cx, |window, _| window.try_find("cell-input").is_none()));
 
+    // Opened from the keyboard, to write in its script.
     db.step(cx, |window, cx| window.press("enter", cx));
-    assert_eq!(db.take_events(), vec![DatabaseEvent::OpenVideo(db.desk)]);
+    assert_eq!(db.take_events(), vec![DatabaseEvent::OpenScript(db.desk)]);
 }
 
 #[gpui_kit::test]
@@ -557,7 +577,7 @@ fn escape_cancels_an_inline_edit_at_once(cx: &mut TestAppContext) {
 
     // Keyboard focus is back on the table: Enter opens the row.
     db.step(cx, |window, cx| window.press("enter", cx));
-    assert_eq!(db.take_events(), vec![DatabaseEvent::OpenVideo(db.desk)]);
+    assert_eq!(db.take_events(), vec![DatabaseEvent::OpenScript(db.desk)]);
 }
 
 #[gpui_kit::test]

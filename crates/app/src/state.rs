@@ -394,9 +394,9 @@ impl AppState {
         self.navigate(Route::Video { id, tab }, cx);
     }
 
-    /// Opens a video that was just created on its Script tab, with the caret in
-    /// the first block.
-    pub fn open_new_video(&mut self, id: VideoId, cx: &mut Context<Self>) {
+    /// Opens a video on its Script tab with the caret in the first block: one
+    /// just created, or one opened from the keyboard to write.
+    pub fn open_script(&mut self, id: VideoId, cx: &mut Context<Self>) {
         self.script_focus = Some(id);
         self.open_video(id, VideoTab::Script, cx);
     }

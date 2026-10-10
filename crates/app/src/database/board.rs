@@ -6,7 +6,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, ThemeStyled as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, AppContext as _, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
@@ -17,7 +17,7 @@ use videocrm_core::{VideoId, VideoRow, VideoStatus};
 use super::colors::{format_color, free_tag_color, run_status_color, tag_colors, youtube_color};
 use super::elements::{Chip, muted_icon};
 use super::format;
-use super::panel::DatabasePanel;
+use super::panel::{BOARD_CARD_CONTEXT, DatabasePanel, OpenSelected};
 use super::query::status_visible;
 use super::table::{EmptyReason, element_id, render_empty_state, video_menu};
 use crate::ui::{PAGE_INSET, video_icon};
@@ -51,7 +51,7 @@ impl Render for DraggedCard {
 }
 
 impl DatabasePanel {
-    pub(super) fn render_board(&self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_board(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.empty_reason(cx) == EmptyReason::NoVideos && self.shown_rows().next().is_none() {
             return render_empty_state(EmptyReason::NoVideos, &cx.weak_entity());
         }
@@ -73,7 +73,7 @@ impl DatabasePanel {
             .child(h_flex().h_full().items_stretch().gap_3().px(PAGE_INSET).pb_4().children(statuses.into_iter().map(
                 |status| {
                     let cards: Vec<&VideoRow> = self.shown_rows().filter(|row| row.video.status == status).collect();
-                    self.render_board_column(status, &cards, now, cx)
+                    self.render_board_column(status, &cards, now, window, cx)
                 },
             )))
             .into_any_element()
@@ -84,6 +84,7 @@ impl DatabasePanel {
         status: VideoStatus,
         cards: &[&VideoRow],
         now: DateTime<Utc>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = tag_colors(status.color(), cx);
@@ -107,7 +108,8 @@ impl DatabasePanel {
                 .child(Icon::new(IconName::Plus).xsmall())
                 .child("New video…"),
         );
-        let card_elements: Vec<AnyElement> = cards.iter().map(|row| self.render_card(row, status, now, cx)).collect();
+        let card_elements: Vec<AnyElement> =
+            cards.iter().map(|row| self.render_card(row, status, now, window, cx)).collect();
 
         v_flex()
             .id(SharedString::from(format!("board-column-{status_key}")))
@@ -152,6 +154,7 @@ impl DatabasePanel {
         row: &VideoRow,
         status: VideoStatus,
         now: DateTime<Utc>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let today = format::local_day(now);
@@ -164,6 +167,12 @@ impl DatabasePanel {
             icon: video.icon.clone().map(Into::into),
         };
         let panel = cx.weak_entity();
+        // A card is a Tab stop; Enter opens the video to write, as on a table row.
+        let focus = window
+            .use_keyed_state(element_id("card-focus", id), cx, |_, cx| cx.focus_handle().tab_stop(true))
+            .read(cx)
+            .clone();
+        let focused = focus.is_focused(window);
 
         let meta = h_flex()
             .gap_3()
@@ -203,6 +212,9 @@ impl DatabasePanel {
                 v_flex()
                     .id(element_id("card", id))
                     .test_support()
+                    .track_focus(&focus)
+                    .key_context(BOARD_CARD_CONTEXT)
+                    .on_action(cx.listener(move |this, _: &OpenSelected, _, cx| this.open_script(id, cx)))
                     .gap_1p5()
                     .px_3()
                     .py_2()
@@ -212,6 +224,7 @@ impl DatabasePanel {
                     .bg(cx.theme().background)
                     .shadow_xs()
                     .hover(|this| this.bg(cx.theme().secondary))
+                    .when(focused, |this| this.focus_ring_style(window, cx))
                     .on_click(cx.listener(move |this, _, _, cx| this.open_video(id, cx)))
                     .on_drag(dragged, |card, _, _, cx| cx.new(|_| card.clone()))
                     .child(
