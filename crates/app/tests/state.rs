@@ -548,6 +548,47 @@ fn deleting_the_open_video_during_a_lock_lands_where_the_creator_came_from(cx: &
 }
 
 #[gpui_kit::test]
+fn a_video_created_while_the_disk_is_full_keeps_its_edits_until_it_lands(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &[]);
+    let errors = app.errors(cx);
+    // As a full disk does: a new video fails, and not because of a lock.
+    let disk = Connection::open(&app.database).expect("second connection");
+    disk.execute_batch(
+        "CREATE TRIGGER no_room BEFORE INSERT ON videos BEGIN SELECT abs(-9223372036854775807 - 1); END;",
+    )
+    .expect("fill the disk");
+    let new = NewVideo { title: "Full disk test".into(), template: TemplateKind::Blank, ..NewVideo::default() };
+    let video = cx.update(|cx| app.state.update(cx, |state, cx| state.create_video(new, cx))).expect("created");
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| {
+        state.update(cx, |state, cx| {
+            let mut changed = state.video(video).cloned().expect("video");
+            changed.hook = "Hook typed on a full disk".into();
+            state.update_video(changed, cx);
+        })
+    });
+    app.wait(cx, SAVE_RETRY_DELAY);
+    app.wait(cx, SAVE_RETRY_DELAY);
+    let hook = |cx: &mut TestAppContext| cx.read(|cx| app.state.read(cx).video(video).map(|video| video.hook.clone()));
+    assert_eq!(hook(cx).as_deref(), Some("Hook typed on a full disk"), "the edit waits behind the create");
+    assert!(cx.read(|cx| app.state.read(cx).is_save_failing(video)));
+    assert_eq!(
+        *errors.borrow(),
+        ["Couldn’t save your changes. VideoCRM keeps trying; keep the app open until they’re saved."]
+    );
+
+    // The disk has room again: the video lands as the creator left it.
+    disk.execute_batch("DROP TRIGGER no_room").expect("free the disk");
+    app.wait(cx, SAVE_RETRY_DELAY);
+    assert!(!cx.read(|cx| app.state.read(cx).has_unsaved_changes()));
+    assert_eq!(hook(cx).as_deref(), Some("Hook typed on a full disk"));
+    let stored_hook =
+        stored(&app.database, |store| store.get_video(video).expect("read video").map(|video| video.hook));
+    assert_eq!(stored_hook.as_deref(), Some("Hook typed on a full disk"));
+    assert_eq!(errors.borrow().len(), 1, "nothing was taken for deleted");
+}
+
+#[gpui_kit::test]
 fn settings_kept_at_a_quit_are_the_ones_the_next_start_uses(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, &["Desk setup tour"]);
     let mut locker = Locker::hold(&app.database);
