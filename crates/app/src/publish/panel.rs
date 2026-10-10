@@ -51,7 +51,7 @@ use crate::ai_edit::PipelineService;
 use crate::route::{Route, VideoTab};
 use crate::state::{AppEvent, AppState};
 use crate::ui::path_prompt::{self, PathKind, PathRequest};
-use crate::ui::warning_text;
+use crate::ui::{state_tooltip, warning_text};
 
 /// Form edits are saved this long after the last keystroke.
 const SAVE_DELAY: Duration = Duration::from_millis(500);
@@ -1290,7 +1290,6 @@ impl PublishPanel {
                 .outline()
                 .dropdown_caret(true)
                 .disabled(true)
-                .tooltip(UPLOAD_FILE_LOCKED)
                 .into_any_element()
         } else {
             Button::new("choose-video-file")
@@ -1388,7 +1387,11 @@ impl PublishPanel {
                     this.on_drop(FileTarget::Video, paths, window, cx)
                 }))
                 .child(body)
-                .child(h_flex().child(picker))
+                .child(h_flex().child(state_tooltip(
+                    "choose-video-file-reason",
+                    uploading.then_some(UPLOAD_FILE_LOCKED.into()),
+                    picker,
+                )))
                 // Tests drop files here.
                 .test_support(),
         )

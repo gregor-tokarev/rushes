@@ -906,6 +906,50 @@ fn the_outline_puts_a_later_heading_at_the_top(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn clicked_rail_rows_and_template_cards_show_no_focus_ring(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    app.open_video(cx, id, VideoTab::Script);
+    // Whether the element has the focus, and whether it draws its ring.
+    let focus = |app: &Fixture, cx: &mut TestAppContext, id: &'static str| {
+        cx.update_window(app.window, |_, window, _| {
+            let focused = window.find(id).focused() == Some(true);
+            (focused, focused && window.last_input_was_keyboard())
+        })
+        .expect("window is open")
+    };
+
+    // A click doesn't take the keyboard, so nothing is left ringed.
+    app.click(cx, "copy-teleprompter");
+    assert_eq!(focus(&app, cx, "copy-teleprompter"), (false, false));
+    app.click(cx, "import-markdown");
+    app.press(cx, "escape");
+    app.wait(cx, Duration::from_secs(1));
+    assert!(!app.has_dialog(cx));
+    assert_eq!(focus(&app, cx, "import-markdown"), (false, false), "the dialog hands no focus back to it");
+
+    // Tab reaches a template card, ringed.
+    app.press(cx, "ctrl-n");
+    for _ in 0..20 {
+        if focus(&app, cx, "template-blank").0 {
+            break;
+        }
+        app.press(cx, "tab");
+    }
+    assert_eq!(focus(&app, cx, "template-blank"), (true, true));
+
+    // One picked with the mouse is selected, not ringed, and the mouse hides
+    // the ring of the one the keyboard left.
+    app.click(cx, "template-tutorial");
+    let selected = cx
+        .update_window(app.window, |_, window, _| window.find("template-tutorial").selected())
+        .expect("window is open");
+    assert_eq!(selected, Some(true));
+    assert_eq!(focus(&app, cx, "template-tutorial"), (false, false));
+    assert_eq!(focus(&app, cx, "template-blank"), (true, false));
+}
+
+#[gpui_kit::test]
 fn a_click_below_the_document_puts_the_caret_after_it(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, &["Desk setup tour"]);
     let id = app.video_id(cx, "Desk setup tour");

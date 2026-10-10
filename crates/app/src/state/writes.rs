@@ -139,6 +139,31 @@ impl Write {
         }
     }
 
+    /// The records the write changes: its video, and its run or upload.
+    fn targets(&self) -> Vec<Target> {
+        match self {
+            Write::DeleteVideos(ids) => ids.iter().copied().map(Target::Video).collect(),
+            Write::InsertRun(run) | Write::Run(run) => vec![Target::Video(run.video_id), Target::Run(run.id)],
+            Write::RunEvent { video_id, event } => vec![Target::Video(*video_id), Target::Run(event.run_id)],
+            Write::InsertUpload(job) | Write::Upload(job) => vec![Target::Video(job.video_id), Target::Upload(job.id)],
+            write => write.video_id().map(Target::Video).into_iter().collect(),
+        }
+    }
+
+    /// What the later writes wait for while this one fails: a write that
+    /// depends on order holds back the later writes of what it creates or
+    /// deletes, so none of them lands before it (or is refused as gone);
+    /// `None` holds back every later write. Other writes hold nothing back.
+    fn holds(&self) -> Option<Vec<Target>> {
+        match self {
+            _ if self.key().is_some() => Some(Vec::new()),
+            Write::CreateVideo { .. } | Write::DeleteVideos(_) => Some(self.targets()),
+            Write::InsertRun(run) => Some(vec![Target::Run(run.id)]),
+            Write::InsertUpload(job) => Some(vec![Target::Upload(job.id)]),
+            _ => None,
+        }
+    }
+
     /// The video the write belongs to.
     fn video_id(&self) -> Option<VideoId> {
         match self {
@@ -293,6 +318,14 @@ impl Write {
 enum Record {
     Edit,
     Upload,
+}
+
+/// A record in the database, for keeping the writes of it in order.
+#[derive(Clone, Copy, PartialEq)]
+enum Target {
+    Video(VideoId),
+    Run(RunId),
+    Upload(UploadId),
 }
 
 /// The data [`AppState`] caches, as a write changes it.
@@ -569,12 +602,18 @@ struct Pass {
 /// read under it, so of two passes the later one writes the later values. An
 /// entry leaves the queue once written, unless a newer value took its place
 /// meanwhile. A busy database ends the pass: the writes after it would wait
-/// just as long, and wait their turn so they land in order.
+/// just as long, and wait their turn so they land in order. Another failure
+/// holds back what [`Write::holds`] names; those writes wait for the retry.
 fn write_queue(store: &SharedStore, queue: &Mutex<Queue>) -> Pass {
     let mut store = lock(store);
     let writes = lock(queue).writes();
     let mut pass = Pass::default();
+    let mut held = Vec::new();
     for (revision, write) in writes {
+        if write.targets().iter().any(|target| held.contains(target)) {
+            lock(queue).mark_failing(Some(revision));
+            continue;
+        }
         match write.apply(&mut store) {
             Ok(()) => {
                 lock(queue).remove(revision);
@@ -585,13 +624,14 @@ fn write_queue(store: &SharedStore, queue: &Mutex<Queue>) -> Pass {
                 pass.refused.push((write, error));
             }
             Err(error) => {
-                let busy = error.is_busy();
-                lock(queue).mark_failing(if busy { None } else { Some(revision) });
-                if busy || pass.failed.is_none() {
+                let holds = write.holds().filter(|_| !error.is_busy());
+                lock(queue).mark_failing(if holds.is_none() { None } else { Some(revision) });
+                if error.is_busy() || pass.failed.is_none() {
                     pass.failed = Some(error);
                 }
-                if busy {
-                    break;
+                match holds {
+                    Some(targets) => held.extend(targets),
+                    None => break,
                 }
             }
         }
@@ -650,14 +690,20 @@ impl Writes {
         }
         let unsaved_file = database.and_then(Path::parent).map(|folder| folder.join(UNSAVED_FILE));
         let queue = Mutex::new(Queue::default());
+        let mut reported = false;
         let problem = unsaved_file.as_deref().and_then(read_unsaved).map(|kept| match kept {
             Ok(writes) => {
                 let mut queued = lock(&queue);
                 writes.into_iter().for_each(|write| queued.push(write));
                 drop(queued);
                 // Before the window opens; the background writer retries the rest.
-                log_refused(&write_queue(&store, &queue));
-                recovered_problem(lock(&queue).is_empty())
+                let pass = write_queue(&store, &queue);
+                log_refused(&pass);
+                let saved = lock(&queue).is_empty();
+                // The notice says they wait for the database to be free, so
+                // the retries stay quiet until a pass succeeds.
+                reported = !saved && pass.failed.as_ref().is_some_and(StoreError::is_busy);
+                recovered_problem(saved)
             }
             Err(problem) => problem,
         });
@@ -666,7 +712,7 @@ impl Writes {
             store,
             queue: Arc::new(queue),
             worker: None,
-            reported: false,
+            reported,
             quit_deadline: None,
             unsaved_file,
             unsaved_kept,
@@ -1140,20 +1186,7 @@ mod tests {
     fn service_records_queue_in_order_and_show_in_what_is_read() {
         let video = Video::new("Desk setup tour");
         let now = chrono::Utc::now();
-        let mut run = PipelineRun {
-            id: RunId::new(),
-            video_id: video.id,
-            status: videocrm_core::RunStatus::Planning,
-            brief: "Cut it tight.".into(),
-            footage_dir: "/media/desk/footage".into(),
-            session_id: None,
-            summary: None,
-            output: None,
-            error: None,
-            cost_usd: None,
-            created_at: now,
-            updated_at: now,
-        };
+        let mut run = pipeline_run(video.id);
         let event = |seq: u32| Write::RunEvent {
             video_id: video.id,
             event: RunEvent { run_id: run.id, seq, at: now, payload: serde_json::json!(seq) },
@@ -1194,6 +1227,147 @@ mod tests {
         let gone = StoreError::NotFound { entity: "pipeline run", id: run.id.to_string() };
         assert!(!Write::Run(run).reports_refusal(&gone));
         assert!(Write::Video(video).reports_refusal(&gone));
+    }
+
+    /// The database at `path` refuses every new row of `table` with an error
+    /// other than a lock, as a full disk does, until the trigger is dropped.
+    fn no_room(path: &Path, table: &str) -> rusqlite::Connection {
+        let disk = rusqlite::Connection::open(path).unwrap();
+        disk.execute_batch(&format!(
+            "CREATE TRIGGER no_room BEFORE INSERT ON {table} BEGIN SELECT abs(-9223372036854775807 - 1); END;"
+        ))
+        .unwrap();
+        disk
+    }
+
+    fn pipeline_run(video_id: VideoId) -> PipelineRun {
+        let now = chrono::Utc::now();
+        PipelineRun {
+            id: RunId::new(),
+            video_id,
+            status: videocrm_core::RunStatus::Planning,
+            brief: "Cut it tight.".into(),
+            footage_dir: "/media/desk/footage".into(),
+            session_id: None,
+            summary: None,
+            output: None,
+            error: None,
+            cost_usd: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn a_failing_create_holds_back_the_later_writes_of_its_video_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("videocrm.db");
+        let mut setup = Store::open(&path).unwrap();
+        let other = Video::new("Studio tour");
+        setup.insert_video(&other).unwrap();
+        let writer: SharedStore = Arc::new(Mutex::new(Store::open(&path).unwrap()));
+        let disk = no_room(&path, "videos");
+
+        let (video, documents) =
+            videocrm_core::NewVideo { title: "Full disk test".into(), ..Default::default() }.build(1.0);
+        let mut script = documents[0].clone();
+        script.blocks = vec![Block::paragraph("Typed on a full disk")];
+        let queue = Mutex::new(Queue::default());
+        lock(&queue).push(Write::CreateVideo { video: video.clone(), documents });
+        lock(&queue).push(Write::Video(Video { hook: "Hook typed on a full disk".into(), ..video.clone() }));
+        lock(&queue).push(Write::Document(script));
+        lock(&queue).push(Write::Video(Video { title: "Studio tour, part 2".into(), ..other.clone() }));
+
+        let pass = write_queue(&writer, &queue);
+        assert!(pass.refused.is_empty(), "nothing is taken for gone: {:?}", pass.refused);
+        assert!(pass.failed.is_some());
+        assert_eq!(pass.written, 1, "another video's change lands");
+        assert_eq!(setup.get_video(other.id).unwrap().unwrap().title, "Studio tour, part 2");
+        assert_eq!(lock(&queue).len(), 3);
+        assert!(lock(&queue).entries.iter().all(|entry| entry.failing), "the page shows them as not saved");
+        assert!(lock(&queue).is_video_failing(video.id));
+
+        // The disk has room again: the video lands as the creator left it.
+        disk.execute_batch("DROP TRIGGER no_room").unwrap();
+        let pass = write_queue(&writer, &queue);
+        assert!(pass.failed.is_none() && pass.refused.is_empty());
+        assert_eq!(pass.written, 3);
+        assert_eq!(setup.get_video(video.id).unwrap().unwrap().hook, "Hook typed on a full disk");
+        assert_eq!(setup.list_documents(video.id).unwrap()[0].blocks[0].text, "Typed on a full disk");
+    }
+
+    #[test]
+    fn a_failing_run_or_upload_insert_holds_back_its_later_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("videocrm.db");
+        let mut setup = Store::open(&path).unwrap();
+        let video = Video::new("Desk setup tour");
+        setup.insert_video(&video).unwrap();
+        let writer: SharedStore = Arc::new(Mutex::new(Store::open(&path).unwrap()));
+        let disk = no_room(&path, "pipeline_runs");
+        disk.execute_batch(
+            "CREATE TRIGGER no_room_uploads BEFORE INSERT ON uploads BEGIN SELECT abs(-9223372036854775807 - 1); END;",
+        )
+        .unwrap();
+
+        let mut run = pipeline_run(video.id);
+        let now = chrono::Utc::now();
+        let mut job = UploadJob {
+            id: UploadId::new(),
+            video_id: video.id,
+            file: "/media/desk/footage/edit/final.mp4".into(),
+            file_stamp: None,
+            status: videocrm_core::UploadStatus::Pending,
+            session_url: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let queue = Mutex::new(Queue::default());
+        lock(&queue).push(Write::InsertRun(run.clone()));
+        lock(&queue).push(Write::InsertUpload(job.clone()));
+        run.status = videocrm_core::RunStatus::AwaitingApproval;
+        lock(&queue).push(Write::Run(run.clone()));
+        job.status = videocrm_core::UploadStatus::Done { video_id: "7iSYEubHWqU".into() };
+        lock(&queue).push(Write::Upload(job.clone()));
+        lock(&queue).push(Write::Video(Video { title: "Desk setup".into(), ..video.clone() }));
+
+        let pass = write_queue(&writer, &queue);
+        assert!(pass.refused.is_empty(), "nothing is taken for gone: {:?}", pass.refused);
+        assert_eq!(pass.written, 1, "the video's own change lands");
+        assert_eq!(lock(&queue).len(), 4);
+
+        disk.execute_batch("DROP TRIGGER no_room; DROP TRIGGER no_room_uploads").unwrap();
+        let pass = write_queue(&writer, &queue);
+        assert!(pass.failed.is_none() && pass.refused.is_empty());
+        assert_eq!(pass.written, 4);
+        assert_eq!(setup.get_run(run.id).unwrap(), Some(run));
+        assert_eq!(setup.get_upload(job.id).unwrap(), Some(job));
+    }
+
+    #[test]
+    fn a_failing_property_definition_holds_back_every_later_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("videocrm.db");
+        let mut setup = Store::open(&path).unwrap();
+        let property = select(&["high", "low"]);
+        let mut video = Video::new("Desk setup tour");
+        setup.insert_video(&video).unwrap();
+        let writer: SharedStore = Arc::new(Mutex::new(Store::open(&path).unwrap()));
+        let disk = no_room(&path, "property_defs");
+
+        let queue = Mutex::new(Queue::default());
+        lock(&queue).push(Write::InsertProperty(property.clone()));
+        video.properties.insert(property.id, PropertyValue::Select(Some("high".into())));
+        lock(&queue).push(Write::Video(video.clone()));
+        let pass = write_queue(&writer, &queue);
+        assert_eq!(pass.written, 0);
+        assert_eq!(lock(&queue).len(), 2);
+        assert!(lock(&queue).entries.iter().all(|entry| entry.failing));
+
+        disk.execute_batch("DROP TRIGGER no_room").unwrap();
+        assert_eq!(write_queue(&writer, &queue).written, 2);
+        assert_eq!(setup.list_properties().unwrap(), [property]);
+        assert_eq!(setup.get_video(video.id).unwrap().unwrap().properties, video.properties);
     }
 
     #[test]

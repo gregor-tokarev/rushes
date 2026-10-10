@@ -5,13 +5,15 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui_kit::component::{ActiveTheme as _, Size, ThemeStyled as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Size, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Div, ElementId, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
     ParentElement as _, Pixels, Rems, RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
     TestSupportExt as _, Window, canvas, div,
 };
+
+use super::KeyboardFocus as _;
 
 /// The narrowest a fill column gets: room for a short title.
 const FILL_MIN_WIDTH: Rems = Rems(10.);
@@ -211,12 +213,10 @@ impl RenderOnce for TableRowButton {
             .children(self.cells.into_iter().map(|(column, content)| column.cell(content)));
         let Some(open) = self.on_open else { return row.aria_label(self.label) };
         let focus = window.use_keyed_state(self.id, cx, |_, cx| cx.focus_handle().tab_stop(true)).read(cx).clone();
-        let focused = focus.is_focused(window);
         let (key_open, key_focus) = (open.clone(), focus.clone());
         row.role(Role::Button)
             .aria_label(self.label)
-            .track_focus(&focus)
-            .when(focused, |this| this.focus_ring_style(window, cx))
+            .keyboard_focus(&focus, window, cx)
             .hover(move |this| this.bg(hover))
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
                 // Keys pressed on a focused button inside the row are the button's.

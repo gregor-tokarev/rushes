@@ -182,8 +182,9 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   wait's cancel flag. While waiting, the panel says to finish in the browser and, for
   Google, that "Error 401: invalid_client" there means a wrong client ID or secret; the
   Upload card's blocker says the same ("Finish signing in with your browser."). Cancelling
-  a reconnect of a `NeedsSignIn` account leaves it `NeedsSignIn`; any other cancelled
-  sign-in leaves VideoCRM disconnected.
+  a reconnect of a `NeedsSignIn` account leaves it `NeedsSignIn`, also when it is cancelled
+  on the consent page (`error=access_denied`, with a "Sign-in cancelled" notice); any other
+  cancelled sign-in leaves VideoCRM disconnected.
 - The sign-in thread only produces the client and account. The service saves the login
   when it accepts the result, so a cancelled or superseded sign-in leaves no file behind.
   Refreshed tokens go to the file only while that sign-in lasts: a request still running
@@ -233,7 +234,9 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   removed by YouTube) and the connected channel is the one it was uploaded to, the video's
   link is dropped (`is_off_youtube`): the card says "Not on YouTube anymore" and offers a
   plain **Upload to YouTube**, the Uploads row stops linking to it and the videos table
-  shows no YouTube state. A failed lookup (offline) keeps the stored link. There is no "update on YouTube": `videos.update` needs the broader `youtube`
+  shows no YouTube state. The YouTube ids of the uploads that are gone are kept in the
+  settings table (`youtube.gone_videos`), so an earlier upload of a video uploaded again
+  still reads "Not on YouTube" after a restart. A failed lookup (offline) keeps the stored link. There is no "update on YouTube": `videos.update` needs the broader `youtube`
   scope, which VideoCRM does not ask for.
 - While the worker retries a passing failure, the Upload card and the Uploads page say so
   ("YouTube isn’t responding · Retrying (2 of 5)…", or "Can’t reach YouTube" when offline)

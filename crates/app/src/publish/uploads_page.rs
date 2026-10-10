@@ -24,7 +24,7 @@ use crate::route::{Route, VideoTab};
 use crate::state::AppState;
 use crate::ui::{
     CollectionTable, EmptyState, PAGE_INSET, PageHeader, TableColumn, TableRowButton, format_when, page_frame,
-    video_icon,
+    state_tooltip, video_icon,
 };
 
 /// The Uploads page: every upload job, with resume for interrupted ones.
@@ -153,20 +153,23 @@ impl UploadsPage {
                     .small()
                     .outline()
                     .on_click(cx.listener(move |this, _, window, cx| this.run(action, &job, window, cx)));
-                Some(
-                    match action {
-                        RowAction::Resume if access == AccountAccess::NeedsSignIn => {
-                            button.disabled(true).tooltip("Sign in to YouTube again to resume")
-                        }
-                        RowAction::Resume if access == AccountAccess::SigningIn => {
-                            button.disabled(true).tooltip("Finish signing in with your browser to resume")
-                        }
-                        RowAction::Resume if access == AccountAccess::NotConnected => {
-                            button.disabled(true).tooltip("Connect YouTube to resume")
-                        }
-                        RowAction::Cancel if cancelling => button.disabled(true),
-                        _ => button,
+                let reason = match action {
+                    RowAction::Resume if access == AccountAccess::NeedsSignIn => {
+                        Some("Sign in to YouTube again to resume")
                     }
+                    RowAction::Resume if access == AccountAccess::SigningIn => {
+                        Some("Finish signing in with your browser to resume")
+                    }
+                    RowAction::Resume if access == AccountAccess::NotConnected => Some("Connect YouTube to resume"),
+                    _ => None,
+                };
+                let disabled = reason.is_some() || (action == RowAction::Cancel && cancelling);
+                Some(
+                    state_tooltip(
+                        SharedString::from(format!("upload-{id}-{}-reason", action_id(action))),
+                        reason.map(SharedString::from),
+                        button.disabled(disabled),
+                    )
                     .into_any_element(),
                 )
             }

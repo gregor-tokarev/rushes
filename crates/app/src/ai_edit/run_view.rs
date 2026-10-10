@@ -33,7 +33,7 @@ use super::timeline::{LogEvent, MarkerKind, PhaseKind, TimelineItem, fold_timeli
 use crate::publish::{UPLOAD_FILE_LOCKED, YoutubeService};
 use crate::route::VideoTab;
 use crate::state::AppState;
-use crate::ui::Card;
+use crate::ui::{Card, state_tooltip};
 
 /// Height of the activity box once the log outgrows it, in rems.
 const TIMELINE_HEIGHT: f32 = 30.;
@@ -537,16 +537,17 @@ impl RunView {
                                     this.open_feedback(FeedbackPurpose::Iterate, window, cx)
                                 })),
                         )
-                        .child(
+                        .child(state_tooltip(
+                            "run-use-for-upload-reason",
+                            file_locked.then_some(UPLOAD_FILE_LOCKED.into()),
                             Button::new("run-use-for-upload")
                                 .primary()
                                 .small()
                                 .icon(IconName::Upload)
                                 .label(if is_upload_file { "Go to Publish" } else { "Use for upload" })
                                 .disabled(file_locked)
-                                .when(file_locked, |this| this.tooltip(UPLOAD_FILE_LOCKED))
                                 .on_click(cx.listener(|this, _, _, cx| this.use_for_upload(cx))),
-                        ),
+                        )),
                 )
             })
     }

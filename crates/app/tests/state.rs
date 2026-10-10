@@ -548,6 +548,80 @@ fn deleting_the_open_video_during_a_lock_lands_where_the_creator_came_from(cx: &
 }
 
 #[gpui_kit::test]
+fn deleting_a_video_from_the_table_during_a_lock_takes_it_out_of_forward(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour", "Studio tour"]);
+    let desk = app.video_id(cx, "Desk setup tour");
+    let table = cx.read(|cx| app.state.read(cx).route().clone());
+    // Opened, then back to the table: Forward leads to the video.
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| {
+        state.update(cx, |state, cx| {
+            state.open_video(desk, VideoTab::Script, cx);
+            state.go_back(cx);
+        })
+    });
+    assert!(cx.read(|cx| app.state.read(cx).can_go_forward()));
+
+    let mut locker = Locker::hold(&app.database);
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| state.update(cx, |state, cx| state.delete_videos(&[desk], cx)));
+    assert!(cx.read(|cx| app.state.read(cx).has_unsaved_changes()), "the delete waits in the queue");
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_forward()), "Forward no longer leads to the deleted video");
+    app.step(cx, |window, cx| window.press("alt-right", cx));
+    let route = |cx: &mut TestAppContext| cx.read(|cx| app.state.read(cx).route().clone());
+    assert_eq!(route(cx), table);
+    assert!(!app.has(cx, "video-missing"));
+
+    locker.release();
+    app.wait(cx, SAVE_RETRY_DELAY);
+    assert!(!cx.read(|cx| app.state.read(cx).has_unsaved_changes()));
+    assert_eq!(stored(&app.database, |store| store.get_video(desk).expect("read video")), None);
+    assert_eq!(route(cx), table);
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_forward()));
+}
+
+#[gpui_kit::test]
+fn a_video_created_while_the_disk_is_full_keeps_its_edits_until_it_lands(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &[]);
+    let errors = app.errors(cx);
+    // As a full disk does: a new video fails, and not because of a lock.
+    let disk = Connection::open(&app.database).expect("second connection");
+    disk.execute_batch(
+        "CREATE TRIGGER no_room BEFORE INSERT ON videos BEGIN SELECT abs(-9223372036854775807 - 1); END;",
+    )
+    .expect("fill the disk");
+    let new = NewVideo { title: "Full disk test".into(), template: TemplateKind::Blank, ..NewVideo::default() };
+    let video = cx.update(|cx| app.state.update(cx, |state, cx| state.create_video(new, cx))).expect("created");
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| {
+        state.update(cx, |state, cx| {
+            let mut changed = state.video(video).cloned().expect("video");
+            changed.hook = "Hook typed on a full disk".into();
+            state.update_video(changed, cx);
+        })
+    });
+    app.wait(cx, SAVE_RETRY_DELAY);
+    app.wait(cx, SAVE_RETRY_DELAY);
+    let hook = |cx: &mut TestAppContext| cx.read(|cx| app.state.read(cx).video(video).map(|video| video.hook.clone()));
+    assert_eq!(hook(cx).as_deref(), Some("Hook typed on a full disk"), "the edit waits behind the create");
+    assert!(cx.read(|cx| app.state.read(cx).is_save_failing(video)));
+    assert_eq!(
+        *errors.borrow(),
+        ["Couldn’t save your changes. VideoCRM keeps trying; keep the app open until they’re saved."]
+    );
+
+    // The disk has room again: the video lands as the creator left it.
+    disk.execute_batch("DROP TRIGGER no_room").expect("free the disk");
+    app.wait(cx, SAVE_RETRY_DELAY);
+    assert!(!cx.read(|cx| app.state.read(cx).has_unsaved_changes()));
+    assert_eq!(hook(cx).as_deref(), Some("Hook typed on a full disk"));
+    let stored_hook =
+        stored(&app.database, |store| store.get_video(video).expect("read video").map(|video| video.hook));
+    assert_eq!(stored_hook.as_deref(), Some("Hook typed on a full disk"));
+    assert_eq!(errors.borrow().len(), 1, "nothing was taken for deleted");
+}
+
+#[gpui_kit::test]
 fn settings_kept_at_a_quit_are_the_ones_the_next_start_uses(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, &["Desk setup tour"]);
     let mut locker = Locker::hold(&app.database);
@@ -578,4 +652,61 @@ fn settings_kept_at_a_quit_are_the_ones_the_next_start_uses(cx: &mut TestAppCont
     let stored_settings = stored(&app.database, |store| store.load_settings().expect("read settings"));
     assert_eq!(stored_settings.theme, ThemeMode::Dark);
     assert!(stored_settings.pipeline.auto_approve);
+}
+
+#[gpui_kit::test]
+fn changes_restored_while_the_database_is_still_locked_wait_without_an_error(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour"]);
+    let desk = app.video_id(cx, "Desk setup tour");
+    let mut locker = Locker::hold(&app.database);
+    let state = app.state.clone();
+    let set_hook = |hook: &'static str| {
+        move |state: &mut AppState, cx: &mut gpui_kit::Context<AppState>| {
+            let mut video = state.video(desk).cloned().expect("video");
+            video.hook = hook.into();
+            state.update_video(video, cx);
+        }
+    };
+    app.step(cx, move |_, cx| state.update(cx, set_hook("Kept over a restart")));
+    cx.update(|cx| cx.shutdown());
+    assert!(app.database.with_file_name("unsaved-changes.json").exists(), "the change is kept");
+
+    // Started again while the lock still holds: the notice says the kept
+    // change waits for the database, and the retries add no error to it.
+    let mut next = AppState::new(Store::open(&app.database).expect("open again")).expect("load state");
+    let problems = next.take_startup_problems();
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert_eq!(problems[0].severity(), Severity::Info);
+    let next = cx.new(|_| next);
+    let errors = Rc::new(RefCell::new(Vec::new()));
+    let sink = errors.clone();
+    cx.update(|cx| {
+        cx.subscribe(&next, move |_, event: &AppEvent, _| {
+            if let AppEvent::Error(message) = event {
+                sink.borrow_mut().push(message.to_string());
+            }
+        })
+        .detach();
+        AppState::set_global(next.clone(), cx);
+    });
+    for _ in 0..2 {
+        cx.executor().advance_clock(SAVE_RETRY_DELAY);
+        cx.run_until_parked();
+    }
+    assert!(cx.read(|cx| next.read(cx).has_unsaved_changes()), "still locked");
+    assert!(errors.borrow().is_empty(), "the notice already told the creator: {:?}", errors.borrow());
+
+    locker.release();
+    cx.executor().advance_clock(SAVE_RETRY_DELAY);
+    cx.run_until_parked();
+    assert!(!cx.read(|cx| next.read(cx).has_unsaved_changes()));
+    let hook = stored(&app.database, |store| store.get_video(desk).expect("read video").expect("video").hook);
+    assert_eq!(hook, "Kept over a restart");
+    assert!(errors.borrow().is_empty());
+
+    // A change that can't be saved later on is reported as usual.
+    let _locker = Locker::hold(&app.database);
+    next.update(cx, set_hook("Changed during another lock"));
+    cx.run_until_parked();
+    assert_eq!(errors.borrow().len(), 1, "{:?}", errors.borrow());
 }

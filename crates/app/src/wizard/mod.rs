@@ -8,14 +8,12 @@ use gpui_kit::component::form::{Field, Form};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{
-    ActiveTheme as _, Icon, Side, Sizable as _, StyledExt as _, ThemeStyled as _, WindowExt as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, Icon, Side, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Global, InteractiveElement as _, IntoElement, KeyBinding,
-    MouseButton, ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, TestSupportExt as _, Window, actions, div,
+    ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    TestSupportExt as _, Window, actions, div,
 };
 use videocrm_core::input::normalize_title;
 use videocrm_core::templates::TemplateKind;
@@ -24,7 +22,7 @@ use videocrm_core::{NewVideo, VideoFormat, VideoStatus};
 use crate::database::Chip;
 use crate::state::AppState;
 use crate::ui::dialog::form_footer;
-use crate::ui::{ChoiceCard, PageIcon};
+use crate::ui::{ChoiceCard, KeyboardFocus as _, PageIcon};
 
 actions!(new_video, [PreviousFormat, NextFormat]);
 
@@ -192,20 +190,17 @@ impl NewVideoForm {
     /// format, and a click picks one without taking the keyboard.
     fn render_format(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = VideoFormat::ALL.iter().position(|format| *format == self.format).unwrap_or(0);
-        let focused = self.format_focus.is_focused(window);
         div()
             .id("new-video-format")
             .test_support()
             .role(Role::RadioGroup)
             .aria_label(format!("Format: {}", self.format.label()))
-            .track_focus(&self.format_focus)
+            .keyboard_focus(&self.format_focus, window, cx)
             .key_context(FORMAT_CONTEXT)
             .on_action(cx.listener(|this, _: &PreviousFormat, _, cx| this.step_format(-1, cx)))
             .on_action(cx.listener(|this, _: &NextFormat, _, cx| this.step_format(1, cx)))
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             // The segmented bar's own radius, so the ring follows its outline.
             .rounded(cx.theme().radius)
-            .when(focused, |this| this.focus_ring_style(window, cx))
             .child(
                 TabBar::new("new-video-format-tabs")
                     .segmented()

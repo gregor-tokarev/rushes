@@ -47,7 +47,10 @@ database's write lock for seconds. The UI thread never waits for it:
   replay the queue over what they read), and a background task writes the queue in order
   on the writer's connection, retrying every 2 s until it lands. The queue keeps only the
   newest value per video, document, view and the settings; writes whose effect depends on
-  order (creating, deleting, property definitions) are never overtaken.
+  order (creating, deleting, property definitions) are never overtaken. A busy database
+  ends a pass. Another failure (a full disk) holds back what depends on the failing
+  write: the later writes of a video it creates or deletes, of a run or upload it
+  inserts, or every later write after a property definition.
 - A write that keeps failing is never dropped: the video page shows "Not saved —
   retrying" and the creator is told once. Only writes that can never succeed (the video
   was deleted) leave the queue, with a notification.

@@ -5,6 +5,8 @@
 
 mod publish_support;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -21,6 +23,7 @@ use videocrm::publish::{
     AccountBadge, BlockingReason, CHAPTERS_HEADING, Connection, PublishPanel, UploadsPage, YoutubeSettings,
 };
 use videocrm::route::{Route, SettingsSection, VideoTab};
+use videocrm::state::{AppEvent, Severity};
 use videocrm_core::settings::YoutubeBackend;
 use videocrm_core::{
     Block, BlockKind, DocumentKind, PipelineRun, Privacy, RunId, RunStatus, UploadId, UploadJob, UploadStatus, VideoId,
@@ -852,6 +855,14 @@ fn ai_edit_keeps_the_upload_file_while_the_video_uploads(cx: &mut TestAppContext
     });
     cx.run_until_parked();
     assert_eq!(workspace.video(cx, video_id).publish.file, Some(take.clone()));
+    // The pointer rests on the button: its tooltip says why.
+    window(cx, handle, |window, cx| window.hover("run-use-for-upload", cx));
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("state-tooltip").is_some_and(|tooltip| tooltip.visible()));
+    });
 
     service.update(cx, |service, cx| service.cancel_upload(upload, cx));
     wait_until(cx, "the cancellation", |cx| {
@@ -860,6 +871,8 @@ fn ai_edit_keeps_the_upload_file_while_the_video_uploads(cx: &mut TestAppContext
     emulators.clear_faults();
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
+        // The upload stopped under the pointer: the tooltip went with it.
+        assert!(window.try_find("state-tooltip").is_none(), "no tooltip is left on an enabled button");
         window.click("run-use-for-upload", cx);
     });
     cx.run_until_parked();
@@ -1081,6 +1094,32 @@ fn an_expired_sign_in_blocks_the_upload_with_reconnect(cx: &mut TestAppContext) 
     assert!(matches!(service.read_with(cx, |s, _| s.connection().clone()), Connection::NeedsSignIn(_)));
     assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), [BlockingReason::NeedsSignIn]);
 
+    // So does Cancel on the browser's consent page, with a note.
+    let notices = Rc::new(RefCell::new(Vec::new()));
+    let sink = notices.clone();
+    cx.update(|cx| {
+        cx.subscribe(&workspace.state, move |_, event: &AppEvent, _| {
+            if let AppEvent::Problem(problem) = event {
+                sink.borrow_mut().push((problem.title().to_string(), problem.severity()));
+            }
+        })
+        .detach()
+    });
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.within("upload-blockers").click("upload-reconnect", cx);
+    });
+    let url = consent_page(cx);
+    publish_support::cancel_in_browser(&url);
+    let account =
+        wait_until(cx, "the cancelled sign-in", |cx| match service.read_with(cx, |s, _| s.connection().clone()) {
+            Connection::NeedsSignIn(account) => Some(account),
+            _ => None,
+        });
+    assert_eq!(account.channel_handle.as_deref(), Some("@creator"), "the account is remembered");
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), [BlockingReason::NeedsSignIn]);
+    assert_eq!(*notices.borrow(), [("Sign-in cancelled".to_owned(), Severity::Info)]);
+
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         window.within("upload-blockers").click("upload-reconnect", cx);
@@ -1261,6 +1300,31 @@ fn the_publish_tab_asks_youtube_again_when_it_is_shown_again(cx: &mut TestAppCon
     cx.run_until_parked();
     window(cx, handle, |window, _| window.activate_window());
     wait_until(cx, "the dropped link", |cx| (!linked(cx)).then_some(()));
+
+    // Neither upload is on YouTube, also after a restart: the Uploads page
+    // says so on both rows, without a link to a deleted video.
+    let store = workspace.state.read_with(cx, |state, _| state.store());
+    let stored: Option<Vec<String>> = store.lock().unwrap().get_setting("youtube.gone_videos").unwrap();
+    let mut both = vec![first.clone(), second.clone()];
+    both.sort();
+    assert_eq!(stored, Some(both), "kept in the database");
+    for restart in [false, true] {
+        let service = if restart { workspace.restart(cx) } else { service.clone() };
+        cx.run_until_parked();
+        let jobs = service.read_with(cx, |s, _| s.jobs().to_vec());
+        assert_eq!(jobs.len(), 2);
+        for job in &jobs {
+            assert!(service.read_with(cx, |s, cx| s.is_off_youtube(job, cx)), "restart {restart}: {:?}", job.status);
+        }
+        let (page, _) = open(cx, |window, cx| cx.new(|cx| UploadsPage::new(window, cx)));
+        window(cx, page, |window, cx| {
+            window.render_frame(cx);
+            for job in &jobs {
+                assert!(window.find(format!("upload-{}", job.id)).visible());
+                assert!(window.try_find(format!("upload-{}-open", job.id)).is_none());
+            }
+        });
+    }
 }
 
 #[gpui_kit::test]

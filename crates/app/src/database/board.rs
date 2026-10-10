@@ -6,10 +6,10 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, ThemeStyled as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, DispatchPhase, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
+    AnyElement, AppContext as _, Context, DispatchPhase, FontWeight, InteractiveElement as _, IntoElement,
     MouseMoveEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
     TestSupportExt as _, Window, canvas, div,
 };
@@ -21,7 +21,7 @@ use super::format;
 use super::panel::{BOARD_CARD_CONTEXT, DatabasePanel, OpenSelected};
 use super::query::status_visible;
 use super::table::{EmptyReason, element_id, render_empty_state, video_menu};
-use crate::ui::{PAGE_INSET, video_icon};
+use crate::ui::{KeyboardFocus as _, PAGE_INSET, video_icon};
 
 /// The payload of a card being dragged.
 #[derive(Clone)]
@@ -198,7 +198,6 @@ impl DatabasePanel {
             .use_keyed_state(element_id("card-focus", id), cx, |_, cx| cx.focus_handle().tab_stop(true))
             .read(cx)
             .clone();
-        let focused = focus.is_focused(window);
 
         let meta = h_flex()
             .gap_3()
@@ -240,7 +239,9 @@ impl DatabasePanel {
                 v_flex()
                     .id(element_id("card", id))
                     .test_support()
-                    .track_focus(&focus)
+                    // A click or drag doesn't take the keyboard: the ring would make a
+                    // dropped card look selected.
+                    .keyboard_focus(&focus, window, cx)
                     .key_context(BOARD_CARD_CONTEXT)
                     .on_action(cx.listener(move |this, _: &OpenSelected, _, cx| this.open_script(id, cx)))
                     .gap_1p5()
@@ -252,10 +253,6 @@ impl DatabasePanel {
                     .bg(cx.theme().background)
                     .shadow_xs()
                     .hover(|this| this.bg(cx.theme().secondary))
-                    .when(focused, |this| this.focus_ring_style(window, cx))
-                    // A click or drag doesn't take the keyboard: the ring would make a
-                    // dropped card look selected.
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .on_click(cx.listener(move |this, _, _, cx| this.open_video(id, cx)))
                     .on_drag(dragged, |card, _, _, cx| cx.new(|_| card.clone()))
                     .child(

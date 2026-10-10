@@ -3,12 +3,14 @@
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, ThemeStyled as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClickEvent, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, Role,
     SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
 };
+
+use super::KeyboardFocus as _;
 
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
@@ -60,7 +62,6 @@ impl RenderOnce for ChoiceCard {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let focus =
             window.use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle().tab_stop(true)).read(cx).clone();
-        let focused = focus.is_focused(window);
         let theme = cx.theme();
         let hover_border = theme.muted_foreground.opacity(0.5);
         let check = Icon::new(IconName::CircleCheck).small().text_color(theme.primary);
@@ -70,7 +71,7 @@ impl RenderOnce for ChoiceCard {
             .role(Role::RadioButton)
             .aria_label(self.title.clone())
             .aria_selected(self.selected)
-            .track_focus(&focus)
+            .keyboard_focus(&focus, window, cx)
             .gap_1()
             .p_3()
             .rounded(theme.radius_lg)
@@ -82,7 +83,6 @@ impl RenderOnce for ChoiceCard {
                     this.border_color(theme.border).hover(move |this| this.border_color(hover_border))
                 }
             })
-            .when(focused, |this| this.focus_ring_style(window, cx))
             .child(
                 h_flex()
                     .gap_2()
