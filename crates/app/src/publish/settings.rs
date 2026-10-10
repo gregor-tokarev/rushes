@@ -325,7 +325,7 @@ impl YoutubeSettings {
                     .gap_2()
                     .items_start()
                     // A plain dot: an outlined circle reads as a radio button.
-                    .child(div().mt_1p5().size_1().flex_shrink_0().rounded_full().bg(muted))
+                    .child(div().mt_2p5().size_1().flex_shrink_0().rounded_full().bg(muted))
                     .child(div().flex_1().min_w_0().text_sm().text_color(muted).child(*note))
             }))
             // Tests check that the notes are on screen.
