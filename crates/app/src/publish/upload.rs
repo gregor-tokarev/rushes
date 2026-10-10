@@ -39,7 +39,7 @@ const PERSISTED_STEPS: f32 = 10.0;
 /// Why a video's upload file can't be changed now, wherever it is chosen.
 pub const UPLOAD_FILE_LOCKED: &str = "The upload file can’t change while the video uploads. Cancel the upload first.";
 /// What a stopped upload says once YouTube no longer takes the rest of its file.
-const SESSION_GONE: &str = "YouTube can’t continue this upload. Start over to send the video from the beginning.";
+const SESSION_GONE: &str = "YouTube can’t continue this upload. Upload the video again to send it from the beginning.";
 
 /// Why an upload did not start.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,7 +73,10 @@ impl fmt::Display for UploadError {
                 )
             }
             UploadError::Stale(Retired::FileChanged) => {
-                write!(f, "The file changed since this upload started. Start over to upload the new version.")
+                write!(
+                    f,
+                    "The file changed since this upload started. Upload it to YouTube again to send the new version."
+                )
             }
             UploadError::Stale(Retired::Replaced) => write!(f, "A newer upload of this video took its place."),
             UploadError::Storage => write!(
@@ -896,7 +899,7 @@ mod tests {
         assert_eq!(UploadError::NotResumable.to_string(), "This upload can’t be resumed. Upload the video again.");
         assert_eq!(
             UploadError::Stale(Retired::FileChanged).to_string(),
-            "The file changed since this upload started. Start over to upload the new version."
+            "The file changed since this upload started. Upload it to YouTube again to send the new version."
         );
     }
 }

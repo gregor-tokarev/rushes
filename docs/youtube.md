@@ -254,7 +254,7 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   one. A session YouTube refuses on resume (`400`, such as `badContent` for a file of
   another length, or `404`/`410`), or one the current connection can't use (another
   backend's after a switch), is dropped as well: "YouTube can’t continue this upload.
-  Start over…". Starting a new upload of a video (**Start over**, **Upload again…**)
+  Upload the video again…". Starting a new upload of a video (**Start over**, **Upload again…**)
   drops the sessions of its stopped uploads, and `resume_upload` refuses while another
   upload of the same video runs, so one video never goes up twice by accident. The
   video file can't be changed while it uploads. At startup, jobs a previous run left

@@ -805,7 +805,7 @@ pub(super) fn describe_error(error: &YoutubeError) -> String {
         }
         YoutubeError::Api { .. } => "YouTube couldn’t handle the request. Try again in a few minutes.",
         YoutubeError::SessionExpired => {
-            "YouTube can’t continue this upload. Start over to send the video from the beginning."
+            "YouTube can’t continue this upload. Upload the video again to send it from the beginning."
         }
         YoutubeError::Io { .. } => "Couldn’t read the file. Check that it’s still there and readable, then try again.",
         YoutubeError::Protocol(_) | YoutubeError::Json(_) => {

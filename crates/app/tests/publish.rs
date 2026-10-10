@@ -421,7 +421,7 @@ fn a_session_youtube_refuses_on_resume_is_dropped(cx: &mut TestAppContext) {
     assert_eq!(
         failed.status,
         UploadStatus::Failed {
-            error: "YouTube can’t continue this upload. Start over to send the video from the beginning.".into()
+            error: "YouTube can’t continue this upload. Upload the video again to send it from the beginning.".into()
         }
     );
     assert_eq!(failed.session_url, None);
