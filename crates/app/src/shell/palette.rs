@@ -18,7 +18,7 @@ use videocrm_core::{VideoId, ViewKind};
 
 use super::sidebar::display_title;
 use super::{NewVideo, OpenSettings, ToggleSidebar, ToggleTheme, Workspace};
-use crate::route::{Route, SettingsSection, VideoTab};
+use crate::route::{Route, SettingsSection};
 use crate::state::AppState;
 use crate::ui::PageIcon;
 use crate::wizard;
@@ -387,7 +387,8 @@ fn run(command: PaletteCommand, workspace: &WeakEntity<Workspace>, window: &mut 
     let Some(workspace) = workspace.upgrade() else { return };
     let state = workspace.read(cx).state().clone();
     match command {
-        PaletteCommand::OpenVideo(id) => state.update(cx, |state, cx| state.open_video(id, VideoTab::Script, cx)),
+        // Opened to write, as Enter on a table row or a board card does.
+        PaletteCommand::OpenVideo(id) => state.update(cx, |state, cx| state.open_script(id, cx)),
         PaletteCommand::Navigate(route) => state.update(cx, |state, cx| state.navigate(route, cx)),
         PaletteCommand::Action(PaletteAction::NewVideo) => {
             // Let the palette's dialog close before the wizard's opens.

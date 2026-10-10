@@ -455,6 +455,28 @@ fn the_command_palette_jumps_to_a_video(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_video_opened_from_the_palette_is_ready_to_write(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour", "Rust ownership explained"]);
+    let rust = app.video_id(cx, "Rust ownership explained");
+    // From the videos, then again from the video's own page.
+    for typed in ["K1 ", "K2 "] {
+        app.press(cx, "ctrl-k");
+        app.type_text(cx, "rust own");
+        app.press(cx, "enter");
+        assert!(!app.has_dialog(cx));
+        assert_eq!(app.route(cx), Route::Video { id: rust, tab: VideoTab::Script });
+        // The palette's close animation ends after the page took the caret.
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        app.step(cx, |_, _| {});
+        let first = app.script_first_block(cx);
+        assert_eq!(app.script_focused_block(cx), Some(first), "the caret is in the script");
+        app.type_text(cx, typed);
+    }
+    app.navigate(cx, Route::default());
+    assert_eq!(app.stored_first_block(cx, rust, DocumentKind::Script), "K2 K1 ");
+}
+
+#[gpui_kit::test]
 fn the_palette_runs_an_action_its_query_names(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, true, &["Rust Ownership Finally Explained in 10 Minutes"]);
     let theme = |cx: &mut TestAppContext| cx.read(|cx| app.state.read(cx).settings().theme);
