@@ -18,7 +18,7 @@ use gpui_kit::{
 use rusqlite::Connection;
 use videocrm::ai_edit::{LogEvent, PipelineService, RunMarker, TimelineEntry};
 use videocrm::publish::{Retired, YoutubeService};
-use videocrm::route::VideoTab;
+use videocrm::route::{Route, VideoTab};
 use videocrm::shell::{self, Workspace};
 use videocrm::state::{AppEvent, AppState, QUIT_SAVE_TIMEOUT, SAVE_RETRY_DELAY, Severity};
 use videocrm::video_page::SAVE_DELAY;
@@ -487,4 +487,37 @@ fn changes_that_cant_be_written_before_quitting_are_written_at_the_next_start(cx
     assert_eq!(stored_property(&app.database, desk, priority), Some(PropertyValue::Select(Some("low".into()))));
     let shown = next.video(desk).and_then(|video| video.properties.get(&priority).cloned());
     assert_eq!(shown, Some(PropertyValue::Select(Some("low".into()))));
+}
+
+#[gpui_kit::test]
+fn deleting_the_open_video_during_a_lock_lands_where_the_creator_came_from(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour"]);
+    let desk = app.video_id(cx, "Desk setup tour");
+    let came_from = cx.read(|cx| app.state.read(cx).route().clone());
+    // Opened from All videos, then another tab: both are in the history.
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| {
+        state.update(cx, |state, cx| {
+            state.open_video(desk, VideoTab::Script, cx);
+            state.open_video(desk, VideoTab::Notes, cx);
+        })
+    });
+
+    let mut locker = Locker::hold(&app.database);
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| state.update(cx, |state, cx| state.delete_videos(&[desk], cx)));
+    let route = |cx: &mut TestAppContext| cx.read(|cx| app.state.read(cx).route().clone());
+    assert_eq!(route(cx), came_from, "the delete waits in the queue, the page doesn't");
+    assert!(!app.has(cx, "video-missing"));
+    assert!(cx.read(|cx| app.state.read(cx).has_unsaved_changes()));
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_forward()));
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_back()), "no tab of the deleted video is left behind");
+
+    locker.release();
+    app.wait(cx, SAVE_RETRY_DELAY);
+    assert!(!cx.read(|cx| app.state.read(cx).has_unsaved_changes()));
+    assert_eq!(stored(&app.database, |store| store.get_video(desk).expect("read video")), None);
+    assert_eq!(route(cx), came_from);
+    assert!(!app.has(cx, "video-missing"));
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_forward()));
 }

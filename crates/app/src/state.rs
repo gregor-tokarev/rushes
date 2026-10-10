@@ -287,9 +287,12 @@ impl AppState {
         let leaves_current_page = matches!(&self.route, Route::Video { id, .. } if ids.contains(id));
         if leaves_current_page {
             // The deleted page is replaced by the page the creator came from, so
-            // the next Back shows another page rather than this one again.
-            self.route = self.back.pop().unwrap_or_default();
+            // the next Back shows another page rather than this one again. Its
+            // other tabs leave the history first: a delete that waits in the
+            // queue gets no reload that would drop them.
             let known: Vec<VideoId> = self.rows.iter().map(|row| row.video.id).collect();
+            self.prune_history(&known);
+            self.route = self.back.pop().unwrap_or_default();
             self.prune_history(&known);
             self.on_route_changed(cx);
         }
