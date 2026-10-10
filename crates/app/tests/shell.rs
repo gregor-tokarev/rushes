@@ -299,6 +299,24 @@ fn onboarding_keeps_its_buttons_in_view_at_the_minimum_window_size(cx: &mut Test
 }
 
 #[gpui_kit::test]
+fn onboarding_keeps_continue_in_one_place_across_steps(cx: &mut TestAppContext) {
+    let app = Fixture::open_sized(cx, false, &[], size(px(1440.), px(900.)));
+    let onboarding = cx.read(|cx| app.workspace.read(cx).onboarding().cloned().expect("onboarding"));
+    let next = |cx: &mut TestAppContext| {
+        cx.update_window(app.window, |_, window, _| window.find("onboarding-next").bounds().bottom_right()).unwrap()
+    };
+    let first = next(cx);
+    loop {
+        let step = cx.read(|cx| onboarding.read(cx).step());
+        assert_eq!(next(cx), first, "Continue moved on the {step:?} step");
+        if step == Step::GetStarted {
+            break;
+        }
+        app.click(cx, "onboarding-next");
+    }
+}
+
+#[gpui_kit::test]
 fn completing_onboarding_starts_the_workspace(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, false, &[]);
     assert_eq!(app.page(cx), Page::Onboarding);

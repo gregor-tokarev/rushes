@@ -285,6 +285,8 @@ fn step_copy(step: Step) -> (&'static str, &'static str) {
 
 /// Windows shorter than this give the onboarding card less room above it.
 const SHORT_WINDOW: Rems = Rems(48.);
+/// Room for the tallest step (YouTube) in a comfortable window.
+const CARD_MAX_HEIGHT: Rems = Rems(44.);
 
 impl Render for Onboarding {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -297,13 +299,15 @@ impl Render for Onboarding {
         let last = self.step == Step::GetStarted;
         let optional = matches!(self.step, Step::Youtube | Step::AiEditing);
 
-        // The stepper and the buttons stay in view; the step between them scrolls.
+        // The stepper and the buttons stay in view; the step between them
+        // scrolls. One height for every step keeps Back and Continue in place.
         let card = v_flex()
             .id("onboarding-card")
             .test_support()
             .w_full()
             .max_w(rems(42.5))
-            .max_h_full()
+            .h_full()
+            .max_h(CARD_MAX_HEIGHT)
             .min_h_0()
             .rounded(cx.theme().radius_lg)
             .border_1()
@@ -332,6 +336,7 @@ impl Render for Onboarding {
             .child(
                 div()
                     .id("onboarding-step")
+                    .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
