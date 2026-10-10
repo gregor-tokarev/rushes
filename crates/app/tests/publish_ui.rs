@@ -852,6 +852,14 @@ fn ai_edit_keeps_the_upload_file_while_the_video_uploads(cx: &mut TestAppContext
     });
     cx.run_until_parked();
     assert_eq!(workspace.video(cx, video_id).publish.file, Some(take.clone()));
+    // The pointer rests on the button: its tooltip says why.
+    window(cx, handle, |window, cx| window.hover("run-use-for-upload", cx));
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("state-tooltip").is_some_and(|tooltip| tooltip.visible()));
+    });
 
     service.update(cx, |service, cx| service.cancel_upload(upload, cx));
     wait_until(cx, "the cancellation", |cx| {
@@ -860,6 +868,8 @@ fn ai_edit_keeps_the_upload_file_while_the_video_uploads(cx: &mut TestAppContext
     emulators.clear_faults();
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
+        // The upload stopped under the pointer: the tooltip went with it.
+        assert!(window.try_find("state-tooltip").is_none(), "no tooltip is left on an enabled button");
         window.click("run-use-for-upload", cx);
     });
     cx.run_until_parked();
