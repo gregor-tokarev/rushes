@@ -2,14 +2,19 @@
 //! with the geometry of the Videos table (the kit's data table): the table
 //! head fill, muted labels, row hairlines and hover, medium cell padding.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui_kit::component::{ActiveTheme as _, Size, ThemeStyled as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Size, ThemeStyled as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Div, ElementId, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Rems,
-    RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
+    AnyElement, App, Div, ElementId, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels,
+    Rems, RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window,
+    canvas, div,
 };
+
+/// The narrowest a fill column gets: room for a short title.
+const FILL_MIN_WIDTH: Rems = Rems(10.);
 
 /// One column: its header label and width (`None` takes the remaining room).
 #[derive(Clone, Copy, Debug)]
@@ -17,22 +22,36 @@ pub struct TableColumn {
     label: &'static str,
     width: Option<Rems>,
     end: bool,
+    optional: bool,
 }
 
 impl TableColumn {
-    /// A column that takes the room the fixed ones leave, at least 12rem wide.
+    /// A column that takes the room the fixed ones leave, at least
+    /// [`FILL_MIN_WIDTH`] wide.
     pub const fn fill(label: &'static str) -> Self {
-        Self { label, width: None, end: false }
+        Self { label, width: None, end: false, optional: false }
     }
 
     pub const fn fixed(label: &'static str, width: Rems) -> Self {
-        Self { label, width: Some(width), end: false }
+        Self { label, width: Some(width), end: false, optional: false }
     }
 
     /// Aligns the column's content to its trailing edge, for numbers and actions.
     pub const fn end(mut self) -> Self {
         self.end = true;
         self
+    }
+
+    /// A secondary column the table drops when it is too narrow for all of
+    /// them, so identity, status and actions keep their room.
+    pub const fn optional(mut self) -> Self {
+        self.optional = true;
+        self
+    }
+
+    /// The room the column needs, in rems.
+    fn needs(self) -> f32 {
+        self.width.unwrap_or(FILL_MIN_WIDTH).0
     }
 
     /// A cell of this column holding `content`.
@@ -45,10 +64,74 @@ impl TableColumn {
             .px(padding)
             .map(|this| match self.width {
                 Some(width) => this.w(width).flex_none(),
-                None => this.flex_1().min_w(Rems(12.)),
+                None => this.flex_1().min_w(FILL_MIN_WIDTH),
             })
             .when(self.end, |this| this.justify_end())
             .child(content)
+    }
+}
+
+/// The columns a table `width` rems wide shows: all of them when they fit
+/// (or before the table is measured), otherwise without its optional columns,
+/// dropped from the trailing end until the rest fit.
+fn visible_columns(columns: &[TableColumn], width: Option<f32>) -> Vec<TableColumn> {
+    let mut visible = columns.to_vec();
+    let Some(width) = width else { return visible };
+    while visible.iter().map(|column| column.needs()).sum::<f32>() > width {
+        let Some(ix) = visible.iter().rposition(|column| column.optional) else { break };
+        visible.remove(ix);
+    }
+    visible
+}
+
+/// A collection: [`table_header`] over its rows, on the full width of its
+/// parent. Too narrow for every column, it drops the optional ones.
+#[derive(IntoElement)]
+pub struct CollectionTable {
+    id: ElementId,
+    columns: &'static [TableColumn],
+    rows: Vec<TableRowButton>,
+}
+
+impl CollectionTable {
+    pub fn new(id: impl Into<ElementId>, columns: &'static [TableColumn]) -> Self {
+        Self { id: id.into(), columns, rows: Vec::new() }
+    }
+
+    pub fn rows(mut self, rows: impl IntoIterator<Item = TableRowButton>) -> Self {
+        self.rows.extend(rows);
+        self
+    }
+}
+
+impl RenderOnce for CollectionTable {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // Measured in the previous frame; a change of the visible columns
+        // draws the table once more.
+        let width =
+            window.use_keyed_state(self.id.clone(), cx, |_, _| Rc::new(Cell::new(None::<Pixels>))).read(cx).clone();
+        let rem = window.rem_size();
+        let columns = self.columns;
+        let shown = move |width: Option<Pixels>| visible_columns(columns, width.map(|width| width / rem)).len();
+        let visible = visible_columns(columns, width.get().map(|width| width / rem));
+        let measure = canvas(
+            move |bounds, window, _| {
+                let previous = width.replace(Some(bounds.size.width));
+                if previous.is_none() || shown(previous) != shown(Some(bounds.size.width)) {
+                    window.request_animation_frame();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+        v_flex()
+            .id(self.id)
+            .relative()
+            .w_full()
+            .child(table_header(&visible, cx))
+            .children(self.rows.into_iter().map(|row| row.columns(&visible)))
+            .child(measure)
     }
 }
 
@@ -89,6 +172,12 @@ impl TableRowButton {
         self
     }
 
+    /// Keeps the cells of `visible` columns only.
+    fn columns(mut self, visible: &[TableColumn]) -> Self {
+        self.cells.retain(|(column, _)| visible.iter().any(|shown| shown.label == column.label));
+        self
+    }
+
     /// What the row opens; a row without it is inert.
     pub fn on_open(mut self, open: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_open = Some(Rc::new(open));
@@ -126,5 +215,31 @@ impl RenderOnce for TableRowButton {
                 }
             })
             .on_click(move |_, window, cx| open(window, cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const COLUMNS: [TableColumn; 4] = [
+        TableColumn::fill("Video"),
+        TableColumn::fixed("Status", Rems(10.)),
+        TableColumn::fixed("Started", Rems(9.)).optional(),
+        TableColumn::fixed("Updated", Rems(9.)).optional(),
+    ];
+
+    fn labels(columns: Vec<TableColumn>) -> Vec<&'static str> {
+        columns.into_iter().map(|column| column.label).collect()
+    }
+
+    #[test]
+    fn narrow_tables_drop_optional_columns_from_the_end() {
+        assert_eq!(labels(visible_columns(&COLUMNS, None)), ["Video", "Status", "Started", "Updated"]);
+        assert_eq!(labels(visible_columns(&COLUMNS, Some(40.))), ["Video", "Status", "Started", "Updated"]);
+        assert_eq!(labels(visible_columns(&COLUMNS, Some(35.))), ["Video", "Status", "Started"]);
+        assert_eq!(labels(visible_columns(&COLUMNS, Some(25.))), ["Video", "Status"]);
+        // Required columns stay even when they do not fit.
+        assert_eq!(labels(visible_columns(&COLUMNS, Some(10.))), ["Video", "Status"]);
     }
 }

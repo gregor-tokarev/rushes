@@ -439,6 +439,42 @@ fn the_uploads_page_offers_what_each_job_allows(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_narrow_uploads_page_keeps_each_jobs_action_in_view(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let video_id = workspace.create_video(cx, "Why I left macOS for Linux", |_| {});
+    let job = UploadJob {
+        id: UploadId::new(),
+        video_id,
+        file: workspace.dir.path().join("final.mp4"),
+        status: UploadStatus::Uploading { sent: 10, total: 100 },
+        session_url: Some("http://127.0.0.1:1/upload/session".into()),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    workspace.insert_jobs(cx, &[&job]);
+    workspace.restart(cx);
+    let options = WindowOptions {
+        // The page column at the app's minimum window size, beside the sidebar.
+        window_bounds: Some(WindowBounds::Windowed(Bounds::new(Default::default(), size(px(703.), px(600.))))),
+        ..WindowOptions::default()
+    };
+    let (handle, _page) = cx
+        .update(|cx| gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| UploadsPage::new(window, cx))))
+        .unwrap();
+    // The first frame measures the table, the next one drops what does not fit.
+    for _ in 0..2 {
+        window(cx, handle, |window, cx| window.render_frame(cx));
+        cx.run_until_parked();
+    }
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        let row = window.find(format!("upload-{}", job.id)).bounds();
+        let resume = window.find(format!("upload-{}-resume", job.id)).bounds();
+        assert!(resume.right() <= row.right(), "the action stays in the row: {resume:?} vs {row:?}");
+    });
+}
+
+#[gpui_kit::test]
 fn youtube_settings_start_with_the_google_client_and_hide_the_emulator(cx: &mut TestAppContext) {
     // A fresh install: the creator's own YouTube account, not the developer emulator.
     let workspace = Workspace::open(cx, YoutubeBackend::default());

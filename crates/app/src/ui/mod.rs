@@ -59,5 +59,5 @@ pub use page::{PAGE_INSET, PageHeader, page_frame};
 pub use page_icon::{Assets, PageIcon, has_page_icon_image, video_icon};
 pub use row_button::{RowButton, section_label};
 pub use section::{Card, SectionHeader};
-pub use table::{TableColumn, TableRowButton, table_header};
+pub use table::{CollectionTable, TableColumn, TableRowButton, table_header};
 pub use time::format_when;

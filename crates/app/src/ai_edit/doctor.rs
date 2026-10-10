@@ -57,12 +57,12 @@ impl DoctorChecklist {
         let (icon, title, subtitle): (Option<Icon>, SharedString, SharedString) = match doctor {
             None => (None, "Checking requirements…".into(), "This takes a few seconds.".into()),
             Some(_) if missing == 0 => (
-                Some(Icon::new(IconName::CircleCheck).text_color(theme.success)),
+                Some(Icon::new(IconName::CircleCheck).small().text_color(theme.success)),
                 "Ready for AI edits".into(),
                 "Everything video-use needs is installed.".into(),
             ),
             Some(_) => (
-                Some(Icon::new(IconName::TriangleAlert).text_color(theme.warning)),
+                Some(Icon::new(IconName::TriangleAlert).small().text_color(theme.warning)),
                 if missing == 1 {
                     "1 requirement missing".into()
                 } else {

@@ -5,7 +5,7 @@ use std::time::Duration;
 use chrono::{Local, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
 use gpui_kit::{
     Context, ElementId, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Rems, Render,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
@@ -19,7 +19,8 @@ use crate::database::colors::run_status_color;
 use crate::route::{Route, VideoTab};
 use crate::state::AppState;
 use crate::ui::{
-    EmptyState, PAGE_INSET, PageHeader, TableColumn, TableRowButton, format_when, page_frame, table_header, video_icon,
+    CollectionTable, EmptyState, PAGE_INSET, PageHeader, TableColumn, TableRowButton, format_when, page_frame,
+    video_icon,
 };
 
 /// The Pipelines page: runs across all videos, newest first. A row opens the
@@ -132,7 +133,7 @@ const COLUMNS: [TableColumn; 5] = [
     TableColumn::fill("Video"),
     TableColumn::fixed("Status", Rems(9.)),
     TableColumn::fixed("Started", Rems(9.)),
-    TableColumn::fixed("Duration", Rems(6.)).end(),
+    TableColumn::fixed("Duration", Rems(5.5)).end(),
     TableColumn::fixed("Cost", Rems(5.)).end(),
 ];
 
@@ -164,7 +165,7 @@ impl Render for PipelinesPage {
                 .id("pipelines-list")
                 .size_full()
                 .overflow_y_scroll()
-                .child(v_flex().px(PAGE_INSET).pb_8().child(table_header(&COLUMNS, cx)).children(rows))
+                .child(div().px(PAGE_INSET).pb_8().child(CollectionTable::new("pipelines-table", &COLUMNS).rows(rows)))
                 .into_any_element()
         };
         page_frame(header, content).id("pipelines-page")

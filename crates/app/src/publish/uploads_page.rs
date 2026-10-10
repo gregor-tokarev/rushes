@@ -21,7 +21,8 @@ use super::upload::ProcessingOutcome;
 use crate::route::{Route, VideoTab};
 use crate::state::AppState;
 use crate::ui::{
-    EmptyState, PAGE_INSET, PageHeader, TableColumn, TableRowButton, format_when, page_frame, table_header, video_icon,
+    CollectionTable, EmptyState, PAGE_INSET, PageHeader, TableColumn, TableRowButton, format_when, page_frame,
+    video_icon,
 };
 
 /// The Uploads page: every upload job, with resume for interrupted ones.
@@ -232,12 +233,13 @@ impl UploadsPage {
     }
 }
 
-/// Video, status, started, updated and the job's action.
+/// Video, status, started, updated and the job's action; a narrow page drops
+/// the update time.
 const COLUMNS: [TableColumn; 5] = [
     TableColumn::fill("Video"),
-    TableColumn::fixed("Status", Rems(13.)),
+    TableColumn::fixed("Status", Rems(10.5)),
     TableColumn::fixed("Started", Rems(9.)),
-    TableColumn::fixed("Updated", Rems(9.)),
+    TableColumn::fixed("Updated", Rems(9.)).optional(),
     TableColumn::fixed("", Rems(9.)).end(),
 ];
 
@@ -257,7 +259,7 @@ impl Render for UploadsPage {
                 .id("uploads-list")
                 .size_full()
                 .overflow_y_scroll()
-                .child(v_flex().px(PAGE_INSET).pb_8().child(table_header(&COLUMNS, cx)).children(rows))
+                .child(div().px(PAGE_INSET).pb_8().child(CollectionTable::new("uploads-table", &COLUMNS).rows(rows)))
                 .into_any_element()
         };
         page_frame(header, content).id("uploads-page")
