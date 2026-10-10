@@ -7,7 +7,6 @@ use std::time::Duration;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
-use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -22,13 +21,14 @@ use videocrm_core::document::{
     DEFAULT_WPM, OutlineItem, estimated_runtime_secs, from_markdown, outline, spoken_word_count, teleprompter_text,
     to_markdown,
 };
-use videocrm_core::input::{PathInputError, display_user_path, expand_user_path};
+use videocrm_core::input::display_user_path;
 use videocrm_core::{Block, BlockId, BlockKind, DocumentId, DocumentKind, VideoId, media};
 
 use super::saves::DocumentSaves;
 use crate::database::format;
 use crate::editor::{DocumentEditor, DocumentEditorEvent};
 use crate::state::AppState;
+use crate::ui::path_prompt::{self, Finish, PathKind, PathRequest, read_error_reason, write_error_reason};
 use crate::ui::{EmptyState, RowButton, section_label};
 
 /// How long after the last edit a document is written.
@@ -303,83 +303,78 @@ impl DocumentTab {
         .detach();
     }
 
-    /// Writes the document as Markdown to `path` off the UI thread and says
-    /// where it went. A typed path may name a folder that doesn't exist yet,
-    /// such as the video's media folder before its first use.
+    /// Writes the document as Markdown to the path the file chooser returned,
+    /// off the UI thread, and says where it went.
     fn write_markdown(&mut self, path: PathBuf, markdown: String, window: &mut Window, cx: &mut Context<Self>) {
-        let target = path.clone();
-        let written = cx.background_spawn(async move {
-            if let Some(folder) = target.parent() {
-                std::fs::create_dir_all(folder)?;
-            }
-            std::fs::write(&target, markdown)
-        });
+        let written = cx.background_spawn(write_file(path.clone(), markdown));
         cx.spawn_in(window, async move |this, cx| {
             let written = written.await;
             _ = this.update_in(cx, |this, window, cx| match written {
-                Ok(()) => window.push_notification(format!("Exported to {}.", display_user_path(&path)), cx),
-                Err(error) => this.report(format!("Couldn’t write {}: {error}", display_user_path(&path)), cx),
+                Ok(()) => exported(&path, window, cx),
+                Err(error) => this.report(write_error_reason(&path, &error).into(), cx),
             });
         })
         .detach();
     }
 
-    /// Reads a Markdown file off the UI thread, then asks how to import it.
+    /// Reads the Markdown file the file chooser returned off the UI thread, then
+    /// asks how to import it.
     fn read_markdown(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let source = path.clone();
-        let read = cx.background_spawn(async move { std::fs::read_to_string(&source) });
+        let read = cx.background_spawn(read_file(path.clone()));
         cx.spawn_in(window, async move |this, cx| {
             let read = read.await;
             _ = this.update_in(cx, |this, window, cx| match read {
                 Ok(markdown) => this.confirm_import(&path, from_markdown(&markdown), window, cx),
-                Err(error) => this.report(format!("Couldn’t read {}: {error}", display_user_path(&path)), cx),
+                Err(error) => this.report(read_error_reason(&path, &error).into(), cx),
             });
         })
         .detach();
     }
 
     /// Asks for a path when the system file chooser is unavailable. Export
-    /// suggests a file in the video's media folder.
+    /// suggests a file in the video's media folder and asks before replacing a
+    /// file; the file is written or read before the dialog closes, so a path
+    /// that doesn't work is explained next to the field.
     pub fn prompt_for_path(&mut self, purpose: PathPurpose, window: &mut Window, cx: &mut Context<Self>) {
-        let suggested = match purpose {
-            PathPurpose::Export => display_user_path(&self.fallback_export_path(cx)),
-            PathPurpose::Import => String::new(),
-        };
-        let form = cx.new(|cx| PathForm::new(suggested, window, cx));
-        let input = form.read(cx).input.clone();
         let tab = cx.weak_entity();
-        let markdown = to_markdown(&self.blocks(cx));
-        let width = window.rem_size() * 30.;
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let (form, tab, markdown) = (form.clone(), tab.clone(), markdown.clone());
-            let (description, ok) = match purpose {
-                PathPurpose::Export => (
-                    "Your system has no file chooser (on Linux it comes from xdg-desktop-portal). Type where to save the Markdown file instead.",
-                    "Export",
-                ),
-                PathPurpose::Import => (
-                    "Your system has no file chooser (on Linux it comes from xdg-desktop-portal). Type the path of the Markdown file to import instead.",
-                    "Import",
-                ),
-            };
-            alert
-                .title("Couldn’t open the file chooser")
-                .description(description)
-                .width(width)
-                .child(form.clone())
-                .confirm()
-                .ok_text(ok)
-                .on_ok(move |_, window, cx| {
-                    let Some(path) = form.update(cx, |form, cx| form.path(cx)) else { return false };
-                    let markdown = markdown.clone();
-                    _ = tab.update(cx, |tab, cx| match purpose {
-                        PathPurpose::Export => tab.write_markdown(path, markdown, window, cx),
-                        PathPurpose::Import => tab.read_markdown(path, window, cx),
-                    });
-                    true
-                })
-        });
-        input.update(cx, |input, cx| input.focus(window, cx));
+        match purpose {
+            PathPurpose::Export => {
+                let request = PathRequest::new(
+                    PathKind::NewFile,
+                    "Type where to save the Markdown file instead.",
+                    "~/Videos/VideoCRM/script.md",
+                )
+                .commit("Export")
+                .value(display_user_path(&self.fallback_export_path(cx)));
+                let markdown = to_markdown(&self.blocks(cx));
+                path_prompt::open(request, window, cx, move |path, _, cx| {
+                    let written = cx.background_spawn(write_file(path.clone(), markdown.clone()));
+                    cx.foreground_executor().spawn(async move {
+                        written.await.map_err(|error| write_error_reason(&path, &error))?;
+                        Ok(Box::new(move |window: &mut Window, cx: &mut App| exported(&path, window, cx)) as Finish)
+                    })
+                });
+            }
+            PathPurpose::Import => {
+                let request = PathRequest::new(
+                    PathKind::File,
+                    "Type the path of the Markdown file instead.",
+                    "~/Videos/VideoCRM/script.md",
+                )
+                .commit("Import");
+                path_prompt::open(request, window, cx, move |path, _, cx| {
+                    let read = cx.background_spawn(read_file(path.clone()));
+                    let tab = tab.clone();
+                    cx.foreground_executor().spawn(async move {
+                        let markdown = read.await.map_err(|error| read_error_reason(&path, &error))?;
+                        Ok(Box::new(move |window: &mut Window, cx: &mut App| {
+                            _ = tab
+                                .update(cx, |tab, cx| tab.confirm_import(&path, from_markdown(&markdown), window, cx));
+                        }) as Finish)
+                    })
+                });
+            }
+        }
     }
 
     /// Asks whether imported blocks go after the document or replace it.
@@ -506,6 +501,23 @@ fn file_name(path: &Path) -> String {
     path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string())
 }
 
+/// Writes `text` to `path`, creating its folder first: a typed path may name
+/// one that doesn't exist yet, such as the video's media folder before its first use.
+async fn write_file(path: PathBuf, text: String) -> std::io::Result<()> {
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+    std::fs::write(&path, text)
+}
+
+async fn read_file(path: PathBuf) -> std::io::Result<String> {
+    std::fs::read_to_string(&path)
+}
+
+fn exported(path: &Path, window: &mut Window, cx: &mut App) {
+    window.push_notification(format!("Exported to {}.", display_user_path(path)), cx);
+}
+
 /// Replaces characters that are not allowed in file names.
 fn sanitize_file_name(name: &str) -> String {
     name.chars()
@@ -548,56 +560,6 @@ impl Render for DocumentTab {
 pub enum PathPurpose {
     Export,
     Import,
-}
-
-/// The path field of the file chooser fallback.
-struct PathForm {
-    input: Entity<InputState>,
-    error: Option<SharedString>,
-    _subscription: Subscription,
-}
-
-impl PathForm {
-    fn new(path: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("~/Videos/VideoCRM/script.md").default_value(path));
-        let subscription =
-            cx.subscribe(&input, |this: &mut Self, _, event: &gpui_kit::component::input::InputEvent, cx| {
-                if matches!(event, gpui_kit::component::input::InputEvent::Change) && this.error.take().is_some() {
-                    cx.notify();
-                }
-            });
-        Self { input, error: None, _subscription: subscription }
-    }
-
-    /// The typed path made absolute, or `None` after showing why it can't be used.
-    fn path(&mut self, cx: &mut Context<Self>) -> Option<PathBuf> {
-        match expand_user_path(&self.input.read(cx).value()) {
-            Ok(path) => Some(path),
-            Err(error) => {
-                self.error = Some(match error {
-                    PathInputError::Empty => "Enter a file path.".into(),
-                    PathInputError::Relative => "Use a full path, like ~/Videos/script.md.".into(),
-                    PathInputError::NoHome => error.to_string().into(),
-                });
-                cx.notify();
-                None
-            }
-        }
-    }
-}
-
-impl Render for PathForm {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex().gap_1().child(Input::new(&self.input).id("markdown-path")).when_some(
-            self.error.clone(),
-            |this, error| {
-                this.child(
-                    div().id("markdown-path-error").test_support().text_sm().text_color(cx.theme().danger).child(error),
-                )
-            },
-        )
-    }
 }
 
 /// Adds the script's text commands and outline to `menu`, for narrow windows

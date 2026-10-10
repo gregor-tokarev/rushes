@@ -6,8 +6,8 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::dialog::{Cancel, Confirm, DialogFooter};
 use gpui_kit::{
-    Action, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    Styled as _, Window, div,
+    Action, AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
+    SharedString, Styled as _, Window, div,
 };
 use videocrm_core::VideoId;
 
@@ -21,7 +21,18 @@ pub fn form_footer(
     commit_id: impl Into<ElementId>,
     commit: impl Into<SharedString>,
 ) -> DialogFooter {
-    DialogFooter::new()
+    form_footer_with(cancel_id, Button::new(commit_id).primary().label(commit), None)
+}
+
+/// [`form_footer`] with a commit button styled by the caller (a destructive
+/// commit is a danger button) and, optionally, an action of its own on the
+/// leading edge, apart from Cancel and the commit.
+pub fn form_footer_with(cancel_id: impl Into<ElementId>, commit: Button, leading: Option<AnyElement>) -> DialogFooter {
+    let footer = match leading {
+        Some(leading) => DialogFooter::new().child(leading).child(div().flex_1()),
+        None => DialogFooter::new(),
+    };
+    footer
         .child(FooterButton {
             anchor: "form-footer-cancel",
             button: Button::new(cancel_id).label("Cancel"),
@@ -29,7 +40,7 @@ pub fn form_footer(
         })
         .child(FooterButton {
             anchor: "form-footer-commit",
-            button: Button::new(commit_id).primary().label(commit),
+            button: commit,
             action: Rc::new(Confirm { secondary: false }),
         })
 }

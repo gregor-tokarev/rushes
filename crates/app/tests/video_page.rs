@@ -738,7 +738,7 @@ fn without_a_file_chooser_markdown_exports_to_a_typed_path(cx: &mut TestAppConte
     let tab = script.clone();
     app.step(cx, move |window, cx| tab.update(cx, |tab, cx| tab.prompt_for_path(PathPurpose::Export, window, cx)));
     assert!(app.has_dialog(cx));
-    let suggested = field_text(&app, cx, "markdown-path");
+    let suggested = field_text(&app, cx, "path-prompt-input");
     assert!(suggested.ends_with("build-a-home-studio.md"), "a file in the media folder: {suggested}");
 
     // A relative path is explained, not written.
@@ -746,7 +746,7 @@ fn without_a_file_chooser_markdown_exports_to_a_typed_path(cx: &mut TestAppConte
     app.type_text(cx, "script.md");
     app.press(cx, "enter");
     assert!(app.has_dialog(cx));
-    assert!(app.has(cx, "markdown-path-error"));
+    assert!(app.has(cx, "path-prompt-error"));
 
     let target = app._media.path().join("exported.md");
     app.press(cx, "ctrl-a");

@@ -16,18 +16,18 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, ClipboardItem, Context, Div, Entity, EventEmitter, ExternalPaths, FontWeight,
-    Global, InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render, SharedString,
-    Styled as _, Task, TestSupportExt as _, Window, div,
+    App, AppContext as _, Context, Div, Entity, EventEmitter, ExternalPaths, Global, InteractiveElement as _,
+    IntoElement, ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Task, TestSupportExt as _,
+    Window, div,
 };
 use videocrm_core::VideoId;
-use videocrm_core::input::display_user_path;
 use videocrm_core::media::{self, MediaFile, MediaKind};
 use videocrm_pipeline::{MediaInfo, probe_media};
 
 use super::format;
 use super::icons::media_icon;
 use crate::state::AppState;
+use crate::ui::path_prompt::{self, PathKind, PathRequest};
 use crate::ui::{EmptyState, SectionHeader};
 
 /// How often the folder is listed again, to pick up takes added outside the app.
@@ -79,9 +79,6 @@ pub(crate) struct FootageCard {
     import: Option<Import>,
     /// What went wrong adding footage.
     error: Option<SharedString>,
-    /// The system file chooser could not open; the card shows how to add takes
-    /// without it until some arrive.
-    chooser_failed: bool,
     /// Why the folder can't be read; cleared once it can.
     list_error: Option<SharedString>,
     /// A listing (and the probes it started) is in flight.
@@ -110,7 +107,6 @@ impl FootageCard {
             probes: HashMap::new(),
             import: None,
             error: None,
-            chooser_failed: false,
             list_error: None,
             refreshing: false,
             refresh_task: None,
@@ -193,10 +189,6 @@ impl FootageCard {
         let changed = !self.loaded
             || files.len() != self.takes.len()
             || files.iter().zip(&self.takes).any(|(file, take)| *file != take.file);
-        if self.loaded && files.len() > self.takes.len() {
-            // Takes arrived without the chooser (copied into the folder or dropped).
-            self.chooser_failed = false;
-        }
         self.loaded = true;
         let mut to_probe = Vec::new();
         self.takes = files
@@ -236,33 +228,52 @@ impl FootageCard {
         self.probes.insert(path, (modified, info));
     }
 
-    fn add_footage(&mut self, cx: &mut Context<Self>) {
+    fn add_footage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: true,
             prompt: Some("Add footage".into()),
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let Ok(picked) = picked.await else { return };
-            _ = this.update(cx, |this, cx| this.on_picked(picked, cx));
+            _ = this.update_in(cx, |this, window, cx| this.on_picked(picked, window, cx));
         })
         .detach();
     }
 
-    /// Imports what the file chooser returned, or explains how to add takes without it
-    /// when it could not open (no desktop portal, for example).
-    fn on_picked(&mut self, picked: gpui_kit::Result<Option<Vec<PathBuf>>>, cx: &mut Context<Self>) {
+    /// Imports what the file chooser returned, or asks for a take's path when it
+    /// could not open (no desktop portal, for example).
+    fn on_picked(
+        &mut self,
+        picked: gpui_kit::Result<Option<Vec<PathBuf>>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match picked {
             Ok(Some(paths)) => self.import(paths, cx),
             Ok(None) => {}
             Err(error) => {
                 eprintln!("videocrm: file chooser failed: {error}");
-                // The hint names the folder to copy takes into, so it has to exist.
-                self.state.update(cx, |state, cx| state.ensure_video_folder(self.video_id, cx));
-                self.chooser_failed = true;
-                self.refresh(cx);
-                cx.notify();
+                let card = cx.weak_entity();
+                let request = PathRequest::new(
+                    PathKind::File,
+                    "Type the path of a take instead, or drop your takes on the footage list.",
+                    "~/Videos/take-1.mp4",
+                )
+                .commit("Add")
+                .check(|path| match MediaKind::from_path(path) {
+                    Some(_) => Ok(()),
+                    None => Err("Only video, audio and image files can be added as footage.".into()),
+                })
+                .secondary("Open footage folder", IconName::FolderOpen, {
+                    let card = card.clone();
+                    move |_, cx| _ = card.update(cx, |card, cx| card.open_folder(cx))
+                });
+                path_prompt::open(request, window, cx, move |path, _, _| {
+                    let card = card.clone();
+                    path_prompt::accept_now(move |_, cx| _ = card.update(cx, |card, cx| card.import(vec![path], cx)))
+                });
             }
         }
     }
@@ -273,7 +284,6 @@ impl FootageCard {
         if self.import.is_some() {
             return;
         }
-        self.chooser_failed = false;
         let (media, skipped): (Vec<PathBuf>, Vec<PathBuf>) =
             paths.into_iter().partition(|path| MediaKind::from_path(path).is_some() && path.is_file());
         if media.is_empty() {
@@ -344,12 +354,6 @@ impl FootageCard {
         .detach();
     }
 
-    fn copy_folder_path(&mut self, cx: &mut Context<Self>) {
-        if let Some(dir) = self.footage_dir(cx) {
-            cx.write_to_clipboard(ClipboardItem::new_string(dir.display().to_string()));
-        }
-    }
-
     fn open_folder(&mut self, cx: &mut Context<Self>) {
         let folder = self.state.update(cx, |state, cx| state.ensure_video_folder(self.video_id, cx));
         if let Some(folder) = folder {
@@ -388,7 +392,7 @@ impl FootageCard {
                     .icon(IconName::Plus)
                     .label("Add footage…")
                     .disabled(self.import.is_some())
-                    .on_click(cx.listener(|this, _, _, cx| this.add_footage(cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.add_footage(window, cx))),
             )
     }
 
@@ -439,72 +443,6 @@ impl FootageCard {
         )
     }
 
-    /// How to add takes when the file chooser can't open.
-    fn render_chooser_failed(&self, cx: &mut Context<Self>) -> AnyElement {
-        let folder = self.footage_dir(cx).map(|dir| display_user_path(&dir)).unwrap_or_default();
-        let theme = cx.theme();
-        h_flex()
-            .id("footage-chooser-failed")
-            .test_support()
-            .items_start()
-            .gap_3()
-            .px_3()
-            .py_2p5()
-            .rounded(theme.radius_lg)
-            .bg(theme.muted)
-            .child(div().pt_0p5().child(Icon::new(IconName::Info).small().text_color(theme.muted_foreground)))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_1()
-                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Couldn’t open the file chooser"))
-                    .child(
-                        div().text_sm().text_color(theme.muted_foreground).child(
-                            "Drop your takes on the footage list, or copy them into the video’s footage folder:",
-                        ),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_family(theme.mono_font_family.clone())
-                            .text_color(theme.foreground)
-                            .truncate()
-                            .child(folder),
-                    )
-                    .child(
-                        h_flex()
-                            .pt_1()
-                            .gap_2()
-                            .child(
-                                Button::new("footage-copy-path")
-                                    .outline()
-                                    .small()
-                                    .icon(IconName::Copy)
-                                    .label("Copy path")
-                                    .on_click(cx.listener(|this, _, _, cx| this.copy_folder_path(cx))),
-                            )
-                            .child(
-                                Button::new("footage-open-folder-instead")
-                                    .outline()
-                                    .small()
-                                    .icon(IconName::FolderOpen)
-                                    .label("Open footage folder")
-                                    .on_click(cx.listener(|this, _, _, cx| this.open_folder(cx))),
-                            ),
-                    ),
-            )
-            .child(
-                Button::new("footage-chooser-dismiss").ghost().xsmall().icon(IconName::X).tooltip("Dismiss").on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.chooser_failed = false;
-                        cx.notify();
-                    }),
-                ),
-            )
-            .into_any_element()
-    }
-
     fn render_import(&self, import: &Import, cx: &App) -> Div {
         let theme = cx.theme();
         let value =
@@ -539,7 +477,6 @@ impl Render for FootageCard {
         } else {
             self.render_list(cx).into_any_element()
         };
-        let chooser_failed = self.chooser_failed.then(|| self.render_chooser_failed(cx));
         let dismiss_error = self.error.is_some().then(|| {
             Button::new("footage-dismiss-error").ghost().xsmall().icon(IconName::X).tooltip("Dismiss").on_click(
                 cx.listener(|this, _, _, cx| {
@@ -569,7 +506,6 @@ impl Render for FootageCard {
                     .when_some(self.import.as_ref(), |this, import| this.child(self.render_import(import, cx)))
                     .child(body),
             )
-            .children(chooser_failed)
             .children(self.list_error.clone().map(|error| div().text_sm().text_color(theme.danger).child(error)))
             .children(self.error.clone().map(|error| {
                 h_flex()
@@ -653,6 +589,7 @@ fn remove_partial_copies(dir: &Path) {
 
 #[cfg(test)]
 mod tests {
+    use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{Bounds, TestAppContext, WindowBounds, WindowOptions, px, size};
     use videocrm_core::{NewVideo, Store};
@@ -660,8 +597,9 @@ mod tests {
     use super::*;
 
     #[gpui_kit::test]
-    fn without_a_file_chooser_the_card_explains_how_to_add_takes(cx: &mut TestAppContext) {
+    fn without_a_file_chooser_a_take_is_added_by_its_path(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let media = tempfile::tempdir().unwrap();
         let state = cx.new(|_| AppState::new(Store::open_in_memory().unwrap()).unwrap());
         let video = cx.update(|cx| {
@@ -680,34 +618,38 @@ mod tests {
             .unwrap();
         let footage = cx.read(|cx| card.read(cx).footage_dir(cx)).expect("footage folder");
         cx.run_until_parked();
-        assert!(cx.read(|cx| card.read(cx).is_loaded()));
-        let shows = |cx: &mut TestAppContext, id: &str| {
-            let id = gpui_kit::ElementId::Name(id.to_owned().into());
-            cx.update_window(window, move |_, window, cx| {
-                window.render_frame(cx);
-                window.try_find(id).is_some_and(|element| element.visible())
-            })
-            .unwrap()
+        let step = |cx: &mut TestAppContext, interact: &dyn Fn(&mut Window, &mut App)| {
+            cx.update_window(window, |_, window, cx| interact(window, cx)).unwrap();
+            cx.run_until_parked();
+            cx.update_window(window, |_, window, cx| window.render_frame(cx)).unwrap();
         };
+        let has_dialog =
+            |cx: &mut TestAppContext| cx.update_window(window, |_, window, cx| window.has_active_dialog(cx)).unwrap();
+        let card_dir = tempfile::tempdir().unwrap();
+        let (notes, take) = (card_dir.path().join("notes.txt"), card_dir.path().join("take1.mp4"));
+        fs::write(&notes, b"x").unwrap();
+        fs::write(&take, b"x").unwrap();
 
-        cx.update(|cx| {
-            card.update(cx, |card, cx| card.on_picked(Err(io::Error::other("ZBus Error: no bus").into()), cx))
+        step(cx, &|window, cx| {
+            let failed = Err(io::Error::other("ZBus Error: no bus").into());
+            card.update(cx, |card, cx| card.on_picked(failed, window, cx));
         });
-        assert!(shows(cx, "footage-chooser-failed"));
+        assert!(has_dialog(cx));
         assert_eq!(cx.read(|cx| card.read(cx).error.clone()), None, "the raw error is only logged");
-        cx.update_window(window, |_, window, cx| window.click("footage-copy-path", cx)).unwrap();
-        assert_eq!(
-            cx.read_from_clipboard().and_then(|item| item.text()),
-            Some(footage.display().to_string()),
-            "the folder path can be pasted into a file manager"
-        );
 
-        // Takes copied in by hand: the notice has done its job.
-        fs::create_dir_all(&footage).unwrap();
-        fs::write(footage.join("take1.mp4"), b"x").unwrap();
-        cx.update(|cx| card.update(cx, |card, cx| card.refresh(cx)));
-        cx.run_until_parked();
-        assert!(!shows(cx, "footage-chooser-failed"));
+        // Not a take: said next to the field, and nothing is copied.
+        step(cx, &|window, cx| window.input(&notes.display().to_string(), cx));
+        step(cx, &|window, cx| window.press("enter", cx));
+        assert!(has_dialog(cx));
+        let error = gpui_kit::ElementId::Name(path_prompt::ERROR_ID.into());
+        let reason = cx.update_window(window, |_, window, _| window.find(error).label().map(str::to_owned)).unwrap();
+        assert_eq!(reason.as_deref(), Some("Only video, audio and image files can be added as footage."));
+
+        step(cx, &|window, cx| window.press("secondary-a", cx));
+        step(cx, &|window, cx| window.input(&take.display().to_string(), cx));
+        step(cx, &|window, cx| window.press("enter", cx));
+        assert!(!has_dialog(cx));
+        assert!(footage.join("take1.mp4").is_file(), "the take is copied into the footage folder");
     }
 
     #[test]

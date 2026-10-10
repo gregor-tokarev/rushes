@@ -23,7 +23,15 @@
 //! - **Dialogs.** Form dialogs end in [`dialog::form_footer`]: trailing,
 //!   content-sized Cancel and commit, as the kit's alert dialogs do.
 //!   Destructive confirmations name the object and the consequence; deleting
-//!   videos always goes through [`dialog::confirm_delete_videos`].
+//!   videos always goes through [`dialog::confirm_delete_videos`]. Their
+//!   commit is a solid danger button (the theme sets it up in
+//!   `shell::apply_theme`).
+//! - **Choosing paths.** When the system file or folder chooser can't open,
+//!   every place falls back to [`path_prompt::open`]: one dialog that takes a
+//!   typed path and says next to the field why a path can't be used.
+//! - **Status colours.** The theme's status colours are fills; warning text
+//!   uses [`warning_text`] and a warning count [`contrast::warning_badge`],
+//!   which read in both themes.
 //! - **Page icons.** A video's icon is a [`PageIcon`]: a bundled colour image
 //!   for every emoji the app offers, the text for any other emoji, and one
 //!   neutral page glyph for a video without an icon.
@@ -43,10 +51,12 @@
 //!   [`gpui_kit::component::link::Link`] ending in the external-link icon.
 
 mod choice_card;
+pub mod contrast;
 pub mod dialog;
 mod empty_state;
 mod page;
 mod page_icon;
+pub mod path_prompt;
 mod row_button;
 mod section;
 pub mod settings;
@@ -54,6 +64,7 @@ mod table;
 mod time;
 
 pub use choice_card::ChoiceCard;
+pub use contrast::warning_text;
 pub use empty_state::EmptyState;
 pub use page::{PAGE_INSET, PageHeader, page_frame};
 pub use page_icon::{Assets, PageIcon, has_page_icon_image, video_icon};
