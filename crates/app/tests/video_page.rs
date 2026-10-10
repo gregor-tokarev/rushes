@@ -674,6 +674,28 @@ fn switching_tabs_keeps_the_header_and_tabs_in_place(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn tabs_other_than_the_script_use_the_rails_width(cx: &mut TestAppContext) {
+    // Wide enough for the script rail, too narrow for the column beside it.
+    let app = Fixture::open_sized(cx, &["Desk setup tour"], 1160., 800.);
+    let id = app.video_id(cx, "Desk setup tour");
+    app.open_video(cx, id, VideoTab::Script);
+    assert!(app.has(cx, "script-rail"));
+    let rail = bounds(&app, cx, "script-rail");
+    let script = (bounds(&app, cx, "page-hook"), bounds(&app, cx, "page-menu"));
+    assert!(script.1.right() <= rail.left(), "the script's column ends before the rail");
+
+    app.open_video(cx, id, VideoTab::Publish);
+    // A frame for the panel to measure itself.
+    app.step(cx, |_, _| {});
+    let publish = (bounds(&app, cx, "page-hook"), bounds(&app, cx, "page-menu"));
+    assert_eq!(publish.0.left(), script.0.left(), "the header starts where it did");
+    assert!(publish.1.right() > script.1.right(), "the column takes the rail's room");
+    // 39rem: the form and the side column next to each other.
+    let panel = bounds(&app, cx, "publish-panel");
+    assert!(panel.size.width >= px(624.), "Publish has room for two columns: {panel:?}");
+}
+
+#[gpui_kit::test]
 fn each_tab_keeps_its_scroll_position(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, &["Desk setup tour"]);
     let id = app.video_id(cx, "Desk setup tour");
