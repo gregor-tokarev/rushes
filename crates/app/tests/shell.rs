@@ -944,6 +944,16 @@ fn settings_controls_end_on_one_edge(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_data_folder_can_be_copied_and_opened(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+    assert!(app.has(cx, "open-data-folder"));
+    app.click(cx, "copy-data-folder");
+    let copied = cx.read_from_clipboard().and_then(|item| item.text());
+    assert_eq!(copied, Some(videocrm_core::settings::data_dir().display().to_string()));
+}
+
+#[gpui_kit::test]
 fn the_settings_list_keeps_its_width_when_the_window_is_resized(cx: &mut TestAppContext) {
     let content_left = |app: &Fixture, cx: &mut TestAppContext| {
         for _ in 0..2 {
