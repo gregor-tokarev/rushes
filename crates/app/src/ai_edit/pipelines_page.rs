@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use chrono::{Local, Utc};
+use chrono::Local;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
@@ -75,14 +75,11 @@ impl PipelinesPage {
             if video.title.trim().is_empty() { "Untitled".to_owned() } else { video.title.clone() }
         });
         let icon = video.and_then(|video| video.icon.clone());
-        let now = Utc::now();
-        let live = self.service.read(cx).live_phase(run.id).is_some();
-        let end = if live { now } else { run.updated_at };
-        let duration = (end - run.created_at).to_std().unwrap_or_default();
+        let agent_time = self.service.read(cx).agent_time(run.id, cx);
         let muted = cx.theme().muted_foreground;
         let page = cx.weak_entity();
         let label = format!("{title}, {}", run.status.label());
-        let [video_column, status, started, duration_column, cost] = COLUMNS;
+        let [video_column, status, started, agent_time_column, cost] = COLUMNS;
         let opened = run.clone();
 
         TableRowButton::new(ElementId::Name(format!("pipeline-run-{}", run.id).into()), label)
@@ -97,11 +94,11 @@ impl PipelinesPage {
             .cell(status, Chip::new(run.status.label(), run_status_color(run.status)).dot(true))
             .cell(started, div().truncate().text_color(muted).child(format_when(run.created_at, Local::now())))
             .cell(
-                duration_column,
+                agent_time_column,
                 div().text_color(muted).child(if run.status == RunStatus::Queued {
                     "—".to_owned()
                 } else {
-                    format::elapsed(duration)
+                    format::elapsed(agent_time)
                 }),
             )
             .cell(cost, div().text_color(muted).child(run.cost_usd.map_or("—".to_owned(), format::cost)))
@@ -128,12 +125,12 @@ impl PipelinesPage {
     }
 }
 
-/// Video, status, started, duration and cost.
+/// Video, status, started, how long the agent worked and cost.
 const COLUMNS: [TableColumn; 5] = [
     TableColumn::fill("Video"),
     TableColumn::fixed("Status", Rems(9.)),
     TableColumn::fixed("Started", Rems(9.)),
-    TableColumn::fixed("Duration", Rems(5.5)).end(),
+    TableColumn::fixed("Agent time", Rems(6.)).end(),
     TableColumn::fixed("Cost", Rems(5.)).end(),
 ];
 

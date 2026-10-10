@@ -1269,6 +1269,38 @@ fn a_running_edit_can_be_cancelled_and_retried(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_agent_time_leaves_out_the_wait_for_approval(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let fx = Fixture::new(cx, &[]);
+    let id = fx.start(cx, false);
+    fx.wait_for_status(cx, id, RunStatus::AwaitingApproval);
+    // The creator reads the strategy for a while.
+    std::thread::sleep(Duration::from_millis(1500));
+    cx.update(|cx| fx.service.update(cx, |service, cx| service.approve(id, None, cx))).expect("approved");
+    let done = fx.wait_for_status(cx, id, RunStatus::Succeeded);
+
+    let reported: u64 = fx
+        .stored_events(cx, id)
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            LogEvent::Agent(AgentEvent::Result { duration_ms, .. }) => *duration_ms,
+            _ => None,
+        })
+        .sum();
+    let wall_clock = (done.updated_at - done.created_at).to_std().unwrap();
+    let agent_time = cx.read(|cx| fx.service.read(cx).agent_time(id, cx));
+    assert_eq!(agent_time, Duration::from_millis(reported), "the phases as the agent reported them");
+    assert!(agent_time + Duration::from_millis(1400) < wall_clock, "{agent_time:?} of {wall_clock:?}");
+
+    // The same from the stored log after a restart.
+    cx.update(|cx| PipelineService::init(fx.state.clone(), cx));
+    let restarted = cx.read(|cx| PipelineService::global(cx).read(cx).agent_time(id, cx));
+    assert_eq!(restarted, agent_time);
+}
+
+#[gpui_kit::test]
 fn the_empty_pipelines_page_leads_to_the_videos(cx: &mut TestAppContext) {
     let fx = Fixture::new(cx, &[]);
     let window = open(cx, PipelinesPage::new);

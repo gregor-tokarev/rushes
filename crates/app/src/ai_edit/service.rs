@@ -1,5 +1,6 @@
 //! [`PipelineService`]: starts and steers AI edit runs and keeps their state.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -21,7 +22,7 @@ use videocrm_pipeline::{
 };
 
 use super::brief::BriefDraft;
-use super::timeline::{LogEvent, MarkerKind, PhaseKind, PhaseStarted, RunMarker, TimelineEntry};
+use super::timeline::{LogEvent, MarkerKind, PhaseKind, PhaseStarted, RunMarker, TimelineEntry, agent_time};
 use crate::state::{AppEvent, AppState};
 
 /// Error of runs a previous session left running.
@@ -157,6 +158,8 @@ pub struct PipelineService {
     live: HashMap<RunId, LiveRun>,
     /// Event logs loaded so far, by run.
     timelines: HashMap<RunId, Vec<TimelineEntry>>,
+    /// How long the agent worked on runs whose log is not loaded, read once.
+    agent_times: RefCell<HashMap<RunId, Duration>>,
     doctor: Option<Doctor>,
     doctor_task: Option<Task<()>>,
     /// The settings the last requirement check ran with.
@@ -198,6 +201,7 @@ impl PipelineService {
                 runs: Vec::new(),
                 live: HashMap::new(),
                 timelines: HashMap::new(),
+                agent_times: RefCell::default(),
                 doctor: None,
                 doctor_task: None,
                 checked: None,
@@ -271,6 +275,26 @@ impl PipelineService {
             }
             Err(error) => self.report(error, cx),
         }
+    }
+
+    /// How long the agent worked on the run, without the time it waited for the
+    /// creator or VideoCRM was closed; see [`agent_time`]. A running phase counts up to now.
+    pub fn agent_time(&self, id: RunId, cx: &App) -> Duration {
+        if let Some(timeline) = self.timelines.get(&id) {
+            return agent_time(timeline, self.live.contains_key(&id).then(Utc::now));
+        }
+        if let Some(time) = self.agent_times.borrow().get(&id) {
+            return *time;
+        }
+        let time = match self.with_store(cx, |store| store.list_run_events(id)) {
+            Ok(events) => agent_time(&events.into_iter().map(TimelineEntry::from).collect::<Vec<_>>(), None),
+            Err(error) => {
+                eprintln!("videocrm: couldn't read the log of run {id}: {error}");
+                Duration::ZERO
+            }
+        };
+        self.agent_times.borrow_mut().insert(id, time);
+        time
     }
 
     /// Asks the AI edit panel of the run's video to select it.
@@ -488,6 +512,8 @@ impl PipelineService {
 
     /// Records the phase, sets the run working and starts the agent thread.
     fn launch(&mut self, id: RunId, started: PhaseStarted, cx: &mut Context<Self>) -> Result<(), RunError> {
+        // A working run keeps its log in memory, where its events are appended.
+        self.load_timeline(id, cx);
         let (phase, text) = (started.phase, started.text.clone());
         let run = self.run(id).ok_or(RunError::RunNotFound)?.clone();
         let settings = self.state.read(cx).settings().pipeline.clone();
@@ -775,6 +801,7 @@ impl PipelineService {
             // Deleted with its video; the store has nothing to append to.
             return;
         }
+        self.agent_times.borrow_mut().remove(&id);
         let stored = self.with_store(cx, |store| store.append_run_event(id, &event.to_payload()));
         match stored {
             Ok(stored) => {
