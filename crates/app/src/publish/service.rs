@@ -85,6 +85,9 @@ pub struct YoutubeService {
     /// Cancel flag of the sign-in in progress.
     sign_in: Option<Arc<AtomicBool>>,
     sign_in_attempt: u64,
+    /// The account a sign-in in progress signs in again: cancelling it leaves
+    /// that account asking for a new sign-in, as before.
+    reconnecting: Option<Account>,
     avatar: Option<PathBuf>,
     /// Every upload job, newest first, as stored.
     pub(super) jobs: Vec<UploadJob>,
@@ -231,6 +234,7 @@ impl YoutubeService {
             tokens: None,
             sign_in: None,
             sign_in_attempt: 0,
+            reconnecting: None,
             avatar: None,
             jobs: Vec::new(),
             active: HashMap::new(),
@@ -273,6 +277,7 @@ impl YoutubeService {
         match &self.connection {
             _ if self.is_connected() => AccountAccess::Connected,
             Connection::NeedsSignIn(_) => AccountAccess::NeedsSignIn,
+            Connection::Connecting { .. } => AccountAccess::SigningIn,
             _ => AccountAccess::NotConnected,
         }
     }
@@ -313,6 +318,10 @@ impl YoutubeService {
         let cancel = Arc::new(AtomicBool::new(false));
         self.sign_in = Some(cancel.clone());
         self.sign_in_attempt += 1;
+        self.reconnecting = match &self.connection {
+            Connection::NeedsSignIn(account) => Some(account.clone()),
+            _ => None,
+        };
         let attempt = self.sign_in_attempt;
         self.set_connection(Connection::Connecting { authorize_url: None }, cx);
 
@@ -338,12 +347,19 @@ impl YoutubeService {
         .detach();
     }
 
-    /// Stops waiting for the browser sign-in.
+    /// Stops waiting for the browser sign-in. An account that was signing in
+    /// again still needs its new sign-in; otherwise nothing is connected.
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
         self.cancel_sign_in();
         if matches!(self.connection, Connection::Connecting { .. }) {
-            self.set_connection(Connection::Disconnected, cx);
+            let connection = self.connection_before_sign_in();
+            self.set_connection(connection, cx);
         }
+    }
+
+    /// Where the account stood before the sign-in that ended without one.
+    fn connection_before_sign_in(&mut self) -> Connection {
+        self.reconnecting.take().map_or(Connection::Disconnected, Connection::NeedsSignIn)
     }
 
     /// Signs out: forgets the tokens and revokes them with Google, best effort.
@@ -365,6 +381,7 @@ impl YoutubeService {
             cx.background_spawn(async move { client.revoke() }).detach();
         }
         self.avatar = None;
+        self.reconnecting = None;
         self.set_connection(Connection::Disconnected, cx);
     }
 
@@ -411,13 +428,20 @@ impl YoutubeService {
                 });
                 match signed_in {
                     Ok(SignedIn { client, tokens, account }) => {
+                        self.reconnecting = None;
                         self.client = Some(client);
                         self.tokens = Some(tokens);
                         self.set_connection(Connection::Connected(account), cx);
                         self.refresh_avatar(cx);
                     }
-                    Err(SignInError::Cancelled) => self.set_connection(Connection::Disconnected, cx),
-                    Err(SignInError::Failed(message)) => self.set_connection(Connection::Failed(message.into()), cx),
+                    Err(SignInError::Cancelled) => {
+                        let connection = self.connection_before_sign_in();
+                        self.set_connection(connection, cx);
+                    }
+                    Err(SignInError::Failed(message)) => {
+                        self.reconnecting = None;
+                        self.set_connection(Connection::Failed(message.into()), cx);
+                    }
                 }
             }
         }

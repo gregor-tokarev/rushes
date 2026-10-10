@@ -1061,10 +1061,31 @@ fn an_expired_sign_in_blocks_the_upload_with_reconnect(cx: &mut TestAppContext) 
         assert!(window.find(("upload-blocker", 0usize)).visible());
         window.within("upload-blockers").click("upload-reconnect", cx);
     });
-    let url = wait_until(cx, "the consent page", |cx| match service.read_with(cx, |s, _| s.connection().clone()) {
-        Connection::Connecting { authorize_url: Some(url) } => Some(url.to_string()),
-        _ => None,
+    let consent_page = |cx: &mut TestAppContext| {
+        wait_until(cx, "the consent page", |cx| match service.read_with(cx, |s, _| s.connection().clone()) {
+            Connection::Connecting { authorize_url: Some(url) } => Some(url.to_string()),
+            _ => None,
+        })
+    };
+    consent_page(cx);
+    // While the browser is open, the card says to finish there, and nothing else.
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), [BlockingReason::SigningIn]);
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find(("upload-blocker", 0usize)).visible());
+        assert!(window.try_find(("upload-blocker", 1usize)).is_none());
+        // Cancelling goes back to where the account stood: it still needs a sign-in.
+        window.within("publish-account").click("cancel", cx);
     });
+    cx.run_until_parked();
+    assert!(matches!(service.read_with(cx, |s, _| s.connection().clone()), Connection::NeedsSignIn(_)));
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), [BlockingReason::NeedsSignIn]);
+
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.within("upload-blockers").click("upload-reconnect", cx);
+    });
+    let url = consent_page(cx);
     publish_support::consent_in_browser(&url, "creator@example.com");
     wait_until(cx, "the connection", |cx| service.read_with(cx, |s, _| s.is_connected().then_some(())));
     assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), []);

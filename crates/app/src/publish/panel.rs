@@ -1151,6 +1151,9 @@ impl PublishPanel {
                     )
                     .map(|this| match service.account_access() {
                         AccountAccess::NotConnected => this.child(help_text("Connect YouTube to resume.", cx)),
+                        AccountAccess::SigningIn => {
+                            this.child(help_text("Finish signing in with your browser to resume.", cx))
+                        }
                         AccountAccess::NeedsSignIn => this.child(
                             v_flex()
                                 .gap_1p5()

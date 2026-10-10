@@ -338,6 +338,7 @@ impl YoutubeService {
     fn account_blocker(&self) -> BlockingReason {
         match self.account_access() {
             AccountAccess::NeedsSignIn => BlockingReason::NeedsSignIn,
+            AccountAccess::SigningIn => BlockingReason::SigningIn,
             _ => BlockingReason::NotConnected,
         }
     }
