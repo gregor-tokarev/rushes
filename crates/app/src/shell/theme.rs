@@ -40,11 +40,36 @@ pub fn apply_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
         ThemeMode::Dark => Theme::change(KitThemeMode::Dark, None, cx),
         ThemeMode::System => Theme::sync_system_appearance(window, cx),
     }
-    Theme::update(cx, solid_danger_buttons);
+    Theme::update(cx, |theme| {
+        readable_danger_text(theme);
+        solid_danger_buttons(theme);
+    });
     let has_ui_font = cx.text_system().all_font_names().iter().any(|name| name == UI_FONT);
     if has_ui_font && Theme::global(cx).font_family != UI_FONT {
         Theme::update(cx, |theme| theme.font_family = UI_FONT.into());
     }
+}
+
+/// The danger colour is made for fills and icons, yet it is also the colour of
+/// inline errors and of a destructive outline button's label (Replace in the
+/// Markdown import). It is made dark enough (light enough in the dark theme)
+/// to read on the window, on dialogs and menus, and on the tint of a hovered
+/// outline button.
+fn readable_danger_text(theme: &mut Theme) {
+    let mut danger = theme.danger;
+    // The tint is the colour itself: once it changes, the tint does too.
+    for _ in 0..10 {
+        let before = danger;
+        for surface in [theme.background, theme.popover] {
+            for behind in [surface, surface.blend(danger.opacity(0.2))] {
+                danger = readable_on(danger, behind);
+            }
+        }
+        if danger == before {
+            break;
+        }
+    }
+    theme.colors.danger = danger;
 }
 
 /// Danger buttons commit destructive confirmations (Delete, Delete property…).
@@ -68,6 +93,33 @@ mod tests {
 
     use super::*;
     use crate::ui::contrast::{TEXT_CONTRAST, contrast_ratio};
+
+    #[gpui_kit::test]
+    fn danger_text_reads_in_both_themes(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            cx.update(|cx| {
+                apply_theme(mode, None, cx);
+                let theme = cx.theme();
+                let text = theme.danger;
+                // Inline errors on the window and in dialogs and menus; an outline
+                // button's label on its tint, at rest and hovered.
+                for surface in [theme.background, theme.popover] {
+                    for tint in [0., 0.1, 0.2] {
+                        let behind = surface.blend(text.opacity(tint));
+                        assert!(contrast_ratio(text, behind) >= TEXT_CONTRAST, "{mode:?}: {text:?} on {behind:?}");
+                    }
+                }
+                assert_eq!(theme.tokens.danger.background, text.into(), "{mode:?}: the token follows the colour");
+            });
+        }
+        // Applying the theme again changes nothing.
+        cx.update(|cx| {
+            let before = cx.theme().danger;
+            apply_theme(ThemeMode::Dark, None, cx);
+            assert_eq!(cx.theme().danger, before);
+        });
+    }
 
     #[gpui_kit::test]
     fn danger_buttons_read_in_both_themes(cx: &mut TestAppContext) {

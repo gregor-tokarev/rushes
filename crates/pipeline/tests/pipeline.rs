@@ -2,6 +2,8 @@
 
 #![cfg(unix)]
 
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -242,8 +244,7 @@ fn agent_failure_reports_stderr() {
 fn an_agent_that_reports_nothing_fails_without_a_result() {
     let ws = Workspace::new(0);
     let silent = ws.skill_real.with_file_name("silent-agent");
-    fs::write(&silent, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&silent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    support::write_executable(&silent, "#!/bin/sh\nexit 0\n");
     let config = AgentConfig { command: silent, ..AgentConfig::default() };
     let (result, _) = run(&config, &ws.context(None), Phase::Plan { brief: String::new() });
     let Err(PipelineError::AgentFailed { message, no_result, .. }) = result else {
@@ -409,14 +410,12 @@ mod cancel {
         let ws = Workspace::new(0);
         let dir = ws.footage.parent().unwrap().to_owned();
         let agent = dir.join("waiting-agent");
-        fs::write(
+        support::write_executable(
             &agent,
             "#!/bin/sh\necho $$ >> \"$PID_FILE\"\nsleep 60 &\necho $! >> \"$PID_FILE\"\n\
              echo '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\",\"cwd\":\"/\",\"tools\":[],\"model\":\"m\"}'\n\
              wait\n",
-        )
-        .unwrap();
-        fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        );
         let mut app = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "cancel::the_agent_dies_with_a_killed_app", "--nocapture"])
             .env(APP_DIR, &dir)

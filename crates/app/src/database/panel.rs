@@ -279,7 +279,7 @@ impl DatabasePanel {
             if let Some(ix) = self.active_index() {
                 self.view_tabs_scroll.scroll_to_item(ix);
             }
-            self.cancel_editing(window, cx);
+            self.save_editing(window, cx);
             self.refresh(cx);
         }
     }
@@ -386,6 +386,11 @@ impl DatabasePanel {
     }
 
     pub(crate) fn start_editing(&mut self, cell: CellRef, window: &mut Window, cx: &mut Context<Self>) {
+        // Another cell's edit is saved, not replaced, even when its field
+        // wasn't told it lost focus (as in a window that isn't active).
+        if self.editing.is_some_and(|editing| editing != cell) {
+            self.save_editing(window, cx);
+        }
         let Some(text) = self.cell_text(cell) else {
             return;
         };
@@ -405,45 +410,68 @@ impl DatabasePanel {
         }
     }
 
+    /// Saves the cell being edited and hands the keyboard back to the table.
     fn commit_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(cell) = self.editing.take() else {
-            return;
-        };
+        if self.editing.is_some() {
+            self.save_editing(window, cx);
+            self.table.focus_handle(cx).focus(window, cx);
+        }
+    }
+
+    /// Saves the cell being edited, e.g. before the database page is left.
+    pub fn save_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.take_edit(cx) {
+            Some(Ok(edited)) => self.update_video(edited.id, |video| *video = edited, cx),
+            // Not a number: keep the previous value, and say so.
+            Some(Err(message)) => window.push_notification(Notification::error(message), cx),
+            None => {}
+        }
+    }
+
+    /// Ends the cell edit and returns its video with the typed value when
+    /// that changes it, for the owner to save without this panel's events,
+    /// as when the app quits.
+    pub fn take_edited_video(&mut self, cx: &mut Context<Self>) -> Option<Video> {
+        let mut edited = self.take_edit(cx)?.ok()?;
+        if self.video(edited.id) == Some(&edited) {
+            return None;
+        }
+        edited.updated_at = Utc::now();
+        Some(edited)
+    }
+
+    /// Ends the cell edit: the video with the typed value, `None` when there
+    /// is nothing to save, or why the typed value was refused.
+    fn take_edit(&mut self, cx: &mut Context<Self>) -> Option<Result<Video, String>> {
+        let cell = self.editing.take()?;
         let text = self.editors.cell_input.read(cx).value().to_string();
         self.sync_table(cx);
-        self.table.focus_handle(cx).focus(window, cx);
+        let mut video = self.video(cell.video)?.clone();
 
         match cell.column {
             // An emptied title is not saved, as on the video page; the cell
             // shows the stored one again.
-            Column::Builtin(BuiltinField::Title) => {
-                if let Some(title) = normalize_title(&text) {
-                    self.update_video(cell.video, |video| video.title = title, cx);
-                }
-            }
+            Column::Builtin(BuiltinField::Title) => video.title = normalize_title(&text)?,
             Column::Custom(property) => {
-                let Some(def) = self.properties.iter().find(|def| def.id == property) else {
-                    return;
-                };
+                let def = self.properties.iter().find(|def| def.id == property)?;
                 let text = text.trim();
                 let value = match def.kind {
                     _ if text.is_empty() => None,
                     PropertyKind::Number => match parse_number(text) {
                         Some(number) => Some(PropertyValue::Number(number)),
-                        // Not a number: keep the previous value, and say so.
-                        None => {
-                            let message = format::not_a_number(text, &def.name);
-                            window.push_notification(Notification::error(message), cx);
-                            return;
-                        }
+                        None => return Some(Err(format::not_a_number(text, &def.name))),
                     },
                     PropertyKind::Url => Some(PropertyValue::Url(text.to_string())),
                     _ => Some(PropertyValue::Text(text.to_string())),
                 };
-                self.set_property_value(cell.video, property, value, cx);
+                match value {
+                    Some(value) => video.properties.insert(property, value),
+                    None => video.properties.remove(&property),
+                };
             }
-            Column::Builtin(_) => {}
+            Column::Builtin(_) => return None,
         }
+        Some(Ok(video))
     }
 
     /// The editable text of a cell, or `None` when it is not edited as text.

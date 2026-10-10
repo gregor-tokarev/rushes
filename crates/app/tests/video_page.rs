@@ -8,8 +8,8 @@ use std::time::Duration;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, ElementId, Entity, Focusable as _, TestAppContext, Window,
-    WindowBounds, WindowOptions, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, ElementId, Entity, Focusable as _, TestAppContext,
+    VisualTestContext, Window, WindowBounds, WindowOptions, px, size,
 };
 use videocrm::ai_edit::PipelineService;
 use videocrm::publish::YoutubeService;
@@ -21,7 +21,7 @@ use videocrm_core::settings::AppSettings;
 use videocrm_core::templates::TemplateKind;
 use videocrm_core::{
     BlockId, Column, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, Store,
-    TagColor, VideoFormat, VideoId, ViewKind,
+    TagColor, UploadId, UploadJob, UploadStatus, VideoFormat, VideoId, ViewKind,
 };
 
 struct Fixture {
@@ -587,6 +587,37 @@ fn the_publish_date_opens_a_calendar_and_clears_from_it(cx: &mut TestAppContext)
     assert!(!app.has(cx, "clear-date"), "the calendar closes");
 }
 
+#[gpui_kit::test]
+fn a_video_gone_from_youtube_says_so(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    app.open_video(cx, id, VideoTab::Script);
+    let shown = |app: &Fixture, cx: &mut TestAppContext| {
+        cx.update_window(app.window, |_, window, _| window.find("property-youtube-value").label().map(str::to_string))
+            .expect("window is open")
+    };
+    assert_eq!(shown(&app, cx).as_deref(), Some("Not uploaded"));
+
+    // The upload reached YouTube; the link was dropped once YouTube no longer had it.
+    let now = chrono::Utc::now();
+    let job = UploadJob {
+        id: UploadId::new(),
+        video_id: id,
+        file: app._media.path().join("final.mp4"),
+        file_stamp: None,
+        status: UploadStatus::Done { video_id: "yt-gone".into() },
+        session_url: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| {
+        state.read(cx).store().lock().expect("store lock").insert_upload(&job).expect("insert upload");
+        state.update(cx, |state, cx| state.reload(cx));
+    });
+    assert_eq!(shown(&app, cx).as_deref(), Some("Not on YouTube anymore"), "as the Publish tab says it");
+}
+
 // Title
 
 #[gpui_kit::test]
@@ -605,6 +636,76 @@ fn an_emptied_title_keeps_the_stored_one(cx: &mut TestAppContext) {
     );
     let page = app.page(cx);
     assert_eq!(cx.read(|cx| page.read(cx).title_field().read(cx).value().to_string()), "Desk setup tour");
+}
+
+#[gpui_kit::test]
+fn a_value_picked_from_a_menu_keeps_what_was_typed(cx: &mut TestAppContext) {
+    // Without an active window (no window manager, another app in front)
+    // fields are never told they lost focus, so nothing is saved on blur.
+    for active in [true, false] {
+        let app = Fixture::open(cx, &["Desk setup tour"]);
+        if !active {
+            VisualTestContext::from_window(app.window, cx).deactivate_window();
+            app.step(cx, |_, _| {});
+        }
+        let id = app.video_id(cx, "Desk setup tour");
+        let option = |id: &str, name: &str| SelectOption { id: id.into(), name: name.into(), color: TagColor::Blue };
+        let options = vec![option("low", "Low"), option("high", "High")];
+        let priority = add_property(&app, cx, "Priority", PropertyKind::Select { options });
+        let sponsor = add_property(&app, cx, "Sponsor", PropertyKind::Text);
+        app.open_video(cx, id, VideoTab::Script);
+        let video = |app: &Fixture, cx: &mut TestAppContext| {
+            cx.read(|cx| app.state.read(cx).video(id).cloned().expect("video"))
+        };
+        let pick = |app: &Fixture, cx: &mut TestAppContext, item: usize| {
+            app.click(cx, ElementId::Name(format!("property-select-{priority}").into()));
+            app.step(cx, move |window, cx| window.within("popup-menu").click(item, cx));
+        };
+
+        // Typed into a field, then a menu pick before the field is left.
+        app.click(cx, "page-hook");
+        app.type_text(cx, "Cheap gear, real sound");
+        pick(&app, cx, 0);
+        assert_eq!(field_text(&app, cx, "page-hook"), "Cheap gear, real sound", "active: {active}");
+        assert_eq!(video(&app, cx).hook, "Cheap gear, real sound", "active: {active}");
+        assert_eq!(video(&app, cx).properties.get(&priority), Some(&PropertyValue::Select(Some("low".into()))));
+
+        app.click(cx, "page-title");
+        app.press(cx, "ctrl-a");
+        app.type_text(cx, "Desk setup tour 2026");
+        pick(&app, cx, 1);
+        let page = app.page(cx);
+        let title = cx.read(|cx| page.read(cx).title_field().read(cx).value().to_string());
+        assert_eq!(title, "Desk setup tour 2026", "active: {active}");
+        assert_eq!(video(&app, cx).title, "Desk setup tour 2026", "active: {active}");
+        assert_eq!(video(&app, cx).properties.get(&priority), Some(&PropertyValue::Select(Some("high".into()))));
+
+        app.click(cx, property_input(sponsor));
+        app.type_text(cx, "Acme Corp");
+        app.click(cx, "property-status-value");
+        app.step(cx, |window, cx| window.within("popup-menu").click(2usize, cx));
+        assert_eq!(field_text(&app, cx, property_input(sponsor)), "Acme Corp", "active: {active}");
+        let stored = video(&app, cx).properties.get(&sponsor).cloned();
+        assert_eq!(stored, Some(PropertyValue::Text("Acme Corp".into())), "active: {active}");
+
+        // A field being typed into keeps its text when the video changes
+        // elsewhere, e.g. in the table; the text is saved when it is left.
+        app.click(cx, "page-hook");
+        app.press(cx, "ctrl-a");
+        app.type_text(cx, "Typed while it changed");
+        let state = app.state.clone();
+        app.step(cx, move |_, cx| {
+            state.update(cx, |state, cx| {
+                let mut video = state.video(id).cloned().expect("video");
+                video.tags.push("studio".into());
+                state.update_video(video, cx);
+            })
+        });
+        assert_eq!(field_text(&app, cx, "page-hook"), "Typed while it changed", "active: {active}");
+        app.navigate(cx, Route::default());
+        assert_eq!(video(&app, cx).hook, "Typed while it changed", "active: {active}");
+        assert_eq!(video(&app, cx).tags, vec!["studio".to_string()]);
+    }
 }
 
 // Layout and scrolling

@@ -26,7 +26,9 @@ pub use rules::{AccountAccess, BlockingReason, CATEGORIES, Category, blocking_re
 pub use service::{Connection, EmulatorCheck, YoutubeEvent, YoutubeService, backend_config};
 pub use settings::YoutubeSettings;
 pub use transfer::Transfer;
-pub use upload::{INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, Retired, Retry, UploadError};
+pub use upload::{
+    INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, Retired, Retry, UPLOAD_FILE_LOCKED, UploadError,
+};
 pub use uploads_page::UploadsPage;
 
 use gpui_kit::App;

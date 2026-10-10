@@ -15,16 +15,14 @@ use futures::channel::mpsc;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, AppContext as _, Context, SharedString};
-use videocrm_core::{
-    FileStamp, Privacy, StoreError, UploadId, UploadJob, UploadStatus, VideoId, VideoStatus, YoutubeLink,
-};
+use videocrm_core::{FileStamp, Privacy, UploadId, UploadJob, UploadStatus, VideoId, VideoStatus, YoutubeLink};
 use videocrm_youtube::{
     Error as YoutubeError, ProcessingStatus, RetryCause, UploadProgress, UploadStatus as YoutubeUploadStatus,
     UploadedVideo, VideoInfo, VideoMetadata, YoutubeClient,
 };
 
 use super::rules::{self, AccountAccess, BlockingReason};
-use super::service::{YoutubeEvent, YoutubeService, describe_error, lock, push_notification, report_problem};
+use super::service::{YoutubeEvent, YoutubeService, describe_error, push_notification, report_problem};
 use super::transfer::{PROGRESS_INTERVAL, Throttle, Transfer};
 use crate::state::Problem;
 
@@ -38,6 +36,8 @@ const PROCESSING_POLLS: usize = 24;
 /// Uploading progress is written to the database in this many steps, so the
 /// videos table and an interrupted job show roughly how far it got.
 const PERSISTED_STEPS: f32 = 10.0;
+/// Why a video's upload file can't be changed now, wherever it is chosen.
+pub const UPLOAD_FILE_LOCKED: &str = "The upload file can’t change while the video uploads. Cancel the upload first.";
 /// What a stopped upload says once YouTube no longer takes the rest of its file.
 const SESSION_GONE: &str = "YouTube can’t continue this upload. Start over to send the video from the beginning.";
 
@@ -356,10 +356,11 @@ impl YoutubeService {
             created_at: now,
             updated_at: now,
         };
-        lock(&self.store(cx)).insert_upload(&job).map_err(|error| {
-            eprintln!("videocrm: couldn't save the upload: {error}");
-            UploadError::Storage
-        })?;
+        // A refusal is logged and reported by the state.
+        if !self.state.update(cx, |state, cx| state.insert_upload(job.clone(), cx)) {
+            return Err(UploadError::Storage);
+        }
+        self.jobs.insert(0, job.clone());
         // Resuming an earlier, stopped upload as well would put a second copy on YouTube.
         let stopped: Vec<UploadId> = self
             .jobs
@@ -370,7 +371,7 @@ impl YoutubeService {
         for id in stopped {
             self.retire(id, Retired::Replaced, cx);
         }
-        self.reload_jobs(cx);
+        self.jobs_changed(cx);
         self.spawn_transfer(job.id, client, file, stamp.size, Request::Upload(Box::new(rules::metadata(&video))), cx);
         Ok(job.id)
     }
@@ -733,52 +734,45 @@ impl YoutubeService {
     /// Jobs a previous run left mid-transfer become failed (resumable when YouTube
     /// had opened a session); jobs left processing are done, the bytes arrived.
     pub(super) fn recover_interrupted_uploads(&mut self, cx: &mut Context<Self>) {
-        let store = self.store(cx);
-        let recovered = (|| {
-            let mut store = lock(&store);
-            let mut changed = false;
-            for mut job in store.list_uploads(None)? {
-                job.status = match job.status {
-                    UploadStatus::Pending | UploadStatus::Uploading { .. } => UploadStatus::Failed {
-                        error: if job.session_url.is_some() { INTERRUPTED_RESUMABLE } else { INTERRUPTED }.to_owned(),
-                    },
-                    UploadStatus::Processing { video_id } => UploadStatus::Done { video_id },
-                    _ => continue,
-                };
-                store.update_upload(&mut job)?;
-                changed = true;
+        let jobs = match self.state.read(cx).read_uploads() {
+            Ok(jobs) => jobs,
+            Err(error) => {
+                return report_problem(&self.state, Problem::store("Couldn’t load the uploads", &error), cx);
             }
-            Ok::<_, StoreError>(changed)
-        })();
-        match recovered {
-            Ok(changed) => {
-                self.jobs = lock(&store).list_uploads(None).unwrap_or_default();
-                if changed {
-                    self.state.update(cx, |state, cx| state.reload(cx));
-                }
-            }
-            Err(error) => report_problem(&self.state, Problem::store("Couldn’t check interrupted uploads", &error), cx),
+        };
+        self.jobs = jobs;
+        let mut changed = false;
+        for job in &mut self.jobs {
+            job.status = match &job.status {
+                UploadStatus::Pending | UploadStatus::Uploading { .. } => UploadStatus::Failed {
+                    error: if job.session_url.is_some() { INTERRUPTED_RESUMABLE } else { INTERRUPTED }.to_owned(),
+                },
+                UploadStatus::Processing { video_id } => UploadStatus::Done { video_id: video_id.clone() },
+                _ => continue,
+            };
+            job.updated_at = Utc::now();
+            let job = job.clone();
+            self.state.update(cx, |state, cx| state.save_upload(job, cx));
+            changed = true;
+        }
+        if changed {
+            self.state.update(cx, |state, cx| state.reload(cx));
         }
     }
 
-    /// Applies `change` to the stored job and tells everyone.
+    /// Applies `change` to the job, saves it and tells everyone. The state
+    /// saves it through its write queue, so a lock on the database holds up
+    /// neither the upload nor the UI.
     fn update_job(&mut self, id: UploadId, cx: &mut Context<Self>, change: impl FnOnce(&mut UploadJob)) {
-        let Some(mut job) = self.job(id).cloned() else { return };
-        change(&mut job);
-        match lock(&self.store(cx)).update_upload(&mut job) {
-            Ok(()) => {}
-            // The video, and its uploads with it, were deleted meanwhile.
-            Err(StoreError::NotFound { .. }) => {}
-            Err(error) => report_problem(&self.state, Problem::store("Couldn’t save the upload status", &error), cx),
-        }
-        self.reload_jobs(cx);
+        let Some(job) = self.jobs.iter_mut().find(|job| job.id == id) else { return };
+        change(job);
+        job.updated_at = Utc::now();
+        let job = job.clone();
+        self.state.update(cx, |state, cx| state.save_upload(job, cx));
+        self.jobs_changed(cx);
     }
 
-    fn reload_jobs(&mut self, cx: &mut Context<Self>) {
-        match lock(&self.store(cx)).list_uploads(None) {
-            Ok(jobs) => self.jobs = jobs,
-            Err(error) => report_problem(&self.state, Problem::store("Couldn’t load the uploads", &error), cx),
-        }
+    fn jobs_changed(&mut self, cx: &mut Context<Self>) {
         // Rows carry the latest upload status.
         self.state.update(cx, |state, cx| state.reload(cx));
         cx.emit(YoutubeEvent::UploadsChanged);

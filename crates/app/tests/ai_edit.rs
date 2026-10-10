@@ -27,7 +27,7 @@ use videocrm::ai_edit::{
     RENDERED_WITH_ERROR, RunError, RunMarker, TimelineEntry, delete_run_notice, split_failure,
 };
 use videocrm::route::{Route, VideoTab};
-use videocrm::state::{AppEvent, AppState};
+use videocrm::state::{AppEvent, AppState, SAVE_RETRY_DELAY};
 use videocrm_core::{Block, DocumentKind, NewVideo, PipelineRun, RunId, RunStatus, Store, VideoId, VideoStatus};
 use videocrm_pipeline::{AgentEvent, AgentProcess};
 
@@ -158,11 +158,30 @@ fn fake_agent() -> PathBuf {
     fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/fake-agent")).expect("fake agent")
 }
 
+/// Writes an executable script at `path`, from a child process.
+///
+/// A file this process writes is open for writing until it is closed, and a
+/// process another test thread forks meanwhile inherits that descriptor and
+/// keeps it until it starts its own program. Running the script before then
+/// fails with "Text file busy" (ETXTBSY), which a loaded machine turns from a
+/// microsecond window into an occasional failure. Written by a child, the
+/// script is never open in this process, so no fork of ours can hold it.
+fn write_executable(path: &Path, script: &str) {
+    let written = Command::new("/bin/sh")
+        .args(["-c", r#"printf '%s' "$1" > "$2""#, "sh"])
+        .arg(script)
+        .arg(path)
+        .status()
+        .expect("run /bin/sh");
+    assert!(written.success(), "couldn't write {}", path.display());
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make it executable");
+}
+
 /// An agent that reports success without doing anything; with `LAZY_IS_ERROR=1` it
 /// reports an error result (like a turn limit) but still exits normally.
 fn lazy_agent(dir: &Path) -> PathBuf {
     let path = dir.join("lazy-agent");
-    fs::write(
+    write_executable(
         &path,
         r#"#!/bin/sh
 echo '{"type":"system","subtype":"init","session_id":"lazy-session","cwd":"/","tools":[],"model":"lazy"}'
@@ -172,9 +191,7 @@ else
   echo '{"type":"result","subtype":"success","is_error":false,"result":"All done.","session_id":"lazy-session","total_cost_usd":0.01}'
 fi
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     path
 }
 
@@ -183,7 +200,7 @@ fi
 /// With `RENDER_THEN_EXIT=1` it also exits with an error status.
 fn render_then_error_agent(dir: &Path) -> PathBuf {
     let path = dir.join("render-then-error-agent");
-    fs::write(
+    write_executable(
         &path,
         r#"#!/bin/sh
 echo '{"type":"system","subtype":"init","session_id":"rte-session","cwd":"/","tools":[],"model":"rte"}'
@@ -193,9 +210,7 @@ echo '{"type":"result","subtype":"error_max_turns","is_error":true,"session_id":
 [ "$RENDER_THEN_EXIT" = 1 ] && exit 1
 exit 0
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     path
 }
 
@@ -203,7 +218,7 @@ exit 0
 /// far taller than the activity box, then the result. It renders nothing.
 fn chatty_agent(dir: &Path) -> PathBuf {
     let path = dir.join("chatty-agent");
-    fs::write(
+    write_executable(
         &path,
         r#"#!/usr/bin/env python3
 import json, sys
@@ -223,9 +238,7 @@ summary = "The final cut is rendered: **`edit/final.mp4`**, 14.6s.\n\n" + "\n\n"
 assistant({"type": "text", "text": summary})
 out({"type": "result", "subtype": "success", "is_error": False, "result": summary, "total_cost_usd": 0.5})
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     path
 }
 
@@ -579,8 +592,7 @@ fn an_agent_command_that_is_not_claude_code_is_named_as_the_cause(cx: &mut TestA
     }
     let fx = Fixture::new(cx, &[]);
     let silent = fx.root.path().join("not-claude");
-    fs::write(&silent, "#!/bin/sh\necho 'true (GNU coreutils) 9.7'\n").unwrap();
-    fs::set_permissions(&silent, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&silent, "#!/bin/sh\necho 'true (GNU coreutils) 9.7'\n");
     cx.update(|cx| {
         fx.state.update(cx, |state, cx| {
             state.update_settings(cx, |settings| settings.pipeline.agent_command = silent.display().to_string())
@@ -720,6 +732,49 @@ fn the_requirement_check_passes_with_the_fake_agent(cx: &mut TestAppContext) {
     wait_until(cx, "second check", |cx| !service.read(cx).is_checking());
     let doctor = cx.read(|cx| service.read(cx).doctor().cloned()).unwrap();
     assert!(!doctor.agent.ok && !doctor.ready());
+}
+
+#[gpui_kit::test]
+fn an_edit_runs_on_while_another_program_locks_the_database(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let database = dir.path().join("videocrm.db");
+    let fx = Fixture::with_store(cx, Store::open(&database).expect("database file"), &[], true);
+    let stored = |database: &Path, id: RunId| {
+        let store = Store::open(database).expect("open the database");
+        (store.get_run(id).expect("read run"), store.list_run_events(id).expect("read log"))
+    };
+
+    // Another program holds the write lock, as a backup or sync tool does.
+    let lock = rusqlite::Connection::open(&database).expect("second connection");
+    lock.execute_batch("BEGIN EXCLUSIVE").expect("lock the database");
+    let started = Instant::now();
+    let id = fx.start(cx, false);
+    assert!(started.elapsed() < Duration::from_secs(1), "starting took {:?}", started.elapsed());
+    let service = fx.service.clone();
+    wait_until(cx, "the strategy", move |cx| {
+        service.read(cx).run(id).is_some_and(|run| run.status == RunStatus::AwaitingApproval)
+            && service.read(cx).live_phase(id).is_none()
+    });
+    let run = fx.run(cx, id);
+    let timeline = cx.read(|cx| fx.service.read(cx).timeline(id).to_vec());
+    assert!(run.summary.is_some() && run.session_id.is_some(), "{run:?}");
+    assert_eq!(tool_names(&timeline), ["Skill", "Bash", "Bash", "Bash", "Write"]);
+    assert_eq!(stored(&database, id), (None, Vec::new()), "nothing is written during the lock");
+
+    // The lock ends: the background writer's next attempt writes the run and its log.
+    lock.execute_batch("COMMIT").expect("release the lock");
+    let deadline = Instant::now() + TIMEOUT;
+    while cx.read(|cx| fx.state.read(cx).has_unsaved_changes()) {
+        assert!(Instant::now() < deadline, "timed out waiting for the saved edit");
+        cx.executor().advance_clock(SAVE_RETRY_DELAY);
+        cx.run_until_parked();
+    }
+    let (stored_run, log) = stored(&database, id);
+    assert_eq!(stored_run, Some(run));
+    assert_eq!(log.into_iter().map(TimelineEntry::from).collect::<Vec<_>>(), timeline);
 }
 
 #[gpui_kit::test]

@@ -11,7 +11,8 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, Bounds, ElementId, Entity, InputEvent as _, Modifiers, MouseButton,
-    MouseDownEvent, MouseUpEvent, Pixels, Size, TestAppContext, WindowBounds, WindowOptions, point, px, size,
+    MouseDownEvent, MouseUpEvent, Pixels, Size, TestAppContext, VisualTestContext, WindowBounds, WindowOptions, point,
+    px, size,
 };
 use videocrm::database::{DatabaseEvent, DatabasePanel};
 use videocrm_core::{
@@ -762,6 +763,37 @@ fn double_clicking_a_title_renames_instead_of_opening(cx: &mut TestAppContext) {
     db.step(cx, |window, cx| window.hover(format!("title-text-{}", db.tokyo), cx));
     db.step(cx, |window, cx| window.click(format!("open-{}", db.tokyo), cx));
     assert_eq!(db.take_events(), vec![DatabaseEvent::OpenVideo(db.tokyo)]);
+}
+
+#[gpui_kit::test]
+fn a_cell_edit_is_saved_when_another_cell_is_edited(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+    // In a window that isn't active the editor is never told it lost focus.
+    VisualTestContext::from_window(db.window, cx).deactivate_window();
+    db.render(cx);
+
+    db.step(cx, |window, cx| window.double_click(format!("title-text-{}", db.desk), cx));
+    db.step(cx, |window, cx| window.input(" tour", cx));
+    db.wait_for_click_delay(cx);
+    db.step(cx, |window, cx| window.double_click(format!("title-text-{}", db.tokyo), cx));
+    db.with_window(cx, |window, _| {
+        assert_eq!(window.find("cell-input").value(), Some("Tokyo tech stores tour"));
+    });
+    let events = db.take_events();
+    let [DatabaseEvent::UpdateVideo(video)] = events.as_slice() else {
+        panic!("the first cell's edit is saved, got {events:?}");
+    };
+    assert_eq!(video.title, "Desk setup 2026 tour");
+
+    // Switching views saves the edit too, rather than dropping it.
+    db.step(cx, |window, cx| window.input(" 2", cx));
+    let (panel, board) = (db.panel.clone(), db.board);
+    db.step(cx, move |window, cx| panel.update(cx, |panel, cx| panel.set_active_view(board, window, cx)));
+    let events = db.take_events();
+    let [DatabaseEvent::UpdateVideo(video)] = events.as_slice() else {
+        panic!("the edit is saved when the view changes, got {events:?}");
+    };
+    assert_eq!(video.title, "Tokyo tech stores tour 2");
 }
 
 #[gpui_kit::test]

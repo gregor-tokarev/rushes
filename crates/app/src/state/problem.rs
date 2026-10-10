@@ -31,23 +31,42 @@ impl Remedy {
     }
 }
 
+/// How a [`Problem`] reads. Most are errors; a few only say what happened,
+/// such as changes kept from the last session that are saved now.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Severity {
+    #[default]
+    Error,
+    /// Nothing failed and nothing is needed; the creator should know.
+    Info,
+    /// What was at risk is safe now.
+    Success,
+}
+
 /// A user-facing error: what happened, how to recover, and optionally where.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Problem {
     title: SharedString,
     message: SharedString,
     remedy: Option<Remedy>,
+    severity: Severity,
 }
 
 impl Problem {
     /// `title` names what failed ("Couldn’t save your changes"); `message` says
     /// why and what to do next. Both are sentences in the app's voice.
     pub fn new(title: impl Into<SharedString>, message: impl Into<SharedString>) -> Self {
-        Self { title: title.into(), message: message.into(), remedy: None }
+        Self { title: title.into(), message: message.into(), remedy: None, severity: Severity::Error }
     }
 
     pub fn with_remedy(mut self, remedy: Remedy) -> Self {
         self.remedy = Some(remedy);
+        self
+    }
+
+    /// Shows it as a notice rather than an error, see [`Severity`].
+    pub fn with_severity(mut self, severity: Severity) -> Self {
+        self.severity = severity;
         self
     }
 
@@ -61,6 +80,10 @@ impl Problem {
 
     pub fn remedy(&self) -> Option<Remedy> {
         self.remedy
+    }
+
+    pub fn severity(&self) -> Severity {
+        self.severity
     }
 
     /// A database error while doing what `title` names. Logs the error.

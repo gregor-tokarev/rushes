@@ -36,9 +36,10 @@ Another program (a second VideoCRM, a backup or sync tool, `sqlite3`) may hold t
 database's write lock for seconds. The UI thread never waits for it:
 
 - The database is in WAL mode and the app opens three connections to it: the UI
-  thread's, the background writer's and the background services' (`AppState::store()`,
-  used by pipelines and uploads). WAL readers never wait for a writer, so reading rows
-  and documents on the UI thread stays instant during a lock.
+  thread's, the background writer's and a spare one for code outside the write queue
+  (`AppState::store()`, used by tests; it waits up to 5 s for a lock, so never on the
+  UI thread). WAL readers never wait for a writer, so reading rows, documents, runs and
+  uploads on the UI thread stays instant during a lock.
 - Every change goes through `AppState` (`state/writes.rs`): videos, properties, views,
   settings, documents, new, copied and deleted videos. While nothing is queued a change
   is written at once on the UI connection, which gives up on a lock after 100 ms.
@@ -54,8 +55,13 @@ database's write lock for seconds. The UI thread never waits for it:
   UI thread, waiting at most 5 s in all for a lock. What still can't be written is kept
   in `unsaved-changes.json` next to the database (mode 0600) and written at the next
   start, which says so.
-- Background services keep their own connection with a 5 s busy timeout; keep their
-  store calls short and off the UI thread where they can wait for a lock.
+- The background services' records take the same queue (`state/records.rs`): AI
+  edit runs, every entry of their logs (numbered by the pipeline service), upload jobs
+  and their progress, kept brief forms. The services keep them in memory, which is
+  what the UI shows; the queue keeps the newest state per run and upload and every
+  log entry, in order after the run's insert. A running edit or upload therefore
+  never makes the UI wait for another program's lock. The rows' latest run and
+  upload status follow once those writes land.
 
 ## Data locations
 

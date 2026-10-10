@@ -2,8 +2,9 @@
 
 #![cfg(unix)]
 
+mod support;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
@@ -29,8 +30,7 @@ impl Machine {
     /// An executable shell script in the fake `bin/`.
     fn stub(&self, name: &str, script: &str) -> PathBuf {
         let path = self.bin.join(name);
-        fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        support::write_executable(&path, &format!("#!/bin/sh\n{script}\n"));
         path
     }
 

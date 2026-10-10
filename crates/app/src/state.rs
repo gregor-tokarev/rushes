@@ -4,11 +4,12 @@
 //! the cached rows stay consistent with the database. Changes are written at
 //! once, or queued and retried in the background while another program holds
 //! the database (see [`writes`]); the UI thread never waits for a lock.
-//! Background services (pipelines, uploads) write to the [`Store`] directly
-//! through [`AppState::store`] and then call [`AppState::reload`] on the
-//! foreground thread.
+//! Background services (pipelines, uploads) keep their records in memory and
+//! save them through the same queue (see [`records`]), then call
+//! [`AppState::reload`] for the rows that summarize them.
 
 mod problem;
+mod records;
 mod writes;
 
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -25,7 +26,7 @@ use videocrm_core::{
 use crate::route::{Route, SettingsSection, VideoTab};
 
 pub(crate) use problem::folder_error_reason;
-pub use problem::{Problem, Remedy};
+pub use problem::{Problem, Remedy, Severity};
 pub(crate) use writes::QueuedWrites;
 use writes::{Cached, Write, Writes};
 pub use writes::{QUIT_SAVE_TIMEOUT, SAVE_RETRY_DELAY, UI_BUSY_TIMEOUT, WRITE_BUSY_TIMEOUT};
@@ -53,7 +54,7 @@ pub struct AppState {
     /// The UI thread's connection: reads, and writes while nothing is queued.
     /// Waits at most [`UI_BUSY_TIMEOUT`] for another program's lock.
     ui: SharedStore,
-    /// The background services' connection, see [`AppState::store`].
+    /// A connection for code outside the write queue, see [`AppState::store`].
     services: SharedStore,
     /// Writes queued for the background writer, which has its own connection.
     writes: Writes,
@@ -80,7 +81,7 @@ impl Global for GlobalAppState {}
 impl AppState {
     /// Loads settings and data from `store`. The first route is onboarding until
     /// it has been completed. A database file gets two more connections, for
-    /// the background writer and the background services; an in-memory one is
+    /// the background writer and for [`AppState::store`]; an in-memory one is
     /// shared by all three.
     pub fn new(store: Store) -> Result<Self, StoreError> {
         let (settings, settings_problem) = load_settings(&store)?;
@@ -129,11 +130,13 @@ impl AppState {
         cx.global::<GlobalAppState>().0.clone()
     }
 
-    /// The database handle for background services (pipelines, uploads), a
-    /// connection of their own. Lock it briefly; never hold the guard across
-    /// `await` points or long operations. Change video rows through
-    /// [`AppState::update_video`] on the foreground instead: pages save whole rows
-    /// from the cache, so a direct write is lost if an edit lands before the reload.
+    /// A connection of its own to the database, for reading or writing it
+    /// outside the app's write queue, as tests do. It waits up to 5 s for
+    /// another program's lock: never use it on the UI thread. The app's
+    /// services save through [`AppState::save_run`], [`AppState::save_upload`]
+    /// and the like, and video rows change through [`AppState::update_video`]:
+    /// pages save whole rows from the cache, so a direct write is lost if an
+    /// edit lands before the reload.
     pub fn store(&self) -> SharedStore {
         self.services.clone()
     }
@@ -471,10 +474,16 @@ impl AppState {
     }
 
     /// Opens a video on its Script tab with the caret in the first block: one
-    /// just created, or one opened from the keyboard to write.
+    /// just created, or one opened from the keyboard or the command palette to
+    /// write. A script already shown takes the caret too.
     pub fn open_script(&mut self, id: VideoId, cx: &mut Context<Self>) {
         self.script_focus = Some(id);
-        self.open_video(id, VideoTab::Script, cx);
+        let route = Route::Video { id, tab: VideoTab::Script };
+        if self.route == route {
+            self.on_route_changed(cx);
+        } else {
+            self.navigate(route, cx);
+        }
     }
 
     /// Whether the script of `id` should take focus when shown; asking clears the request.

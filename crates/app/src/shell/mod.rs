@@ -33,7 +33,7 @@ use crate::onboarding::Onboarding;
 use crate::publish::{AccountBadge, UploadsPage};
 use crate::route::{Route, SettingsSection, VideoTab};
 use crate::settings_page::SettingsPage;
-use crate::state::{AppEvent, AppState, Problem, Remedy};
+use crate::state::{AppEvent, AppState, Problem, Remedy, Severity};
 use crate::ui::{PageHeader, page_frame};
 use crate::video_page::VideoPage;
 use crate::wizard;
@@ -157,6 +157,10 @@ impl Workspace {
             }),
             cx.on_app_quit(|this, cx| {
                 this.flush_pending_saves(cx);
+                // The panel's own events are no longer delivered once the app quits.
+                if let Some(video) = this.database.update(cx, |panel, cx| panel.take_edited_video(cx)) {
+                    this.state.update(cx, |state, cx| state.update_video(video, cx));
+                }
                 if let Some(settings) = &this.settings {
                     settings.update(cx, |settings, cx| settings.commit_before_quit(cx));
                 }
@@ -318,6 +322,9 @@ impl Workspace {
             self.flush_pending_saves(cx);
         }
         let page = Page::of(&route);
+        if self.shown == Some(Page::Database) && page != Page::Database {
+            self.database.update(cx, |panel, cx| panel.save_editing(window, cx));
+        }
         if self.shown == Some(Page::Settings)
             && page != Page::Settings
             && let Some(settings) = &self.settings
@@ -450,12 +457,17 @@ impl Workspace {
     }
 }
 
-/// An error notification for `problem`, with a button for its remedy. The
-/// same problem raised again replaces the one shown instead of stacking.
+/// A notification for `problem` in the style of its severity, with a button
+/// for its remedy. The same problem raised again replaces the one shown
+/// instead of stacking.
 fn problem_notification(problem: &Problem) -> Notification {
-    let notification = Notification::error(problem.message().clone())
-        .title(problem.title().clone())
-        .id1::<Problem>(problem.title().clone());
+    let message = problem.message().clone();
+    let notification = match problem.severity() {
+        Severity::Error => Notification::error(message),
+        Severity::Info => Notification::info(message),
+        Severity::Success => Notification::success(message),
+    };
+    let notification = notification.title(problem.title().clone()).id1::<Problem>(problem.title().clone());
     let Some(remedy) = problem.remedy() else { return notification };
     notification.action(move |_, _, cx| {
         Button::new("problem-remedy").small().label(remedy.label()).on_click(cx.listener(

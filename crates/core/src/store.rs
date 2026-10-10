@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Row, ToSql, Transaction, TransactionBehavior, params};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::document::{self, DEFAULT_WPM};
@@ -209,7 +209,7 @@ fn prune_select_value(property: &PropertyDef, values: &mut BTreeMap<PropertyId, 
 
 /// One entry of a pipeline run's append-only event log (agent messages, tool
 /// calls, status changes) as produced by the pipeline.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunEvent {
     pub run_id: RunId,
     /// 1-based, increasing per run.
@@ -506,6 +506,12 @@ impl Store {
     /// Saves all fields except `video_id`/`created_at` and sets `updated_at` to now (also on `run`).
     pub fn update_run(&mut self, run: &mut PipelineRun) -> StoreResult<()> {
         run.updated_at = Utc::now();
+        self.replace_run(run)
+    }
+
+    /// Saves all fields except `video_id`/`created_at` as `run` has them,
+    /// `updated_at` included: for a caller that keeps the run and writes it later.
+    pub fn replace_run(&mut self, run: &PipelineRun) -> StoreResult<()> {
         if write_run(&self.conn, UPDATE_RUN, run)? == 0 {
             return Err(not_found("pipeline run", run.id));
         }
@@ -542,6 +548,15 @@ impl Store {
         Ok(RunEvent { run_id, seq, at, payload: payload.clone() })
     }
 
+    /// Adds an event numbered by the caller, which keeps the run's log and
+    /// writes it later. A number the run already has is refused.
+    pub fn insert_run_event(&mut self, event: &RunEvent) -> StoreResult<()> {
+        self.conn
+            .prepare_cached("INSERT INTO run_events (run_id, seq, at, payload) VALUES (?1, ?2, ?3, ?4)")?
+            .execute(params![event.run_id, event.seq, event.at, Json(&event.payload)])?;
+        Ok(())
+    }
+
     /// Events of a run in append order.
     pub fn list_run_events(&self, run_id: RunId) -> StoreResult<Vec<RunEvent>> {
         let mut stmt = self
@@ -570,6 +585,12 @@ impl Store {
     /// Saves all fields except `video_id`/`created_at` and sets `updated_at` to now (also on `upload`).
     pub fn update_upload(&mut self, upload: &mut UploadJob) -> StoreResult<()> {
         upload.updated_at = Utc::now();
+        self.replace_upload(upload)
+    }
+
+    /// Saves all fields except `video_id`/`created_at` as `upload` has them,
+    /// `updated_at` included: for a caller that keeps the job and writes it later.
+    pub fn replace_upload(&mut self, upload: &UploadJob) -> StoreResult<()> {
         if write_upload(&self.conn, UPDATE_UPLOAD, upload)? == 0 {
             return Err(not_found("upload", upload.id));
         }

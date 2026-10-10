@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, PoisonError, mpsc};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use videocrm_core::input::expand_user_path;
 use videocrm_core::media::{self, MediaKind};
 use videocrm_core::settings::PipelineSettings;
-use videocrm_core::{PipelineRun, RunId, RunStatus, Store, StoreError, VideoId, VideoStatus};
+use videocrm_core::{PipelineRun, RunEvent, RunId, RunStatus, StoreError, VideoId, VideoStatus};
 use videocrm_pipeline::{
     AgentConfig, AgentEvent, AgentProcess, Doctor, Phase, PhaseOutcome, PipelineError, RunContext, default_skill_dir,
     doctor, keep_final_cut, run_phase, stop_leftover_agent,
@@ -154,8 +154,10 @@ enum AgentMessage {
 ///
 /// Agent phases run for minutes, so each gets its own thread rather than a slot of
 /// the background executor; its events reach the foreground through a channel,
-/// where they are persisted and appended to the run's timeline. Observe the
-/// service to follow runs, the timeline and the requirement check.
+/// where they are appended to the run's timeline. The service keeps the runs and
+/// the loaded logs; [`AppState`] saves them through its write queue, so another
+/// program's lock on the database never holds up the UI. Observe the service to
+/// follow runs, the timeline and the requirement check.
 pub struct PipelineService {
     state: Entity<AppState>,
     /// Every run, newest first.
@@ -290,7 +292,7 @@ impl PipelineService {
         if self.timelines.contains_key(&id) {
             return;
         }
-        let events = self.with_store(cx, |store| store.list_run_events(id));
+        let events = self.state.read(cx).read_run_events(id);
         match events {
             Ok(events) => {
                 self.timelines.insert(id, events.into_iter().map(TimelineEntry::from).collect());
@@ -309,7 +311,7 @@ impl PipelineService {
         if let Some(time) = self.agent_times.borrow().get(&id) {
             return *time;
         }
-        let time = match self.with_store(cx, |store| store.list_run_events(id)) {
+        let time = match self.state.read(cx).read_run_events(id) {
             Ok(events) => agent_time(&events.into_iter().map(TimelineEntry::from).collect::<Vec<_>>(), None),
             Err(error) => {
                 eprintln!("videocrm: couldn't read the log of run {id}: {error}");
@@ -353,7 +355,7 @@ impl PipelineService {
     }
 
     fn load_drafts(&mut self, cx: &mut Context<Self>) {
-        let stored = self.with_store(cx, |store| store.get_setting::<Vec<StoredDraft>>(DRAFTS_KEY));
+        let stored = self.state.read(cx).read_setting::<Vec<StoredDraft>>(DRAFTS_KEY);
         match stored {
             Ok(stored) => {
                 let state = self.state.read(cx);
@@ -383,10 +385,8 @@ impl PipelineService {
             .map(|(video_id, draft)| StoredDraft { video_id: *video_id, draft: draft.clone() })
             .collect();
         stored.sort_by_key(|stored| stored.video_id);
-        if let Err(error) = self.with_store(cx, |store| store.set_setting(DRAFTS_KEY, &stored)) {
-            eprintln!("videocrm: couldn't save the edit briefs: {error}");
-            self.report("Couldn’t save your edit brief. It’s kept until VideoCRM closes.", cx);
-        }
+        // A refusal is reported by the state; the forms stay until VideoCRM closes.
+        self.state.update(cx, |state, cx| state.save_setting(DRAFTS_KEY, &stored, cx));
     }
 
     /// Extra environment for the agent and every tool it runs, such as a complete
@@ -435,7 +435,9 @@ impl PipelineService {
             created_at: now,
             updated_at: now,
         };
-        self.with_store(cx, |store| store.insert_run(&run))?;
+        if !self.state.update(cx, |state, cx| state.insert_run(run.clone(), cx)) {
+            return Err(RunError::Store("the database refused the run".to_owned()));
+        }
         let id = run.id;
         self.runs.insert(0, run);
         self.timelines.insert(id, Vec::new());
@@ -855,35 +857,35 @@ impl PipelineService {
 
     /// Applies `change` to the cached run and saves it.
     fn update_run(&mut self, id: RunId, cx: &mut Context<Self>, change: impl FnOnce(&mut PipelineRun)) {
-        let Some(ix) = self.runs.iter().position(|run| run.id == id) else { return };
-        let mut run = self.runs[ix].clone();
-        change(&mut run);
-        let saved = self.with_store(cx, |store| store.update_run(&mut run));
-        match saved {
-            Ok(()) => self.runs[ix] = run,
-            Err(error) => self.report(error, cx),
-        }
+        let Some(run) = self.runs.iter_mut().find(|run| run.id == id) else { return };
+        change(run);
+        run.updated_at = Utc::now();
+        let run = run.clone();
+        self.state.update(cx, |state, cx| state.save_run(run, cx));
     }
 
+    /// Adds `event` to the run's log, numbered after the last entry.
     fn append_event(&mut self, id: RunId, event: LogEvent, cx: &mut Context<Self>) {
-        if self.run(id).is_none() {
+        let Some(video_id) = self.run(id).map(|run| run.video_id) else {
             // Deleted with its video; the store has nothing to append to.
             return;
-        }
+        };
         self.agent_times.borrow_mut().remove(&id);
-        let stored = self.with_store(cx, |store| store.append_run_event(id, &event.to_payload()));
-        match stored {
-            Ok(stored) => {
-                if let Some(timeline) = self.timelines.get_mut(&id) {
-                    timeline.push(TimelineEntry { seq: stored.seq, at: stored.at, event });
-                }
-            }
-            Err(error) => self.report(error, cx),
-        }
+        self.load_timeline(id, cx);
+        // Without its log (it couldn't be read, which was reported) the entry has no number.
+        let Some(timeline) = self.timelines.get_mut(&id) else { return };
+        let stored = RunEvent {
+            run_id: id,
+            seq: timeline.last().map_or(1, |entry| entry.seq + 1),
+            at: Utc::now(),
+            payload: event.to_payload(),
+        };
+        timeline.push(TimelineEntry { seq: stored.seq, at: stored.at, event });
+        self.state.update(cx, |state, cx| state.save_run_event(video_id, stored, cx));
     }
 
     fn reload_runs(&mut self, cx: &mut Context<Self>) {
-        let runs = self.with_store(cx, |store| store.list_runs(None));
+        let runs = self.state.read(cx).read_runs();
         match runs {
             Ok(runs) => self.runs = runs,
             Err(error) => self.report(error, cx),
@@ -899,7 +901,7 @@ impl PipelineService {
     /// [`LEFTOVER_GRACE`], and only after a crash.
     fn recover_interrupted(&mut self, cx: &mut Context<Self>) -> Result<bool, StoreError> {
         let mut recovered = false;
-        for mut run in self.with_store(cx, |store| store.list_runs(None))? {
+        for mut run in self.state.read(cx).read_runs()? {
             let unfinished = run.status.is_active();
             // Saved by an earlier version, which failed a finished edit when a change
             // to it failed and dropped a strategy whose revision failed.
@@ -908,11 +910,8 @@ impl PipelineService {
             if !unfinished && !outdated {
                 continue;
             }
-            let events: Vec<TimelineEntry> = self
-                .with_store(cx, |store| store.list_run_events(run.id))?
-                .into_iter()
-                .map(TimelineEntry::from)
-                .collect();
+            let events: Vec<TimelineEntry> =
+                self.state.read(cx).read_run_events(run.id)?.into_iter().map(TimelineEntry::from).collect();
             let last_phase = events.iter().rev().find_map(|entry| match &entry.event {
                 LogEvent::Phase(started) => Some(started.phase),
                 _ => None,
@@ -923,11 +922,19 @@ impl PipelineService {
                 }
                 run.status = unfinished_status(last_phase, &run, true);
                 run.error = Some(INTERRUPTED.to_owned());
+                run.updated_at = Utc::now();
                 let marker = LogEvent::Marker(RunMarker { kind: MarkerKind::Interrupted });
-                self.with_store(cx, |store| {
-                    store.update_run(&mut run)?;
-                    store.append_run_event(run.id, &marker.to_payload()).map(drop)
-                })?;
+                let marker = RunEvent {
+                    run_id: run.id,
+                    seq: events.last().map_or(1, |entry| entry.seq + 1),
+                    at: Utc::now(),
+                    payload: marker.to_payload(),
+                };
+                let video_id = run.video_id;
+                self.state.update(cx, |state, cx| {
+                    state.save_run(run, cx);
+                    state.save_run_event(video_id, marker, cx);
+                });
                 recovered = true;
                 continue;
             }
@@ -938,7 +945,8 @@ impl PipelineService {
             let status = unfinished_status(last_phase, &run, run.status == RunStatus::Failed);
             if !discarded && status != run.status {
                 run.status = status;
-                self.with_store(cx, |store| store.update_run(&mut run))?;
+                run.updated_at = Utc::now();
+                self.state.update(cx, |state, cx| state.save_run(run, cx));
                 recovered = true;
             }
         }
@@ -1035,13 +1043,6 @@ impl PipelineService {
             env: self.agent_env.clone(),
             ..defaults
         }
-    }
-
-    /// Runs `f` with the store locked; keep `f` short.
-    fn with_store<T>(&self, cx: &App, f: impl FnOnce(&mut Store) -> T) -> T {
-        let store = self.state.read(cx).store();
-        let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
-        f(&mut store)
     }
 
     fn report(&self, error: impl fmt::Display, cx: &mut Context<Self>) {
