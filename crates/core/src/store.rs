@@ -717,7 +717,7 @@ type Migration = fn(&Transaction<'_>) -> rusqlite::Result<()>;
 
 /// Applied in order; after `MIGRATIONS[i]` the database is at `user_version = i + 1`.
 /// Append new migrations, never edit released ones.
-const MIGRATIONS: &[Migration] = &[migration_1, migration_2];
+const MIGRATIONS: &[Migration] = &[migration_1, migration_2, migration_3];
 
 fn migrate(conn: &mut Connection) -> StoreResult<()> {
     while pending_migration(conn)?.is_some() {
@@ -844,6 +844,11 @@ fn migration_2(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute_batch("ALTER TABLE uploads ADD COLUMN file_stamp TEXT;  -- JSON FileStamp")
 }
 
+/// Upload jobs remember the YouTube account they go to (`UploadJob::channel`).
+fn migration_3(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch("ALTER TABLE uploads ADD COLUMN channel TEXT;")
+}
+
 /// "All videos" (table) and "Board" (kanban by status).
 fn default_views() -> [DatabaseView; 2] {
     use BuiltinField::*;
@@ -861,6 +866,7 @@ fn default_views() -> [DatabaseView; 2] {
             layout(Script, 170.0, true),
             layout(Edit, 140.0, true),
             layout(Youtube, 130.0, true),
+            layout(Channel, 170.0, true),
             layout(CreatedAt, 150.0, false),
             layout(UpdatedAt, 150.0, false),
         ],
@@ -881,6 +887,7 @@ fn default_views() -> [DatabaseView; 2] {
             layout(Script, 130.0, true),
             layout(Edit, 140.0, false),
             layout(Youtube, 130.0, false),
+            layout(Channel, 170.0, false),
             layout(Status, 140.0, false),
             layout(CreatedAt, 150.0, false),
             layout(UpdatedAt, 150.0, false),
@@ -1132,12 +1139,12 @@ fn run_from_row(row: &Row<'_>) -> rusqlite::Result<PipelineRun> {
     })
 }
 
-const UPLOAD_COLUMNS: &str = "id, video_id, file, status, session_url, created_at, updated_at, file_stamp";
+const UPLOAD_COLUMNS: &str = "id, video_id, file, status, session_url, created_at, updated_at, file_stamp, channel";
 const INSERT_UPLOAD: &str = "INSERT INTO uploads \
-                             (id, video_id, file, status, session_url, created_at, updated_at, file_stamp) \
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+                             (id, video_id, file, status, session_url, created_at, updated_at, file_stamp, channel) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
 const UPDATE_UPLOAD: &str = "UPDATE uploads SET file = ?3, status = ?4, session_url = ?5, updated_at = ?7, \
-                             file_stamp = ?8 WHERE id = ?1";
+                             file_stamp = ?8, channel = ?9 WHERE id = ?1";
 
 /// Runs `INSERT_UPLOAD` or `UPDATE_UPLOAD`, which share parameter numbering.
 fn write_upload(conn: &Connection, sql: &str, upload: &UploadJob) -> rusqlite::Result<usize> {
@@ -1150,6 +1157,7 @@ fn write_upload(conn: &Connection, sql: &str, upload: &UploadJob) -> rusqlite::R
         upload.created_at,
         upload.updated_at,
         upload.file_stamp.as_ref().map(Json),
+        upload.channel,
     ])
 }
 
@@ -1161,6 +1169,7 @@ fn upload_from_row(row: &Row<'_>) -> rusqlite::Result<UploadJob> {
         file_stamp: row.get::<_, Option<Json<_>>>("file_stamp")?.map(Json::into_inner),
         status: row.get::<_, Json<_>>("status")?.into_inner(),
         session_url: row.get("session_url")?,
+        channel: row.get("channel")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })

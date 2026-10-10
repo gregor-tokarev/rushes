@@ -4,7 +4,8 @@ use serde_json::json;
 
 use super::*;
 use crate::model::{
-    BlockKind, FileStamp, Privacy, PublishSettings, SelectOption, SortDirection, TagColor, YoutubeLink, YoutubeState,
+    BlockKind, FileStamp, Privacy, PublishChannel, PublishSettings, SelectOption, SortDirection, TagColor, YoutubeLink,
+    YoutubeState,
 };
 use crate::settings::{ThemeMode, YoutubeBackend};
 
@@ -45,6 +46,7 @@ fn upload(video_id: VideoId, status: UploadStatus, age_minutes: i64) -> UploadJo
         file_stamp: None,
         status,
         session_url: None,
+        channel: None,
         created_at: at,
         updated_at: at,
     }
@@ -279,6 +281,7 @@ fn video_round_trips_every_field() {
             made_for_kids: false,
             file: Some("/media/final.mp4".into()),
             thumbnail: Some("/media/thumb.png".into()),
+            channel: Some(PublishChannel { id: "UC123".into(), name: "Rust in 60".into() }),
         },
         youtube: Some(YoutubeLink {
             video_id: "abc123".into(),
@@ -805,6 +808,7 @@ fn uploads_crud() {
     job.status = UploadStatus::Uploading { sent: 1 << 20, total: 1 << 30 };
     job.session_url = Some("https://upload.example/session/1".into());
     job.file_stamp = Some(FileStamp { size: 1 << 30, modified: Some(Utc::now()) });
+    job.channel = Some("UC123".into());
     store.update_upload(&mut job).unwrap();
     assert_eq!(store.get_upload(job.id).unwrap(), Some(job.clone()));
     assert_eq!(store.list_uploads(Some(video.id)).unwrap(), vec![job.clone()]);

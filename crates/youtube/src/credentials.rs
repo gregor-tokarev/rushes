@@ -46,6 +46,11 @@ impl Account {
             backend: config.backend_label(),
         }
     }
+
+    /// Tells accounts apart: the channel id, or the email while the account has no channel.
+    pub fn key(&self) -> &str {
+        self.channel_id.as_deref().unwrap_or(&self.email)
+    }
 }
 
 /// Contents of the credentials file.
