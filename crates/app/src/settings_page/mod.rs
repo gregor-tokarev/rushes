@@ -228,9 +228,13 @@ fn data_folder_field() -> SettingField<SharedString> {
 impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page_ix = SettingsSection::ALL.iter().position(|section| *section == self.section).unwrap_or(0);
+        let sidebar_width = window.rem_size() * 14.;
         Settings::new(("settings", self.opened))
             .default_selected_index(SelectIndex { page_ix, group_ix: None })
-            .sidebar_width(window.rem_size() * 14.)
+            // One width at every window size: resizing the window widens or
+            // narrows the content, not both panes in proportion.
+            .sidebar_width(sidebar_width)
+            .sidebar_size_range(sidebar_width..sidebar_width)
             .pages(self.pages(cx))
     }
 }

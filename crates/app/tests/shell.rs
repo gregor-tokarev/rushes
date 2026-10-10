@@ -939,6 +939,33 @@ fn settings_controls_end_on_one_edge(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_settings_list_keeps_its_width_when_the_window_is_resized(cx: &mut TestAppContext) {
+    let content_left = |app: &Fixture, cx: &mut TestAppContext| {
+        for _ in 0..2 {
+            cx.run_until_parked();
+            cx.update_window(app.window, |_, window, cx| window.render_frame(cx)).unwrap();
+        }
+        cx.update_window(app.window, |_, window, _| window.find("settings-media-root").bounds().left()).unwrap()
+    };
+    let wide = size(px(1440.), px(900.));
+    let opened_wide = {
+        let app = Fixture::open_sized(cx, true, &[], wide);
+        app.navigate(cx, Route::Settings { section: SettingsSection::General });
+        content_left(&app, cx)
+    };
+
+    // Opened in a small window, then made larger, and back.
+    let app = Fixture::open_sized(cx, true, &[], size(px(960.), px(600.)));
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+    let opened_small = content_left(&app, cx);
+    cx.simulate_window_resize(app.window, wide);
+    assert_eq!(content_left(&app, cx), opened_wide, "the list doesn't grow with the window");
+    cx.simulate_window_resize(app.window, size(px(960.), px(600.)));
+    assert_eq!(content_left(&app, cx), opened_small, "nor shrink with it");
+    assert_eq!(opened_small, opened_wide);
+}
+
+#[gpui_kit::test]
 fn folder_errors_explain_themselves_and_lead_to_the_settings(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, true, &[]);
     // A media folder inside a file can never be created.
