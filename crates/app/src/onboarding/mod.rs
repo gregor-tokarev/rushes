@@ -103,7 +103,7 @@ impl Onboarding {
 
     /// Whether the creator has done what the step is for. Only the YouTube and
     /// AI editing steps can be left undone.
-    pub fn is_step_done(&self, cx: &App) -> bool {
+    fn is_step_done(&self, cx: &App) -> bool {
         match self.step {
             Step::Youtube => YoutubeService::try_global(cx).is_some_and(|youtube| youtube.read(cx).is_connected()),
             Step::AiEditing => PipelineService::global(cx).read(cx).doctor().is_some_and(|doctor| doctor.ready()),
