@@ -574,7 +574,7 @@ impl PropertiesPanel {
                 .into_any_element();
         }
         let left = self.state.read(cx).row(self.video_id).is_some_and(VideoRow::left_youtube);
-        let label = if left { YOUTUBE_GONE } else { "Not uploaded" };
+        let label = if left { format::YOUTUBE_GONE } else { "Not uploaded" };
         div()
             .id("property-youtube-value")
             .test_support()
@@ -582,7 +582,7 @@ impl PropertiesPanel {
             .px_2()
             .text_sm()
             .text_color(cx.theme().muted_foreground)
-            .when(left, |this| this.tooltip(|window, cx| Tooltip::new(YOUTUBE_GONE_DETAIL).build(window, cx)))
+            .when(left, |this| this.tooltip(|window, cx| Tooltip::new(format::YOUTUBE_GONE_DETAIL).build(window, cx)))
             .child(label)
             .into_any_element()
     }
@@ -749,9 +749,6 @@ fn add_property_to_tables(property: PropertyDef, cx: &mut App) {
 
 /// Status, format, publish date, tags, media folder and YouTube.
 const BUILT_IN_ROWS: usize = 6;
-/// A video whose upload YouTube no longer has, in the Publish tab's words.
-const YOUTUBE_GONE: &str = "Not on YouTube anymore";
-const YOUTUBE_GONE_DETAIL: &str = "YouTube no longer has this video. It may have been deleted in YouTube Studio.";
 
 /// Kinds edited in a text input.
 fn is_text_like(kind: &PropertyKind) -> bool {

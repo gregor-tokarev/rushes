@@ -86,6 +86,14 @@ pub fn is_scheduled(publish_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bo
     publish_at.is_some_and(|at| at > now)
 }
 
+/// A video whose upload YouTube no longer has (deleted in YouTube Studio, say),
+/// in the words of the table, the board, the video page and the Publish tab.
+pub const YOUTUBE_GONE: &str = "Not on YouTube anymore";
+/// [`YOUTUBE_GONE`] in a chip, which has little room, as the Uploads page says it.
+pub const YOUTUBE_GONE_CHIP: &str = "Not on YouTube";
+/// What [`YOUTUBE_GONE`] means.
+pub const YOUTUBE_GONE_DETAIL: &str = "YouTube no longer has this video. It may have been deleted in YouTube Studio.";
+
 /// The YouTube column: the video's visibility on YouTube ("Scheduled" until
 /// its publish time), or the state of its upload attempt.
 pub fn youtube(state: YoutubeState<'_>, scheduled: bool) -> String {

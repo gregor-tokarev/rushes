@@ -15,6 +15,7 @@ use gpui_kit::{
 use videocrm_core::{SelectOption, TagColor};
 
 use super::colors::tag_colors;
+use super::format;
 
 /// A colored, Notion-style value chip: select options, statuses and tags.
 #[derive(IntoElement)]
@@ -176,6 +177,18 @@ pub fn attempt_hint(id: ElementId, icon: IconName, tooltip: SharedString, cx: &A
         .aria_label(tooltip.clone())
         .child(muted_icon(icon, cx))
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+}
+
+/// The YouTube state of a video YouTube no longer has, with what that means as
+/// its tooltip.
+pub fn youtube_gone(id: ElementId) -> impl IntoElement {
+    h_flex()
+        .id(id)
+        .test_support()
+        .min_w_0()
+        .aria_label(format::YOUTUBE_GONE_CHIP)
+        .child(Chip::new(format::YOUTUBE_GONE_CHIP, TagColor::Gray).dot(true))
+        .tooltip(|window, cx| Tooltip::new(format::YOUTUBE_GONE_DETAIL).build(window, cx))
 }
 
 /// A small count on a toolbar trigger, e.g. the number of active filters.

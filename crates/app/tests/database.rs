@@ -851,6 +851,34 @@ fn a_live_video_and_a_finished_edit_win_over_newer_attempts(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
+fn a_video_gone_from_youtube_says_so_in_the_table_and_on_the_board(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+    let desk = db.desk;
+    // Its upload reached YouTube, which no longer has the video: the link was dropped.
+    db.set_data(
+        cx,
+        |rows| {
+            rows.into_iter()
+                .map(|mut row| {
+                    if row.video.id == desk {
+                        row.latest_upload = Some(UploadStatus::Done { video_id: "deleted-in-studio".into() });
+                    }
+                    row
+                })
+                .collect()
+        },
+        |views| views,
+    );
+    let gone = Some("Not on YouTube");
+    assert_eq!(db.label(cx, format!("youtube-{desk}")).as_deref(), gone, "as the Uploads page says it");
+    let never = db.with_window(cx, |window, _| window.try_find(format!("youtube-{}", db.tokyo)).is_some());
+    assert!(!never, "never uploaded: nothing to say");
+
+    db.step(cx, |window, cx| db.panel.update(cx, |panel, cx| panel.set_active_view(db.board, window, cx)));
+    assert_eq!(db.label(cx, format!("card-youtube-{desk}")).as_deref(), gone);
+}
+
+#[gpui_kit::test]
 fn picking_a_sort_column_keeps_the_sort_popover_open(cx: &mut TestAppContext) {
     let db = Fixture::open(cx);
 

@@ -16,7 +16,7 @@ use gpui_kit::{
 use videocrm_core::{VideoId, VideoRow, VideoStatus};
 
 use super::colors::{format_color, free_tag_color, run_status_color, tag_colors, youtube_color};
-use super::elements::{Chip, muted_icon};
+use super::elements::{Chip, muted_icon, youtube_gone};
 use super::format;
 use super::panel::{BOARD_CARD_CONTEXT, DatabasePanel, OpenSelected};
 use super::query::status_visible;
@@ -195,8 +195,9 @@ impl DatabasePanel {
         // YouTube are not hidden by a later failed or cancelled attempt.
         let edit = row.edit_status();
         let youtube = row.youtube_state();
+        let left_youtube = row.left_youtube();
         let scheduled = format::is_scheduled(video.publish.publish_at, now);
-        let has_pipeline = edit.is_some() || youtube.is_some();
+        let has_pipeline = edit.is_some() || youtube.is_some() || left_youtube;
 
         // The transparent top border is the drop indicator's slot, so showing
         // it does not move the card.
@@ -272,7 +273,8 @@ impl DatabasePanel {
                                         )
                                         .dot(true),
                                     )
-                                }),
+                                })
+                                .when(left_youtube, |this| this.child(youtube_gone(element_id("card-youtube", id)))),
                         )
                     })
                     .context_menu(move |menu, _, _| video_menu(menu, id, false, &panel)),
