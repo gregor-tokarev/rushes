@@ -108,7 +108,7 @@ All calls block; run them on a background thread and stream progress back to the
    `Error::is_network()`.
    `begin_authorization(&config)` binds `127.0.0.1:<random port>` (it refuses a Google
    config without client secret); open `pending.authorize_url()` in the browser;
-   `pending.wait(timeout, &cancel)` serves the redirect, shows a "You're signed in" page
+   `pending.wait(timeout, &cancel)` serves the redirect, shows a "You’re signed in" page
    and returns `Credentials`. Requests without this sign-in's `state` get an error page
    and are ignored. Check
    `credentials.has_scope("https://www.googleapis.com/auth/youtube.upload")`: Google lets
@@ -175,8 +175,8 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   every change. `connect` runs the sign-in on a `youtube-sign-in` thread. Before the
   browser opens it checks that the sign-in can work: for the emulators both must answer
   (the same probe as **Check**), and `check_client` must accept the OAuth client. Either
-  failure ends the sign-in at once with a sentence saying what to fix ("Google doesn't
-  recognise this client ID and secret…", "Can't reach Google…", "Neither emulator is
+  failure ends the sign-in at once with a sentence saying what to fix ("Google doesn’t
+  recognise this client ID and secret…", "Can’t reach Google…", "Neither emulator is
   answering…"). Then `begin_authorization` and the wait (up to 5 minutes) run, the consent
   page opens with `cx.open_url` and its URL is exposed for **Copy link**; `cancel` sets the
   wait's cancel flag. While waiting, the panel says to finish in the browser and, for
@@ -214,7 +214,8 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   seconds and derives the time left.
 - After the bytes arrive the video gets `video.youtube = YoutubeLink { .. }` and its status
   becomes `Scheduled` (with a publish time), `Published` (public or unlisted) or stays as
-  it was (private). The custom thumbnail is set next; a failure there is a warning
+  it was (private). A scheduled upload also sets the video's Publish date to the local
+  date of the publish time: that is when YouTube publishes it, so the planner follows. The custom thumbnail is set next; a failure there is a warning
   notification, not a failed upload, and its reason stays on the Upload card and the
   Uploads page for the rest of the session ("Thumbnail not set"; `403 forbidden` becomes
   `Error::ThumbnailsNotAllowed`: custom thumbnails need a channel verified at
@@ -224,12 +225,18 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   (`refresh_youtube_video`, one `videos.list` when the tab opens or connects, and every
   processing poll): "Private · goes public Mon, 12 Oct at 09:00", "Unlisted", ... It links
   to the video and to YouTube Studio, and the form says that its changes apply to the next
-  upload. There is no "update on YouTube": `videos.update` needs the broader `youtube`
+  upload. When YouTube answers that it has no such video (deleted in YouTube Studio, or
+  removed by YouTube) and the connected channel is the one it was uploaded to, the video's
+  link is dropped (`is_off_youtube`): the card says "Not on YouTube anymore" and offers a
+  plain **Upload to YouTube**, the Uploads row stops linking to it and the videos table
+  shows no YouTube state. A failed lookup (offline) keeps the stored link. There is no "update on YouTube": `videos.update` needs the broader `youtube`
   scope, which VideoCRM does not ask for.
 - While the worker retries a passing failure, the Upload card and the Uploads page say so
-  ("YouTube isn't responding · Retrying (2 of 5)…", or "Can't reach YouTube" when offline)
+  ("YouTube isn’t responding · Retrying (2 of 5)…", or "Can’t reach YouTube" when offline)
   and the sidebar badge reads "Retrying the upload…", until the upload gets further than
-  before. A failure reads as a
+  before. Meanwhile the progress shows what YouTube confirmed (`YoutubeService::progress`):
+  after a failed request the worker reports `Bytes` back at the server's offset before the
+  retry, and bytes in flight during a retry don't count. A failure reads as a
   plain sentence (`describe_error`; the technical error goes to stderr) and stays
   resumable when YouTube had opened a session.
 - Deleting a video cancels its running upload (the delete confirmations say so, through
@@ -237,9 +244,20 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   deletes them with the video. If the last chunk was already on its way and YouTube
   finishes the upload anyway, a notice links to the video so it can be removed in Studio.
 - `cancel_upload` stops at the next chunk read and keeps the session; `resume_upload`
-  continues from the offset YouTube reports. A session the current connection refuses
-  (another backend's after a switch, or a file that changed) is dropped, so the job stops
-  offering Resume. At startup, jobs a previous run left
+  continues from the offset YouTube reports. A session continues the bytes it was opened
+  for, so each job records its file's size and modification time (`UploadJob::file_stamp`,
+  taken when the upload starts). Resume is offered and allowed only while the job's file
+  is still the video's chosen file and its stamp is unchanged: choosing another file
+  (also AI edit's "Use for upload") or re-exporting the file drops the session
+  (`check_stopped_uploads` runs on data changes, when the window is activated and before
+  every resume), and the Upload card offers a fresh upload with a note about the stopped
+  one. A session YouTube refuses on resume (`400`, such as `badContent` for a file of
+  another length, or `404`/`410`), or one the current connection can't use (another
+  backend's after a switch), is dropped as well: "YouTube can’t continue this upload.
+  Start over…". Starting a new upload of a video (**Start over**, **Upload again…**)
+  drops the sessions of its stopped uploads, and `resume_upload` refuses while another
+  upload of the same video runs, so one video never goes up twice by accident. The
+  video file can't be changed while it uploads. At startup, jobs a previous run left
   `Pending` or `Uploading` become `Failed { "Interrupted — you can resume" }` (resumable
   when a session URL was stored) and jobs left `Processing` become `Done`.
 
@@ -261,8 +279,12 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
 - **Schedule** forces private (YouTube makes the video public at the publish time) and
   restores the earlier visibility when turned off.
 - The Upload card lists what blocks an upload in every state, so a disabled **Upload to
-  YouTube**, **Upload again** or **Start over** always says why. A chosen file counts as
-  missing only once the background check finds it gone.
+  YouTube**, **Upload again…** or **Start over** always says why. An expired sign-in reads
+  "Sign in to YouTube again to upload." with **Reconnect** next to it, as the account card
+  says, rather than asking to connect an account. A chosen file counts as missing only
+  once the background check finds it gone. The primary button reads **Upload again…**
+  whenever the video is on YouTube already, because it then asks before making a second
+  copy.
 - The file menu offers the AI edit outputs (`final.mp4`, then `preview.mp4`), then the
   footage videos, then **Choose file…** (`cx.prompt_for_paths`; on Linux that needs the
   desktop portal). When no file chooser opens, "Couldn't open the file chooser" asks for
@@ -336,7 +358,7 @@ client in Google Cloud (free) and pastes it into VideoCRM. It takes about ten mi
    - Google warns "Google hasn't verified this app". Click **Continue**. This is expected
      for a personal OAuth client.
    - Leave all permission boxes ticked, especially "Manage your YouTube videos".
-   - When the page says "You're signed in", return to VideoCRM.
+   - When the page says "You’re signed in", return to VideoCRM.
 
 ### Limits to know about
 

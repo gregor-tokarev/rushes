@@ -137,8 +137,8 @@ pub enum UploadProgress {
     Started {
         session_url: String,
     },
-    /// `sent` bytes are on their way or confirmed. May step back when the server
-    /// kept less than was sent.
+    /// `sent` bytes are on their way or confirmed. After a failed request it steps
+    /// back to what the server holds, before the retry is reported.
     Bytes {
         sent: u64,
         total: u64,
@@ -370,6 +370,7 @@ impl YoutubeClient {
                                 "the upload server keeps rejecting data at byte {next}"
                             )));
                         }
+                        progress(UploadProgress::Bytes { sent: next, total });
                         self.upload.retry(failures, RetryCause::Server, progress, cancel, Some(session_url))?;
                         failures += 1;
                     }
@@ -378,6 +379,8 @@ impl YoutubeClient {
                 }
                 Err(_) if cancel.load(Ordering::Relaxed) => return Err(cancelled(session_url)),
                 Err(error) if error.is_transient() && failures < self.upload.max_retries => {
+                    // What was in flight is lost until the server says otherwise.
+                    progress(UploadProgress::Bytes { sent: confirmed, total });
                     self.upload.retry(failures, error.retry_cause(), progress, cancel, Some(session_url))?;
                     failures += 1;
                     offset = None;

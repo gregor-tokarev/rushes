@@ -379,7 +379,7 @@ impl RenderOnce for ConnectionPanel {
                 };
                 v_flex()
                     .gap_3()
-                    .child(status_line(IconName::CircleAlert, theme.danger, "Couldn't connect", Some(message), cx))
+                    .child(status_line(IconName::CircleAlert, theme.danger, "Couldn’t connect", Some(message), cx))
                     .children(action.map(|button| h_flex().child(button)))
             }
             Connection::Disconnected => {

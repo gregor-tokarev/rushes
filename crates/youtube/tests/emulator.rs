@@ -237,7 +237,7 @@ fn signs_in_and_reads_the_channel() {
         return;
     };
     let (credentials, page) = sign_in(&emulators, "creator@example.com");
-    assert!(page.contains("You're signed in"), "{page}");
+    assert!(page.contains("You’re signed in"), "{page}");
     assert!(credentials.refresh_token.is_some());
     assert!(credentials.id_token.is_some());
     assert!(credentials.has_scope("https://www.googleapis.com/auth/youtube.upload"));
@@ -453,21 +453,29 @@ fn transient_failures_are_retried_from_the_server_offset() {
 
     emulators.inject_fault(json!({"method": "POST", "path": "/upload/youtube/v3/videos", "status": 503}));
     emulators.inject_fault(json!({"method": "PUT", "path": "/upload/youtube/v3/videos", "status": 500, "times": 2}));
-    let mut retries = Vec::new();
+    let mut events = Vec::new();
     let video = client
-        .upload_video(
-            &path,
-            &metadata("Flaky network"),
-            &mut |event| {
-                if let UploadProgress::Retrying { attempt, cause, .. } = event {
-                    retries.push((attempt, cause));
-                }
-            },
-            &AtomicBool::new(false),
-        )
+        .upload_video(&path, &metadata("Flaky network"), &mut |event| events.push(event), &AtomicBool::new(false))
         .unwrap();
+    let retries: Vec<(u32, RetryCause)> = events
+        .iter()
+        .filter_map(|event| match event {
+            UploadProgress::Retrying { attempt, cause, .. } => Some((*attempt, *cause)),
+            _ => None,
+        })
+        .collect();
     // Each failure is reported before its backoff, so the app can say what is going on.
     assert_eq!(retries, [(1, RetryCause::Server), (1, RetryCause::Server), (2, RetryCause::Server)]);
+    // A failed chunk first steps back to what the server holds: the bytes that were
+    // in flight are not progress while the upload retries. (The retry of the session
+    // start comes first, with nothing before it.)
+    let total = std::fs::metadata(&path).unwrap().len();
+    let before_chunk_retries: Vec<&UploadProgress> = events
+        .windows(2)
+        .filter(|pair| matches!(pair[1], UploadProgress::Retrying { .. }))
+        .map(|pair| &pair[0])
+        .collect();
+    assert_eq!(before_chunk_retries, [&UploadProgress::Bytes { sent: 0, total }; 2]);
     let uploads = emulators.uploads();
     assert_eq!(uploads[0]["videoId"], video.id.as_str());
     assert_eq!(uploads[0]["sha256"], sha256.as_str());

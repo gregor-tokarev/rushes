@@ -192,8 +192,8 @@ impl PendingAuthorization {
         };
 
         let body = match &outcome {
-            Ok(_) => page("You're signed in", "Return to VideoCRM — you can close this tab.", true),
-            Err(error) => page("Sign-in didn't finish", &format!("{error}. Return to VideoCRM and try again."), false),
+            Ok(_) => page("You’re signed in", "Return to VideoCRM — you can close this tab.", true),
+            Err(error) => page("Sign-in didn’t finish", &format!("{error}. Return to VideoCRM and try again."), false),
         };
         respond(&mut stream, "200 OK", &body);
         Some(outcome)

@@ -696,7 +696,7 @@ type Migration = fn(&Transaction<'_>) -> rusqlite::Result<()>;
 
 /// Applied in order; after `MIGRATIONS[i]` the database is at `user_version = i + 1`.
 /// Append new migrations, never edit released ones.
-const MIGRATIONS: &[Migration] = &[migration_1];
+const MIGRATIONS: &[Migration] = &[migration_1, migration_2];
 
 fn migrate(conn: &mut Connection) -> StoreResult<()> {
     while pending_migration(conn)?.is_some() {
@@ -816,6 +816,11 @@ fn migration_1(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         upsert_view(tx, &view)?;
     }
     Ok(())
+}
+
+/// Upload jobs remember which version of the file they send (`UploadJob::file_stamp`).
+fn migration_2(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch("ALTER TABLE uploads ADD COLUMN file_stamp TEXT;  -- JSON FileStamp")
 }
 
 /// "All videos" (table) and "Board" (kanban by status).
@@ -1106,11 +1111,12 @@ fn run_from_row(row: &Row<'_>) -> rusqlite::Result<PipelineRun> {
     })
 }
 
-const UPLOAD_COLUMNS: &str = "id, video_id, file, status, session_url, created_at, updated_at";
-const INSERT_UPLOAD: &str = "INSERT INTO uploads (id, video_id, file, status, session_url, created_at, updated_at) \
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
-const UPDATE_UPLOAD: &str = "UPDATE uploads SET file = ?3, status = ?4, session_url = ?5, updated_at = ?7 \
-                             WHERE id = ?1";
+const UPLOAD_COLUMNS: &str = "id, video_id, file, status, session_url, created_at, updated_at, file_stamp";
+const INSERT_UPLOAD: &str = "INSERT INTO uploads \
+                             (id, video_id, file, status, session_url, created_at, updated_at, file_stamp) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+const UPDATE_UPLOAD: &str = "UPDATE uploads SET file = ?3, status = ?4, session_url = ?5, updated_at = ?7, \
+                             file_stamp = ?8 WHERE id = ?1";
 
 /// Runs `INSERT_UPLOAD` or `UPDATE_UPLOAD`, which share parameter numbering.
 fn write_upload(conn: &Connection, sql: &str, upload: &UploadJob) -> rusqlite::Result<usize> {
@@ -1122,6 +1128,7 @@ fn write_upload(conn: &Connection, sql: &str, upload: &UploadJob) -> rusqlite::R
         upload.session_url,
         upload.created_at,
         upload.updated_at,
+        upload.file_stamp.as_ref().map(Json),
     ])
 }
 
@@ -1130,6 +1137,7 @@ fn upload_from_row(row: &Row<'_>) -> rusqlite::Result<UploadJob> {
         id: row.get("id")?,
         video_id: row.get("video_id")?,
         file: PathBuf::from(row.get::<_, String>("file")?),
+        file_stamp: row.get::<_, Option<Json<_>>>("file_stamp")?.map(Json::into_inner),
         status: row.get::<_, Json<_>>("status")?.into_inner(),
         session_url: row.get("session_url")?,
         created_at: row.get("created_at")?,

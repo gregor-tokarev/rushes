@@ -17,14 +17,15 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Subscription};
 use videocrm_core::settings::{self, YoutubeBackend};
-use videocrm_core::{Store, UploadId, UploadJob};
+use videocrm_core::{Store, UploadId, UploadJob, UploadStatus, Video};
 use videocrm_youtube::{
     Account, CredentialStore, Credentials, Error as YoutubeError, SavedLogin, VideoInfo, YoutubeClient, YoutubeConfig,
     begin_authorization, check_client,
 };
 
-use super::upload::{ActiveUpload, ProcessingOutcome};
-use crate::state::{AppEvent, AppState, SharedStore};
+use super::rules::AccountAccess;
+use super::upload::{ActiveUpload, ProcessingOutcome, Retired};
+use crate::state::{AppEvent, AppState, Problem, SharedStore};
 
 const CREDENTIALS_FILE: &str = "credentials.json";
 const AVATAR_DIR: &str = "avatars";
@@ -91,8 +92,15 @@ pub struct YoutubeService {
     pub(super) outcomes: HashMap<UploadId, ProcessingOutcome>,
     /// Why the custom thumbnail of a finished upload wasn't set, for this run of the app.
     pub(super) thumbnail_problems: HashMap<UploadId, String>,
+    /// Why stopped uploads stopped offering Resume, for this run of the app.
+    pub(super) retired: HashMap<UploadId, Retired>,
+    /// A background check of the files of stopped uploads is running.
+    pub(super) checking_files: bool,
     /// What YouTube last said about uploaded videos, by YouTube video id.
     pub(super) remote: HashMap<String, VideoInfo>,
+    /// Uploaded videos YouTube says it doesn't have (deleted in YouTube Studio, or
+    /// removed by YouTube), by YouTube video id.
+    gone: HashSet<String>,
     remote_requests: HashSet<String>,
     _subscription: Subscription,
 }
@@ -206,7 +214,10 @@ impl YoutubeService {
         let (config, env_override) = backend_config(&state.read(cx).settings().youtube);
         let subscription = cx.subscribe(&state, |this, _, event: &AppEvent, cx| match event {
             AppEvent::SettingsChanged => this.on_settings_changed(cx),
-            AppEvent::DataChanged => this.forget_deleted_videos(cx),
+            AppEvent::DataChanged => {
+                this.forget_deleted_videos(cx);
+                this.check_stopped_uploads(cx);
+            }
             _ => {}
         });
         let mut service = Self {
@@ -225,12 +236,16 @@ impl YoutubeService {
             active: HashMap::new(),
             outcomes: HashMap::new(),
             thumbnail_problems: HashMap::new(),
+            retired: HashMap::new(),
+            checking_files: false,
             remote: HashMap::new(),
+            gone: HashSet::new(),
             remote_requests: HashSet::new(),
             _subscription: subscription,
         };
         service.restore_login(cx);
         service.recover_interrupted_uploads(cx);
+        service.check_stopped_uploads(cx);
         service
     }
 
@@ -251,6 +266,15 @@ impl YoutubeService {
 
     pub fn is_connected(&self) -> bool {
         self.client.is_some() && self.account().is_some()
+    }
+
+    /// Whether uploads can use the account now, or what they need first.
+    pub fn account_access(&self) -> AccountAccess {
+        match &self.connection {
+            _ if self.is_connected() => AccountAccess::Connected,
+            Connection::NeedsSignIn(_) => AccountAccess::NeedsSignIn,
+            _ => AccountAccess::NotConnected,
+        }
     }
 
     /// The backend the settings describe, or why they do not describe one yet.
@@ -298,8 +322,10 @@ impl YoutubeService {
             .name("youtube-sign-in".into())
             .spawn(move || sign_in(config, tokens, &cancel, &sender));
         if let Err(error) = spawned {
+            eprintln!("videocrm: couldn't start the sign-in thread: {error}");
             self.sign_in = None;
-            self.set_connection(Connection::Failed(format!("Couldn't start the sign-in: {error}.").into()), cx);
+            let message = "Couldn’t start the sign-in. Quit VideoCRM and open it again, then connect.";
+            self.set_connection(Connection::Failed(message.into()), cx);
             return;
         }
         cx.spawn(async move |this, cx| {
@@ -332,7 +358,7 @@ impl YoutubeService {
             None => self.credentials.clear(),
         };
         if let Err(error) = cleared {
-            report_error(&self.state, format!("Couldn't remove the saved YouTube sign-in: {error}"), cx);
+            report_problem(&self.state, credentials_problem("Couldn’t remove the saved YouTube sign-in", &error), cx);
         }
         if let Some(client) = self.client.take() {
             // The local tokens are gone either way; revoking also ends the grant at Google.
@@ -373,10 +399,14 @@ impl YoutubeService {
                     };
                     match signed_in.tokens.sign_in(&login) {
                         Ok(()) => Ok(signed_in),
-                        Err(error) => Err(SignInError::Failed(format!(
-                            "Couldn't save the YouTube sign-in: {}",
-                            sentence(&error.to_string())
-                        ))),
+                        Err(error) => {
+                            eprintln!("videocrm: couldn't save the YouTube sign-in: {error}");
+                            Err(SignInError::Failed(
+                                "Couldn’t save the YouTube sign-in: VideoCRM can’t write credentials.json in its \
+                                 data folder. Check that the folder is writable, then connect again."
+                                    .to_owned(),
+                            ))
+                        }
                     }
                 });
                 match signed_in {
@@ -421,8 +451,9 @@ impl YoutubeService {
             // Tokens of another backend, or no account: not usable here.
             Ok(_) => {}
             Err(error) => {
+                eprintln!("videocrm: couldn't read the saved YouTube sign-in: {error}");
                 self.connection =
-                    Connection::Failed(format!("Couldn't read the saved YouTube sign-in: {error}.").into());
+                    Connection::Failed("Couldn’t read the saved YouTube sign-in. Connect again to sign in.".into());
             }
         }
     }
@@ -464,7 +495,11 @@ impl YoutubeService {
                     Ok(account) => {
                         let login = SavedLogin { credentials: client.credentials(), account: Some(account.clone()) };
                         if let Err(error) = tokens.update(&login) {
-                            report_error(&this.state, format!("Couldn't save the YouTube account: {error}"), cx);
+                            report_problem(
+                                &this.state,
+                                credentials_problem("Couldn’t save the YouTube account", &error),
+                                cx,
+                            );
                         }
                         if this.account() != Some(&account) {
                             this.set_connection(Connection::Connected(account), cx);
@@ -509,6 +544,19 @@ impl YoutubeService {
         self.remote.get(youtube_id)
     }
 
+    /// Whether the video a finished upload put on YouTube is no longer there.
+    pub fn is_off_youtube(&self, job: &UploadJob, cx: &App) -> bool {
+        let (UploadStatus::Processing { video_id: youtube_id } | UploadStatus::Done { video_id: youtube_id }) =
+            &job.status
+        else {
+            return false;
+        };
+        // Once YouTube said so, the video's link is cleared, also for later runs.
+        self.gone.contains(youtube_id)
+            || (self.latest_job(job.video_id).is_some_and(|latest| latest.id == job.id)
+                && self.state.read(cx).video(job.video_id).is_some_and(|video| video.youtube.is_none()))
+    }
+
     /// Asks YouTube about an uploaded video in the background (one quota unit), so the
     /// Publish tab shows what YouTube has rather than what was asked for.
     pub fn refresh_youtube_video(&mut self, youtube_id: &str, cx: &mut Context<Self>) {
@@ -522,15 +570,50 @@ impl YoutubeService {
             let info = cx.background_spawn(async move { client.get_video(&lookup) }).await;
             this.update(cx, |this, cx| {
                 this.remote_requests.remove(&youtube_id);
-                // Offline, the stored link is what the tab shows.
-                if let Ok(Some(info)) = info {
-                    this.remote.insert(youtube_id, info);
-                    cx.notify();
+                match info {
+                    Ok(Some(info)) => {
+                        this.remote.insert(youtube_id, info);
+                        cx.notify();
+                    }
+                    Ok(None) => this.on_video_gone(&youtube_id, cx),
+                    // Offline, the stored link is what the tab shows.
+                    Err(_) => {}
                 }
             })
             .ok();
         })
         .detach();
+    }
+
+    /// YouTube has no video `youtube_id`. Only its owner sees a private video, so
+    /// that counts only when the connected channel is the one it was uploaded to.
+    /// The videos linking to it stop pointing at a dead page.
+    fn on_video_gone(&mut self, youtube_id: &str, cx: &mut Context<Self>) {
+        let Some(channel) = self.account().and_then(|account| account.channel_id.clone()) else { return };
+        let linked: Vec<Video> = self
+            .state
+            .read(cx)
+            .rows()
+            .iter()
+            .map(|row| &row.video)
+            .filter(|video| {
+                video.youtube.as_ref().is_some_and(|link| link.video_id == youtube_id && link.channel_id == channel)
+            })
+            .cloned()
+            .collect();
+        if linked.is_empty() {
+            return;
+        }
+        self.gone.insert(youtube_id.to_owned());
+        self.remote.remove(youtube_id);
+        self.state.update(cx, |state, cx| {
+            for mut video in linked {
+                video.youtube = None;
+                state.update_video(video, cx);
+            }
+        });
+        cx.emit(YoutubeEvent::UploadsChanged);
+        cx.notify();
     }
 
     pub(super) fn store(&self, cx: &App) -> SharedStore {
@@ -585,15 +668,15 @@ fn sign_in_with_browser(
 fn sign_in_message(error: &YoutubeError, config: &YoutubeConfig) -> String {
     let minutes = SIGN_IN_TIMEOUT.as_secs() / 60;
     match error {
-        error if error.is_invalid_client() => "Google doesn't recognise this client ID and secret. Copy both \
+        error if error.is_invalid_client() => "Google doesn’t recognise this client ID and secret. Copy both \
             again from Google Cloud › Clients, from a client of type Desktop app."
             .to_owned(),
         error if error.is_network() && config.is_google() => {
-            "Can't reach Google. Check your internet connection and try again.".to_owned()
+            "Can’t reach Google. Check your internet connection and try again.".to_owned()
         }
         error if error.is_network() => format!("Nothing answers at {}. Is the server running?", config.auth_url),
         YoutubeError::Timeout => {
-            format!("The sign-in wasn't finished in the browser within {minutes} minutes. Connect again to start over.")
+            format!("The sign-in wasn’t finished in the browser within {minutes} minutes. Connect again to start over.")
         }
         YoutubeError::AccessDenied => {
             "The sign-in was cancelled in the browser. Connect again and allow access to upload.".to_owned()
@@ -621,10 +704,10 @@ pub(super) fn probe_emulators(google_url: &str, youtube_url: &str) -> EmulatorCh
     match (google, youtube) {
         (true, true) => EmulatorCheck::Running,
         (false, true) => {
-            EmulatorCheck::Unreachable(format!("The Google emulator isn't answering at {google_url}.").into())
+            EmulatorCheck::Unreachable(format!("The Google emulator isn’t answering at {google_url}.").into())
         }
         (true, false) => {
-            EmulatorCheck::Unreachable(format!("The YouTube emulator isn't answering at {youtube_url}.").into())
+            EmulatorCheck::Unreachable(format!("The YouTube emulator isn’t answering at {youtube_url}.").into())
         }
         (false, false) => {
             EmulatorCheck::Unreachable("Neither emulator is answering. Start them with scripts/emulators.sh.".into())
@@ -660,7 +743,7 @@ pub fn backend_config(backend: &YoutubeBackend) -> (Result<YoutubeConfig, Shared
             if client_id.is_empty() || client_secret.is_empty() {
                 Err("Add the client ID and client secret of your Google OAuth client.".into())
             } else if !client_id.ends_with(CLIENT_ID_SUFFIX) || client_id.contains(char::is_whitespace) {
-                Err(format!("This isn't a Google OAuth client ID. Client IDs end with {CLIENT_ID_SUFFIX}.").into())
+                Err(format!("This isn’t a Google OAuth client ID. Client IDs end with {CLIENT_ID_SUFFIX}.").into())
             } else {
                 Ok(YoutubeConfig::google(client_id, Some(client_secret.to_owned())))
             }
@@ -702,12 +785,6 @@ pub(super) fn lock(store: &SharedStore) -> MutexGuard<'_, Store> {
     store.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Shows `message` the way the shell shows every app error.
-pub(super) fn report_error(state: &Entity<AppState>, message: impl Into<SharedString>, cx: &mut App) {
-    let message = message.into();
-    state.update(cx, |_, cx| cx.emit(AppEvent::Error(message)));
-}
-
 /// Shows a notification in the active window; nothing happens without a window.
 pub(super) fn push_notification(cx: &mut App, notification: impl FnOnce() -> Notification) {
     let window = cx.active_window().or_else(|| cx.windows().into_iter().next());
@@ -721,13 +798,54 @@ pub(super) fn push_notification(cx: &mut App, notification: impl FnOnce() -> Not
 /// A YouTube error as the creator should read it. The technical detail goes to stderr.
 pub(super) fn describe_error(error: &YoutubeError) -> String {
     eprintln!("videocrm: youtube: {error}");
-    match error {
-        error if error.is_network() => "Can't reach YouTube. Check your internet connection and try again.".to_owned(),
-        YoutubeError::ThumbnailsNotAllowed => "YouTube allows custom thumbnails only on verified channels. \
-            Verify yours at youtube.com/verify, then set the thumbnail in YouTube Studio."
-            .to_owned(),
-        error => sentence(&error.to_string()),
-    }
+    let message = match error {
+        error if error.is_network() => "Can’t reach YouTube. Check your internet connection and try again.",
+        // Quota, upload limit, missing permission, rate limits, outages.
+        error if let Some(message) = error.api_message() => message,
+        error if error.needs_sign_in() => {
+            "YouTube no longer accepts the sign-in. Reconnect the account, then try again."
+        }
+        YoutubeError::ThumbnailsNotAllowed => {
+            "YouTube allows custom thumbnails only on verified channels. Verify yours at youtube.com/verify, \
+             then set the thumbnail in YouTube Studio."
+        }
+        YoutubeError::Api { status: 400..=499, .. } => {
+            "YouTube refused the request. Check the video’s details and file, then try again."
+        }
+        YoutubeError::Api { .. } => "YouTube couldn’t handle the request. Try again in a few minutes.",
+        YoutubeError::SessionExpired => {
+            "YouTube can’t continue this upload. Start over to send the video from the beginning."
+        }
+        YoutubeError::Io { .. } => "Couldn’t read the file. Check that it’s still there and readable, then try again.",
+        YoutubeError::Protocol(_) | YoutubeError::Json(_) => {
+            "YouTube answered in a way VideoCRM didn’t expect. Try again in a few minutes."
+        }
+        YoutubeError::NoChannel => {
+            "This Google account has no YouTube channel yet. Create one on youtube.com, then connect again."
+        }
+        YoutubeError::OAuth { .. } => "Google didn’t accept the sign-in. Connect again to retry.",
+        YoutubeError::AccessDenied => "The sign-in was cancelled in the browser. Connect again and allow access.",
+        YoutubeError::Timeout => "The sign-in took too long. Connect again to start over.",
+        YoutubeError::Cancelled { .. } => "The upload was cancelled.",
+        // VideoCRM's own checks, written as sentences already.
+        YoutubeError::InvalidInput(text) => return sentence(text),
+        error => return sentence(&error.to_string()),
+    };
+    message.to_owned()
+}
+
+/// A failed write to the credentials file, as the creator should read it.
+fn credentials_problem(title: &str, error: &YoutubeError) -> Problem {
+    eprintln!("videocrm: {title}: {error}");
+    Problem::new(
+        title.to_owned(),
+        "VideoCRM can’t write credentials.json in its data folder. Check that the folder is writable, then try again.",
+    )
+}
+
+/// Shows `problem` the way the shell shows every app problem.
+pub(super) fn report_problem(state: &Entity<AppState>, problem: Problem, cx: &mut App) {
+    state.update(cx, |state, cx| state.report_problem(problem, cx));
 }
 
 /// Library errors read like `network error: ...`; the UI shows sentences.
@@ -762,7 +880,7 @@ mod tests {
         let problem = backend_config(&google("GOCSPX-abc", "GOCSPX-abc")).0.unwrap_err();
         assert_eq!(
             problem.as_ref(),
-            "This isn't a Google OAuth client ID. Client IDs end with .apps.googleusercontent.com."
+            "This isn’t a Google OAuth client ID. Client IDs end with .apps.googleusercontent.com."
         );
         assert!(backend_config(&google("1234-abc.apps.googleusercontent", "GOCSPX-x")).0.is_err());
         let config = backend_config(&google(" id.apps.googleusercontent.com ", "GOCSPX-x")).0.unwrap();
@@ -806,11 +924,11 @@ mod tests {
     fn sign_in_failures_say_what_to_fix() {
         let google = YoutubeConfig::google("1-a.apps.googleusercontent.com", Some("GOCSPX-x".into()));
         let unknown_client = YoutubeError::OAuth { error: "invalid_client".into(), description: None };
-        assert!(sign_in_message(&unknown_client, &google).starts_with("Google doesn't recognise this client ID"));
+        assert!(sign_in_message(&unknown_client, &google).starts_with("Google doesn’t recognise this client ID"));
         let offline = YoutubeError::Http(ureq::Error::ConnectionFailed);
         assert_eq!(
             sign_in_message(&offline, &google),
-            "Can't reach Google. Check your internet connection and try again."
+            "Can’t reach Google. Check your internet connection and try again."
         );
         assert!(sign_in_message(&YoutubeError::Timeout, &google).contains("within 5 minutes"));
 
@@ -832,10 +950,35 @@ mod tests {
     #[test]
     fn outages_read_as_plain_language() {
         let offline = YoutubeError::Http(ureq::Error::ConnectionFailed);
-        assert_eq!(describe_error(&offline), "Can't reach YouTube. Check your internet connection and try again.");
+        assert_eq!(describe_error(&offline), "Can’t reach YouTube. Check your internet connection and try again.");
         let outage = YoutubeError::Api { status: 503, reason: "backendError".into(), message: "Backend Error".into() };
         assert_eq!(describe_error(&outage), "YouTube is having problems right now. Try again in a few minutes.");
         assert!(describe_error(&YoutubeError::ThumbnailsNotAllowed).contains("youtube.com/verify"));
+    }
+
+    #[test]
+    fn raw_library_text_stays_in_the_log() {
+        let refused = YoutubeError::Api {
+            status: 400,
+            reason: "badContent".into(),
+            message: "Content-Range total 400001000 does not match X-Upload-Content-Length 400000000.".into(),
+        };
+        assert_eq!(
+            describe_error(&refused),
+            "YouTube refused the request. Check the video’s details and file, then try again."
+        );
+        let quota = YoutubeError::Api { status: 403, reason: "quotaExceeded".into(), message: String::new() };
+        assert!(describe_error(&quota).starts_with("The YouTube API quota for today is used up."));
+        let unreadable = YoutubeError::Io {
+            context: "opening /videos/final.mp4".into(),
+            source: io::Error::from(io::ErrorKind::PermissionDenied),
+        };
+        assert_eq!(
+            describe_error(&unreadable),
+            "Couldn’t read the file. Check that it’s still there and readable, then try again."
+        );
+        let odd = YoutubeError::Protocol("the upload server holds 10 of 10 bytes but did not finish the upload".into());
+        assert!(!describe_error(&odd).contains("bytes"));
     }
 
     #[test]

@@ -9,21 +9,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{DateTime, Local, Utc};
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, AppContext as _, Context, SharedString};
-use videocrm_core::{Privacy, StoreError, UploadId, UploadJob, UploadStatus, VideoId, VideoStatus, YoutubeLink};
+use videocrm_core::{
+    FileStamp, Privacy, StoreError, UploadId, UploadJob, UploadStatus, VideoId, VideoStatus, YoutubeLink,
+};
 use videocrm_youtube::{
     Error as YoutubeError, ProcessingStatus, RetryCause, UploadProgress, UploadStatus as YoutubeUploadStatus,
     UploadedVideo, VideoInfo, VideoMetadata, YoutubeClient,
 };
 
-use super::rules::{self, BlockingReason};
-use super::service::{YoutubeEvent, YoutubeService, describe_error, lock, push_notification, report_error};
+use super::rules::{self, AccountAccess, BlockingReason};
+use super::service::{YoutubeEvent, YoutubeService, describe_error, lock, push_notification, report_problem};
 use super::transfer::{PROGRESS_INTERVAL, Throttle, Transfer};
+use crate::state::Problem;
 
 /// Status message of jobs a previous run left mid-transfer with a session to resume.
 pub const INTERRUPTED_RESUMABLE: &str = "Interrupted — you can resume";
@@ -35,6 +38,8 @@ const PROCESSING_POLLS: usize = 24;
 /// Uploading progress is written to the database in this many steps, so the
 /// videos table and an interrupted job show roughly how far it got.
 const PERSISTED_STEPS: f32 = 10.0;
+/// What a stopped upload says once YouTube no longer takes the rest of its file.
+const SESSION_GONE: &str = "YouTube can’t continue this upload. Start over to send the video from the beginning.";
 
 /// Why an upload did not start.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,7 +49,10 @@ pub enum UploadError {
     UnknownUpload,
     AlreadyUploading,
     NotResumable,
-    Storage(String),
+    /// The upload stopped sending a file that is no longer the one to upload.
+    Stale(Retired),
+    /// The job couldn't be stored; the cause is in the log.
+    Storage,
 }
 
 impl fmt::Display for UploadError {
@@ -57,8 +65,21 @@ impl fmt::Display for UploadError {
             UploadError::UnknownVideo => write!(f, "This video no longer exists."),
             UploadError::UnknownUpload => write!(f, "This upload no longer exists."),
             UploadError::AlreadyUploading => write!(f, "This video is already uploading."),
-            UploadError::NotResumable => write!(f, "This upload can't be resumed. Upload the video again."),
-            UploadError::Storage(error) => write!(f, "Couldn't save the upload: {error}."),
+            UploadError::NotResumable => write!(f, "This upload can’t be resumed. Upload the video again."),
+            UploadError::Stale(Retired::OtherFile) => {
+                write!(
+                    f,
+                    "Another file was chosen for this video since the upload stopped. Upload the video to send it."
+                )
+            }
+            UploadError::Stale(Retired::FileChanged) => {
+                write!(f, "The file changed since this upload started. Start over to upload the new version.")
+            }
+            UploadError::Stale(Retired::Replaced) => write!(f, "A newer upload of this video took its place."),
+            UploadError::Storage => write!(
+                f,
+                "Couldn’t save the upload. Check that the disk isn’t full and the data folder is writable, then try again."
+            ),
         }
     }
 }
@@ -74,6 +95,29 @@ pub enum ProcessingOutcome {
     StillProcessing,
 }
 
+/// Why a stopped upload no longer offers Resume: its YouTube session would send
+/// something other than the video's file as it is now, or a second copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Retired {
+    /// Another file was chosen for the video since.
+    OtherFile,
+    /// The file changed on disk since the upload started.
+    FileChanged,
+    /// A newer upload of the video took its place.
+    Replaced,
+}
+
+impl Retired {
+    /// What happened, as the stopped job's status says it.
+    pub fn message(self) -> &'static str {
+        match self {
+            Retired::OtherFile => "Another file was chosen for the video since, so this upload can’t be resumed.",
+            Retired::FileChanged => "The file changed since this upload started, so it can’t be resumed.",
+            Retired::Replaced => "A newer upload of the video took its place.",
+        }
+    }
+}
+
 /// The worker is waiting to try again after a passing failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Retry {
@@ -87,8 +131,8 @@ impl Retry {
     /// What went wrong, as a short status title.
     pub fn headline(&self) -> &'static str {
         match self.cause {
-            RetryCause::Network => "Can't reach YouTube",
-            RetryCause::Server => "YouTube isn't responding",
+            RetryCause::Network => "Can’t reach YouTube",
+            RetryCause::Server => "YouTube isn’t responding",
             RetryCause::RateLimited => "YouTube is busy",
         }
     }
@@ -106,9 +150,21 @@ pub(super) struct ActiveUpload {
     transfer: Transfer,
     /// Most bytes sent so far; progress past it after a retry means the retry worked.
     high_water: u64,
-    retry: Option<(Retry, u64)>,
+    retry: Option<Retrying>,
+    /// Continues an earlier session rather than opening one.
+    resumed: bool,
     /// The upload title, for a notice if the video is deleted while it uploads.
     title: String,
+}
+
+/// A retry in progress and what it is measured against.
+#[derive(Clone, Copy, Debug)]
+struct Retrying {
+    retry: Retry,
+    /// The high-water mark when the retry began; getting past it means it worked.
+    mark: u64,
+    /// What YouTube holds: the worker steps back to it after a failed request.
+    confirmed: u64,
 }
 
 impl ActiveUpload {
@@ -156,7 +212,18 @@ impl YoutubeService {
 
     /// The passing failure a running upload is retrying after, until it gets further.
     pub fn retry(&self, id: UploadId) -> Option<Retry> {
-        self.active.get(&id).and_then(|upload| upload.retry).map(|(retry, _)| retry)
+        self.active.get(&id).and_then(|upload| upload.retry).map(|retrying| retrying.retry)
+    }
+
+    /// How far a running upload got, `0.0..=1.0`. While it retries after a failure,
+    /// only what YouTube confirmed counts: bytes in flight may be lost again.
+    pub fn progress(&self, id: UploadId) -> Option<f32> {
+        let upload = self.active.get(&id)?;
+        let total = upload.transfer.total();
+        Some(match upload.retry {
+            Some(retrying) if total > 0 => (retrying.confirmed as f64 / total as f64).clamp(0.0, 1.0) as f32,
+            _ => upload.transfer.fraction(),
+        })
     }
 
     pub fn is_cancelling(&self, id: UploadId) -> bool {
@@ -184,11 +251,84 @@ impl YoutubeService {
             && matches!(job.status, UploadStatus::Failed { .. } | UploadStatus::Cancelled)
     }
 
+    /// Why a stopped upload stopped offering Resume during this run of the app.
+    pub fn retired(&self, id: UploadId) -> Option<Retired> {
+        self.retired.get(&id).copied()
+    }
+
+    /// Stops offering Resume for uploads whose video has another file now, and
+    /// checks in the background that the files of the others haven't changed: a
+    /// session continues the bytes it was opened for, whatever the file holds now.
+    pub fn check_stopped_uploads(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let mut other_file = Vec::new();
+        let mut stamped = Vec::new();
+        for job in self.jobs.iter().filter(|job| self.is_resumable(job)) {
+            let chosen = state.video(job.video_id).and_then(|video| video.publish.file.as_ref());
+            if chosen != Some(&job.file) {
+                other_file.push(job.id);
+            } else if let Some(stamp) = job.file_stamp {
+                stamped.push((job.id, job.file.clone(), stamp));
+            }
+        }
+        for id in other_file {
+            self.retire(id, Retired::OtherFile, cx);
+        }
+        if stamped.is_empty() || self.checking_files {
+            return;
+        }
+        self.checking_files = true;
+        cx.spawn(async move |this, cx| {
+            let changed: Vec<UploadId> = cx
+                .background_spawn(async move {
+                    // A missing file is not a changed one: it may come back, and
+                    // resuming says it is missing.
+                    stamped
+                        .into_iter()
+                        .filter(|(_, file, stamp)| file_stamp(file).is_some_and(|now| now != *stamp))
+                        .map(|(id, ..)| id)
+                        .collect()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.checking_files = false;
+                for id in changed {
+                    // It may have been resumed or retired meanwhile.
+                    if this.job(id).is_some_and(|job| this.is_resumable(job)) {
+                        this.retire(id, Retired::FileChanged, cx);
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Drops the session of a stopped upload, so it no longer offers Resume.
+    fn retire(&mut self, id: UploadId, reason: Retired, cx: &mut Context<Self>) {
+        self.retired.insert(id, reason);
+        self.update_job(id, cx, |job| {
+            job.session_url = None;
+            // "Interrupted — you can resume" and the like no longer hold.
+            if let UploadStatus::Failed { error } = &mut job.status {
+                *error = reason.message().to_owned();
+            }
+        });
+    }
+
     /// What stops `video_id` from being uploaded now; empty when it is ready.
     pub fn blocking_reasons(&self, video_id: VideoId, cx: &App) -> Vec<BlockingReason> {
         let Some(video) = self.state.read(cx).video(video_id) else { return Vec::new() };
         let file_exists = video.publish.file.as_deref().is_some_and(Path::is_file);
-        rules::blocking_reasons(video, self.is_connected(), file_exists, Utc::now())
+        rules::blocking_reasons(video, self.account_access(), file_exists, Utc::now())
+    }
+
+    /// What uploads need from the account before they can start.
+    fn account_blocker(&self) -> BlockingReason {
+        match self.account_access() {
+            AccountAccess::NeedsSignIn => BlockingReason::NeedsSignIn,
+            _ => BlockingReason::NotConnected,
+        }
     }
 
     /// Validates `video_id`, records a new upload job and starts sending the file.
@@ -202,38 +342,63 @@ impl YoutubeService {
             return Err(UploadError::Blocked(reasons));
         }
         let (Some(client), Some(file)) = (self.client.clone(), video.publish.file.clone()) else {
-            return Err(UploadError::Blocked(vec![BlockingReason::NotConnected]));
+            return Err(UploadError::Blocked(vec![self.account_blocker()]));
         };
-        let total = file_len(&file).ok_or(UploadError::Blocked(vec![BlockingReason::FileMissing]))?;
+        let stamp = file_stamp(&file).ok_or(UploadError::Blocked(vec![BlockingReason::FileMissing]))?;
         let now = Utc::now();
         let job = UploadJob {
             id: UploadId::new(),
             video_id,
             file: file.clone(),
+            file_stamp: Some(stamp),
             status: UploadStatus::Pending,
             session_url: None,
             created_at: now,
             updated_at: now,
         };
-        lock(&self.store(cx)).insert_upload(&job).map_err(|error| UploadError::Storage(error.to_string()))?;
+        lock(&self.store(cx)).insert_upload(&job).map_err(|error| {
+            eprintln!("videocrm: couldn't save the upload: {error}");
+            UploadError::Storage
+        })?;
+        // Resuming an earlier, stopped upload as well would put a second copy on YouTube.
+        let stopped: Vec<UploadId> = self
+            .jobs
+            .iter()
+            .filter(|earlier| earlier.video_id == video_id && self.is_resumable(earlier))
+            .map(|earlier| earlier.id)
+            .collect();
+        for id in stopped {
+            self.retire(id, Retired::Replaced, cx);
+        }
         self.reload_jobs(cx);
-        self.spawn_transfer(job.id, client, file, total, Request::Upload(Box::new(rules::metadata(&video))), cx);
+        self.spawn_transfer(job.id, client, file, stamp.size, Request::Upload(Box::new(rules::metadata(&video))), cx);
         Ok(job.id)
     }
 
     /// Continues a stopped upload from wherever the YouTube session got to.
     pub fn resume_upload(&mut self, id: UploadId, cx: &mut Context<Self>) -> Result<(), UploadError> {
         let job = self.job(id).cloned().ok_or(UploadError::UnknownUpload)?;
-        if self.is_active(id) {
+        if self.is_uploading_any(&[job.video_id]) {
             return Err(UploadError::AlreadyUploading);
         }
         let Some(session_url) = job.session_url.clone().filter(|_| self.is_resumable(&job)) else {
             return Err(UploadError::NotResumable);
         };
         let Some(client) = self.client.clone() else {
-            return Err(UploadError::Blocked(vec![BlockingReason::NotConnected]));
+            return Err(UploadError::Blocked(vec![self.account_blocker()]));
         };
-        let total = file_len(&job.file).ok_or(UploadError::Blocked(vec![BlockingReason::FileMissing]))?;
+        // The session takes the rest of the bytes it was opened for, and nothing else.
+        let chosen = self.state.read(cx).video(job.video_id).and_then(|video| video.publish.file.clone());
+        if chosen.as_ref() != Some(&job.file) {
+            self.retire(id, Retired::OtherFile, cx);
+            return Err(UploadError::Stale(Retired::OtherFile));
+        }
+        let stamp = file_stamp(&job.file).ok_or(UploadError::Blocked(vec![BlockingReason::FileMissing]))?;
+        if job.file_stamp.is_some_and(|recorded| recorded != stamp) {
+            self.retire(id, Retired::FileChanged, cx);
+            return Err(UploadError::Stale(Retired::FileChanged));
+        }
+        let total = stamp.size;
         if self.spawn_transfer(id, client, job.file, total, Request::Resume(session_url), cx) {
             self.update_job(id, cx, |job| job.status = UploadStatus::Uploading { sent: 0, total });
         }
@@ -261,19 +426,23 @@ impl YoutubeService {
         let cancel = Arc::new(AtomicBool::new(false));
         let (sender, mut messages) = mpsc::unbounded();
         let title = self.video_title(id, cx);
+        let resumed = matches!(request, Request::Resume(_));
         let worker = (client.clone(), cancel.clone());
         let spawned = thread::Builder::new()
             .name("youtube-upload".into())
             .spawn(move || transfer_file(&worker.0, &file, &request, &worker.1, &sender));
         if let Err(error) = spawned {
+            eprintln!("videocrm: couldn't start the upload thread: {error}");
             self.update_job(id, cx, |job| {
-                job.status = UploadStatus::Failed { error: format!("Couldn't start the upload: {error}.") }
+                job.status = UploadStatus::Failed {
+                    error: "Couldn’t start the upload. Quit VideoCRM and open it again, then retry.".to_owned(),
+                }
             });
             return false;
         }
         self.active.insert(
             id,
-            ActiveUpload { cancel, client, transfer: Transfer::new(total), high_water: 0, retry: None, title },
+            ActiveUpload { cancel, client, transfer: Transfer::new(total), high_water: 0, retry: None, resumed, title },
         );
         cx.spawn(async move |this, cx| {
             while let Some(message) = messages.next().await {
@@ -305,9 +474,15 @@ impl YoutubeService {
                 let Some(upload) = self.active.get_mut(&id) else { return };
                 let step = |transfer: &Transfer| (transfer.fraction() * PERSISTED_STEPS).floor();
                 let before = step(&upload.transfer);
+                // After a failed request the worker steps back to what YouTube holds.
+                if let Some(retrying) = upload.retry.as_mut()
+                    && sent < upload.transfer.sent()
+                {
+                    retrying.confirmed = sent;
+                }
                 upload.transfer.record(at, sent, total);
                 upload.high_water = upload.high_water.max(sent);
-                if upload.retry.is_some_and(|(_, mark)| sent > mark) {
+                if upload.retry.is_some_and(|retrying| sent > retrying.mark) {
                     upload.retry = None;
                 }
                 if step(&upload.transfer) > before && sent < total {
@@ -317,7 +492,10 @@ impl YoutubeService {
             }
             UploadMessage::Retrying(retry) => {
                 let Some(upload) = self.active.get_mut(&id) else { return };
-                upload.retry = Some((retry, upload.high_water));
+                // The worker reported what YouTube holds just before.
+                let confirmed = upload.transfer.sent();
+                let mark = upload.retry.map_or(upload.high_water, |retrying| retrying.mark);
+                upload.retry = Some(Retrying { retry, mark, confirmed });
                 cx.notify();
             }
             UploadMessage::Finished(result) => {
@@ -334,7 +512,7 @@ impl YoutubeService {
                         job.status = UploadStatus::Cancelled;
                         job.session_url = session_url.or(job.session_url.take());
                     }),
-                    Err(error) => self.on_upload_failed(id, &error, cx),
+                    Err(error) => self.on_upload_failed(id, &error, upload.resumed, cx),
                 }
             }
         }
@@ -348,7 +526,7 @@ impl YoutubeService {
         push_notification(cx, move || {
             Notification::warning(
                 "The upload finished before the video was deleted, so it is on your channel. \
-                 Remove it in YouTube Studio if you don't want it there.",
+                 Remove it in YouTube Studio if you don’t want it there.",
             )
             .title(format!("“{title}” reached YouTube"))
             .action(move |_, _, _| {
@@ -375,6 +553,7 @@ impl YoutubeService {
             }
             self.outcomes.remove(id);
             self.thumbnail_problems.remove(id);
+            self.retired.remove(id);
         }
         self.jobs.retain(|job| !gone.contains(&job.id));
         cx.emit(YoutubeEvent::UploadsChanged);
@@ -386,14 +565,27 @@ impl YoutubeService {
         self.active.keys().any(|id| self.job(*id).is_some_and(|job| video_ids.contains(&job.video_id)))
     }
 
-    fn on_upload_failed(&mut self, id: UploadId, error: &YoutubeError, cx: &mut Context<Self>) {
-        let message = describe_error(error);
-        // An expired session, or one the current connection refuses to use (another
-        // backend's after a switch) or a changed file, can't take the rest of the file.
-        let session_unusable = matches!(error, YoutubeError::SessionExpired | YoutubeError::InvalidInput(_));
+    fn on_upload_failed(&mut self, id: UploadId, error: &YoutubeError, resumed: bool, cx: &mut Context<Self>) {
+        // A session YouTube no longer has (404/410), one that refuses the bytes sent
+        // (400, such as a file that changed size), or one the current connection
+        // can't use (another backend's after a switch) can't take the rest of the file.
+        let had_session = self.job(id).is_some_and(|job| job.session_url.is_some());
+        let session_gone = had_session
+            && match error {
+                YoutubeError::SessionExpired => true,
+                YoutubeError::Api { status, .. } => *status == 400,
+                YoutubeError::InvalidInput(_) => resumed,
+                _ => false,
+            };
+        let message = if session_gone {
+            eprintln!("videocrm: youtube: {error}");
+            SESSION_GONE.to_owned()
+        } else {
+            describe_error(error)
+        };
         self.update_job(id, cx, |job| {
             job.status = UploadStatus::Failed { error: message.clone() };
-            if session_unusable {
+            if session_gone {
                 job.session_url = None;
             }
         });
@@ -401,7 +593,8 @@ impl YoutubeService {
             self.require_sign_in(cx);
         }
         let title = self.video_title(id, cx);
-        push_notification(cx, move || Notification::error(message).title(format!("Couldn't upload “{title}”")));
+        let headline = if resumed { "Couldn’t resume" } else { "Couldn’t upload" };
+        push_notification(cx, move || Notification::error(message).title(format!("{headline} “{title}”")));
     }
 
     fn on_uploaded(
@@ -425,8 +618,10 @@ impl YoutubeService {
                 privacy,
                 uploaded_at: Utc::now(),
             });
-            if video.publish.publish_at.is_some() {
+            if let Some(publish_at) = video.publish.publish_at {
                 video.status = VideoStatus::Scheduled;
+                // YouTube publishes it then, whatever the planner said before.
+                video.publish_date = Some(publish_at.with_timezone(&Local).date_naive());
             } else if privacy != Privacy::Private {
                 video.status = VideoStatus::Published;
             }
@@ -475,7 +670,7 @@ impl YoutubeService {
                     this.thumbnail_problems.insert(id, message.clone());
                     cx.notify();
                     push_notification(cx, move || {
-                        Notification::warning(message).title(format!("The thumbnail of “{title}” wasn't set"))
+                        Notification::warning(message).title(format!("The thumbnail of “{title}” wasn’t set"))
                     });
                 })
                 .ok();
@@ -562,7 +757,7 @@ impl YoutubeService {
                     self.state.update(cx, |state, cx| state.reload(cx));
                 }
             }
-            Err(error) => report_error(&self.state, format!("Couldn't check interrupted uploads: {error}"), cx),
+            Err(error) => report_problem(&self.state, Problem::store("Couldn’t check interrupted uploads", &error), cx),
         }
     }
 
@@ -574,7 +769,7 @@ impl YoutubeService {
             Ok(()) => {}
             // The video, and its uploads with it, were deleted meanwhile.
             Err(StoreError::NotFound { .. }) => {}
-            Err(error) => report_error(&self.state, format!("Couldn't save the upload status: {error}"), cx),
+            Err(error) => report_problem(&self.state, Problem::store("Couldn’t save the upload status", &error), cx),
         }
         self.reload_jobs(cx);
     }
@@ -582,7 +777,7 @@ impl YoutubeService {
     fn reload_jobs(&mut self, cx: &mut Context<Self>) {
         match lock(&self.store(cx)).list_uploads(None) {
             Ok(jobs) => self.jobs = jobs,
-            Err(error) => report_error(&self.state, format!("Couldn't load the uploads: {error}"), cx),
+            Err(error) => report_problem(&self.state, Problem::store("Couldn’t load the uploads", &error), cx),
         }
         // Rows carry the latest upload status.
         self.state.update(cx, |state, cx| state.reload(cx));
@@ -638,15 +833,17 @@ fn processed(info: &VideoInfo) -> Option<Result<ProcessingOutcome, String>> {
             YoutubeUploadStatus::Failed | YoutubeUploadStatus::Rejected | YoutubeUploadStatus::Deleted
         );
     if failed {
-        return Some(Err("YouTube couldn't process the video. Check it in YouTube Studio.".to_owned()));
+        return Some(Err("YouTube couldn’t process the video. Check it in YouTube Studio.".to_owned()));
     }
     let ready = info.processing_status == Some(ProcessingStatus::Succeeded)
         || info.upload_status == YoutubeUploadStatus::Processed;
     ready.then_some(Ok(ProcessingOutcome::Ready))
 }
 
-fn file_len(path: &Path) -> Option<u64> {
-    fs::metadata(path).ok().filter(|metadata| metadata.is_file()).map(|metadata| metadata.len())
+/// Size and modification time of the file at `path`; `None` when there is none.
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = fs::metadata(path).ok().filter(|metadata| metadata.is_file())?;
+    Some(FileStamp { size: metadata.len(), modified: metadata.modified().ok().map(DateTime::<Utc>::from) })
 }
 
 #[cfg(test)]
@@ -689,6 +886,10 @@ mod tests {
     fn upload_errors_read_as_sentences() {
         let blocked = UploadError::Blocked(vec![BlockingReason::NotConnected, BlockingReason::EmptyTitle]);
         assert_eq!(blocked.to_string(), "Connect a YouTube account. Add a title.");
-        assert_eq!(UploadError::NotResumable.to_string(), "This upload can't be resumed. Upload the video again.");
+        assert_eq!(UploadError::NotResumable.to_string(), "This upload can’t be resumed. Upload the video again.");
+        assert_eq!(
+            UploadError::Stale(Retired::FileChanged).to_string(),
+            "The file changed since this upload started. Start over to upload the new version."
+        );
     }
 }

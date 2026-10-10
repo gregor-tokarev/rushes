@@ -12,12 +12,14 @@ use gpui_kit::{
     AnyElement, App, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
 };
-use videocrm_core::{UploadJob, UploadStatus};
+use videocrm_core::{TagColor, UploadJob, UploadStatus};
 
+use super::rules::AccountAccess;
 use super::service::YoutubeService;
 use super::transfer::{format_bytes, format_eta, format_speed};
 use super::ui::{file_name, upload_chip, upload_label, youtube_link};
 use super::upload::ProcessingOutcome;
+use crate::database::Chip;
 use crate::route::{Route, VideoTab};
 use crate::state::AppState;
 use crate::ui::{
@@ -73,6 +75,8 @@ impl UploadsPage {
             Some(RowAction::Cancel)
         } else if service.is_resumable(job) {
             Some(RowAction::Resume)
+        } else if service.is_off_youtube(job, cx) {
+            None
         } else {
             watch_url(job).map(|_| RowAction::Open)
         }
@@ -85,7 +89,7 @@ impl UploadsPage {
             RowAction::Resume => {
                 if let Err(error) = self.service.update(cx, |service, cx| service.resume_upload(id, cx)) {
                     window.push_notification(
-                        Notification::error(error.to_string()).title("Couldn't resume the upload"),
+                        Notification::error(error.to_string()).title("Couldn’t resume the upload"),
                         cx,
                     );
                 }
@@ -105,9 +109,13 @@ impl UploadsPage {
         let title = video.map_or_else(|| "Deleted video".to_owned(), |video| display_title(video.upload_title()));
         let icon = video.and_then(|video| video.icon.clone());
         let transfer = service.transfer(job.id);
+        // While a retry runs, what YouTube confirmed rather than what was in flight.
+        let progress = service.progress(job.id);
         let cancelling = service.is_cancelling(job.id);
+        let off_youtube = service.is_off_youtube(job, cx);
         let detail: Option<SharedString> = match (&job.status, transfer) {
             _ if cancelling => Some("Stopping…".into()),
+            _ if off_youtube => Some("YouTube no longer has this video.".into()),
             _ if let Some(retry) = service.retry(job.id) => {
                 Some(format!("{}. {}", retry.headline(), retry.detail()).into())
             }
@@ -120,6 +128,7 @@ impl UploadsPage {
                 Some(parts.join(" · ").into())
             }
             (UploadStatus::Failed { error }, None) => Some(error.clone().into()),
+            (UploadStatus::Cancelled, None) => service.retired(job.id).map(|reason| reason.message().into()),
             (UploadStatus::Processing { .. }, None) => Some("YouTube is processing the video.".into()),
             (UploadStatus::Done { .. }, None) if let Some(problem) = service.thumbnail_problem(job.id) => {
                 Some(format!("Thumbnail not set. {problem}").into())
@@ -132,7 +141,7 @@ impl UploadsPage {
             _ => None,
         };
         let id = job.id.to_string();
-        let connected = service.is_connected();
+        let access = service.account_access();
         // The row itself opens the video's Publish tab; the trailing lane holds
         // what the job allows besides that.
         let action: Option<AnyElement> = match self.row_action(job, cx) {
@@ -146,7 +155,12 @@ impl UploadsPage {
                     .on_click(cx.listener(move |this, _, window, cx| this.run(action, &job, window, cx)));
                 Some(
                     match action {
-                        RowAction::Resume if !connected => button.disabled(true).tooltip("Connect YouTube to resume"),
+                        RowAction::Resume if access == AccountAccess::NeedsSignIn => {
+                            button.disabled(true).tooltip("Sign in to YouTube again to resume")
+                        }
+                        RowAction::Resume if access == AccountAccess::NotConnected => {
+                            button.disabled(true).tooltip("Connect YouTube to resume")
+                        }
                         RowAction::Cancel if cancelling => button.disabled(true),
                         _ => button,
                     }
@@ -155,8 +169,11 @@ impl UploadsPage {
             }
             None => None,
         };
-        let status_label =
-            upload_label(&job.status, transfer.map(|transfer| transfer.fraction()), service.is_resumable(job));
+        let status_label = if off_youtube {
+            "Not on YouTube".to_owned()
+        } else {
+            upload_label(&job.status, progress, service.is_resumable(job))
+        };
         let [video_column, status, started, updated, actions] = COLUMNS;
         let video_id = job.video_id;
         let row = TableRowButton::new(SharedString::from(format!("upload-{id}")), format!("{title}, {status_label}"))
@@ -178,15 +195,15 @@ impl UploadsPage {
                     .w_full()
                     .min_w_0()
                     .gap_1()
-                    .child(h_flex().child(upload_chip(
-                        &job.status,
-                        transfer.map(|transfer| transfer.fraction()),
-                        service.is_resumable(job),
-                    )))
-                    .when_some(transfer, |this, transfer| {
+                    .child(h_flex().child(if off_youtube {
+                        Chip::new("Not on YouTube", TagColor::Gray).dot(true)
+                    } else {
+                        upload_chip(&job.status, progress, service.is_resumable(job))
+                    }))
+                    .when_some(progress, |this, progress| {
                         this.child(
                             Progress::new(SharedString::from(format!("upload-{id}-progress")))
-                                .value(transfer.fraction() * 100.0)
+                                .value(progress * 100.0)
                                 .xsmall()
                                 .accessibility_label("Upload progress"),
                         )
@@ -200,7 +217,15 @@ impl UploadsPage {
                                 .truncate()
                                 .tooltip({
                                     let detail = detail.clone();
-                                    move |window, cx| Tooltip::new(detail.clone()).build(window, cx)
+                                    // Long reasons wrap beside the row instead of one line
+                                    // across the window.
+                                    move |window, cx| {
+                                        let detail = detail.clone();
+                                        Tooltip::element(move |_, _| {
+                                            div().max_w(TOOLTIP_MAX_WIDTH).child(detail.clone())
+                                        })
+                                        .build(window, cx)
+                                    }
                                 })
                                 .child(detail),
                         )
@@ -208,7 +233,8 @@ impl UploadsPage {
             )
             .cell(started, time_text(format_when(job.created_at, Local::now()), cx))
             .cell(updated, time_text(format_when(job.updated_at, Local::now()), cx))
-            .cell(actions, h_flex().children(action));
+            // Cancel and Resume act on their own; the page stays.
+            .action_cell(actions, h_flex().children(action));
         if video.is_none() {
             return row;
         }
@@ -232,6 +258,9 @@ impl UploadsPage {
         )
     }
 }
+
+/// Wide enough for a short sentence per line.
+const TOOLTIP_MAX_WIDTH: Rems = Rems(24.);
 
 /// Video, status, started, updated and the job's action; a narrow page drops
 /// the update time.

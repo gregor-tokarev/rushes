@@ -27,8 +27,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, ExternalPaths, FontWeight, InteractiveElement as _, IntoElement,
-    ObjectFit, ParentElement as _, PathPromptOptions, Pixels, Rems, Render, SharedString, Styled as _,
+    AnyElement, App, AppContext as _, Context, Div, Entity, ExternalPaths, FontWeight, InteractiveElement as _,
+    IntoElement, ObjectFit, ParentElement as _, PathPromptOptions, Pixels, Rems, Render, SharedString, Styled as _,
     StyledImage as _, Subscription, Task, Window, canvas, div, img, rems,
 };
 use videocrm_core::document::DEFAULT_WPM;
@@ -40,13 +40,13 @@ use videocrm_pipeline::{MediaInfo, kept_cuts};
 
 use super::chapters::{MIN_CHAPTERS, chapters, chapters_text, insert_chapters, timestamp};
 use super::rules::{
-    self, BlockingReason, CATEGORIES, Category, DESCRIPTION_MAX_BYTES, TAGS_MAX_CHARS, THUMBNAIL_MAX_BYTES,
-    TITLE_MAX_CHARS, tags_length,
+    self, AccountAccess, BlockingReason, CATEGORIES, Category, DESCRIPTION_MAX_BYTES, TAGS_MAX_CHARS,
+    THUMBNAIL_MAX_BYTES, TITLE_MAX_CHARS, tags_length,
 };
-use super::service::{YoutubeEvent, YoutubeService};
+use super::service::{Connection, YoutubeEvent, YoutubeService};
 use super::transfer::{format_bytes, format_duration, format_eta, format_speed};
 use super::ui::{ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, status_line, youtube_link};
-use super::upload::{ProcessingOutcome, UploadError};
+use super::upload::{ProcessingOutcome, Retired, UploadError};
 use crate::state::{AppEvent, AppState};
 use crate::ui::path_prompt::{self, PathKind, PathRequest};
 use crate::ui::warning_text;
@@ -82,7 +82,9 @@ impl SelectItem for CategoryItem {
 const NO_SECTIONS: &str = "Add Heading 2 sections to the script to make chapters.";
 const TOO_FEW_SECTIONS: &str =
     "YouTube shows chapters only for three or more sections of 10 seconds or longer. The script has fewer.";
-const SHORTS_HAVE_NO_CHAPTERS: &str = "Shorts don't have chapters on YouTube.";
+const SHORTS_HAVE_NO_CHAPTERS: &str = "Shorts don’t have chapters on YouTube.";
+/// Why the video file can't change right now.
+const FILE_LOCKED: &str = "The file can’t change while it uploads. Cancel the upload first.";
 
 /// Chapters YouTube will show, as description text.
 #[derive(Clone, Debug, PartialEq)]
@@ -282,11 +284,13 @@ impl PublishPanel {
                     this.schedule_save(Field::Visibility, cx);
                 }
             }),
-            // Coming back from the file manager or another app may bring new files.
+            // Coming back from the file manager or another app may bring new files,
+            // or a re-exported one that a stopped upload can no longer continue.
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     this.refresh_choices(cx);
                     this.refresh_file(cx);
+                    this.service.update(cx, |service, cx| service.check_stopped_uploads(cx));
                 }
             }),
             // Leaving the page or quitting must not lose the last edits.
@@ -323,6 +327,7 @@ impl PublishPanel {
         panel.refresh_file(cx);
         panel.refresh_thumbnail(cx);
         panel.refresh_youtube_video(cx);
+        panel.service.update(cx, |service, cx| service.check_stopped_uploads(cx));
         panel
     }
 
@@ -347,7 +352,7 @@ impl PublishPanel {
             (Some(path), Some(details)) if &details.path == path => details.size.is_some(),
             _ => true,
         };
-        rules::blocking_reasons(&video, self.service.read(cx).is_connected(), file_exists, Utc::now())
+        rules::blocking_reasons(&video, self.service.read(cx).account_access(), file_exists, Utc::now())
     }
 
     /// Saves pending form edits now instead of after the delay. Only the fields the form
@@ -597,9 +602,18 @@ impl PublishPanel {
         });
     }
 
+    /// Whether this video is uploading: its file must stay the one being sent.
+    fn is_uploading(&self, cx: &App) -> bool {
+        self.service.read(cx).is_uploading_any(&[self.video_id])
+    }
+
     /// Takes the first dropped file for the video file or the thumbnail.
     fn on_drop(&mut self, target: FileTarget, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = paths.paths().iter().find(|path| path.is_file()).cloned() else { return };
+        if target == FileTarget::Video && self.is_uploading(cx) {
+            window.push_notification(Notification::warning(FILE_LOCKED), cx);
+            return;
+        }
         match target {
             FileTarget::Video => self.set_file(Some(path), cx),
             FileTarget::Thumbnail => self.set_thumbnail(Some(path), window, cx),
@@ -663,10 +677,15 @@ impl PublishPanel {
         self.description.update(cx, |input, cx| input.replace_all(description, window, cx));
     }
 
+    /// Whether the video is on YouTube already, so another upload makes a second copy
+    /// and asks first.
+    fn uploaded_before(&self, cx: &App) -> bool {
+        self.state.read(cx).video(self.video_id).is_some_and(|video| video.youtube.is_some())
+    }
+
     fn start_upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.save_pending(cx);
-        let uploaded_before = self.state.read(cx).video(self.video_id).is_some_and(|video| video.youtube.is_some());
-        if !uploaded_before {
+        if !self.uploaded_before(cx) {
             self.upload_now(window, cx);
             return;
         }
@@ -691,16 +710,18 @@ impl PublishPanel {
         let started = self.service.update(cx, |service, cx| service.start_upload(video_id, cx));
         if let Err(error) = started {
             self.on_upload_refused(&error, cx);
-            window.push_notification(Notification::error(error.to_string()).title("Couldn't start the upload"), cx);
+            window.push_notification(Notification::error(error.to_string()).title("Couldn’t start the upload"), cx);
         }
     }
 
     fn resume_upload(&mut self, job: &UploadJob, window: &mut Window, cx: &mut Context<Self>) {
+        // A file just chosen in the form must count before the upload continues.
+        self.save_pending(cx);
         let id = job.id;
         let resumed = self.service.update(cx, |service, cx| service.resume_upload(id, cx));
         if let Err(error) = resumed {
             self.on_upload_refused(&error, cx);
-            window.push_notification(Notification::error(error.to_string()).title("Couldn't resume the upload"), cx);
+            window.push_notification(Notification::error(error.to_string()).title("Couldn’t resume the upload"), cx);
         }
     }
 
@@ -767,7 +788,7 @@ impl PublishPanel {
             .child(
                 FieldRow::new("Title")
                     .counter(title_len, TITLE_MAX_CHARS)
-                    .help("Leave empty to use the video's title.")
+                    .help("Leave empty to use the video’s title.")
                     .control(Input::new(&self.title).id("publish-title")),
             )
             .child(
@@ -884,7 +905,7 @@ impl PublishPanel {
                 .help("YouTube requires an answer for every video. Videos made for kids have comments and personalized ads turned off.")
                 .control(
                     RadioGroup::vertical("publish-made-for-kids")
-                        .children(["Yes, it's made for kids", "No, it's not made for kids"])
+                        .children(["Yes, it’s made for kids", "No, it’s not made for kids"])
                         .selected_index(Some(if self.draft.made_for_kids { 0 } else { 1 }))
                         .on_change(cx.listener(|this, ix: &usize, _, cx| {
                             this.draft.made_for_kids = *ix == 0;
@@ -912,7 +933,7 @@ impl PublishPanel {
                 let cancelling = service.is_cancelling(job.id);
                 let retry = service.retry(job.id).filter(|_| !cancelling);
                 let transfer = service.transfer(job.id);
-                let fraction = transfer.map_or(0.0, |transfer| transfer.fraction());
+                let fraction = service.progress(job.id).unwrap_or(0.0);
                 // Amount and speed on one line, time left on the next: the column is too
                 // narrow for one line, and a wrap in the middle of a figure reads badly.
                 // While retrying, speed and time left mean nothing.
@@ -975,7 +996,9 @@ impl PublishPanel {
                     ))
                     .into_any_element()
             }
-            Some(job @ UploadJob { status: UploadStatus::Processing { .. } | UploadStatus::Done { .. }, .. }) => {
+            Some(job @ UploadJob { status: UploadStatus::Processing { .. } | UploadStatus::Done { .. }, .. })
+                if !service.is_off_youtube(job, cx) =>
+            {
                 let processing = matches!(job.status, UploadStatus::Processing { .. });
                 let (icon, headline, detail) = match (processing, service.processing(job.id)) {
                     (true, _) | (false, Some(ProcessingOutcome::Processing)) => {
@@ -987,7 +1010,7 @@ impl PublishPanel {
                     (false, Some(ProcessingOutcome::StillProcessing)) => (
                         Some(IconName::CircleCheck),
                         "Uploaded to YouTube",
-                        Some("YouTube is still processing it. YouTube Studio shows when it's done."),
+                        Some("YouTube is still processing it. YouTube Studio shows when it’s done."),
                     ),
                     (false, None) => (Some(IconName::CircleCheck), "Uploaded to YouTube", None),
                 };
@@ -1078,10 +1101,12 @@ impl PublishPanel {
                                     .on_click(cx.listener(|this, _, window, cx| this.start_upload(window, cx))),
                             ),
                     )
-                    .when(!reasons.is_empty(), |this| this.child(render_blockers(&reasons, cx)))
+                    .when(!reasons.is_empty(), |this| this.child(render_blockers(&reasons, &self.service, cx)))
                     .into_any_element()
             }
-            Some(job) if service.is_resumable(job) => {
+            // Resume sends the rest of the file the upload started with, so only while
+            // that is still the chosen file.
+            Some(job) if service.is_resumable(job) && self.draft.file.as_ref() == Some(&job.file) => {
                 let status = match &job.status {
                     UploadStatus::Failed { error } => status_line(
                         IconName::TriangleAlert,
@@ -1118,41 +1143,33 @@ impl PublishPanel {
                             )
                             .child(
                                 Button::new("upload-again")
-                                    .label("Start over")
+                                    // Over a copy on YouTube, it asks first.
+                                    .label(if self.uploaded_before(cx) { "Start over…" } else { "Start over" })
                                     .small()
                                     .ghost()
                                     .disabled(!reasons.is_empty())
                                     .on_click(cx.listener(|this, _, window, cx| this.start_upload(window, cx))),
                             ),
                     )
-                    .map(|this| {
-                        if !service.is_connected() {
-                            this.child(help_text("Connect the account to resume.", cx))
-                        } else if reasons.is_empty() {
-                            this
-                        } else {
-                            // Resume only needs the account; starting over needs the whole form.
-                            this.child(render_blockers(&reasons, cx))
-                        }
+                    .map(|this| match service.account_access() {
+                        AccountAccess::NotConnected => this.child(help_text("Connect YouTube to resume.", cx)),
+                        AccountAccess::NeedsSignIn => this.child(
+                            v_flex()
+                                .gap_1p5()
+                                .child(help_text("Sign in to YouTube again to resume.", cx))
+                                .children(reconnect_button(&self.service, cx).map(|button| h_flex().child(button))),
+                        ),
+                        AccountAccess::Connected if reasons.is_empty() => this,
+                        // Resume only needs the account; starting over needs the whole form.
+                        AccountAccess::Connected => this.child(render_blockers(&reasons, &self.service, cx)),
                     })
                     .into_any_element()
             }
             failed => {
-                let failure = match failed.as_ref().map(|job| &job.status) {
-                    Some(UploadStatus::Failed { error }) => Some(error.clone()),
-                    _ => None,
-                };
+                let last = failed.as_ref().and_then(|job| self.last_upload_note(job, service, cx));
                 v_flex()
                     .gap_3()
-                    .when_some(failure, |this, error| {
-                        this.child(status_line(
-                            IconName::CircleAlert,
-                            theme.danger,
-                            "The last upload failed",
-                            Some(error.into()),
-                            cx,
-                        ))
-                    })
+                    .children(last)
                     .child(self.render_upload_button(reasons, cx))
                     .when_some(youtube_url, |this, url| this.child(open_link(url)))
                     .into_any_element()
@@ -1168,7 +1185,9 @@ impl PublishPanel {
             .child(
                 h_flex().child(
                     Button::new("upload-to-youtube")
-                        .label("Upload to YouTube")
+                        // The same command as on the done card: over a copy on YouTube,
+                        // it makes a second one and asks first.
+                        .label(if self.uploaded_before(cx) { "Upload again…" } else { "Upload to YouTube" })
                         .icon(IconName::Upload)
                         .primary()
                         .small()
@@ -1180,49 +1199,111 @@ impl PublishPanel {
                 if reasons.is_empty() {
                     this.when_some(summary, |this, summary| this.child(help_text(summary, cx)))
                 } else {
-                    this.child(render_blockers(&reasons, cx))
+                    this.child(render_blockers(&reasons, &self.service, cx))
                 }
             })
+    }
+
+    /// What the card says about the last upload when it didn't reach YouTube: why
+    /// it failed, or why a stopped one can't continue.
+    fn last_upload_note(&self, job: &UploadJob, service: &YoutubeService, cx: &App) -> Option<Div> {
+        let theme = cx.theme();
+        match &job.status {
+            UploadStatus::Failed { error } => Some(status_line(
+                IconName::CircleAlert,
+                theme.danger,
+                "The last upload failed",
+                Some(error.clone().into()),
+                cx,
+            )),
+            UploadStatus::Cancelled => {
+                let detail = if self.draft.file.as_ref() != Some(&job.file) {
+                    format!("It was sending {}, not the file chosen now.", file_name(&job.file))
+                } else if service.retired(job.id) == Some(Retired::FileChanged) {
+                    format!("{} changed since, so the upload starts from the beginning.", file_name(&job.file))
+                } else {
+                    return None;
+                };
+                let note = status_line(
+                    IconName::CirclePause,
+                    theme.muted_foreground,
+                    "Upload cancelled",
+                    Some(detail.into()),
+                    cx,
+                );
+                // Tests check that the note is on screen.
+                Some(div().child(note.id("upload-cancelled-note").test_support()))
+            }
+            // It reached YouTube, and is gone from there since.
+            UploadStatus::Processing { .. } | UploadStatus::Done { .. } => {
+                let note = status_line(
+                    IconName::CircleAlert,
+                    theme.warning,
+                    "Not on YouTube anymore",
+                    Some("YouTube no longer has this video. It may have been deleted in YouTube Studio.".into()),
+                    cx,
+                );
+                // Tests check that the note is on screen.
+                Some(div().child(note.id("youtube-video-gone").test_support()))
+            }
+            _ => None,
+        }
     }
 
     fn render_file(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let panel = cx.weak_entity();
+        let uploading = self.is_uploading(cx);
         let current = self.draft.file.clone();
         let choices = self.choices.clone();
         let chosen = current.clone();
-        let picker = Button::new("choose-video-file")
-            .label(if current.is_some() { "Change" } else { "Choose" })
-            .small()
-            .outline()
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                // The film icons take the left side; the chosen file is ticked on the right.
-                let mut menu = menu.check_side(Side::Right);
-                for (ix, choice) in choices.iter().enumerate() {
-                    if ix == 0 || choices[ix - 1].source != choice.source {
-                        menu = menu.label(choice.source);
+        let label = if current.is_some() { "Change" } else { "Choose" };
+        let picker = if uploading {
+            // The upload sends this file, so the card must keep showing it. A disabled
+            // button would still open the menu, which owns the click.
+            Button::new("choose-video-file")
+                .label(label)
+                .small()
+                .outline()
+                .dropdown_caret(true)
+                .disabled(true)
+                .tooltip(FILE_LOCKED)
+                .into_any_element()
+        } else {
+            Button::new("choose-video-file")
+                .label(label)
+                .small()
+                .outline()
+                .dropdown_caret(true)
+                .dropdown_menu(move |menu, _, _| {
+                    // The film icons take the left side; the chosen file is ticked on the right.
+                    let mut menu = menu.check_side(Side::Right);
+                    for (ix, choice) in choices.iter().enumerate() {
+                        if ix == 0 || choices[ix - 1].source != choice.source {
+                            menu = menu.label(choice.source);
+                        }
+                        let (panel, path) = (panel.clone(), choice.path.clone());
+                        menu = menu.item(
+                            PopupMenuItem::new(file_name(&choice.path))
+                                .icon(IconName::Film)
+                                .checked(chosen.as_ref() == Some(&choice.path))
+                                .on_click(move |_, _, cx| {
+                                    panel.update(cx, |panel, cx| panel.set_file(Some(path.clone()), cx)).ok();
+                                }),
+                        );
                     }
-                    let (panel, path) = (panel.clone(), choice.path.clone());
-                    menu = menu.item(
-                        PopupMenuItem::new(file_name(&choice.path))
-                            .icon(IconName::Film)
-                            .checked(chosen.as_ref() == Some(&choice.path))
-                            .on_click(move |_, _, cx| {
-                                panel.update(cx, |panel, cx| panel.set_file(Some(path.clone()), cx)).ok();
-                            }),
-                    );
-                }
-                if !choices.is_empty() {
-                    menu = menu.separator();
-                }
-                let panel = panel.clone();
-                menu.item(PopupMenuItem::new("Choose file…").icon(IconName::FolderOpen).on_click(
-                    move |_, window, cx| {
-                        panel.update(cx, |panel, cx| panel.choose_file(window, cx, false)).ok();
-                    },
-                ))
-            });
+                    if !choices.is_empty() {
+                        menu = menu.separator();
+                    }
+                    let panel = panel.clone();
+                    menu.item(PopupMenuItem::new("Choose file…").icon(IconName::FolderOpen).on_click(
+                        move |_, window, cx| {
+                            panel.update(cx, |panel, cx| panel.choose_file(window, cx, false)).ok();
+                        },
+                    ))
+                })
+                .into_any_element()
+        };
 
         let body = match &current {
             Some(path) => {
@@ -1266,7 +1347,7 @@ impl PublishPanel {
                     .into_any_element()
             }
             None => help_text(
-                "Choose the AI edit's final cut, a take from the footage, or any video file. You can also drop one here.",
+                "Choose the AI edit’s final cut, a take from the footage, or any video file. You can also drop one here.",
                 cx,
             )
             .into_any_element(),
@@ -1382,19 +1463,18 @@ impl Render for PublishPanel {
             .child(self.render_details(cx))
             .child(self.render_visibility(cx))
             .child(self.render_audience(cx));
-        let side = v_flex()
-            .map(|this| if stacked { this.w_full() } else { this.w(SIDE_COLUMN_WIDTH).flex_shrink_0() })
-            .gap_6()
-            // The cards that clear the upload's blocking reasons follow it.
-            .child(self.render_upload(cx))
-            .child(
-                card("publish-account", "YouTube account")
-                    .child(ConnectionPanel::new("publish-connection", self.service.clone())),
-            )
-            .child(self.render_file(cx))
-            .child(self.render_thumbnail(cx));
+        let upload = self.render_upload(cx);
+        // The cards that clear the upload's blocking reasons follow it.
+        let cards = [
+            card("publish-account", "YouTube account")
+                .child(ConnectionPanel::new("publish-connection", self.service.clone()))
+                .into_any_element(),
+            self.render_file(cx).into_any_element(),
+            self.render_thumbnail(cx).into_any_element(),
+        ];
         // Too narrow for both columns (a small window, the rail beside it), the
-        // cards follow the form.
+        // Upload card (state, blockers, the upload button) comes first, so the tab
+        // opens on the next step; the other cards follow the form.
         let measure = {
             let width = self.width.clone();
             canvas(
@@ -1418,8 +1498,14 @@ impl Render for PublishPanel {
             .w_full()
             .map(|this| {
                 if stacked {
-                    this.flex().flex_col().gap_10().child(form).child(side)
+                    this.flex()
+                        .flex_col()
+                        .gap_10()
+                        .child(upload)
+                        .child(form)
+                        .child(v_flex().w_full().gap_6().children(cards))
                 } else {
+                    let side = v_flex().w(SIDE_COLUMN_WIDTH).flex_shrink_0().gap_6().child(upload).children(cards);
                     this.flex().flex_row().items_start().gap_8().child(form).child(side)
                 }
             })
@@ -1428,12 +1514,14 @@ impl Render for PublishPanel {
 }
 
 /// What stops the upload, one line each, so a disabled upload button never goes unexplained.
-fn render_blockers(reasons: &[BlockingReason], cx: &App) -> impl IntoElement {
+/// An expired sign-in comes with the way back.
+fn render_blockers(reasons: &[BlockingReason], service: &Entity<YoutubeService>, cx: &App) -> impl IntoElement {
     let muted = cx.theme().muted_foreground;
     v_flex()
         .id("upload-blockers")
         .gap_1()
         .children(reasons.iter().enumerate().map(|(ix, reason)| {
+            let reconnect = (*reason == BlockingReason::NeedsSignIn).then(|| reconnect_button(service, cx)).flatten();
             h_flex()
                 .gap_2()
                 .items_start()
@@ -1441,10 +1529,32 @@ fn render_blockers(reasons: &[BlockingReason], cx: &App) -> impl IntoElement {
                 .text_color(muted)
                 .child(div().pt_0p5().child(Icon::new(IconName::Circle).xsmall()))
                 // Wraps inside the narrow side column instead of running past the card.
-                .child(div().id(("upload-blocker", ix)).flex_1().min_w_0().child(reason.to_string()).test_support())
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1p5()
+                        .child(div().id(("upload-blocker", ix)).child(reason.to_string()).test_support())
+                        .children(reconnect.map(|button| h_flex().child(button))),
+                )
         }))
         // Tests check that the reasons are on screen.
         .test_support()
+}
+
+/// "Reconnect" for an expired sign-in; `None` while the settings can't sign in
+/// (the account card then offers to open them).
+fn reconnect_button(service: &Entity<YoutubeService>, cx: &App) -> Option<Button> {
+    let service = service.clone();
+    let usable =
+        matches!(service.read(cx).connection(), Connection::NeedsSignIn(_)) && service.read(cx).config().is_ok();
+    usable.then(|| {
+        Button::new("upload-reconnect")
+            .label("Reconnect")
+            .small()
+            .outline()
+            .on_click(move |_, _, cx| service.update(cx, |service, cx| service.connect(cx)))
+    })
 }
 
 /// `Private · goes public Mon, 12 Oct at 09:00`, or just who can watch.

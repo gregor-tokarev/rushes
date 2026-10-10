@@ -728,11 +728,21 @@ pub struct UploadJob {
     pub id: UploadId,
     pub video_id: VideoId,
     pub file: PathBuf,
+    /// `file` as it was when the upload started. A resume must send the same
+    /// bytes; `None` for jobs stored before stamps were recorded.
+    pub file_stamp: Option<FileStamp>,
     pub status: UploadStatus,
     /// Resumable session URL returned by YouTube; lets an interrupted upload continue.
     pub session_url: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// One version of a file: replacing or re-exporting it changes the stamp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileStamp {
+    pub size: u64,
+    pub modified: Option<DateTime<Utc>>,
 }
 
 /// A video plus the derived values the database views display.
@@ -779,6 +789,9 @@ impl VideoRow {
     pub fn youtube_state(&self) -> Option<YoutubeState<'_>> {
         match (&self.video.youtube, &self.latest_upload) {
             (Some(link), _) => Some(YoutubeState::Live(link)),
+            // The upload reached YouTube, but the app dropped the link since because
+            // YouTube no longer has the video: it isn't on YouTube.
+            (None, Some(UploadStatus::Processing { .. } | UploadStatus::Done { .. })) => None,
             (None, Some(upload)) => Some(YoutubeState::Upload(upload)),
             (None, None) => None,
         }
