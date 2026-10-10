@@ -1366,7 +1366,7 @@ mod tests {
 
         disk.execute_batch("DROP TRIGGER no_room").unwrap();
         assert_eq!(write_queue(&writer, &queue).written, 2);
-        assert_eq!(setup.list_properties().unwrap(), [property.clone()]);
+        assert_eq!(setup.list_properties().unwrap(), [property]);
         assert_eq!(setup.get_video(video.id).unwrap().unwrap().properties, video.properties);
     }
 
