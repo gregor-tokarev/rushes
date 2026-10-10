@@ -5,6 +5,7 @@
 //! opened video, and the other pages are created the first time they are shown.
 
 pub(crate) mod elements;
+mod launch_path;
 mod palette;
 mod sidebar;
 mod signals;
@@ -39,6 +40,7 @@ use crate::video_page::VideoPage;
 use crate::wizard;
 
 use palette::CommandPalette;
+pub use launch_path::extend_tool_path;
 pub use signals::on_termination_signal;
 pub use startup::{InstanceLock, StartupNotice, StartupProblem, open_startup_notice};
 pub use theme::{apply_theme, register_fonts};
