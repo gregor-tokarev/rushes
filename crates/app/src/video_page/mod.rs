@@ -427,7 +427,7 @@ impl VideoPage {
                 .child(PageIcon::new(Some(&icon)).size(PAGE_ICON_SIZE)),
             None => Button::new("page-icon")
                 .ghost()
-                .xsmall()
+                .small()
                 .icon(IconName::FaceSlightlySmilingPlus)
                 .label("Add icon")
                 .text_color(cx.theme().muted_foreground),

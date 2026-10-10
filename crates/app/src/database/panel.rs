@@ -1036,7 +1036,7 @@ impl DatabasePanel {
                                 .ghost()
                                 .small()
                                 .icon(IconName::Plus)
-                                .label("New video")
+                                .label("New video…")
                                 .text_color(cx.theme().muted_foreground)
                                 .on_click(move |_, _, cx| {
                                     _ = panel.update(cx, |panel, cx| panel.create_video_in_view(cx));

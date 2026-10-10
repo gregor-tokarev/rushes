@@ -95,7 +95,7 @@ impl DatabasePanel {
                 .accessibility_label(format!("New {} video", status.label().to_lowercase()))
                 .on_click(cx.listener(move |this, _, _, cx| this.create_video(Some(status), cx)))
         };
-        let add_button = new_in_column("board-add", cx).icon(IconName::Plus).tooltip("New video");
+        let add_button = new_in_column("board-add", cx).icon(IconName::Plus).tooltip("New video…");
         // A child instead of a label, so the content lines up with the cards'
         // leading edge rather than centering in the column.
         let new_button = new_in_column("board-new", cx).w_full().child(

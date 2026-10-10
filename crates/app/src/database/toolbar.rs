@@ -86,7 +86,7 @@ impl DatabasePanel {
                     .primary()
                     .small()
                     .icon(IconName::Plus)
-                    .label("New video")
+                    .label("New video…")
                     .on_click(cx.listener(|this, _, _, cx| this.create_video_in_view(cx))),
             );
         h_flex()

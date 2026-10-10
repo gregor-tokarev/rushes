@@ -295,7 +295,7 @@ impl Workspace {
                     .w_full()
                     .outline()
                     .icon(IconName::Plus)
-                    .label("New video")
+                    .label("New video…")
                     .when_some(shortcut, |this, hint| this.child(div().flex_1()).child(hint))
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(NewVideo), cx)),
             )

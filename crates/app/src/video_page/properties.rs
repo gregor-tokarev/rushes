@@ -743,7 +743,7 @@ impl Render for PropertiesPanel {
                 .child(
                     Button::new("show-properties")
                         .ghost()
-                        .xsmall()
+                        .small()
                         .icon(IconName::ChevronRight)
                         .label(format!("{count} properties"))
                         .on_click(cx.listener(|this, _, _, cx| this.set_collapsed(false, cx))),
@@ -785,7 +785,7 @@ impl Render for PropertiesPanel {
                     .child(
                         Button::new("add-property")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(IconName::Plus)
                             .label("Add property…")
                             .on_click(cx.listener(|this, _, window, cx| this.open_add_property(window, cx))),
@@ -793,7 +793,7 @@ impl Render for PropertiesPanel {
                     .child(
                         Button::new("hide-properties")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .icon(IconName::ChevronDown)
                             .label("Hide properties")
                             .on_click(cx.listener(|this, _, _, cx| this.set_collapsed(true, cx))),
