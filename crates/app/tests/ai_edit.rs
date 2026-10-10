@@ -158,11 +158,30 @@ fn fake_agent() -> PathBuf {
     fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/fake-agent")).expect("fake agent")
 }
 
+/// Writes an executable script at `path`, from a child process.
+///
+/// A file this process writes is open for writing until it is closed, and a
+/// process another test thread forks meanwhile inherits that descriptor and
+/// keeps it until it starts its own program. Running the script before then
+/// fails with "Text file busy" (ETXTBSY), which a loaded machine turns from a
+/// microsecond window into an occasional failure. Written by a child, the
+/// script is never open in this process, so no fork of ours can hold it.
+fn write_executable(path: &Path, script: &str) {
+    let written = Command::new("/bin/sh")
+        .args(["-c", r#"printf '%s' "$1" > "$2""#, "sh"])
+        .arg(script)
+        .arg(path)
+        .status()
+        .expect("run /bin/sh");
+    assert!(written.success(), "couldn't write {}", path.display());
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make it executable");
+}
+
 /// An agent that reports success without doing anything; with `LAZY_IS_ERROR=1` it
 /// reports an error result (like a turn limit) but still exits normally.
 fn lazy_agent(dir: &Path) -> PathBuf {
     let path = dir.join("lazy-agent");
-    fs::write(
+    write_executable(
         &path,
         r#"#!/bin/sh
 echo '{"type":"system","subtype":"init","session_id":"lazy-session","cwd":"/","tools":[],"model":"lazy"}'
@@ -172,9 +191,7 @@ else
   echo '{"type":"result","subtype":"success","is_error":false,"result":"All done.","session_id":"lazy-session","total_cost_usd":0.01}'
 fi
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     path
 }
 
@@ -183,7 +200,7 @@ fi
 /// With `RENDER_THEN_EXIT=1` it also exits with an error status.
 fn render_then_error_agent(dir: &Path) -> PathBuf {
     let path = dir.join("render-then-error-agent");
-    fs::write(
+    write_executable(
         &path,
         r#"#!/bin/sh
 echo '{"type":"system","subtype":"init","session_id":"rte-session","cwd":"/","tools":[],"model":"rte"}'
@@ -193,9 +210,7 @@ echo '{"type":"result","subtype":"error_max_turns","is_error":true,"session_id":
 [ "$RENDER_THEN_EXIT" = 1 ] && exit 1
 exit 0
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     path
 }
 
@@ -203,7 +218,7 @@ exit 0
 /// far taller than the activity box, then the result. It renders nothing.
 fn chatty_agent(dir: &Path) -> PathBuf {
     let path = dir.join("chatty-agent");
-    fs::write(
+    write_executable(
         &path,
         r#"#!/usr/bin/env python3
 import json, sys
@@ -223,9 +238,7 @@ summary = "The final cut is rendered: **`edit/final.mp4`**, 14.6s.\n\n" + "\n\n"
 assistant({"type": "text", "text": summary})
 out({"type": "result", "subtype": "success", "is_error": False, "result": summary, "total_cost_usd": 0.5})
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     path
 }
 
@@ -579,8 +592,7 @@ fn an_agent_command_that_is_not_claude_code_is_named_as_the_cause(cx: &mut TestA
     }
     let fx = Fixture::new(cx, &[]);
     let silent = fx.root.path().join("not-claude");
-    fs::write(&silent, "#!/bin/sh\necho 'true (GNU coreutils) 9.7'\n").unwrap();
-    fs::set_permissions(&silent, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&silent, "#!/bin/sh\necho 'true (GNU coreutils) 9.7'\n");
     cx.update(|cx| {
         fx.state.update(cx, |state, cx| {
             state.update_settings(cx, |settings| settings.pipeline.agent_command = silent.display().to_string())
