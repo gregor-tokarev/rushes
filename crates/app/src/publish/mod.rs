@@ -38,7 +38,7 @@ pub fn delete_upload_notice(video_ids: &[VideoId], cx: &App) -> Option<&'static 
     let service = YoutubeService::try_global(cx)?;
     let uploading = service.read(cx).is_uploading_any(video_ids);
     uploading.then_some(if video_ids.len() == 1 {
-        "It's uploading to YouTube right now: deleting it cancels the upload."
+        "It’s uploading to YouTube right now: deleting it cancels the upload."
     } else {
         "Some of them are uploading to YouTube right now: deleting them cancels those uploads."
     })

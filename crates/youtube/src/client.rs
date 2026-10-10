@@ -124,7 +124,7 @@ impl YoutubeClient {
         };
         let size = std::fs::metadata(path).map_err(|e| Error::io(format!("reading {}", path.display()), e))?.len();
         if size > MAX_THUMBNAIL_BYTES {
-            return Err(Error::InvalidInput("the thumbnail is larger than YouTube's 2 MB limit".to_owned()));
+            return Err(Error::InvalidInput("the thumbnail is larger than YouTube’s 2 MB limit".to_owned()));
         }
         let image = std::fs::read(path).map_err(|e| Error::io(format!("reading {}", path.display()), e))?;
         let url = format!("{}/thumbnails/set", self.config.upload_base);

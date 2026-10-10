@@ -108,7 +108,7 @@ All calls block; run them on a background thread and stream progress back to the
    `Error::is_network()`.
    `begin_authorization(&config)` binds `127.0.0.1:<random port>` (it refuses a Google
    config without client secret); open `pending.authorize_url()` in the browser;
-   `pending.wait(timeout, &cancel)` serves the redirect, shows a "You're signed in" page
+   `pending.wait(timeout, &cancel)` serves the redirect, shows a "You’re signed in" page
    and returns `Credentials`. Requests without this sign-in's `state` get an error page
    and are ignored. Check
    `credentials.has_scope("https://www.googleapis.com/auth/youtube.upload")`: Google lets
@@ -175,8 +175,8 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   every change. `connect` runs the sign-in on a `youtube-sign-in` thread. Before the
   browser opens it checks that the sign-in can work: for the emulators both must answer
   (the same probe as **Check**), and `check_client` must accept the OAuth client. Either
-  failure ends the sign-in at once with a sentence saying what to fix ("Google doesn't
-  recognise this client ID and secret…", "Can't reach Google…", "Neither emulator is
+  failure ends the sign-in at once with a sentence saying what to fix ("Google doesn’t
+  recognise this client ID and secret…", "Can’t reach Google…", "Neither emulator is
   answering…"). Then `begin_authorization` and the wait (up to 5 minutes) run, the consent
   page opens with `cx.open_url` and its URL is exposed for **Copy link**; `cancel` sets the
   wait's cancel flag. While waiting, the panel says to finish in the browser and, for
@@ -358,7 +358,7 @@ client in Google Cloud (free) and pastes it into VideoCRM. It takes about ten mi
    - Google warns "Google hasn't verified this app". Click **Continue**. This is expected
      for a personal OAuth client.
    - Leave all permission boxes ticked, especially "Manage your YouTube videos".
-   - When the page says "You're signed in", return to VideoCRM.
+   - When the page says "You’re signed in", return to VideoCRM.
 
 ### Limits to know about
 

@@ -102,6 +102,16 @@ impl Error {
         }
     }
 
+    /// What to tell people about an error answer that has a sentence of its own (quota,
+    /// upload limit, missing permission, rate limits, outages). `None` for other errors,
+    /// whose `Display` is meant for developers.
+    pub fn api_message(&self) -> Option<&'static str> {
+        match self {
+            Error::Api { status, reason, .. } => api_message(*status, reason),
+            _ => None,
+        }
+    }
+
     /// Session URL to pass to `resume_upload` after a cancelled upload.
     pub fn session_url(&self) -> Option<&str> {
         match self {
@@ -147,25 +157,29 @@ fn is_rate_limit(status: u16, reason: &str) -> bool {
 }
 
 fn describe_api_error(status: u16, reason: &str, message: &str) -> String {
-    match reason {
-        "quotaExceeded" => "The YouTube API quota for today is used up. It resets at midnight Pacific time; \
+    match api_message(status, reason) {
+        Some(sentence) => sentence.to_owned(),
+        None => format!("{message} (HTTP {status}, {reason})"),
+    }
+}
+
+/// A sentence for people for the answers that have one; `None` leaves Google's own text.
+fn api_message(status: u16, reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "quotaExceeded" => {
+            "The YouTube API quota for today is used up. It resets at midnight Pacific time; \
              each upload costs about 1,600 of the default 10,000 daily units."
-            .to_owned(),
-        "uploadLimitExceeded" => "This channel reached YouTube's upload limit. Try again in about 24 hours.".to_owned(),
+        }
+        "uploadLimitExceeded" => "This channel reached YouTube’s upload limit. Try again in about 24 hours.",
         "insufficientPermissions" => {
             "VideoCRM is missing permission to manage your YouTube videos. Connect the account \
              again and leave every permission box ticked."
-                .to_owned()
         }
-        _ if is_rate_limit(status, reason) => {
-            "YouTube is limiting requests right now. Try again in a few minutes.".to_owned()
-        }
+        _ if is_rate_limit(status, reason) => "YouTube is limiting requests right now. Try again in a few minutes.",
         // Google's own text ("Backend Error") tells the creator nothing.
-        _ if is_server_trouble(status) => {
-            "YouTube is having problems right now. Try again in a few minutes.".to_owned()
-        }
-        _ => format!("{message} (HTTP {status}, {reason})"),
-    }
+        _ if is_server_trouble(status) => "YouTube is having problems right now. Try again in a few minutes.",
+        _ => return None,
+    })
 }
 
 /// `{"error": {"code", "message", "errors": [{"reason", ...}]}}` from Google APIs, or
@@ -230,6 +244,7 @@ mod tests {
         let error = api_error(403, body);
         assert!(matches!(&error, Error::Api { status: 403, reason, .. } if reason == "quotaExceeded"));
         assert!(error.to_string().contains("quota for today is used up"));
+        assert_eq!(error.api_message(), Some(error.to_string().as_str()));
         assert!(!error.is_transient());
     }
 
@@ -239,6 +254,8 @@ mod tests {
             api_error(401, r#"{"error":{"code":401,"message":"Invalid Credentials","status":"UNAUTHENTICATED"}}"#);
         assert!(matches!(&error, Error::Api { reason, .. } if reason == "UNAUTHENTICATED"));
         assert!(error.needs_sign_in());
+        // Google's own text is for developers: there is no sentence for people.
+        assert_eq!(error.api_message(), None);
 
         let error = api_error(502, "<html>Bad Gateway</html>");
         assert!(

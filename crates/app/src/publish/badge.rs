@@ -52,7 +52,7 @@ impl AccountBadge {
                 ("Connecting YouTube…".to_owned(), Some("Finish in your browser".to_owned()))
             }
             Connection::NeedsSignIn(account) => (display_name(account), Some("Sign in again".to_owned())),
-            Connection::Failed(_) => ("Connect YouTube".to_owned(), Some("Couldn't connect".to_owned())),
+            Connection::Failed(_) => ("Connect YouTube".to_owned(), Some("Couldn’t connect".to_owned())),
             Connection::Disconnected => ("Connect YouTube".to_owned(), None),
         }
     }

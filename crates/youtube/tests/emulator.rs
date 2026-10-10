@@ -237,7 +237,7 @@ fn signs_in_and_reads_the_channel() {
         return;
     };
     let (credentials, page) = sign_in(&emulators, "creator@example.com");
-    assert!(page.contains("You're signed in"), "{page}");
+    assert!(page.contains("You’re signed in"), "{page}");
     assert!(credentials.refresh_token.is_some());
     assert!(credentials.id_token.is_some());
     assert!(credentials.has_scope("https://www.googleapis.com/auth/youtube.upload"));

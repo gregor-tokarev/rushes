@@ -89,7 +89,7 @@ impl UploadsPage {
             RowAction::Resume => {
                 if let Err(error) = self.service.update(cx, |service, cx| service.resume_upload(id, cx)) {
                     window.push_notification(
-                        Notification::error(error.to_string()).title("Couldn't resume the upload"),
+                        Notification::error(error.to_string()).title("Couldn’t resume the upload"),
                         cx,
                     );
                 }

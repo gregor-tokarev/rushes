@@ -749,7 +749,7 @@ impl PublishPanel {
         let started = self.service.update(cx, |service, cx| service.start_upload(video_id, cx));
         if let Err(error) = started {
             self.on_upload_refused(&error, cx);
-            window.push_notification(Notification::error(error.to_string()).title("Couldn't start the upload"), cx);
+            window.push_notification(Notification::error(error.to_string()).title("Couldn’t start the upload"), cx);
         }
     }
 
@@ -760,7 +760,7 @@ impl PublishPanel {
         let resumed = self.service.update(cx, |service, cx| service.resume_upload(id, cx));
         if let Err(error) = resumed {
             self.on_upload_refused(&error, cx);
-            window.push_notification(Notification::error(error.to_string()).title("Couldn't resume the upload"), cx);
+            window.push_notification(Notification::error(error.to_string()).title("Couldn’t resume the upload"), cx);
         }
     }
 
@@ -827,7 +827,7 @@ impl PublishPanel {
             .child(
                 FieldRow::new("Title")
                     .counter(title_len, TITLE_MAX_CHARS)
-                    .help("Leave empty to use the video's title.")
+                    .help("Leave empty to use the video’s title.")
                     .control(Input::new(&self.title).id("publish-title")),
             )
             .child(
@@ -944,7 +944,7 @@ impl PublishPanel {
                 .help("YouTube requires an answer for every video. Videos made for kids have comments and personalized ads turned off.")
                 .control(
                     RadioGroup::vertical("publish-made-for-kids")
-                        .children(["Yes, it's made for kids", "No, it's not made for kids"])
+                        .children(["Yes, it’s made for kids", "No, it’s not made for kids"])
                         .selected_index(Some(if self.draft.made_for_kids { 0 } else { 1 }))
                         .on_change(cx.listener(|this, ix: &usize, _, cx| {
                             this.draft.made_for_kids = *ix == 0;
@@ -1049,7 +1049,7 @@ impl PublishPanel {
                     (false, Some(ProcessingOutcome::StillProcessing)) => (
                         Some(IconName::CircleCheck),
                         "Uploaded to YouTube",
-                        Some("YouTube is still processing it. YouTube Studio shows when it's done."),
+                        Some("YouTube is still processing it. YouTube Studio shows when it’s done."),
                     ),
                     (false, None) => (Some(IconName::CircleCheck), "Uploaded to YouTube", None),
                 };
@@ -1386,7 +1386,7 @@ impl PublishPanel {
                     .into_any_element()
             }
             None => help_text(
-                "Choose the AI edit's final cut, a take from the footage, or any video file. You can also drop one here.",
+                "Choose the AI edit’s final cut, a take from the footage, or any video file. You can also drop one here.",
                 cx,
             )
             .into_any_element(),

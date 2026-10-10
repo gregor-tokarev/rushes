@@ -174,7 +174,7 @@ fn a_pending_form_edit_keeps_the_final_cut_ai_edit_chose(cx: &mut TestAppContext
     settle(cx);
     let publish = workspace.video(cx, video_id).publish;
     assert_eq!(publish.title, "My title");
-    assert_eq!(publish.file, Some(cut), "the form's save leaves the final cut in place");
+    assert_eq!(publish.file, Some(cut), "the form’s save leaves the final cut in place");
 }
 
 #[gpui_kit::test]
@@ -440,10 +440,18 @@ fn the_uploads_page_offers_what_each_job_allows(cx: &mut TestAppContext) {
     });
     assert_eq!(workspace.state.read_with(cx, |state, _| state.route().clone()), Route::default());
 
-    // Resume continues the file the video still has chosen.
+    // Resume continues the file the video still has chosen; the finished upload is on YouTube.
     let file = workspace.dir.path().join("final.mp4");
-    let video_id =
-        workspace.create_video(cx, "Why I left macOS for Linux", |video| video.publish.file = Some(file.clone()));
+    let video_id = workspace.create_video(cx, "Why I left macOS for Linux", |video| {
+        video.publish.file = Some(file.clone());
+        video.youtube = Some(YoutubeLink {
+            video_id: "dQw4w9WgXcQ".into(),
+            url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".into(),
+            channel_id: "UC1".into(),
+            privacy: Privacy::Unlisted,
+            uploaded_at: Utc::now(),
+        });
+    });
     let job = |status: UploadStatus, session_url: Option<&str>| UploadJob {
         id: UploadId::new(),
         video_id,
@@ -512,7 +520,7 @@ fn buttons_in_upload_rows_act_on_their_own(cx: &mut TestAppContext) {
         window.render_frame(cx);
         window.click(format!("upload-{upload}-cancel"), cx);
     });
-    assert_eq!(route(cx), Route::Uploads, "Cancel doesn't open the video");
+    assert_eq!(route(cx), Route::Uploads, "Cancel doesn’t open the video");
     wait_until(cx, "the cancellation", |cx| {
         service.read_with(cx, |s, _| s.job(upload).filter(|job| job.status == UploadStatus::Cancelled).map(|_| ()))
     });
@@ -520,7 +528,7 @@ fn buttons_in_upload_rows_act_on_their_own(cx: &mut TestAppContext) {
         window.render_frame(cx);
         window.click(format!("upload-{upload}-resume"), cx);
     });
-    assert_eq!(route(cx), Route::Uploads, "Resume doesn't open the video");
+    assert_eq!(route(cx), Route::Uploads, "Resume doesn’t open the video");
     assert!(service.read_with(cx, |s, _| s.is_active(upload)));
 
     // From the keyboard: Enter on the row's button presses the button.
@@ -638,7 +646,7 @@ fn youtube_settings_start_with_the_google_client_and_hide_the_emulator(cx: &mut 
         assert_eq!(window.find("youtube-client-secret").value(), None);
     });
     settle(cx);
-    assert!(problem(cx).is_some_and(|problem| problem.contains("isn't a Google OAuth client ID")));
+    assert!(problem(cx).is_some_and(|problem| problem.contains("isn’t a Google OAuth client ID")));
 
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
@@ -783,7 +791,7 @@ fn an_outage_shows_the_retry_on_the_upload_card(cx: &mut TestAppContext) {
         service.read_with(cx, |s, _| s.latest_job(video_id).and_then(|job| s.retry(job.id)))
     });
     assert_eq!((retry.attempt, retry.cause), (1, RetryCause::Server));
-    assert_eq!(retry.headline(), "YouTube isn't responding");
+    assert_eq!(retry.headline(), "YouTube isn’t responding");
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         // The card says what is going on instead of a frozen "Uploading… 100%".
@@ -1034,7 +1042,7 @@ fn the_done_card_shows_what_youtube_has_and_what_did_not_work(cx: &mut TestAppCo
     assert!(problem.contains("verified channels"), "{problem}");
 
     let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
-    let info = wait_until(cx, "YouTube's view of the video", |cx| {
+    let info = wait_until(cx, "YouTube’s view of the video", |cx| {
         service.read_with(cx, |s, _| s.youtube_video(&youtube_id).cloned())
     });
     assert_eq!(info.privacy, videocrm_youtube::Privacy::Private);

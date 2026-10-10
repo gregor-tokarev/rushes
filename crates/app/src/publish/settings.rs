@@ -60,7 +60,7 @@ const GOOGLE_STEPS: [SetupStep; 6] = [
 
 /// What Google shows during and after the sign-in, so none of it comes as a surprise.
 const GOOGLE_EXPECTATIONS: [&str; 4] = [
-    "Google warns that it hasn't verified the app. That's expected for your own client: click Continue.",
+    "Google warns that it hasn’t verified the app. That’s expected for your own client: click Continue.",
     "Leave every permission box ticked, especially “Manage your YouTube videos”.",
     "While the app is in Testing, Google ends the sign-in after 7 days. Reconnect here when VideoCRM asks.",
     "Until Google audits your project, YouTube keeps the videos it uploads private.",

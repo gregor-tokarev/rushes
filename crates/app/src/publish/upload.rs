@@ -24,8 +24,9 @@ use videocrm_youtube::{
 };
 
 use super::rules::{self, AccountAccess, BlockingReason};
-use super::service::{YoutubeEvent, YoutubeService, describe_error, lock, push_notification, report_error};
+use super::service::{YoutubeEvent, YoutubeService, describe_error, lock, push_notification, report_problem};
 use super::transfer::{PROGRESS_INTERVAL, Throttle, Transfer};
+use crate::state::Problem;
 
 /// Status message of jobs a previous run left mid-transfer with a session to resume.
 pub const INTERRUPTED_RESUMABLE: &str = "Interrupted — you can resume";
@@ -50,7 +51,8 @@ pub enum UploadError {
     NotResumable,
     /// The upload stopped sending a file that is no longer the one to upload.
     Stale(Retired),
-    Storage(String),
+    /// The job couldn't be stored; the cause is in the log.
+    Storage,
 }
 
 impl fmt::Display for UploadError {
@@ -74,7 +76,10 @@ impl fmt::Display for UploadError {
                 write!(f, "The file changed since this upload started. Start over to upload the new version.")
             }
             UploadError::Stale(Retired::Replaced) => write!(f, "A newer upload of this video took its place."),
-            UploadError::Storage(error) => write!(f, "Couldn’t save the upload: {error}."),
+            UploadError::Storage => write!(
+                f,
+                "Couldn’t save the upload. Check that the disk isn’t full and the data folder is writable, then try again."
+            ),
         }
     }
 }
@@ -126,8 +131,8 @@ impl Retry {
     /// What went wrong, as a short status title.
     pub fn headline(&self) -> &'static str {
         match self.cause {
-            RetryCause::Network => "Can't reach YouTube",
-            RetryCause::Server => "YouTube isn't responding",
+            RetryCause::Network => "Can’t reach YouTube",
+            RetryCause::Server => "YouTube isn’t responding",
             RetryCause::RateLimited => "YouTube is busy",
         }
     }
@@ -351,7 +356,10 @@ impl YoutubeService {
             created_at: now,
             updated_at: now,
         };
-        lock(&self.store(cx)).insert_upload(&job).map_err(|error| UploadError::Storage(error.to_string()))?;
+        lock(&self.store(cx)).insert_upload(&job).map_err(|error| {
+            eprintln!("videocrm: couldn't save the upload: {error}");
+            UploadError::Storage
+        })?;
         // Resuming an earlier, stopped upload as well would put a second copy on YouTube.
         let stopped: Vec<UploadId> = self
             .jobs
@@ -518,7 +526,7 @@ impl YoutubeService {
         push_notification(cx, move || {
             Notification::warning(
                 "The upload finished before the video was deleted, so it is on your channel. \
-                 Remove it in YouTube Studio if you don't want it there.",
+                 Remove it in YouTube Studio if you don’t want it there.",
             )
             .title(format!("“{title}” reached YouTube"))
             .action(move |_, _, _| {
@@ -662,7 +670,7 @@ impl YoutubeService {
                     this.thumbnail_problems.insert(id, message.clone());
                     cx.notify();
                     push_notification(cx, move || {
-                        Notification::warning(message).title(format!("The thumbnail of “{title}” wasn't set"))
+                        Notification::warning(message).title(format!("The thumbnail of “{title}” wasn’t set"))
                     });
                 })
                 .ok();
@@ -749,7 +757,7 @@ impl YoutubeService {
                     self.state.update(cx, |state, cx| state.reload(cx));
                 }
             }
-            Err(error) => report_error(&self.state, format!("Couldn't check interrupted uploads: {error}"), cx),
+            Err(error) => report_problem(&self.state, Problem::store("Couldn’t check interrupted uploads", &error), cx),
         }
     }
 
@@ -761,7 +769,7 @@ impl YoutubeService {
             Ok(()) => {}
             // The video, and its uploads with it, were deleted meanwhile.
             Err(StoreError::NotFound { .. }) => {}
-            Err(error) => report_error(&self.state, format!("Couldn't save the upload status: {error}"), cx),
+            Err(error) => report_problem(&self.state, Problem::store("Couldn’t save the upload status", &error), cx),
         }
         self.reload_jobs(cx);
     }
@@ -769,7 +777,7 @@ impl YoutubeService {
     fn reload_jobs(&mut self, cx: &mut Context<Self>) {
         match lock(&self.store(cx)).list_uploads(None) {
             Ok(jobs) => self.jobs = jobs,
-            Err(error) => report_error(&self.state, format!("Couldn't load the uploads: {error}"), cx),
+            Err(error) => report_problem(&self.state, Problem::store("Couldn’t load the uploads", &error), cx),
         }
         // Rows carry the latest upload status.
         self.state.update(cx, |state, cx| state.reload(cx));
@@ -825,7 +833,7 @@ fn processed(info: &VideoInfo) -> Option<Result<ProcessingOutcome, String>> {
             YoutubeUploadStatus::Failed | YoutubeUploadStatus::Rejected | YoutubeUploadStatus::Deleted
         );
     if failed {
-        return Some(Err("YouTube couldn't process the video. Check it in YouTube Studio.".to_owned()));
+        return Some(Err("YouTube couldn’t process the video. Check it in YouTube Studio.".to_owned()));
     }
     let ready = info.processing_status == Some(ProcessingStatus::Succeeded)
         || info.upload_status == YoutubeUploadStatus::Processed;

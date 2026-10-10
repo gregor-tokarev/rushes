@@ -384,7 +384,7 @@ fn starting_over_retires_the_stopped_upload(cx: &mut TestAppContext) {
     emulators.inject_fault(json!({"method": "PUT", "path": "/upload/youtube/v3/videos", "status": 503, "times": 1000}));
     let fresh = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
     let stopped = service.read_with(cx, |s, _| s.job(stopped.id).cloned()).unwrap();
-    assert_eq!(stopped.session_url, None, "the abandoned session can't send a second copy");
+    assert_eq!(stopped.session_url, None, "the abandoned session can’t send a second copy");
     assert_eq!(service.read_with(cx, |s, _| s.retired(stopped.id)), Some(Retired::Replaced));
     assert!(!service.read_with(cx, |s, _| s.is_resumable(&stopped)));
     // Like starting, resuming refuses while the video uploads.
@@ -538,7 +538,7 @@ fn switching_the_backend_signs_out(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert_eq!(service.read_with(cx, |s, _| s.connection().clone()), Connection::Disconnected);
-    assert!(!path.exists(), "the other backend's tokens are forgotten");
+    assert!(!path.exists(), "the other backend’s tokens are forgotten");
     let problem = service.read_with(cx, |s, _| s.config().err().cloned()).unwrap();
     assert_eq!(problem.as_ref(), "Add the client ID and client secret of your Google OAuth client.");
 
