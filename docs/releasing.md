@@ -41,10 +41,12 @@ The scripts also run locally (`scripts/bundle-macos.sh <version> <binary>...`,
 
 ## Smoke test
 
-Each job starts the bundle it built (macOS: from the mounted disk image; Linux: the
-AppImage's contents under Xvfb with Mesa's software renderer), waits 20 seconds, checks
-that the app is still running (and, on Linux, that it has a window), and keeps a
-screenshot as the `smoke-macos` / `smoke-linux` artifact.
+Every bundle is started once before it's published. macOS: the app opens from the
+mounted disk image, and the job checks it's still running 20 seconds later. Linux: a
+separate job on Ubuntu 24.04 (newer than the build's 22.04) runs the AppImage's contents
+under Xvfb with Mesa's software renderer and checks that the app is running, has a
+window, and drew something (the screenshot isn't blank). Screenshots are kept as the
+`smoke-macos` / `smoke-linux` artifacts.
 
 ## Cost
 

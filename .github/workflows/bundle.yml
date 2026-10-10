@@ -35,6 +35,8 @@ jobs:
       - uses: actions/checkout@v7
       - id: version
         name: Version from the workspace (and the tag)
+        env:
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
@@ -44,7 +46,7 @@ jobs:
               exit 1
             fi
           else
-            version=$crate-dev.${GITHUB_SHA::7}
+            version=$crate-dev.${COMMIT::7}
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Version: $version"
@@ -137,8 +139,7 @@ jobs:
             build-essential clang cmake pkg-config \
             libfontconfig-dev libfreetype-dev libssl-dev \
             libwayland-dev libx11-xcb-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev \
-            librsvg2-bin desktop-file-utils \
-            xvfb x11-utils imagemagick mesa-vulkan-drivers libgl1-mesa-dri libegl1
+            librsvg2-bin desktop-file-utils
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -157,32 +158,6 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN=1 APPIMAGETOOL="$RUNNER_TEMP/appimagetool" \
             scripts/bundle-linux.sh "$VERSION" target/release/videocrm
 
-      - name: Smoke test (starts the AppImage under Xvfb)
-        run: |
-          export DISPLAY=:99
-          Xvfb :99 -screen 0 1440x900x24 &
-          sleep 2
-          mkdir -p smoke
-          # No FUSE on the runner: run the AppImage's own contents.
-          (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE"/target/bundle/VideoCRM-"$VERSION"-x86_64.AppImage --appimage-extract >/dev/null)
-          VIDEOCRM_DATA_DIR="$RUNNER_TEMP/data" "$RUNNER_TEMP/squashfs-root/AppRun" > smoke/linux.log 2>&1 &
-          app=$!
-          sleep 20
-          import -window root smoke/linux.png || echo "::warning::screenshot failed"
-          if ! kill -0 "$app"; then
-            echo "::error::VideoCRM quit within 20 s of starting."
-            cat smoke/linux.log
-            exit 1
-          fi
-          if ! xwininfo -root -tree | grep -q '"VideoCRM"'; then
-            echo "::error::VideoCRM is running but has no window."
-            cat smoke/linux.log
-            exit 1
-          fi
-          kill -TERM "$app"
-          wait "$app"
-          tar -tzf target/bundle/videocrm-"$VERSION"-linux-x86_64.tar.gz
-
       - uses: actions/upload-artifact@v7
         with:
           name: videocrm-linux
@@ -190,6 +165,52 @@ jobs:
             target/bundle/*.tar.gz
             target/bundle/*.AppImage
           if-no-files-found: error
+
+  linux-smoke:
+    name: Linux smoke test
+    needs: [version, linux]
+    # A newer distribution than the build's: the bundle must run there too, and its
+    # Mesa software renderer presents frames under Xvfb (22.04's stays black).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: videocrm-linux
+          path: dist
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb x11-utils imagemagick mesa-vulkan-drivers libgl1-mesa-dri libegl1 libxkbcommon-x11-0
+
+      - name: Start the AppImage under Xvfb
+        run: |
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1440x900x24 &
+          sleep 2
+          mkdir -p smoke
+          appimage=$PWD/dist/VideoCRM-$VERSION-x86_64.AppImage
+          chmod +x "$appimage"
+          # No FUSE on the runner: run the AppImage's own contents.
+          (cd "$RUNNER_TEMP" && "$appimage" --appimage-extract >/dev/null)
+          VIDEOCRM_DATA_DIR="$RUNNER_TEMP/data" "$RUNNER_TEMP/squashfs-root/AppRun" > smoke/linux.log 2>&1 &
+          app=$!
+          sleep 20
+          import -window root smoke/linux.png
+          fail() { echo "::error::$1"; cat smoke/linux.log; exit 1; }
+          kill -0 "$app" || fail "VideoCRM quit within 20 s of starting."
+          xwininfo -root -tree | grep -q '"VideoCRM"' || fail "VideoCRM is running but has no window."
+          # The onboarding screen is mostly light; a blank (black) screen means nothing rendered.
+          brightness=$(convert smoke/linux.png -format '%[fx:mean]' info:)
+          echo "Mean brightness: $brightness"
+          awk -v b="$brightness" 'BEGIN { exit !(b > 0.2) }' || fail "VideoCRM's window is blank."
+          kill -TERM "$app"
+          wait "$app"
+          tar -tzf dist/videocrm-"$VERSION"-linux-x86_64.tar.gz > /dev/null
 
       - uses: actions/upload-artifact@v7
         if: always()
@@ -201,7 +222,7 @@ jobs:
   release:
     name: Release
     if: github.ref_type == 'tag'
-    needs: [version, macos, linux]
+    needs: [version, macos, linux, linux-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write
