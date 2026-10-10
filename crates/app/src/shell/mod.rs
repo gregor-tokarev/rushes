@@ -33,7 +33,7 @@ use crate::onboarding::Onboarding;
 use crate::publish::{AccountBadge, UploadsPage};
 use crate::route::{Route, SettingsSection, VideoTab};
 use crate::settings_page::SettingsPage;
-use crate::state::{AppEvent, AppState, Problem, Remedy};
+use crate::state::{AppEvent, AppState, Problem, Remedy, Severity};
 use crate::ui::{PageHeader, page_frame};
 use crate::video_page::VideoPage;
 use crate::wizard;
@@ -457,12 +457,17 @@ impl Workspace {
     }
 }
 
-/// An error notification for `problem`, with a button for its remedy. The
-/// same problem raised again replaces the one shown instead of stacking.
+/// A notification for `problem` in the style of its severity, with a button
+/// for its remedy. The same problem raised again replaces the one shown
+/// instead of stacking.
 fn problem_notification(problem: &Problem) -> Notification {
-    let notification = Notification::error(problem.message().clone())
-        .title(problem.title().clone())
-        .id1::<Problem>(problem.title().clone());
+    let message = problem.message().clone();
+    let notification = match problem.severity() {
+        Severity::Error => Notification::error(message),
+        Severity::Info => Notification::info(message),
+        Severity::Success => Notification::success(message),
+    };
+    let notification = notification.title(problem.title().clone()).id1::<Problem>(problem.title().clone());
     let Some(remedy) = problem.remedy() else { return notification };
     notification.action(move |_, _, cx| {
         Button::new("problem-remedy").small().label(remedy.label()).on_click(cx.listener(

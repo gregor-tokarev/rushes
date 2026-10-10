@@ -20,7 +20,7 @@ use videocrm::ai_edit::{LogEvent, PipelineService, RunMarker, TimelineEntry};
 use videocrm::publish::{Retired, YoutubeService};
 use videocrm::route::VideoTab;
 use videocrm::shell::{self, Workspace};
-use videocrm::state::{AppEvent, AppState, QUIT_SAVE_TIMEOUT, SAVE_RETRY_DELAY};
+use videocrm::state::{AppEvent, AppState, QUIT_SAVE_TIMEOUT, SAVE_RETRY_DELAY, Severity};
 use videocrm::video_page::SAVE_DELAY;
 use videocrm_core::settings::AppSettings;
 use videocrm_core::templates::TemplateKind;
@@ -482,6 +482,7 @@ fn changes_that_cant_be_written_before_quitting_are_written_at_the_next_start(cx
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert_eq!(problems[0].title(), "Changes from last time restored");
     assert!(problems[0].message().contains("they’re saved now"), "{problems:?}");
+    assert_eq!(problems[0].severity(), Severity::Success, "nothing was lost: no error");
     assert!(!unsaved.exists(), "written changes aren't replayed again");
     assert_eq!(stored_property(&app.database, desk, priority), Some(PropertyValue::Select(Some("low".into()))));
     let shown = next.video(desk).and_then(|video| video.properties.get(&priority).cloned());

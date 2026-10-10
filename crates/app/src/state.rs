@@ -26,7 +26,7 @@ use videocrm_core::{
 use crate::route::{Route, SettingsSection, VideoTab};
 
 pub(crate) use problem::folder_error_reason;
-pub use problem::{Problem, Remedy};
+pub use problem::{Problem, Remedy, Severity};
 pub(crate) use writes::QueuedWrites;
 use writes::{Cached, Write, Writes};
 pub use writes::{QUIT_SAVE_TIMEOUT, SAVE_RETRY_DELAY, UI_BUSY_TIMEOUT, WRITE_BUSY_TIMEOUT};

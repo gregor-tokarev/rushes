@@ -34,7 +34,7 @@ use videocrm_core::{
     StoreError, UploadId, UploadJob, Video, VideoId, VideoRow, ViewId,
 };
 
-use super::{AppEvent, AppState, Problem, SharedStore};
+use super::{AppEvent, AppState, Problem, Severity, SharedStore};
 
 /// How long the UI thread waits for another program's lock before it hands a
 /// write to the background writer. Reads don't wait for writers (WAL).
@@ -921,13 +921,21 @@ fn log_refused(pass: &Pass) {
     }
 }
 
+/// The notice that changes kept at the last quit were restored: nothing is
+/// lost, so it is no error.
 fn recovered_problem(saved: bool) -> Problem {
-    let message = if saved {
-        "VideoCRM couldn’t save some changes before it last quit. It kept them, and they’re saved now."
+    let (message, severity) = if saved {
+        (
+            "VideoCRM couldn’t save some changes before it last quit. It kept them, and they’re saved now.",
+            Severity::Success,
+        )
     } else {
-        "VideoCRM couldn’t save some changes before it last quit. It kept them and saves them as soon as the database is free."
+        (
+            "VideoCRM couldn’t save some changes before it last quit. It kept them and saves them as soon as the database is free.",
+            Severity::Info,
+        )
     };
-    Problem::new("Changes from last time restored", message)
+    Problem::new("Changes from last time restored", message).with_severity(severity)
 }
 
 /// The writes kept at the last quit; `None` when there are none.
@@ -1184,6 +1192,14 @@ mod tests {
         let pass = write_queue(&store, &queue);
         assert_eq!(pass.refused.len(), 1);
         assert!(lock(&queue).is_empty());
+    }
+
+    #[test]
+    fn restored_changes_read_as_a_notice_not_an_error() {
+        assert_eq!(recovered_problem(true).severity(), Severity::Success);
+        assert_eq!(recovered_problem(false).severity(), Severity::Info);
+        let gone = StoreError::NotFound { entity: "video", id: "1".into() };
+        assert_eq!(Problem::store("Couldn’t save your changes", &gone).severity(), Severity::Error);
     }
 
     #[test]
