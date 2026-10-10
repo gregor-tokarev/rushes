@@ -9,13 +9,13 @@ use gpui_kit::component::stepper::{Stepper, StepperItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
-    Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
-    rems,
+    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
+    Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    TestSupportExt as _, Window, div, rems,
 };
 
-use crate::ai_edit::DoctorChecklist;
-use crate::publish::YoutubeSettings;
+use crate::ai_edit::{DoctorChecklist, PipelineService};
+use crate::publish::{YoutubeService, YoutubeSettings};
 use crate::settings_page::{Commit, MediaFolderField};
 use crate::state::AppState;
 use crate::ui::ChoiceCard;
@@ -78,10 +78,16 @@ pub struct Onboarding {
     doctor: Option<Entity<DoctorChecklist>>,
     choice: StartChoice,
     scroll: ScrollHandle,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl Onboarding {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // The forward button says whether the YouTube and AI editing steps are done.
+        let mut subscriptions = vec![cx.observe(&PipelineService::global(cx), |_, _, cx| cx.notify())];
+        if let Some(youtube) = YoutubeService::try_global(cx) {
+            subscriptions.push(cx.observe(&youtube, |_, _, cx| cx.notify()));
+        }
         Self {
             state: AppState::global(cx),
             step: Step::Welcome,
@@ -91,6 +97,17 @@ impl Onboarding {
             doctor: None,
             choice: StartChoice::default(),
             scroll: ScrollHandle::new(),
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// Whether the creator has done what the step is for. Only the YouTube and
+    /// AI editing steps can be left undone.
+    pub fn is_step_done(&self, cx: &App) -> bool {
+        match self.step {
+            Step::Youtube => YoutubeService::try_global(cx).is_some_and(|youtube| youtube.read(cx).is_connected()),
+            Step::AiEditing => PipelineService::global(cx).read(cx).doctor().is_some_and(|doctor| doctor.ready()),
+            _ => true,
         }
     }
 
@@ -297,7 +314,9 @@ impl Render for Onboarding {
         };
         let first = self.step == Step::Welcome;
         let last = self.step == Step::GetStarted;
-        let optional = matches!(self.step, Step::Youtube | Step::AiEditing);
+        // An optional step not done yet is skipped, not completed: one forward
+        // button whose label says which, and only completion is emphasised.
+        let skip = !self.is_step_done(cx);
 
         // The stepper and the buttons stay in view; the step between them
         // scrolls. One height for every step keeps Back and Continue in place.
@@ -373,19 +392,15 @@ impl Render for Onboarding {
                         )
                     })
                     .child(div().flex_1())
-                    .when(optional, |this| {
-                        this.child(
-                            Button::new("onboarding-skip")
-                                .ghost()
-                                .label("Skip for now")
-                                .on_click(cx.listener(|this, _, window, cx| this.next(window, cx))),
-                        )
-                    })
                     .child(
                         Button::new("onboarding-next")
-                            .primary()
+                            .when(!skip, |button| button.primary())
                             .loading(self.checking)
-                            .label(if last { "Get started" } else { "Continue" })
+                            .label(match (last, skip) {
+                                (true, _) => "Get started",
+                                (false, true) => "Skip for now",
+                                (false, false) => "Continue",
+                            })
                             .on_click(cx.listener(|this, _, window, cx| this.next(window, cx))),
                     ),
             );

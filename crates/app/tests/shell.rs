@@ -333,15 +333,20 @@ fn completing_onboarding_starts_the_workspace(cx: &mut TestAppContext) {
     let step = |cx: &mut TestAppContext| cx.read(|cx| onboarding.read(cx).step());
     app.click(cx, "onboarding-next");
     assert_eq!(step(cx), Step::MediaFolder);
+    assert_eq!(app.label_of(cx, "onboarding-next".into()).as_deref(), Some("Continue"));
     app.click(cx, "onboarding-next");
     assert_eq!(step(cx), Step::Youtube);
-    app.click(cx, "onboarding-skip");
+    // Nothing connected: the one way on says that it skips the step.
+    assert_eq!(app.label_of(cx, "onboarding-next".into()).as_deref(), Some("Skip for now"));
+    assert!(!app.has(cx, "onboarding-skip"));
+    app.click(cx, "onboarding-next");
     assert_eq!(step(cx), Step::AiEditing);
     app.click(cx, "onboarding-back");
     assert_eq!(step(cx), Step::Youtube);
-    app.click(cx, "onboarding-skip");
-    app.click(cx, "onboarding-skip");
+    app.click(cx, "onboarding-next");
+    app.click(cx, "onboarding-next");
     assert_eq!(step(cx), Step::GetStarted);
+    assert_eq!(app.label_of(cx, "onboarding-next".into()).as_deref(), Some("Get started"));
     app.click(cx, "start-empty");
     app.click(cx, "onboarding-next");
 
