@@ -690,14 +690,20 @@ impl Writes {
         }
         let unsaved_file = database.and_then(Path::parent).map(|folder| folder.join(UNSAVED_FILE));
         let queue = Mutex::new(Queue::default());
+        let mut reported = false;
         let problem = unsaved_file.as_deref().and_then(read_unsaved).map(|kept| match kept {
             Ok(writes) => {
                 let mut queued = lock(&queue);
                 writes.into_iter().for_each(|write| queued.push(write));
                 drop(queued);
                 // Before the window opens; the background writer retries the rest.
-                log_refused(&write_queue(&store, &queue));
-                recovered_problem(lock(&queue).is_empty())
+                let pass = write_queue(&store, &queue);
+                log_refused(&pass);
+                let saved = lock(&queue).is_empty();
+                // The notice says they wait for the database to be free, so
+                // the retries stay quiet until a pass succeeds.
+                reported = !saved && pass.failed.as_ref().is_some_and(StoreError::is_busy);
+                recovered_problem(saved)
             }
             Err(problem) => problem,
         });
@@ -706,7 +712,7 @@ impl Writes {
             store,
             queue: Arc::new(queue),
             worker: None,
-            reported: false,
+            reported,
             quit_deadline: None,
             unsaved_file,
             unsaved_kept,
