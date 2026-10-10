@@ -206,7 +206,8 @@ pub fn fold_timeline(entries: &[TimelineEntry]) -> Vec<TimelineItem> {
             LogEvent::Agent(event) => event,
         };
         match agent {
-            AgentEvent::Init { .. } => {}
+            // Bookkeeping: which process ran, which session.
+            AgentEvent::Spawned { .. } | AgentEvent::Init { .. } => {}
             AgentEvent::AssistantText { text } => items.push(TimelineItem::Message { seq, text: text.clone() }),
             AgentEvent::Thinking { text } => items.push(TimelineItem::Thinking { seq, text: text.clone() }),
             AgentEvent::ToolUse { name, summary, .. } => {
