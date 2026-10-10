@@ -1,6 +1,7 @@
 # Builds the macOS and Linux bundles of VideoCRM, starts each once to check that it
 # opens a window, and publishes them:
-#   - a tag v<version> (matching the workspace version) creates a GitHub release with them;
+#   - a tag v<version> (matching the workspace version) creates a GitHub release with them,
+#     whether it was pushed or the Daily release workflow made it and calls this one;
 #   - a manual run, or a pull request that touches the bundling, keeps them as run artifacts.
 name: Bundle
 
@@ -13,9 +14,15 @@ on:
       - scripts/bundle-*.sh
       - assets/icon.svg
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      tag:
+        description: The tag to build and release, v<version>
+        type: string
+        required: true
 
 concurrency:
-  group: bundle-${{ github.ref }}
+  group: bundle-${{ inputs.tag || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -31,24 +38,29 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
       - id: version
         name: Version from the workspace (and the tag)
         env:
+          TAG: ${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
           COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            version=${GITHUB_REF_NAME#v}
+          if [[ -n "$TAG" ]]; then
+            version=${TAG#v}
             if [[ "$version" != "$crate" ]]; then
-              echo "::error::Tag $GITHUB_REF_NAME doesn't match the workspace version $crate in Cargo.toml."
+              echo "::error::Tag $TAG doesn't match the workspace version $crate in Cargo.toml."
               exit 1
             fi
           else
             version=$crate-dev.${COMMIT::7}
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Version: $version"
 
   macos:
@@ -62,6 +74,8 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "10.15.7"
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -113,6 +127,8 @@ jobs:
           name: videocrm-macos
           path: target/bundle/*.dmg
           if-no-files-found: error
+          # A release keeps its own copy; the Actions storage quota is small.
+          retention-days: ${{ needs.version.outputs.tag != '' && 1 || 7 }}
 
       - uses: actions/upload-artifact@v7
         if: always()
@@ -131,6 +147,8 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
 
       - name: System packages
         run: |
@@ -165,6 +183,8 @@ jobs:
             target/bundle/*.tar.gz
             target/bundle/*.AppImage
           if-no-files-found: error
+          # A release keeps its own copy; the Actions storage quota is small.
+          retention-days: ${{ needs.version.outputs.tag != '' && 1 || 7 }}
 
   linux-smoke:
     name: Linux smoke test
@@ -221,7 +241,7 @@ jobs:
 
   release:
     name: Release
-    if: github.ref_type == 'tag'
+    if: needs.version.outputs.tag != ''
     needs: [version, macos, linux, linux-smoke]
     runs-on: ubuntu-latest
     permissions:
@@ -236,8 +256,10 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
+          gh release create "$TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
             --title "VideoCRM ${{ needs.version.outputs.version }}" \
             --generate-notes

@@ -1,0 +1,53 @@
+# Releases main once a day if it changed since the last release: scripts/daily-release.sh
+# bumps the patch version (unless it was bumped by hand) and tags it, then the Bundle
+# workflow builds, smoke-tests and publishes the release. A manual run releases now.
+name: Daily release
+
+on:
+  schedule:
+    - cron: "30 3 * * *" # 03:30 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: daily-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    name: Tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          # The tags and the history since the last one.
+          fetch-depth: 0
+
+      - id: tag
+        name: Tag main if it changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          tag=$(scripts/daily-release.sh)
+          if [[ -n "$tag" ]]; then
+            # Fails, and releases nothing, if main moved meanwhile; the next run retries.
+            git push --atomic origin HEAD:main "$tag"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  bundle:
+    name: Bundle
+    needs: tag
+    if: needs.tag.outputs.tag != ''
+    permissions:
+      contents: write
+    uses: ./.github/workflows/bundle.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
