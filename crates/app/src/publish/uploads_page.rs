@@ -217,7 +217,15 @@ impl UploadsPage {
                                 .truncate()
                                 .tooltip({
                                     let detail = detail.clone();
-                                    move |window, cx| Tooltip::new(detail.clone()).build(window, cx)
+                                    // Long reasons wrap beside the row instead of one line
+                                    // across the window.
+                                    move |window, cx| {
+                                        let detail = detail.clone();
+                                        Tooltip::element(move |_, _| {
+                                            div().max_w(TOOLTIP_MAX_WIDTH).child(detail.clone())
+                                        })
+                                        .build(window, cx)
+                                    }
                                 })
                                 .child(detail),
                         )
@@ -250,6 +258,9 @@ impl UploadsPage {
         )
     }
 }
+
+/// Wide enough for a short sentence per line.
+const TOOLTIP_MAX_WIDTH: Rems = Rems(24.);
 
 /// Video, status, started, updated and the job's action; a narrow page drops
 /// the update time.
