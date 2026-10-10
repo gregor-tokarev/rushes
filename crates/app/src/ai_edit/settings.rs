@@ -11,8 +11,8 @@ use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Div, Entity, Focusable as _, InteractiveElement as _, IntoElement,
-    ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Subscription, Task, TestSupportExt as _,
-    Window, div,
+    ParentElement as _, PathPromptOptions, Rems, Render, SharedString, Styled as _, Subscription, Task,
+    TestSupportExt as _, Window, div,
 };
 use videocrm_core::input::{PathInputError, display_user_path, expand_user_path};
 use videocrm_core::settings::{DEFAULT_AGENT_COMMAND, PipelineSettings};
@@ -26,6 +26,10 @@ use crate::ui::settings::{SettingsField, SettingsSection};
 
 /// How long typing pauses before text fields are saved.
 const SAVE_DELAY: Duration = Duration::from_millis(600);
+
+/// Width of a short text field beside its label. The label takes up to three fifths
+/// of the row, which leaves about this much beside it at the smallest window.
+const TRAILING_FIELD_WIDTH: Rems = Rems(10.);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ModelChoice {
@@ -321,14 +325,15 @@ impl AiSettings {
         Some(div().id(id).test_support().text_sm().text_color(color).child(message))
     }
 
+    /// The model menu, with the model name under it once Custom is chosen: side by
+    /// side they would not fit beside the label in a narrow window.
     fn render_model(&self, cx: &mut Context<Self>) -> Div {
         let settings = cx.weak_entity();
         let current = self.model;
-        h_flex()
+        let custom = current == ModelChoice::Custom;
+        v_flex()
             .gap_2()
-            .when(current == ModelChoice::Custom, |this| {
-                this.child(div().w_48().child(Input::new(&self.custom_model).id("ai-settings-custom-model")))
-            })
+            .when(custom, |this| this.w(TRAILING_FIELD_WIDTH))
             .child(
                 Button::new("ai-settings-model")
                     .outline()
@@ -346,6 +351,7 @@ impl AiSettings {
                         menu
                     }),
             )
+            .when(custom, |this| this.child(Input::new(&self.custom_model).id("ai-settings-custom-model")))
     }
 
     fn render_skill_dir(&self, cx: &mut Context<Self>) -> Div {
@@ -465,7 +471,9 @@ impl AiSettings {
                 .field(SettingsField::new("Colour grade", |this: &mut Self, _, cx| this.render_grade(cx)))
                 .field(
                     SettingsField::new("Target length", |this: &mut Self, _, _| {
-                        div().w_48().child(Input::new(&this.target_length).id("ai-settings-target-length"))
+                        div()
+                            .w(TRAILING_FIELD_WIDTH)
+                            .child(Input::new(&this.target_length).id("ai-settings-target-length"))
                     })
                     .description("For example 60 seconds; empty keeps the natural length."),
                 ),
