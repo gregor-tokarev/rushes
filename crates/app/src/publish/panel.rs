@@ -47,6 +47,7 @@ use super::service::{Connection, YoutubeEvent, YoutubeService};
 use super::transfer::{format_bytes, format_duration, format_eta, format_speed};
 use super::ui::{ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, status_line, youtube_link};
 use super::upload::{ProcessingOutcome, Retired, UPLOAD_FILE_LOCKED, UploadError};
+use crate::route::{Route, VideoTab};
 use crate::state::{AppEvent, AppState};
 use crate::ui::path_prompt::{self, PathKind, PathRequest};
 use crate::ui::warning_text;
@@ -283,12 +284,16 @@ impl PublishPanel {
                 }
             }),
             // Coming back from the file manager or another app may bring new files,
-            // or a re-exported one that a stopped upload can no longer continue.
+            // or a re-exported one that a stopped upload can no longer continue;
+            // coming back from YouTube Studio, a video changed or deleted there.
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     this.refresh_choices(cx);
                     this.refresh_file(cx);
                     this.service.update(cx, |service, cx| service.check_stopped_uploads(cx));
+                    if this.is_shown(cx) {
+                        this.refresh_youtube_video(cx);
+                    }
                 }
             }),
             // Leaving the page or quitting must not lose the last edits.
@@ -327,6 +332,11 @@ impl PublishPanel {
         panel.refresh_youtube_video(cx);
         panel.service.update(cx, |service, cx| service.check_stopped_uploads(cx));
         panel
+    }
+
+    /// Whether the page shows this panel now: its video's Publish tab.
+    fn is_shown(&self, cx: &App) -> bool {
+        *self.state.read(cx).route() == Route::Video { id: self.video_id, tab: VideoTab::Publish }
     }
 
     /// Asks YouTube how the uploaded video stands, for the Upload card.
@@ -386,6 +396,11 @@ impl PublishPanel {
     }
 
     fn on_app_event(&mut self, _: &Entity<AppState>, event: &AppEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The tab shown again, or the video opened again: the video may have
+        // changed on YouTube meanwhile.
+        if *event == AppEvent::RouteChanged && self.is_shown(cx) {
+            self.refresh_youtube_video(cx);
+        }
         if *event != AppEvent::DataChanged {
             return;
         }

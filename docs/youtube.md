@@ -222,8 +222,9 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   youtube.com/verify). `get_video` is polled every 5 s for about two minutes to report
   processing → ready.
 - The Upload card of an uploaded video says who can watch it as YouTube reports it
-  (`refresh_youtube_video`, one `videos.list` when the tab opens or connects, and every
-  processing poll): "Private · goes public Mon, 12 Oct at 09:00", "Unlisted", ... It links
+  (`refresh_youtube_video`, one `videos.list` when the tab opens, is shown again, the
+  window is activated while it shows, or the account connects, at most every 30 s per
+  video; and every processing poll): "Private · goes public Mon, 12 Oct at 09:00", "Unlisted", ... It links
   to the video and to YouTube Studio, and the form says that its changes apply to the next
   upload. When YouTube answers that it has no such video (deleted in YouTube Studio, or
   removed by YouTube) and the connected channel is the one it was uploaded to, the video's

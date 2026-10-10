@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use futures::channel::mpsc;
@@ -37,6 +37,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const CLIENT_ID_SUFFIX: &str = ".apps.googleusercontent.com";
 const UPLOAD_SCOPE: &str = "https://www.googleapis.com/auth/youtube.upload";
 const AVATAR_TIMEOUT: Duration = Duration::from_secs(15);
+/// The Publish tab asks YouTube about its video again when it is shown, at
+/// most this often: each answer costs a unit of the daily quota.
+const REMOTE_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Where the YouTube account stands.
 #[derive(Clone, Debug, PartialEq)]
@@ -105,6 +108,8 @@ pub struct YoutubeService {
     /// removed by YouTube), by YouTube video id.
     gone: HashSet<String>,
     remote_requests: HashSet<String>,
+    /// When YouTube was last asked about an uploaded video, by YouTube video id.
+    remote_asked: HashMap<String, Instant>,
     _subscription: Subscription,
 }
 
@@ -245,6 +250,7 @@ impl YoutubeService {
             remote: HashMap::new(),
             gone: HashSet::new(),
             remote_requests: HashSet::new(),
+            remote_asked: HashMap::new(),
             _subscription: subscription,
         };
         service.restore_login(cx);
@@ -392,6 +398,8 @@ impl YoutubeService {
     }
 
     fn set_connection(&mut self, connection: Connection, cx: &mut Context<Self>) {
+        // Another account may see the videos differently.
+        self.remote_asked.clear();
         self.connection = connection;
         cx.emit(YoutubeEvent::ConnectionChanged);
         cx.notify();
@@ -582,12 +590,16 @@ impl YoutubeService {
     }
 
     /// Asks YouTube about an uploaded video in the background (one quota unit), so the
-    /// Publish tab shows what YouTube has rather than what was asked for.
+    /// Publish tab shows what YouTube has rather than what was asked for. An answer
+    /// younger than [`REMOTE_REFRESH_INTERVAL`] is kept instead.
     pub fn refresh_youtube_video(&mut self, youtube_id: &str, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else { return };
-        if !self.remote_requests.insert(youtube_id.to_owned()) {
+        let now = cx.background_executor().now();
+        let recent = self.remote_asked.get(youtube_id).is_some_and(|asked| now < *asked + REMOTE_REFRESH_INTERVAL);
+        if recent || !self.remote_requests.insert(youtube_id.to_owned()) {
             return;
         }
+        self.remote_asked.insert(youtube_id.to_owned(), now);
         let youtube_id = youtube_id.to_owned();
         cx.spawn(async move |this, cx| {
             let lookup = youtube_id.clone();

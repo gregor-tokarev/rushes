@@ -1201,6 +1201,69 @@ fn drop_files(window: &mut Window, id: &'static str, paths: Vec<std::path::PathB
 }
 
 #[gpui_kit::test]
+fn the_publish_tab_asks_youtube_again_when_it_is_shown_again(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "final-1.mp4");
+    let video_id = workspace.create_video(cx, "Why Every Developer Should Learn SQLite", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.privacy = Privacy::Private;
+    });
+    let upload = |cx: &mut TestAppContext| {
+        let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+        wait_until(cx, "the processed upload", |cx| {
+            cx.executor().advance_clock(Duration::from_secs(5));
+            match service.read_with(cx, |s, _| s.job(upload).map(|job| job.status.clone())) {
+                Some(UploadStatus::Done { video_id }) => Some(video_id),
+                Some(UploadStatus::Failed { error }) => panic!("upload failed: {error}"),
+                _ => None,
+            }
+        })
+    };
+    let token = |cx: &mut TestAppContext| service.read_with(cx, |s, _| s.client()).unwrap().credentials().access_token;
+    let linked = |cx: &mut TestAppContext| workspace.video(cx, video_id).youtube.is_some();
+    let first = upload(cx);
+
+    // The page shows the Publish tab; it asked YouTube when it opened.
+    workspace.state.update(cx, |state, cx| state.open_video(video_id, VideoTab::Publish, cx));
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    window(cx, handle, |window, _| window.activate_window());
+    wait_until(cx, "YouTube's answer", |cx| service.read_with(cx, |s, _| s.youtube_video(&first).map(drop)));
+
+    // Deleted in YouTube Studio. Switching tabs right away keeps the answer
+    // that just came: each question costs quota.
+    emulators.delete_video(&token(cx), &first);
+    let show_again = |cx: &mut TestAppContext| {
+        workspace.state.update(cx, |state, cx| {
+            state.open_video(video_id, VideoTab::Script, cx);
+            state.open_video(video_id, VideoTab::Publish, cx);
+        })
+    };
+    show_again(cx);
+    cx.run_until_parked();
+    std::thread::sleep(Duration::from_millis(300));
+    cx.run_until_parked();
+    assert!(linked(cx), "asked again too soon");
+    // A little later, showing the tab again asks YouTube, which has no such video.
+    cx.executor().advance_clock(Duration::from_secs(30));
+    show_again(cx);
+    wait_until(cx, "the dropped link", |cx| (!linked(cx)).then_some(()));
+
+    // Uploaded again and deleted again, while the creator is in the browser:
+    // coming back to VideoCRM asks YouTube.
+    let second = upload(cx);
+    assert!(linked(cx));
+    emulators.delete_video(&token(cx), &second);
+    let (browser, _) = open(cx, |_, cx| cx.new(|_| gpui_kit::EmptyView));
+    window(cx, browser, |window, _| window.activate_window());
+    cx.run_until_parked();
+    window(cx, handle, |window, _| window.activate_window());
+    wait_until(cx, "the dropped link", |cx| (!linked(cx)).then_some(()));
+}
+
+#[gpui_kit::test]
 fn files_dropped_on_the_cards_become_the_video_and_thumbnail(cx: &mut TestAppContext) {
     let workspace = Workspace::open(cx, YoutubeBackend::default());
     let video_id = workspace.create_video(cx, "Desk setup 2026", |_| {});
