@@ -18,11 +18,11 @@ use gpui_kit::{
 use rusqlite::Connection;
 use videocrm::ai_edit::{LogEvent, PipelineService, RunMarker, TimelineEntry};
 use videocrm::publish::{Retired, YoutubeService};
-use videocrm::route::{Route, VideoTab};
+use videocrm::route::VideoTab;
 use videocrm::shell::{self, Workspace};
 use videocrm::state::{AppEvent, AppState, QUIT_SAVE_TIMEOUT, SAVE_RETRY_DELAY, Severity};
 use videocrm::video_page::SAVE_DELAY;
-use videocrm_core::settings::AppSettings;
+use videocrm_core::settings::{AppSettings, ThemeMode};
 use videocrm_core::templates::TemplateKind;
 use videocrm_core::{
     BlockId, DocumentKind, NewVideo, PipelineRun, PropertyDef, PropertyId, PropertyKind, PropertyValue, RunId,
@@ -520,4 +520,37 @@ fn deleting_the_open_video_during_a_lock_lands_where_the_creator_came_from(cx: &
     assert_eq!(route(cx), came_from);
     assert!(!app.has(cx, "video-missing"));
     assert!(!cx.read(|cx| app.state.read(cx).can_go_forward()));
+}
+
+#[gpui_kit::test]
+fn settings_kept_at_a_quit_are_the_ones_the_next_start_uses(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour"]);
+    let mut locker = Locker::hold(&app.database);
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| state.update(cx, |state, cx| state.update_settings(cx, |s| s.theme = ThemeMode::Dark)));
+    cx.update(|cx| cx.shutdown());
+    let unsaved = app.database.with_file_name("unsaved-changes.json");
+    assert!(unsaved.exists(), "the settings are kept");
+    let stored_theme = || stored(&app.database, |store| store.load_settings().expect("read settings").theme);
+
+    // Still locked at the next start: the kept settings wait in the queue and
+    // are the ones in use.
+    let next = AppState::new(Store::open(&app.database).expect("open again")).expect("load state");
+    assert_eq!(next.settings().theme, ThemeMode::Dark);
+    assert!(next.has_unsaved_changes());
+    drop(next);
+    locker.release();
+
+    // Written at the start once the lock is gone, and used.
+    let next = AppState::new(Store::open(&app.database).expect("open again")).expect("load state");
+    assert_eq!(next.settings().theme, ThemeMode::Dark);
+    assert_eq!(stored_theme(), ThemeMode::Dark);
+    assert!(!unsaved.exists());
+
+    // A later change builds on them rather than on what was stored before.
+    let next = cx.new(|_| next);
+    next.update(cx, |state, cx| state.update_settings(cx, |s| s.pipeline.auto_approve = true));
+    let stored_settings = stored(&app.database, |store| store.load_settings().expect("read settings"));
+    assert_eq!(stored_settings.theme, ThemeMode::Dark);
+    assert!(stored_settings.pipeline.auto_approve);
 }

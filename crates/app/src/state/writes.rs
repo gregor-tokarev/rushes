@@ -476,6 +476,14 @@ impl Queue {
         jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
     }
 
+    /// The newest queued app settings.
+    pub(super) fn settings(&self) -> Option<&AppSettings> {
+        self.entries.iter().rev().find_map(|entry| match &entry.write {
+            Write::Settings(settings) => Some(settings),
+            _ => None,
+        })
+    }
+
     /// The newest queued value of a settings key other than the app settings.
     pub(super) fn setting(&self, key: &str) -> Option<&serde_json::Value> {
         self.entries.iter().rev().find_map(|entry| match &entry.write {

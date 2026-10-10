@@ -84,16 +84,24 @@ impl AppState {
     /// the background writer and for [`AppState::store`]; an in-memory one is
     /// shared by all three.
     pub fn new(store: Store) -> Result<Self, StoreError> {
-        let (settings, settings_problem) = load_settings(&store)?;
-        let route = if settings.onboarding_completed { Route::default() } else { Route::Onboarding };
         let database = store.path();
         let services = store.reopen()?;
         let writer = store.reopen()?;
-        store.set_busy_timeout(UI_BUSY_TIMEOUT)?;
         let ui = Arc::new(Mutex::new(store));
         let shared = |store: Option<Store>| store.map_or_else(|| ui.clone(), |store| Arc::new(Mutex::new(store)));
         let (services, writer) = (shared(services), shared(writer));
+        // Changes kept at the last quit are written first, so the settings read
+        // next are the ones the creator chose last; those that still wait for
+        // the database are used as queued.
         let (writes, unsaved_problem) = Writes::new(writer, database.as_deref());
+        let store = ui.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (stored, settings_problem) = load_settings(&store)?;
+        store.set_busy_timeout(UI_BUSY_TIMEOUT)?;
+        drop(store);
+        let queued = writes.queued().read().settings().cloned();
+        let settings_problem = settings_problem.filter(|_| queued.is_none());
+        let settings = queued.unwrap_or(stored);
+        let route = if settings.onboarding_completed { Route::default() } else { Route::Onboarding };
         let mut state = Self {
             ui,
             services,
