@@ -23,6 +23,7 @@ use videocrm_pipeline::{
 };
 
 use super::brief::BriefDraft;
+use super::footage::FootageImports;
 use super::timeline::{LogEvent, MarkerKind, PhaseKind, PhaseStarted, RunMarker, TimelineEntry, agent_time};
 use crate::state::{AppEvent, AppState};
 
@@ -174,6 +175,8 @@ pub struct PipelineService {
     /// Brief forms by video, as their panels left them; the ones that differ from a
     /// fresh form are also saved in the settings, so they survive a restart.
     drafts: HashMap<VideoId, BriefDraft>,
+    /// Copies into footage folders, whichever card started them.
+    footage_imports: Entity<FootageImports>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -221,6 +224,7 @@ impl PipelineService {
                 agent_env: Vec::new(),
                 revealed: None,
                 drafts: HashMap::new(),
+                footage_imports: cx.new(|_| FootageImports::new()),
                 _subscriptions: subscriptions,
             };
             match service.recover_interrupted(cx) {
@@ -327,6 +331,11 @@ impl PipelineService {
         let id = self.revealed.filter(|id| self.run(*id).is_some_and(|run| run.video_id == video_id))?;
         self.revealed = None;
         Some(id)
+    }
+
+    /// The footage copies of every video.
+    pub(crate) fn footage_imports(&self) -> &Entity<FootageImports> {
+        &self.footage_imports
     }
 
     /// The brief form a panel of `video_id` left behind, in this session or an earlier one.
