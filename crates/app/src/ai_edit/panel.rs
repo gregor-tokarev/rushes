@@ -1,5 +1,7 @@
 //! [`AiEditPanel`]: the "Footage & AI edit" tab of a video page.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::Local;
@@ -13,7 +15,8 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Subscription, Task, TestSupportExt as _, Window, div,
+    Render, ScrollHandle, SharedString, Styled as _, Subscription, Task, TestSupportExt as _, Window, canvas, div,
+    point, px,
 };
 use videocrm_core::settings::EditPreferences;
 use videocrm_core::{Block, DocumentKind, PipelineRun, RunId, RunStatus, Video, VideoId};
@@ -66,6 +69,11 @@ pub struct AiEditPanel {
     run_view: Entity<RunView>,
     doctor: Entity<DoctorChecklist>,
     start_error: Option<SharedString>,
+    /// The scrolling page around the panel, if any.
+    page_scroll: Option<ScrollHandle>,
+    /// A run was revealed (from the Pipelines page): the page scrolls the AI edit
+    /// section into view once the footage list above it has its final height.
+    reveal: Rc<Cell<bool>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -124,9 +132,8 @@ impl AiEditPanel {
             }),
         ];
 
-        let latest = service
-            .update(cx, |service, _| service.take_revealed(video_id))
-            .or_else(|| service.read(cx).video_runs(video_id).next().map(|run| run.id));
+        let revealed = service.update(cx, |service, _| service.take_revealed(video_id));
+        let latest = revealed.or_else(|| service.read(cx).video_runs(video_id).next().map(|run| run.id));
         let mut panel = Self {
             video_id,
             state,
@@ -145,6 +152,8 @@ impl AiEditPanel {
             run_view,
             doctor,
             start_error: None,
+            page_scroll: None,
+            reveal: Rc::new(Cell::new(revealed.is_some())),
             _subscriptions: subscriptions,
         };
         match draft {
@@ -163,6 +172,12 @@ impl AiEditPanel {
 
     pub fn video_id(&self) -> VideoId {
         self.video_id
+    }
+
+    /// The page that scrolls the panel: a run revealed from elsewhere is scrolled into view.
+    pub fn page_scroll(mut self, scroll: ScrollHandle) -> Self {
+        self.page_scroll = Some(scroll);
+        self
     }
 
     /// The brief as the form shows it.
@@ -276,6 +291,7 @@ impl AiEditPanel {
     fn on_runs_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.service.update(cx, |service, _| service.take_revealed(self.video_id)) {
             self.select_run(id, window, cx);
+            self.reveal.set(true);
             return;
         }
         let selected = self.run_view.read(cx).run_id();
@@ -524,6 +540,36 @@ impl AiEditPanel {
                 this.child(div().text_sm().text_color(theme.danger).child(error))
             })
     }
+
+    /// While a revealed run waits to be shown: once laid out, scrolls the page so the
+    /// AI edit section starts at its top, unless it is in the upper part of the view
+    /// already. Waits for the footage list, whose height moves the section.
+    fn render_reveal(&self, cx: &App) -> Option<impl IntoElement + use<>> {
+        if !self.reveal.get() || !self.footage.read(cx).is_loaded() {
+            return None;
+        }
+        let scroll = self.page_scroll.clone()?;
+        let reveal = self.reveal.clone();
+        Some(
+            canvas(
+                move |section, window, _| {
+                    reveal.set(false);
+                    let view = scroll.bounds();
+                    let offset = section.top() - view.top();
+                    if offset < px(0.) || offset > view.size.height / 3. {
+                        let current = scroll.offset();
+                        scroll.set_offset(point(current.x, current.y - offset));
+                        window.refresh();
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_0(),
+        )
+    }
 }
 
 /// One run in the history menu.
@@ -560,24 +606,28 @@ impl Render for AiEditPanel {
         let composer = self.composing.then(|| self.render_composer(cx));
         let selected = self.run_view.read(cx).run_id().and_then(|id| self.service.read(cx).run(id).cloned());
 
+        let reveal = self.render_reveal(cx);
         v_flex().w_full().gap_10().child(self.footage.clone()).child(
-            v_flex().gap_4().child(header).children(composer).when_some(selected, |this, run| {
-                let color = run_status_color(run.status);
-                this.child(
-                    v_flex()
-                        .gap_4()
-                        .when(self.composing, |this| {
-                            this.child(
-                                h_flex()
-                                    .gap_2()
-                                    .text_sm()
-                                    .child(div().font_weight(FontWeight::MEDIUM).child("Latest edit"))
-                                    .child(Chip::new(run.status.label(), color).dot(true)),
-                            )
-                        })
-                        .child(self.run_view.clone()),
-                )
-            }),
+            v_flex().relative().gap_4().children(reveal).child(header).children(composer).when_some(
+                selected,
+                |this, run| {
+                    let color = run_status_color(run.status);
+                    this.child(
+                        v_flex()
+                            .gap_4()
+                            .when(self.composing, |this| {
+                                this.child(
+                                    h_flex()
+                                        .gap_2()
+                                        .text_sm()
+                                        .child(div().font_weight(FontWeight::MEDIUM).child("Latest edit"))
+                                        .child(Chip::new(run.status.label(), color).dot(true)),
+                                )
+                            })
+                            .child(self.run_view.clone()),
+                    )
+                },
+            ),
         )
     }
 }

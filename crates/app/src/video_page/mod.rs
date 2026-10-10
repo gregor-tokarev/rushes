@@ -279,7 +279,8 @@ impl VideoPage {
                 self.notes = Some(cx.new(|cx| DocumentTab::new(id, DocumentKind::Notes, scroll, window, cx)));
             }
             VideoTab::Footage if self.footage.is_none() => {
-                self.footage = Some(cx.new(|cx| AiEditPanel::new(id, window, cx)));
+                let scroll = self.scroll.clone();
+                self.footage = Some(cx.new(|cx| AiEditPanel::new(id, window, cx).page_scroll(scroll)));
             }
             VideoTab::Publish if self.publish.is_none() => {
                 self.publish = Some(cx.new(|cx| PublishPanel::new(id, window, cx)));
