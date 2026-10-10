@@ -1527,6 +1527,8 @@ fn a_preference_changes_only_its_own_line_of_the_brief(cx: &mut TestAppContext) 
     assert!(brief(cx).contains("- No subtitles.") && brief(cx).contains(sponsor), "{}", brief(cx));
     cx.update_window(window, |_, window, cx| window.press("ctrl-z", cx)).unwrap();
     assert!(brief(cx).contains("- Remove filler words") && brief(cx).contains(sponsor), "{}", brief(cx));
+    let preferences = cx.read(|cx| panel.read(cx).preferences().clone());
+    assert!(preferences.remove_fillers && !preferences.subtitles, "the checkboxes follow the brief: {preferences:?}");
     cx.update_window(window, |_, window, cx| window.press("ctrl-z", cx)).unwrap();
     assert!(!brief(cx).contains(sponsor), "{}", brief(cx));
 }

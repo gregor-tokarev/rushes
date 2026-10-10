@@ -158,6 +158,44 @@ pub fn preference_edits(brief: &str, old: &EditPreferences, new: &EditPreference
     edits
 }
 
+/// The preferences the brief's own preference lines state, starting from `current`:
+/// when the creator edits or undoes one of those lines, the form follows the brief. A
+/// preference without such a line keeps its value.
+pub fn preferences_in(brief: &str, current: &EditPreferences) -> EditPreferences {
+    let mut preferences = current.clone();
+    let lines = line_spans(brief);
+    let Some(heading) = lines.iter().position(|span| brief[span.clone()].trim() == PREFERENCES_HEADING) else {
+        return preferences;
+    };
+    let list = lines[heading + 1..].iter().map(|span| brief[span.clone()].trim()).take_while(|line| !line.is_empty());
+    let valued = |line: &str, prefix: &str| line.strip_prefix(prefix)?.strip_suffix('.').map(str::to_owned);
+    for line in list {
+        match line {
+            NATURAL_LENGTH => preferences.target_length = String::new(),
+            REMOVE_FILLERS => preferences.remove_fillers = true,
+            KEEP_FILLERS => preferences.remove_fillers = false,
+            SUBTITLES => preferences.subtitles = true,
+            NO_SUBTITLES => preferences.subtitles = false,
+            NO_GRADE => preferences.color_grade = "none".to_owned(),
+            line => {
+                if let Some(target) = valued(line, TARGET_LENGTH) {
+                    preferences.target_length = target;
+                } else if let Some(grade) = valued(line, GRADE) {
+                    preferences.color_grade = COLOR_GRADES
+                        .iter()
+                        .find(|(_, label)| label.to_lowercase() == grade)
+                        .map_or(grade, |(value, _)| (*value).to_owned());
+                }
+            }
+        }
+    }
+    // The same preference either way: the form keeps how it was set.
+    if preferences.color_grade == "none" && matches!(current.color_grade.trim(), "" | "none") {
+        preferences.color_grade = current.color_grade.clone();
+    }
+    preferences
+}
+
 /// `brief` with [`preference_edits`] applied.
 pub fn with_preferences(brief: &str, old: &EditPreferences, new: &EditPreferences) -> String {
     apply_edits(brief, &preference_edits(brief, old, new))
@@ -392,6 +430,20 @@ mod tests {
         // Undone by hand to the new value already: nothing to do.
         let undone = default_brief(&video(), &[], &without, "");
         assert!(preference_edits(&undone, &before, &without).is_empty());
+    }
+
+    #[test]
+    fn the_form_follows_the_preference_lines_of_the_brief() {
+        let current = EditPreferences::default();
+        let brief = default_brief(&video(), &[], &preferences(), "");
+        assert_eq!(preferences_in(&brief, &current), preferences());
+        // The creator's own lines change nothing; a preference without a line keeps its value.
+        let custom = "Edit preferences:\n- Colour grade: teal and orange.\n- Mention the sponsor.\n\n- No subtitles.\n";
+        let followed = preferences_in(custom, &preferences());
+        assert_eq!(followed, EditPreferences { color_grade: "teal and orange".into(), ..preferences() });
+        assert_eq!(preferences_in("Just cut it.", &preferences()), preferences());
+        let unchanged = default_brief(&video(), &[], &current, "");
+        assert_eq!(preferences_in(&unchanged, &current), current, "no grade is still no grade");
     }
 
     #[test]

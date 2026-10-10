@@ -23,7 +23,7 @@ use videocrm_core::{Block, DocumentKind, PipelineRun, RunId, RunStatus, Video, V
 
 use super::brief::{
     BriefDraft, COLOR_GRADES, apply_edits, brief_source, color_grade_label, default_brief, preference_edits,
-    shift_offset,
+    preferences_in, shift_offset,
 };
 use super::doctor::DoctorChecklist;
 use super::footage::{FootageCard, FootageChanged};
@@ -105,15 +105,17 @@ impl AiEditPanel {
                     this.follow_video(window, cx);
                 }
             }),
-            cx.subscribe(&brief, |this, brief, event: &InputEvent, cx| {
+            cx.subscribe_in(&brief, window, |this, brief, event: &InputEvent, window, cx| {
                 if !matches!(event, InputEvent::Change) {
                     return;
                 }
                 // `set_value` emits nothing, and the panel's own edits leave the brief as
-                // it noted; any other change is the creator typing.
-                if this.applied_brief.as_deref() != Some(brief.read(cx).value().as_ref()) {
+                // it noted; any other change is the creator typing (or undoing).
+                let value = brief.read(cx).value().to_string();
+                if this.applied_brief.as_deref() != Some(value.as_str()) {
                     this.applied_brief = None;
                     this.brief_edited = true;
+                    this.follow_brief(&value, window, cx);
                     this.schedule_save(cx);
                     cx.notify();
                 }
@@ -185,6 +187,11 @@ impl AiEditPanel {
         self.brief.read(cx).value().to_string()
     }
 
+    /// The edit preferences the form shows.
+    pub fn preferences(&self) -> &EditPreferences {
+        &self.preferences
+    }
+
     /// The video, its script and the standing instructions a brief is drafted from.
     fn brief_inputs(&self, cx: &App) -> Option<(Video, Vec<Block>, String)> {
         let state = self.state.read(cx);
@@ -252,6 +259,17 @@ impl AiEditPanel {
         } else {
             self.reset_brief(window, cx);
         }
+    }
+
+    /// Shows the preferences the brief's own preference lines state, after the creator
+    /// changed or undid one of them.
+    fn follow_brief(&mut self, brief: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let preferences = preferences_in(brief, &self.preferences);
+        if preferences.target_length != self.preferences.target_length {
+            let target_length = preferences.target_length.clone();
+            self.target_length.update(cx, |input, cx| input.set_value(target_length, window, cx));
+        }
+        self.preferences = preferences;
     }
 
     /// Changes the preferences and the brief's lines for the ones that changed. The
