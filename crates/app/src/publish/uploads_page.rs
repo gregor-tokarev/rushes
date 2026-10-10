@@ -225,7 +225,8 @@ impl UploadsPage {
             )
             .cell(started, time_text(format_when(job.created_at, Local::now()), cx))
             .cell(updated, time_text(format_when(job.updated_at, Local::now()), cx))
-            .cell(actions, h_flex().children(action));
+            // Cancel and Resume act on their own; the page stays.
+            .action_cell(actions, h_flex().children(action));
         if video.is_none() {
             return row;
         }

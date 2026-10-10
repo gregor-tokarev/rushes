@@ -8,9 +8,9 @@ use std::rc::Rc;
 use gpui_kit::component::{ActiveTheme as _, Size, ThemeStyled as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Div, ElementId, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels,
-    Rems, RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window,
-    canvas, div,
+    AnyElement, App, Div, ElementId, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
+    ParentElement as _, Pixels, Rems, RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
+    TestSupportExt as _, Window, canvas, div,
 };
 
 /// The narrowest a fill column gets: room for a short title.
@@ -152,7 +152,7 @@ pub fn table_header(columns: &[TableColumn], cx: &App) -> Div {
 
 /// A row that opens what it stands for: by click, or with Enter or Space
 /// once Tab reaches it, like a button. Buttons and links inside it act on
-/// their own.
+/// their own: put them in an [`TableRowButton::action_cell`].
 #[derive(IntoElement)]
 pub struct TableRowButton {
     id: ElementId,
@@ -173,6 +173,13 @@ impl TableRowButton {
     pub fn cell(mut self, column: TableColumn, content: impl IntoElement) -> Self {
         self.cells.push((column, content.into_any_element()));
         self
+    }
+
+    /// A cell of controls, such as buttons, that act on their own: pressing one
+    /// (enabled or not) doesn't also open the row.
+    pub fn action_cell(self, column: TableColumn, content: impl IntoElement) -> Self {
+        let controls = div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(content);
+        self.cell(column, controls)
     }
 
     /// Keeps the cells of `visible` columns only.
@@ -205,14 +212,15 @@ impl RenderOnce for TableRowButton {
         let Some(open) = self.on_open else { return row.aria_label(self.label) };
         let focus = window.use_keyed_state(self.id, cx, |_, cx| cx.focus_handle().tab_stop(true)).read(cx).clone();
         let focused = focus.is_focused(window);
-        let key_open = open.clone();
+        let (key_open, key_focus) = (open.clone(), focus.clone());
         row.role(Role::Button)
             .aria_label(self.label)
             .track_focus(&focus)
             .when(focused, |this| this.focus_ring_style(window, cx))
             .hover(move |this| this.bg(hover))
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                // Keys pressed on a focused button inside the row are the button's.
+                if key_focus.is_focused(window) && matches!(event.keystroke.key.as_str(), "enter" | "space") {
                     cx.stop_propagation();
                     key_open(window, cx);
                 }

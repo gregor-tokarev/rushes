@@ -486,6 +486,68 @@ fn the_uploads_page_offers_what_each_job_allows(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn buttons_in_upload_rows_act_on_their_own(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "take2.mp4");
+    let video_id = workspace.create_video(cx, "Stop Using print() to Debug Python", |video| {
+        video.publish.file = Some(file.clone());
+    });
+    // YouTube keeps failing, so the upload keeps running until it is cancelled.
+    emulators.inject_fault(json!({"method": "PUT", "path": "/upload/youtube/v3/videos", "status": 503, "times": 1000}));
+    let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    wait_until(cx, "the upload session", |cx| {
+        service.read_with(cx, |s, _| s.job(upload).and_then(|job| job.session_url.clone()))
+    });
+    workspace.state.update(cx, |state, cx| state.navigate(Route::Uploads, cx));
+    let route = |cx: &mut TestAppContext| workspace.state.read_with(cx, |state, _| state.route().clone());
+    let (handle, _page) = open(cx, |window, cx| cx.new(|cx| UploadsPage::new(window, cx)));
+
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click(format!("upload-{upload}-cancel"), cx);
+    });
+    assert_eq!(route(cx), Route::Uploads, "Cancel doesn't open the video");
+    wait_until(cx, "the cancellation", |cx| {
+        service.read_with(cx, |s, _| s.job(upload).filter(|job| job.status == UploadStatus::Cancelled).map(|_| ()))
+    });
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click(format!("upload-{upload}-resume"), cx);
+    });
+    assert_eq!(route(cx), Route::Uploads, "Resume doesn't open the video");
+    assert!(service.read_with(cx, |s, _| s.is_active(upload)));
+
+    // From the keyboard: Enter on the row's button presses the button.
+    let button = format!("upload-{upload}-cancel");
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        // Tab order: the row, then its button.
+        for _ in 0..4 {
+            if window.find(button.clone()).focused() == Some(true) {
+                break;
+            }
+            window.focus_next(cx);
+            window.render_frame(cx);
+        }
+        assert_eq!(window.find(button.clone()).focused(), Some(true));
+        window.press("enter", cx);
+    });
+    assert!(service.read_with(cx, |s, _| s.is_cancelling(upload)));
+    assert_eq!(route(cx), Route::Uploads);
+    emulators.clear_faults();
+
+    // The row itself still opens the video.
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click(format!("upload-{upload}"), cx);
+    });
+    assert_eq!(route(cx), Route::Video { id: video_id, tab: VideoTab::Publish });
+}
+
+#[gpui_kit::test]
 fn a_narrow_uploads_page_keeps_each_jobs_action_in_view(cx: &mut TestAppContext) {
     let workspace = Workspace::open(cx, YoutubeBackend::default());
     // Resume continues the file the video still has chosen.
