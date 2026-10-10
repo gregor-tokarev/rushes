@@ -175,7 +175,12 @@ pub fn open(
             })
             .on_close(move |_, _, cx| closed.update(cx, |form, _| form.closed = true))
     });
-    input.update(cx, |input, cx| input.focus(window, cx));
+    // The suggested path is selected, so typing another one replaces it; the
+    // form brings its end into view once the field is laid out.
+    input.update(cx, |input, cx| {
+        input.focus(window, cx);
+        input.select_all(window, cx);
+    });
 }
 
 /// The dialog's content: the sentence, the field and what is wrong with it.
@@ -195,6 +200,9 @@ struct PathForm {
     busy: bool,
     /// The dialog went away (Cancel, Escape); a lookup finishing late leaves it be.
     closed: bool,
+    /// The suggested path waits to be scrolled to its end, where the file or
+    /// folder name is, once the field has been laid out.
+    reveal_end: bool,
     task: Option<Task<()>>,
     _subscription: Subscription,
 }
@@ -225,6 +233,7 @@ impl PathForm {
             replace: None,
             busy: false,
             closed: false,
+            reveal_end: !request.value.is_empty(),
             task: None,
             _subscription: subscription,
         }
@@ -323,7 +332,10 @@ impl PathForm {
 }
 
 impl Render for PathForm {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.reveal_end) {
+            reveal_end(self.input.clone(), window);
+        }
         let theme = cx.theme();
         let replace = self
             .replace
@@ -360,6 +372,23 @@ impl Render for PathForm {
     }
 }
 
+/// Scrolls the suggested path in `input` to its end once the field has been
+/// laid out (the frame after the first one), keeping it selected: a long path
+/// shows its file or folder name rather than its first folders. The field only
+/// follows the caret of a partial selection, so the caret visits the end first.
+fn reveal_end(input: Entity<InputState>, window: &mut Window) {
+    window.on_next_frame(move |window, cx| {
+        input.update(cx, |input, cx| {
+            let end = input.value().len();
+            // The creator may have typed or moved the caret meanwhile.
+            if end > 0 && input.selected_range() == (0..end) {
+                input.set_selected_range(end..end, cx);
+                input.select_all(window, cx);
+            }
+        });
+    });
+}
+
 /// What is at a path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Found {
@@ -392,10 +421,18 @@ fn verdict(kind: PathKind, path: &Path, found: io::Result<Found>) -> Verdict {
         Ok(found) => found,
         Err(error) => {
             log_line!("videocrm: can't look up {}: {error}", path.display());
+            // A path to write to is refused for the folder it would go in.
+            let folder = || path.parent().map_or_else(|| shown.clone(), display_user_path);
             return Verdict::Refuse(
-                match error.kind() {
-                    io::ErrorKind::PermissionDenied => format!("VideoCRM isn’t allowed to open {shown}."),
-                    io::ErrorKind::NotADirectory => format!("Part of {shown} is a file, not a folder."),
+                match (error.kind(), kind) {
+                    (io::ErrorKind::PermissionDenied, PathKind::NewFile) => {
+                        format!("VideoCRM isn’t allowed to save files in {}.", folder())
+                    }
+                    (io::ErrorKind::PermissionDenied, PathKind::NewFolder) => {
+                        format!("VideoCRM isn’t allowed to create folders in {}.", folder())
+                    }
+                    (io::ErrorKind::PermissionDenied, _) => format!("VideoCRM isn’t allowed to open {shown}."),
+                    (io::ErrorKind::NotADirectory, _) => format!("Part of {shown} is a file, not a folder."),
                     _ => format!("VideoCRM couldn’t open {shown}. Check that its drive is connected."),
                 }
                 .into(),
@@ -483,6 +520,15 @@ mod tests {
             verdict(PathKind::File, path, Err(io::ErrorKind::PermissionDenied.into())),
             Verdict::Refuse("VideoCRM isn’t allowed to open /srv/media/notes.md.".into())
         );
+        // Saving into a folder VideoCRM can't enter says so, not that it can't open the file.
+        assert_eq!(
+            verdict(PathKind::NewFile, path, Err(io::ErrorKind::PermissionDenied.into())),
+            Verdict::Refuse("VideoCRM isn’t allowed to save files in /srv/media.".into())
+        );
+        assert_eq!(
+            verdict(PathKind::NewFolder, Path::new("/root/media"), Err(io::ErrorKind::PermissionDenied.into())),
+            Verdict::Refuse("VideoCRM isn’t allowed to create folders in /root.".into())
+        );
     }
 
     #[test]
@@ -565,6 +611,32 @@ mod tests {
         type_path(cx, window, &notes.display().to_string());
         assert!(!has_dialog(cx, window));
         assert_eq!(*taken.borrow(), vec![notes]);
+    }
+
+    #[gpui_kit::test]
+    fn typing_replaces_the_suggested_path(cx: &mut TestAppContext) {
+        let window = window(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let take = dir.path().join("take 1.mp4");
+        std::fs::write(&take, "x").unwrap();
+        let taken = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
+        let record = taken.clone();
+        let suggested = dir.path().join("footage").display().to_string();
+        step(cx, window, move |window, cx| {
+            let request =
+                PathRequest::new(PathKind::File, "Type the path of the video instead.", "~/take.mp4").value(suggested);
+            open(request, window, cx, move |path, _, _| {
+                let record = record.clone();
+                accept_now(move |_, _| record.borrow_mut().push(path))
+            });
+        });
+        // No select-all first: the suggestion is selected when the dialog opens.
+        let location = format!("file://{}", take.display().to_string().replace(' ', "%20"));
+        step(cx, window, move |window, cx| window.input(&location, cx));
+        step(cx, window, |window, cx| window.press("enter", cx));
+        assert_eq!(shows(cx, window, ERROR_ID), None, "a file:// location is a full path");
+        assert!(!has_dialog(cx, window));
+        assert_eq!(*taken.borrow(), vec![take]);
     }
 
     #[gpui_kit::test]
