@@ -758,6 +758,34 @@ fn runs_crud_and_event_log() {
 }
 
 #[test]
+fn runs_and_events_written_later_keep_what_the_caller_kept() {
+    let mut store = store();
+    let video = insert(&mut store, "A", 0.0);
+    let mut kept = run(video.id, RunStatus::Planning, 30);
+    store.insert_run(&kept).unwrap();
+    kept.status = RunStatus::AwaitingApproval;
+    kept.updated_at = Utc::now() - TimeDelta::seconds(5);
+    store.replace_run(&kept).unwrap();
+    assert_eq!(store.get_run(kept.id).unwrap(), Some(kept.clone()), "updated_at as the caller set it");
+    assert!(matches!(store.replace_run(&run(video.id, RunStatus::Failed, 0)), Err(StoreError::NotFound { .. })));
+
+    let event = |seq: u32, payload| RunEvent { run_id: kept.id, seq, at: Utc::now(), payload };
+    let (first, second) = (event(1, json!("plan")), event(2, json!("done")));
+    store.insert_run_event(&first).unwrap();
+    store.insert_run_event(&second).unwrap();
+    assert_eq!(store.list_run_events(kept.id).unwrap(), vec![first.clone(), second]);
+    assert!(store.insert_run_event(&first).is_err(), "a number is used once");
+    assert_eq!(store.append_run_event(kept.id, &json!("next")).unwrap().seq, 3);
+
+    let mut job = upload(video.id, UploadStatus::Pending, 5);
+    store.insert_upload(&job).unwrap();
+    job.status = UploadStatus::Uploading { sent: 1, total: 2 };
+    job.updated_at = Utc::now() - TimeDelta::seconds(5);
+    store.replace_upload(&job).unwrap();
+    assert_eq!(store.get_upload(job.id).unwrap(), Some(job));
+}
+
+#[test]
 fn uploads_crud() {
     let mut store = store();
     let video = insert(&mut store, "Upload me", 0.0);

@@ -11,6 +11,11 @@
 //! exits, waiting at most [`QUIT_SAVE_TIMEOUT`] for a lock; what can't be
 //! written by then is kept in a file next to the database and written at the
 //! next start.
+//!
+//! The background services' records (AI edit runs and their logs, uploads,
+//! their own settings) take the same way: the services keep them in memory,
+//! and the queue writes them in order, the newest state of each run and
+//! upload and every log entry.
 
 use std::fs;
 use std::io::{self, Write as _};
@@ -25,8 +30,8 @@ use videocrm_core::document::{DEFAULT_WPM, runtime_secs_for_words, spoken_word_c
 use videocrm_core::settings::AppSettings;
 use videocrm_core::store::{forget_property, reconcile_property_value};
 use videocrm_core::{
-    DatabaseView, Document, DocumentId, DocumentKind, PropertyDef, PropertyId, Store, StoreError, Video, VideoId,
-    VideoRow, ViewId,
+    DatabaseView, Document, DocumentId, DocumentKind, PipelineRun, PropertyDef, PropertyId, RunEvent, RunId, Store,
+    StoreError, UploadId, UploadJob, Video, VideoId, VideoRow, ViewId,
 };
 
 use super::{AppEvent, AppState, Problem, SharedStore};
@@ -47,7 +52,10 @@ const UNSAVED_FILE: &str = "unsaved-changes.json";
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum Write {
     Video(Video),
-    CreateVideo { video: Video, documents: Vec<Document> },
+    CreateVideo {
+        video: Video,
+        documents: Vec<Document>,
+    },
     DeleteVideos(Vec<VideoId>),
     InsertProperty(PropertyDef),
     UpdateProperty(PropertyDef),
@@ -57,16 +65,38 @@ pub(crate) enum Write {
     Settings(AppSettings),
     Document(Document),
     SeedSample,
+    /// A new AI edit run.
+    InsertRun(PipelineRun),
+    /// An AI edit run's state, as the pipeline service keeps it.
+    Run(PipelineRun),
+    /// An entry of an AI edit run's log, numbered by the pipeline service.
+    RunEvent {
+        video_id: VideoId,
+        event: RunEvent,
+    },
+    InsertUpload(UploadJob),
+    /// An upload's state, as the YouTube service keeps it.
+    Upload(UploadJob),
+    /// A value of the settings table other than the app settings.
+    Setting {
+        key: String,
+        value: serde_json::Value,
+    },
 }
 
 /// What a write replaces as a whole, so a later write of the same key makes an
 /// earlier one unnecessary.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum Key {
     Video(VideoId),
     Document(DocumentId),
     View(ViewId),
     Settings,
+    Run(RunId),
+    /// Log entries are never replaced, and don't keep other writes apart.
+    RunEvent(RunId, u32),
+    Upload(UploadId),
+    Setting(String),
 }
 
 impl Write {
@@ -79,6 +109,10 @@ impl Write {
             Write::Document(document) => Some(Key::Document(document.id)),
             Write::SaveView(view) => Some(Key::View(view.id)),
             Write::Settings(_) => Some(Key::Settings),
+            Write::Run(run) => Some(Key::Run(run.id)),
+            Write::RunEvent { event, .. } => Some(Key::RunEvent(event.run_id, event.seq)),
+            Write::Upload(job) => Some(Key::Upload(job.id)),
+            Write::Setting { key, .. } => Some(Key::Setting(key.clone())),
             _ => None,
         }
     }
@@ -96,6 +130,12 @@ impl Write {
             Write::Settings(settings) => store.save_settings(settings),
             Write::Document(document) => store.save_document(&mut document.clone()),
             Write::SeedSample => store.seed_sample_workspace().map(drop),
+            Write::InsertRun(run) => store.insert_run(run),
+            Write::Run(run) => store.replace_run(run),
+            Write::RunEvent { event, .. } => store.insert_run_event(event),
+            Write::InsertUpload(job) => store.insert_upload(job),
+            Write::Upload(job) => store.replace_upload(job),
+            Write::Setting { key, value } => store.set_setting(key, value),
         }
     }
 
@@ -104,13 +144,33 @@ impl Write {
         match self {
             Write::Video(video) | Write::CreateVideo { video, .. } => Some(video.id),
             Write::Document(document) => Some(document.video_id),
+            Write::InsertRun(run) | Write::Run(run) => Some(run.video_id),
+            Write::RunEvent { video_id, .. } => Some(*video_id),
+            Write::InsertUpload(job) | Write::Upload(job) => Some(job.video_id),
             _ => None,
         }
     }
 
-    /// Whether the cached rows, properties or views follow the stored ones after it.
+    /// Whether the cached rows, properties or views follow the stored ones
+    /// after it. The services reload the rows themselves after their records
+    /// change, as the rows only summarize them.
     fn changes_data(&self) -> bool {
-        !matches!(self, Write::Settings(_))
+        !matches!(self, Write::Settings(_) | Write::Setting { .. }) && self.record().is_none()
+    }
+
+    /// The service record the write saves, if it is one.
+    fn record(&self) -> Option<Record> {
+        match self {
+            Write::InsertRun(_) | Write::Run(_) | Write::RunEvent { .. } => Some(Record::Edit),
+            Write::InsertUpload(_) | Write::Upload(_) => Some(Record::Upload),
+            _ => None,
+        }
+    }
+
+    /// Whether the creator hears that the database refused it. A run or an
+    /// upload that is gone was deleted with its video.
+    fn reports_refusal(&self, error: &StoreError) -> bool {
+        self.record().is_none() || !matches!(error, StoreError::NotFound { .. })
     }
 
     /// What failed, as the title of a problem.
@@ -118,6 +178,8 @@ impl Write {
         match self {
             Write::CreateVideo { .. } => "Couldn’t create the video",
             Write::Settings(_) => "Couldn’t save the settings",
+            Write::InsertRun(_) | Write::Run(_) | Write::RunEvent { .. } => "Couldn’t save the AI edit",
+            Write::InsertUpload(_) | Write::Upload(_) => "Couldn’t save the upload",
             _ => "Couldn’t save your changes",
         }
     }
@@ -213,9 +275,24 @@ impl Write {
                 row.script_seconds = runtime_secs_for_words(script_words, DEFAULT_WPM);
                 true
             }
-            Write::Settings(_) | Write::Document(_) | Write::SeedSample => false,
+            Write::Settings(_)
+            | Write::Document(_)
+            | Write::SeedSample
+            | Write::InsertRun(_)
+            | Write::Run(_)
+            | Write::RunEvent { .. }
+            | Write::InsertUpload(_)
+            | Write::Upload(_)
+            | Write::Setting { .. } => false,
         }
     }
+}
+
+/// The kinds of service records, for what a failure is about.
+#[derive(Clone, Copy, PartialEq)]
+enum Record {
+    Edit,
+    Upload,
 }
 
 /// The data [`AppState`] caches, as a write changes it.
@@ -352,8 +429,73 @@ impl Queue {
         documents.sort_by_key(|document| (document.position, document.id));
     }
 
+    /// Replays the queued writes on runs read from the database, newest first.
+    pub(super) fn overlay_runs(&self, runs: &mut Vec<PipelineRun>) {
+        for entry in &self.entries {
+            match &entry.write {
+                Write::InsertRun(run) | Write::Run(run) => match runs.iter_mut().find(|known| known.id == run.id) {
+                    Some(known) => *known = run.clone(),
+                    None if matches!(entry.write, Write::InsertRun(_)) => runs.push(run.clone()),
+                    None => {}
+                },
+                Write::DeleteVideos(ids) => runs.retain(|run| !ids.contains(&run.video_id)),
+                _ => {}
+            }
+        }
+        runs.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+    }
+
+    /// Adds the queued entries of a run's log to the ones read from the
+    /// database, in order; an entry written meanwhile is not repeated.
+    pub(super) fn overlay_run_events(&self, run_id: RunId, events: &mut Vec<RunEvent>) {
+        for entry in &self.entries {
+            if let Write::RunEvent { event, .. } = &entry.write
+                && event.run_id == run_id
+                && !events.iter().any(|known| known.seq == event.seq)
+            {
+                events.push(event.clone());
+            }
+        }
+        events.sort_by_key(|event| event.seq);
+    }
+
+    /// Replays the queued writes on uploads read from the database, newest first.
+    pub(super) fn overlay_uploads(&self, jobs: &mut Vec<UploadJob>) {
+        for entry in &self.entries {
+            match &entry.write {
+                Write::InsertUpload(job) | Write::Upload(job) => match jobs.iter_mut().find(|known| known.id == job.id)
+                {
+                    Some(known) => *known = job.clone(),
+                    None if matches!(entry.write, Write::InsertUpload(_)) => jobs.push(job.clone()),
+                    None => {}
+                },
+                Write::DeleteVideos(ids) => jobs.retain(|job| !ids.contains(&job.video_id)),
+                _ => {}
+            }
+        }
+        jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+    }
+
+    /// The newest queued value of a settings key other than the app settings.
+    pub(super) fn setting(&self, key: &str) -> Option<&serde_json::Value> {
+        self.entries.iter().rev().find_map(|entry| match &entry.write {
+            Write::Setting { key: queued, value } if queued == key => Some(value),
+            _ => None,
+        })
+    }
+
     /// What the failing writes are, for a sentence: "Couldn’t save …".
     fn failing_subject(&self) -> Subject {
+        let mut records = self.entries.iter().filter(|entry| entry.failing).map(|entry| entry.write.record());
+        match records.next() {
+            Some(Some(first)) if records.all(|record| record == Some(first)) => {
+                return match first {
+                    Record::Edit => Subject::Edit,
+                    Record::Upload => Subject::Upload,
+                };
+            }
+            _ => {}
+        }
         let mut kinds = self.entries.iter().filter(|entry| entry.failing).map(|entry| match &entry.write {
             Write::Document(document) => Some(document.kind),
             _ => None,
@@ -377,6 +519,8 @@ enum Subject {
     Script,
     Notes,
     Writing,
+    Edit,
+    Upload,
     Changes,
 }
 
@@ -386,6 +530,8 @@ impl Subject {
             Subject::Script => "the script",
             Subject::Notes => "the notes",
             Subject::Writing => "your writing",
+            Subject::Edit => "the AI edit’s progress",
+            Subject::Upload => "the upload’s progress",
             Subject::Changes => "your changes",
         }
     }
@@ -606,7 +752,11 @@ impl AppState {
                     return true;
                 }
                 Err(error) if is_refused(&error) => {
-                    self.report_problem(Problem::store(write.failure_title(), &error), cx);
+                    if write.reports_refusal(&error) {
+                        self.report_problem(Problem::store(write.failure_title(), &error), cx);
+                    } else {
+                        eprintln!("videocrm: {}: {error}", write.failure_title());
+                    }
                     return false;
                 }
                 // Busy or failing: the background writer retries it.
@@ -657,7 +807,11 @@ impl AppState {
 
     fn finish_writes(&mut self, pass: Pass, cx: &mut Context<Self>) {
         for (write, error) in &pass.refused {
-            self.report_problem(Problem::store(write.failure_title(), error), cx);
+            if write.reports_refusal(error) {
+                self.report_problem(Problem::store(write.failure_title(), error), cx);
+            } else {
+                eprintln!("videocrm: {}: {error}", write.failure_title());
+            }
         }
         let known: Vec<VideoId> = self.rows.iter().map(|row| row.video.id).collect();
         lock(&self.writes.queue).drop_failing(|id| known.contains(&id));
@@ -963,6 +1117,66 @@ mod tests {
     }
 
     #[test]
+    fn service_records_queue_in_order_and_show_in_what_is_read() {
+        let video = Video::new("Desk setup tour");
+        let now = chrono::Utc::now();
+        let mut run = PipelineRun {
+            id: RunId::new(),
+            video_id: video.id,
+            status: videocrm_core::RunStatus::Planning,
+            brief: "Cut it tight.".into(),
+            footage_dir: "/media/desk/footage".into(),
+            session_id: None,
+            summary: None,
+            output: None,
+            error: None,
+            cost_usd: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let event = |seq: u32| Write::RunEvent {
+            video_id: video.id,
+            event: RunEvent { run_id: run.id, seq, at: now, payload: serde_json::json!(seq) },
+        };
+        let mut queue = Queue::default();
+        queue.push(Write::InsertRun(run.clone()));
+        queue.push(event(1));
+        queue.push(Write::Run(run.clone()));
+        queue.push(event(2));
+        run.status = videocrm_core::RunStatus::AwaitingApproval;
+        queue.push(Write::Run(run.clone()));
+        queue.push(Write::Video(video.clone()));
+        queue.push(Write::Video(Video { title: "Desk setup".into(), ..video.clone() }));
+        // Log entries stay, each once; a run's newer state and a video's newer
+        // value take the place of the queued ones past them.
+        assert_eq!(queue.len(), 5);
+        assert!(matches!(&queue.entries[2].write, Write::Run(queued) if queued.status == run.status));
+        assert!(matches!(&queue.entries[4].write, Write::Video(queued) if queued.title == "Desk setup"));
+
+        let mut runs = Vec::new();
+        queue.overlay_runs(&mut runs);
+        assert_eq!(runs, vec![run.clone()]);
+        // The first entry was written meanwhile: it is read, and not repeated.
+        let mut events = vec![RunEvent { run_id: run.id, seq: 1, at: now, payload: serde_json::json!(1) }];
+        queue.overlay_run_events(run.id, &mut events);
+        assert_eq!(events.iter().map(|event| event.seq).collect::<Vec<_>>(), [1, 2]);
+
+        queue.mark_failing(None);
+        assert_eq!(queue.failing_subject().name(), "your changes");
+        queue.entries.retain(|entry| entry.write.record().is_some());
+        assert_eq!(queue.failing_subject().name(), "the AI edit’s progress");
+
+        queue.push(Write::DeleteVideos(vec![video.id]));
+        let mut runs = vec![run.clone()];
+        queue.overlay_runs(&mut runs);
+        assert!(runs.is_empty(), "deleted with the video");
+        // A run gone with its video is refused without a word.
+        let gone = StoreError::NotFound { entity: "pipeline run", id: run.id.to_string() };
+        assert!(!Write::Run(run).reports_refusal(&gone));
+        assert!(Write::Video(video).reports_refusal(&gone));
+    }
+
+    #[test]
     fn writes_that_can_never_succeed_leave_the_queue() {
         let store: SharedStore = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let queue = Mutex::new(Queue::default());
@@ -976,7 +1190,15 @@ mod tests {
     fn unsaved_writes_round_trip_through_their_file() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(UNSAVED_FILE);
-        let writes = vec![Write::Video(Video::new("Kept")), Write::Settings(AppSettings::default()), Write::SeedSample];
+        let video = Video::new("Kept");
+        let event = RunEvent { run_id: RunId::new(), seq: 1, at: chrono::Utc::now(), payload: serde_json::json!({}) };
+        let writes = vec![
+            Write::Video(video.clone()),
+            Write::Settings(AppSettings::default()),
+            Write::SeedSample,
+            Write::RunEvent { video_id: video.id, event },
+            Write::Setting { key: "ai_edit.brief_drafts".into(), value: serde_json::json!([]) },
+        ];
         write_private_json(&file, &writes).unwrap();
         assert_eq!(read_unsaved(&file).unwrap().unwrap(), writes);
 

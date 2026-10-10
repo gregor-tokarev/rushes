@@ -27,7 +27,7 @@ use videocrm::ai_edit::{
     RENDERED_WITH_ERROR, RunError, RunMarker, TimelineEntry, delete_run_notice, split_failure,
 };
 use videocrm::route::{Route, VideoTab};
-use videocrm::state::{AppEvent, AppState};
+use videocrm::state::{AppEvent, AppState, SAVE_RETRY_DELAY};
 use videocrm_core::{Block, DocumentKind, NewVideo, PipelineRun, RunId, RunStatus, Store, VideoId, VideoStatus};
 use videocrm_pipeline::{AgentEvent, AgentProcess};
 
@@ -720,6 +720,49 @@ fn the_requirement_check_passes_with_the_fake_agent(cx: &mut TestAppContext) {
     wait_until(cx, "second check", |cx| !service.read(cx).is_checking());
     let doctor = cx.read(|cx| service.read(cx).doctor().cloned()).unwrap();
     assert!(!doctor.agent.ok && !doctor.ready());
+}
+
+#[gpui_kit::test]
+fn an_edit_runs_on_while_another_program_locks_the_database(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let database = dir.path().join("videocrm.db");
+    let fx = Fixture::with_store(cx, Store::open(&database).expect("database file"), &[], true);
+    let stored = |database: &Path, id: RunId| {
+        let store = Store::open(database).expect("open the database");
+        (store.get_run(id).expect("read run"), store.list_run_events(id).expect("read log"))
+    };
+
+    // Another program holds the write lock, as a backup or sync tool does.
+    let lock = rusqlite::Connection::open(&database).expect("second connection");
+    lock.execute_batch("BEGIN EXCLUSIVE").expect("lock the database");
+    let started = Instant::now();
+    let id = fx.start(cx, false);
+    assert!(started.elapsed() < Duration::from_secs(1), "starting took {:?}", started.elapsed());
+    let service = fx.service.clone();
+    wait_until(cx, "the strategy", move |cx| {
+        service.read(cx).run(id).is_some_and(|run| run.status == RunStatus::AwaitingApproval)
+            && service.read(cx).live_phase(id).is_none()
+    });
+    let run = fx.run(cx, id);
+    let timeline = cx.read(|cx| fx.service.read(cx).timeline(id).to_vec());
+    assert!(run.summary.is_some() && run.session_id.is_some(), "{run:?}");
+    assert_eq!(tool_names(&timeline), ["Skill", "Bash", "Bash", "Bash", "Write"]);
+    assert_eq!(stored(&database, id), (None, Vec::new()), "nothing is written during the lock");
+
+    // The lock ends: the background writer's next attempt writes the run and its log.
+    lock.execute_batch("COMMIT").expect("release the lock");
+    let deadline = Instant::now() + TIMEOUT;
+    while cx.read(|cx| fx.state.read(cx).has_unsaved_changes()) {
+        assert!(Instant::now() < deadline, "timed out waiting for the saved edit");
+        cx.executor().advance_clock(SAVE_RETRY_DELAY);
+        cx.run_until_parked();
+    }
+    let (stored_run, log) = stored(&database, id);
+    assert_eq!(stored_run, Some(run));
+    assert_eq!(log.into_iter().map(TimelineEntry::from).collect::<Vec<_>>(), timeline);
 }
 
 #[gpui_kit::test]

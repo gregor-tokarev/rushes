@@ -17,7 +17,7 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Subscription};
 use videocrm_core::settings::{self, YoutubeBackend};
-use videocrm_core::{Store, UploadId, UploadJob, UploadStatus, Video};
+use videocrm_core::{UploadId, UploadJob, UploadStatus, Video};
 use videocrm_youtube::{
     Account, CredentialStore, Credentials, Error as YoutubeError, SavedLogin, VideoInfo, YoutubeClient, YoutubeConfig,
     begin_authorization, check_client,
@@ -25,7 +25,7 @@ use videocrm_youtube::{
 
 use super::rules::AccountAccess;
 use super::upload::{ActiveUpload, ProcessingOutcome, Retired};
-use crate::state::{AppEvent, AppState, Problem, SharedStore};
+use crate::state::{AppEvent, AppState, Problem};
 
 const CREDENTIALS_FILE: &str = "credentials.json";
 const AVATAR_DIR: &str = "avatars";
@@ -615,10 +615,6 @@ impl YoutubeService {
         cx.emit(YoutubeEvent::UploadsChanged);
         cx.notify();
     }
-
-    pub(super) fn store(&self, cx: &App) -> SharedStore {
-        self.state.read(cx).store()
-    }
 }
 
 /// Sign-in worker: a check that the sign-in can work, consent in the browser, then the
@@ -778,11 +774,6 @@ fn download_avatar(url: &str, path: &Path) -> io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(path, bytes)
-}
-
-pub(super) fn lock(store: &SharedStore) -> MutexGuard<'_, Store> {
-    // SQLite transactions roll back on their own, so a poisoned lock is still usable.
-    store.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Shows a notification in the active window; nothing happens without a window.

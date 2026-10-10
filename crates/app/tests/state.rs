@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
@@ -15,8 +16,8 @@ use gpui_kit::{
     WindowBounds, WindowOptions, px, size,
 };
 use rusqlite::Connection;
-use videocrm::ai_edit::PipelineService;
-use videocrm::publish::YoutubeService;
+use videocrm::ai_edit::{LogEvent, PipelineService, RunMarker, TimelineEntry};
+use videocrm::publish::{Retired, YoutubeService};
 use videocrm::route::VideoTab;
 use videocrm::shell::{self, Workspace};
 use videocrm::state::{AppEvent, AppState, QUIT_SAVE_TIMEOUT, SAVE_RETRY_DELAY};
@@ -24,8 +25,8 @@ use videocrm::video_page::SAVE_DELAY;
 use videocrm_core::settings::AppSettings;
 use videocrm_core::templates::TemplateKind;
 use videocrm_core::{
-    BlockId, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, Store,
-    TagColor, VideoId,
+    BlockId, DocumentKind, NewVideo, PipelineRun, PropertyDef, PropertyId, PropertyKind, PropertyValue, RunId,
+    RunStatus, SelectOption, Store, TagColor, UploadId, UploadJob, UploadStatus, VideoId,
 };
 
 /// Longest a UI-thread call may take while the database is locked. The UI
@@ -243,8 +244,10 @@ fn edits_during_another_programs_lock_wait_for_nothing_and_land_after_it(cx: &mu
     assert_eq!(shown, Some(PropertyValue::Select(Some("low".into()))));
 
     // Typing goes to the queue after the save delay, without waiting either.
-    let ((), took) = app.timed(cx, |window, cx| window.input("Locked in", cx));
-    assert!(took < PROMPT, "typing took {took:?}");
+    for key in ["Locked", " ", "in"] {
+        let ((), took) = app.timed(cx, |window, cx| window.input(key, cx));
+        assert!(took < PROMPT, "typing {key:?} took {took:?}");
+    }
     cx.executor().advance_clock(SAVE_DELAY);
     let page = cx.read(|cx| app.workspace.read(cx).video_page().cloned().expect("video page"));
     let ((), took) = app.timed(cx, move |_, cx| {
@@ -294,6 +297,115 @@ fn edits_during_another_programs_lock_wait_for_nothing_and_land_after_it(cx: &mu
     assert!(!app.has(cx, "not-saved"));
     assert_eq!(stored_property(&app.database, desk, priority), Some(PropertyValue::Select(Some("low".into()))));
     assert_eq!(stored_script(&app.database, desk), "Locked in");
+}
+
+#[gpui_kit::test]
+fn ai_edits_and_uploads_change_during_a_lock_without_waiting_and_land_after_it(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour"]);
+    let desk = app.video_id(cx, "Desk setup tour");
+    let now = Utc::now();
+    let run = PipelineRun {
+        id: RunId::new(),
+        video_id: desk,
+        status: RunStatus::AwaitingApproval,
+        brief: "Cut it tight.".into(),
+        footage_dir: app._dir.path().join("footage"),
+        session_id: Some("session".into()),
+        summary: Some("Keep the second take.".into()),
+        output: None,
+        error: None,
+        cost_usd: None,
+        created_at: now,
+        updated_at: now,
+    };
+    // Stopped with a session that can take the rest of the video's file.
+    let job = UploadJob {
+        id: UploadId::new(),
+        video_id: desk,
+        file: app._dir.path().join("take.mp4"),
+        file_stamp: None,
+        status: UploadStatus::Failed { error: "Interrupted — you can resume".into() },
+        session_url: Some("http://127.0.0.1:9/upload/session".into()),
+        created_at: now,
+        updated_at: now,
+    };
+    let (run_id, job_id) = (run.id, job.id);
+    {
+        let mut store = Store::open(&app.database).expect("open the database");
+        store.insert_run(&run).expect("insert run");
+        store.insert_upload(&job).expect("insert upload");
+    }
+    let (state, file) = (app.state.clone(), job.file.clone());
+    app.step(cx, move |_, cx| {
+        state.update(cx, |state, cx| {
+            let mut video = state.video(desk).cloned().expect("video");
+            video.publish.file = Some(file);
+            state.update_video(video, cx);
+        })
+    });
+    let (state, dir) = (app.state.clone(), app._dir.path().to_owned());
+    let (pipeline, youtube) = cx.update(|cx| {
+        PipelineService::init(state.clone(), cx);
+        (PipelineService::global(cx), YoutubeService::init_in(state, dir, cx))
+    });
+    let errors = app.errors(cx);
+
+    let mut locker = Locker::hold(&app.database);
+
+    // Discarding the strategy logs it and changes the run; so does bringing it
+    // back. Neither waits for the lock.
+    let service = pipeline.clone();
+    let ((), took) = app.timed(cx, move |_, cx| service.update(cx, |service, cx| service.cancel(run_id, cx)));
+    assert!(took < PROMPT, "discarding took {took:?}");
+    let service = pipeline.clone();
+    let (restored, took) = app.timed(cx, move |_, cx| service.update(cx, |service, cx| service.restore(run_id, cx)));
+    assert!(took < PROMPT, "restoring took {took:?}");
+    restored.expect("restored");
+    // Another file is chosen for the video: the stopped upload's status
+    // changes, the way its progress does.
+    let state = app.state.clone();
+    let other = app._dir.path().join("final.mp4");
+    let ((), took) = app.timed(cx, move |_, cx| {
+        state.update(cx, |state, cx| {
+            let mut video = state.video(desk).cloned().expect("video");
+            video.publish.file = Some(other);
+            state.update_video(video, cx);
+        })
+    });
+    assert!(took < PROMPT, "an upload status took {took:?}");
+    app.step(cx, |_, _| {});
+
+    // Shown at once, stored once the lock ends.
+    let shown_run = cx.read(|cx| pipeline.read(cx).run(run_id).cloned().expect("run"));
+    assert_eq!(shown_run.status, RunStatus::AwaitingApproval);
+    let timeline = cx.read(|cx| pipeline.read(cx).timeline(run_id).to_vec());
+    let markers: Vec<RunMarker> = timeline
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            LogEvent::Marker(marker) => Some(marker.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(markers.len(), 2, "discarded, then restored: {timeline:?}");
+    let shown_job = cx.read(|cx| youtube.read(cx).job(job_id).cloned().expect("job"));
+    assert_eq!(shown_job.session_url, None);
+    assert_eq!(cx.read(|cx| youtube.read(cx).retired(job_id)), Some(Retired::OtherFile));
+    assert_eq!(stored(&app.database, |store| store.get_run(run_id).expect("read run")), Some(run));
+    assert!(stored(&app.database, |store| store.list_run_events(run_id).expect("read log")).is_empty());
+    assert_eq!(stored(&app.database, |store| store.get_upload(job_id).expect("read upload")), Some(job));
+
+    locker.release();
+    app.wait(cx, SAVE_RETRY_DELAY);
+    assert!(!cx.read(|cx| app.state.read(cx).has_unsaved_changes()));
+    assert_eq!(stored(&app.database, |store| store.get_run(run_id).expect("read run")), Some(shown_run));
+    let log = stored(&app.database, |store| store.list_run_events(run_id).expect("read log"));
+    assert_eq!(log.into_iter().map(TimelineEntry::from).collect::<Vec<_>>(), timeline);
+    assert_eq!(stored(&app.database, |store| store.get_upload(job_id).expect("read upload")), Some(shown_job));
+    assert_eq!(
+        *errors.borrow(),
+        ["Couldn’t save your changes: another program is using the database. VideoCRM keeps trying and saves them \
+          when the database is free."]
+    );
 }
 
 #[gpui_kit::test]

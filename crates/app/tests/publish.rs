@@ -8,17 +8,17 @@ mod publish_support;
 use std::cell::RefCell;
 use std::io::Write as _;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{Local, Utc};
 use gpui_kit::{Entity, TestAppContext};
 use publish_support::{Emulators, Workspace, wait_until};
 use serde_json::json;
 use videocrm::publish::{
-    Connection, INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, Retired, UploadError, YoutubeService,
-    delete_upload_notice,
+    Connection, INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, Retired, UploadError, YoutubeEvent,
+    YoutubeService, delete_upload_notice,
 };
-use videocrm::state::AppEvent;
+use videocrm::state::{AppEvent, SAVE_RETRY_DELAY};
 use videocrm_core::settings::YoutubeBackend;
 use videocrm_core::{Privacy, UploadId, UploadJob, UploadStatus, VideoId, VideoStatus};
 use videocrm_youtube::{Account, CredentialStore, Credentials, SavedLogin};
@@ -232,6 +232,63 @@ fn a_cancelled_upload_resumes_where_youtube_stopped(cx: &mut TestAppContext) {
     assert_eq!(received.len(), 1);
     assert_eq!(received[0]["sha256"], publish_support::sha256(&file));
     assert_eq!(service.update(cx, |service, cx| service.resume_upload(upload, cx)), Err(UploadError::NotResumable));
+}
+
+#[gpui_kit::test]
+fn an_upload_goes_on_while_another_program_locks_the_database(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Keychron Q1 Max review", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.privacy = Privacy::Private;
+    });
+    // Every state the upload goes through, as the service shows it.
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let sink = seen.clone();
+    cx.update(|cx| {
+        cx.subscribe(&service, move |service, event: &YoutubeEvent, cx| {
+            if *event == YoutubeEvent::UploadsChanged
+                && let Some(job) = service.read(cx).latest_job(video_id)
+            {
+                sink.borrow_mut().push(job.status.clone());
+            }
+        })
+        .detach()
+    });
+
+    // Another program holds the write lock, as a backup or sync tool does.
+    let database = workspace.dir.path().join("videocrm.db");
+    let lock = rusqlite::Connection::open(&database).unwrap();
+    lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let started = Instant::now();
+    let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).expect("the upload starts");
+    assert!(started.elapsed() < Duration::from_secs(1), "starting took {:?}", started.elapsed());
+    let youtube_id = wait_until(cx, "the upload", |cx| {
+        match service.read_with(cx, |s, _| s.job(upload).map(|job| job.status.clone())) {
+            Some(UploadStatus::Processing { video_id }) => Some(video_id),
+            Some(UploadStatus::Failed { error }) => panic!("upload failed: {error}"),
+            _ => None,
+        }
+    });
+    assert!(seen.borrow().iter().any(|status| matches!(status, UploadStatus::Uploading { .. })), "{seen:?}");
+    assert_eq!(emulators.uploads().len(), 1, "the video reached YouTube");
+    assert!(workspace.stored_jobs(cx).is_empty(), "nothing is written during the lock");
+
+    // The lock ends: the background writer's next attempt writes the job as the
+    // service shows it, and the video's link.
+    lock.execute_batch("COMMIT").unwrap();
+    wait_until(cx, "the saved upload", |cx| {
+        cx.executor().advance_clock(SAVE_RETRY_DELAY);
+        (!workspace.state.read_with(cx, |state, _| state.has_unsaved_changes())).then_some(())
+    });
+    let shown = service.read_with(cx, |s, _| s.jobs().to_vec());
+    assert_eq!(workspace.stored_jobs(cx), shown);
+    let store = workspace.state.read_with(cx, |state, _| state.store());
+    let link = store.lock().unwrap().get_video(video_id).unwrap().and_then(|video| video.youtube);
+    assert_eq!(link.map(|link| link.video_id), Some(youtube_id));
 }
 
 /// Starts an upload of `video_id` that YouTube keeps failing, then cancels it once
