@@ -548,6 +548,39 @@ fn deleting_the_open_video_during_a_lock_lands_where_the_creator_came_from(cx: &
 }
 
 #[gpui_kit::test]
+fn deleting_a_video_from_the_table_during_a_lock_takes_it_out_of_forward(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour", "Studio tour"]);
+    let desk = app.video_id(cx, "Desk setup tour");
+    let table = cx.read(|cx| app.state.read(cx).route().clone());
+    // Opened, then back to the table: Forward leads to the video.
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| {
+        state.update(cx, |state, cx| {
+            state.open_video(desk, VideoTab::Script, cx);
+            state.go_back(cx);
+        })
+    });
+    assert!(cx.read(|cx| app.state.read(cx).can_go_forward()));
+
+    let mut locker = Locker::hold(&app.database);
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| state.update(cx, |state, cx| state.delete_videos(&[desk], cx)));
+    assert!(cx.read(|cx| app.state.read(cx).has_unsaved_changes()), "the delete waits in the queue");
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_forward()), "Forward no longer leads to the deleted video");
+    app.step(cx, |window, cx| window.press("alt-right", cx));
+    let route = |cx: &mut TestAppContext| cx.read(|cx| app.state.read(cx).route().clone());
+    assert_eq!(route(cx), table);
+    assert!(!app.has(cx, "video-missing"));
+
+    locker.release();
+    app.wait(cx, SAVE_RETRY_DELAY);
+    assert!(!cx.read(|cx| app.state.read(cx).has_unsaved_changes()));
+    assert_eq!(stored(&app.database, |store| store.get_video(desk).expect("read video")), None);
+    assert_eq!(route(cx), table);
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_forward()));
+}
+
+#[gpui_kit::test]
 fn a_video_created_while_the_disk_is_full_keeps_its_edits_until_it_lands(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, &[]);
     let errors = app.errors(cx);
