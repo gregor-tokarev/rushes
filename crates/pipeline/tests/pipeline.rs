@@ -134,8 +134,9 @@ fn plan_then_approve_then_feedback() {
     assert_eq!(plan.cost_usd, Some(0.0123));
     assert!(ws.footage.join("edit/project.md").is_file());
 
+    assert!(matches!(&events[0], AgentEvent::Spawned { process } if process.pgid > 0), "{:?}", events[0]);
     assert!(matches!(
-        &events[0],
+        &events[1],
         AgentEvent::Init { session_id: id, model, cwd, .. }
             if *id == session_id && model == "fake-model" && *cwd == ws.footage
     ));
@@ -173,7 +174,7 @@ fn plan_then_approve_then_feedback() {
     );
     let approve = approve.expect("approve succeeds");
     assert_eq!(approve.session_id.as_deref(), Some(session_id.as_str()));
-    assert!(matches!(&events[0], AgentEvent::Init { session_id: id, .. } if *id == session_id));
+    assert!(matches!(&events[1], AgentEvent::Init { session_id: id, .. } if *id == session_id));
     let argv = ws.argv();
     assert!(argv.contains(&format!("--resume={session_id}")), "{argv:?}");
     assert!(argv[1].contains("Keep it tight."));
@@ -342,7 +343,7 @@ mod cancel {
             "cancellation took {:?}",
             cancelled_at.elapsed()
         );
-        assert!(matches!(events.first(), Some(AgentEvent::Init { .. })));
+        assert!(matches!(events.get(1), Some(AgentEvent::Init { .. })), "{events:?}");
         for pid in pids {
             assert!(wait_until(Duration::from_secs(5), || is_dead(pid)), "pid {pid} survived");
         }
@@ -386,6 +387,54 @@ mod cancel {
         }
     }
 
+    /// The agent and what it started die with the app, even when the app is killed
+    /// outright. The app here is this test binary, run again as a child process that
+    /// starts a phase with an agent waiting in a child of its own, like ffmpeg.
+    #[test]
+    fn the_agent_dies_with_a_killed_app() {
+        const APP_DIR: &str = "VIDEOCRM_TEST_KILLED_APP_DIR";
+        if let Some(dir) = std::env::var_os(APP_DIR) {
+            let dir = PathBuf::from(dir);
+            let ctx =
+                RunContext { footage_dir: dir.join("footage"), skill_dir: dir.join("video-use"), session_id: None };
+            let config = AgentConfig {
+                command: dir.join("waiting-agent"),
+                env: vec![("PID_FILE".to_owned(), dir.join("pids").display().to_string())],
+                ..AgentConfig::default()
+            };
+            let (result, _) = run(&config, &ctx, Phase::Plan { brief: String::new() });
+            panic!("the app should have been killed while the agent ran: {result:?}");
+        }
+
+        let ws = Workspace::new(0);
+        let dir = ws.footage.parent().unwrap().to_owned();
+        let agent = dir.join("waiting-agent");
+        fs::write(
+            &agent,
+            "#!/bin/sh\necho $$ >> \"$PID_FILE\"\nsleep 60 &\necho $! >> \"$PID_FILE\"\n\
+             echo '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\",\"cwd\":\"/\",\"tools\":[],\"model\":\"m\"}'\n\
+             wait\n",
+        )
+        .unwrap();
+        fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let mut app = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "cancel::the_agent_dies_with_a_killed_app", "--nocapture"])
+            .env(APP_DIR, &dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("start the app");
+        let pid_file = dir.join("pids");
+        let started = wait_until(Duration::from_secs(20), || recorded_pids(&pid_file).len() >= 2);
+        assert!(started, "the agent never started its child");
+
+        app.kill().expect("kill -9 the app");
+        app.wait().unwrap();
+        for pid in recorded_pids(&pid_file) {
+            assert!(wait_until(Duration::from_secs(5), || is_dead(pid)), "pid {pid} outlived the app");
+        }
+    }
+
     /// A panicking event callback must not leave the agent running unsupervised.
     #[test]
     fn panicking_callback_still_stops_the_agent() {
@@ -403,7 +452,12 @@ mod cancel {
                 &config,
                 &ws.context(None),
                 Phase::Plan { brief: String::new() },
-                &mut |_| panic!("event sink gone"),
+                // Once the agent speaks: it has recorded its pid by then.
+                &mut |event| {
+                    if !matches!(event, AgentEvent::Spawned { .. }) {
+                        panic!("event sink gone")
+                    }
+                },
                 &AtomicBool::new(false),
             )
         });

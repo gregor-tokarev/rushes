@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crate::error::PipelineError;
 use crate::event::{AgentEvent, parse_line};
 use crate::exec::find_executable;
+use crate::process::AgentProcess;
 
 pub const DEFAULT_COMMAND: &str = "claude";
 /// Accepts file edits inside the working directories; every other tool must be in
@@ -28,6 +29,23 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// How long to keep reading after the agent exits, in case a leftover child
 /// still holds the output pipes open.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Linux: the agent's process group is led by this `sh` script, started with the
+/// agent's path as `$0` and its arguments. It gets `SIGTERM` when the thread that
+/// started it ends, also when the app is killed (see [`die_with_parent`]), and passes
+/// it on to the whole group: the agent and every ffmpeg or python process it started.
+/// It waits for the agent itself, so the group keeps the leader that identifies it
+/// ([`AgentProcess`]) until the agent is gone, and exits with the agent's status.
+#[cfg(target_os = "linux")]
+const GROUP_LEADER: &str = r#"trap 'trap "" TERM; kill -TERM 0' TERM
+"$0" "$@" &
+agent=$!
+while :; do
+  wait "$agent"
+  status=$?
+  kill -0 "$agent" 2>/dev/null || exit "$status"
+done
+"#;
 
 /// How to launch the agent CLI.
 #[derive(Clone, PartialEq)]
@@ -198,6 +216,16 @@ pub(crate) fn run_agent(
     on_event: &mut dyn FnMut(&AgentEvent),
     cancel: &AtomicBool,
 ) -> Result<(ExitStatus, AgentRun), PipelineError> {
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(GROUP_LEADER).arg(program);
+        let app = std::process::id();
+        // SAFETY: `die_with_parent` only makes async-signal-safe calls.
+        unsafe { std::os::unix::process::CommandExt::pre_exec(&mut command, move || die_with_parent(app)) };
+        command
+    };
+    #[cfg(not(target_os = "linux"))]
     let mut command = Command::new(program);
     command
         .args(config.args(invocation))
@@ -210,7 +238,7 @@ pub(crate) fn run_agent(
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let child = command.spawn().map_err(|source| PipelineError::Spawn { command: program.to_owned(), source })?;
-    let mut agent = AgentProcess { child, kill_grace: config.kill_grace };
+    let mut agent = RunningAgent { child, kill_grace: config.kill_grace };
 
     let (tx, rx) = mpsc::channel();
     let readers = [
@@ -220,6 +248,7 @@ pub(crate) fn run_agent(
     if let Some(error) = readers.into_iter().flatten().find_map(Result::err) {
         return Err(error.into());
     }
+    on_event(&AgentEvent::Spawned { process: AgentProcess::of(agent.child.id()) });
 
     let mut run = AgentRun::default();
     let mut handle = |line: Line, run: &mut AgentRun| {
@@ -289,14 +318,29 @@ fn spawn_reader(stream: impl Read + Send + 'static, tx: Sender<Line>, wrap: fn(S
         .map(drop)
 }
 
+/// Linux, in the forked group leader before it runs: asks for `SIGTERM` once the
+/// app's thread that started it ends, so the agent never outlives the app.
+#[cfg(target_os = "linux")]
+fn die_with_parent(app: u32) -> std::io::Result<()> {
+    // SAFETY: prctl and getppid are async-signal-safe and take no pointers.
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // The app may have died before the signal was asked for.
+    if unsafe { libc::getppid() } as u32 != app {
+        return Err(std::io::Error::other("VideoCRM exited while starting the agent"));
+    }
+    Ok(())
+}
+
 /// The running agent. Every way out of [`run_agent`] (exit, cancellation, an error,
 /// a panicking `on_event`) drops it, which terminates what is left of its process group.
-struct AgentProcess {
+struct RunningAgent {
     child: Child,
     kill_grace: Duration,
 }
 
-impl Drop for AgentProcess {
+impl Drop for RunningAgent {
     fn drop(&mut self) {
         terminate(&mut self.child, self.kill_grace);
     }
