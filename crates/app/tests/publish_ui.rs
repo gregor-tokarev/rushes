@@ -898,6 +898,45 @@ fn an_expired_sign_in_names_the_account_and_offers_reconnect(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
+fn an_expired_sign_in_blocks_the_upload_with_reconnect(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Rust Ownership Explained", |video| {
+        video.publish.file = Some(file.clone());
+    });
+    // The grant ended and the access token expired by the next start.
+    let client = workspace.service.read_with(cx, |s, _| s.client()).unwrap();
+    client.revoke().unwrap();
+    let store = CredentialStore::new(workspace.dir.path().join("credentials.json"));
+    let mut login = store.load().unwrap().unwrap();
+    login.credentials.expires_at = Utc::now() - chrono::TimeDelta::hours(1);
+    store.save(&login).unwrap();
+    let service = workspace.restart(cx);
+    wait_until(cx, "the rejected sign-in", |cx| {
+        service.read_with(cx, |s, _| matches!(s.connection(), Connection::NeedsSignIn(_)).then_some(()))
+    });
+
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    cx.run_until_parked();
+    // The same instruction as the account card, not "Connect a YouTube account."
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), [BlockingReason::NeedsSignIn]);
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find(("upload-blocker", 0usize)).visible());
+        window.within("upload-blockers").click("upload-reconnect", cx);
+    });
+    let url = wait_until(cx, "the consent page", |cx| match service.read_with(cx, |s, _| s.connection().clone()) {
+        Connection::Connecting { authorize_url: Some(url) } => Some(url.to_string()),
+        _ => None,
+    });
+    publish_support::consent_in_browser(&url, "creator@example.com");
+    wait_until(cx, "the connection", |cx| service.read_with(cx, |s, _| s.is_connected().then_some(())));
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), []);
+}
+
+#[gpui_kit::test]
 fn the_done_card_shows_what_youtube_has_and_what_did_not_work(cx: &mut TestAppContext) {
     let Some(emulators) = Emulators::start() else { return };
     let workspace = Workspace::open(cx, emulators.backend());

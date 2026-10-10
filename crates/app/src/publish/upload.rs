@@ -23,7 +23,7 @@ use videocrm_youtube::{
     UploadedVideo, VideoInfo, VideoMetadata, YoutubeClient,
 };
 
-use super::rules::{self, BlockingReason};
+use super::rules::{self, AccountAccess, BlockingReason};
 use super::service::{YoutubeEvent, YoutubeService, describe_error, lock, push_notification, report_error};
 use super::transfer::{PROGRESS_INTERVAL, Throttle, Transfer};
 
@@ -315,7 +315,15 @@ impl YoutubeService {
     pub fn blocking_reasons(&self, video_id: VideoId, cx: &App) -> Vec<BlockingReason> {
         let Some(video) = self.state.read(cx).video(video_id) else { return Vec::new() };
         let file_exists = video.publish.file.as_deref().is_some_and(Path::is_file);
-        rules::blocking_reasons(video, self.is_connected(), file_exists, Utc::now())
+        rules::blocking_reasons(video, self.account_access(), file_exists, Utc::now())
+    }
+
+    /// What uploads need from the account before they can start.
+    fn account_blocker(&self) -> BlockingReason {
+        match self.account_access() {
+            AccountAccess::NeedsSignIn => BlockingReason::NeedsSignIn,
+            _ => BlockingReason::NotConnected,
+        }
     }
 
     /// Validates `video_id`, records a new upload job and starts sending the file.
@@ -329,7 +337,7 @@ impl YoutubeService {
             return Err(UploadError::Blocked(reasons));
         }
         let (Some(client), Some(file)) = (self.client.clone(), video.publish.file.clone()) else {
-            return Err(UploadError::Blocked(vec![BlockingReason::NotConnected]));
+            return Err(UploadError::Blocked(vec![self.account_blocker()]));
         };
         let stamp = file_stamp(&file).ok_or(UploadError::Blocked(vec![BlockingReason::FileMissing]))?;
         let now = Utc::now();
@@ -369,7 +377,7 @@ impl YoutubeService {
             return Err(UploadError::NotResumable);
         };
         let Some(client) = self.client.clone() else {
-            return Err(UploadError::Blocked(vec![BlockingReason::NotConnected]));
+            return Err(UploadError::Blocked(vec![self.account_blocker()]));
         };
         // The session takes the rest of the bytes it was opened for, and nothing else.
         let chosen = self.state.read(cx).video(job.video_id).and_then(|video| video.publish.file.clone());
@@ -870,6 +878,10 @@ mod tests {
     fn upload_errors_read_as_sentences() {
         let blocked = UploadError::Blocked(vec![BlockingReason::NotConnected, BlockingReason::EmptyTitle]);
         assert_eq!(blocked.to_string(), "Connect a YouTube account. Add a title.");
-        assert_eq!(UploadError::NotResumable.to_string(), "This upload can't be resumed. Upload the video again.");
+        assert_eq!(UploadError::NotResumable.to_string(), "This upload can’t be resumed. Upload the video again.");
+        assert_eq!(
+            UploadError::Stale(Retired::FileChanged).to_string(),
+            "The file changed since this upload started. Start over to upload the new version."
+        );
     }
 }

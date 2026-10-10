@@ -42,10 +42,10 @@ use videocrm_pipeline::{MediaInfo, kept_cuts};
 
 use super::chapters::{MIN_CHAPTERS, chapters, chapters_text, insert_chapters, timestamp};
 use super::rules::{
-    self, BlockingReason, CATEGORIES, Category, DESCRIPTION_MAX_BYTES, TAGS_MAX_CHARS, THUMBNAIL_MAX_BYTES,
-    TITLE_MAX_CHARS, tags_length,
+    self, AccountAccess, BlockingReason, CATEGORIES, Category, DESCRIPTION_MAX_BYTES, TAGS_MAX_CHARS,
+    THUMBNAIL_MAX_BYTES, TITLE_MAX_CHARS, tags_length,
 };
-use super::service::{YoutubeEvent, YoutubeService};
+use super::service::{Connection, YoutubeEvent, YoutubeService};
 use super::transfer::{format_bytes, format_duration, format_eta, format_speed};
 use super::ui::{ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, status_line, youtube_link};
 use super::upload::{ProcessingOutcome, Retired, UploadError};
@@ -382,7 +382,7 @@ impl PublishPanel {
             (Some(path), Some(details)) if &details.path == path => details.size.is_some(),
             _ => true,
         };
-        rules::blocking_reasons(&video, self.service.read(cx).is_connected(), file_exists, Utc::now())
+        rules::blocking_reasons(&video, self.service.read(cx).account_access(), file_exists, Utc::now())
     }
 
     /// Saves pending form edits now instead of after the delay. Only the fields the form
@@ -1140,7 +1140,7 @@ impl PublishPanel {
                                     .on_click(cx.listener(|this, _, window, cx| this.start_upload(window, cx))),
                             ),
                     )
-                    .when(!reasons.is_empty(), |this| this.child(render_blockers(&reasons, cx)))
+                    .when(!reasons.is_empty(), |this| this.child(render_blockers(&reasons, &self.service, cx)))
                     .into_any_element()
             }
             // Resume sends the rest of the file the upload started with, so only while
@@ -1190,15 +1190,17 @@ impl PublishPanel {
                                     .on_click(cx.listener(|this, _, window, cx| this.start_upload(window, cx))),
                             ),
                     )
-                    .map(|this| {
-                        if !service.is_connected() {
-                            this.child(help_text("Connect the account to resume.", cx))
-                        } else if reasons.is_empty() {
-                            this
-                        } else {
-                            // Resume only needs the account; starting over needs the whole form.
-                            this.child(render_blockers(&reasons, cx))
-                        }
+                    .map(|this| match service.account_access() {
+                        AccountAccess::NotConnected => this.child(help_text("Connect YouTube to resume.", cx)),
+                        AccountAccess::NeedsSignIn => this.child(
+                            v_flex()
+                                .gap_1p5()
+                                .child(help_text("Sign in to YouTube again to resume.", cx))
+                                .children(reconnect_button(&self.service, cx).map(|button| h_flex().child(button))),
+                        ),
+                        AccountAccess::Connected if reasons.is_empty() => this,
+                        // Resume only needs the account; starting over needs the whole form.
+                        AccountAccess::Connected => this.child(render_blockers(&reasons, &self.service, cx)),
                     })
                     .into_any_element()
             }
@@ -1236,7 +1238,7 @@ impl PublishPanel {
                 if reasons.is_empty() {
                     this.when_some(summary, |this, summary| this.child(help_text(summary, cx)))
                 } else {
-                    this.child(render_blockers(&reasons, cx))
+                    this.child(render_blockers(&reasons, &self.service, cx))
                 }
             })
     }
@@ -1546,12 +1548,14 @@ impl Render for PublishPanel {
 }
 
 /// What stops the upload, one line each, so a disabled upload button never goes unexplained.
-fn render_blockers(reasons: &[BlockingReason], cx: &App) -> impl IntoElement {
+/// An expired sign-in comes with the way back.
+fn render_blockers(reasons: &[BlockingReason], service: &Entity<YoutubeService>, cx: &App) -> impl IntoElement {
     let muted = cx.theme().muted_foreground;
     v_flex()
         .id("upload-blockers")
         .gap_1()
         .children(reasons.iter().enumerate().map(|(ix, reason)| {
+            let reconnect = (*reason == BlockingReason::NeedsSignIn).then(|| reconnect_button(service, cx)).flatten();
             h_flex()
                 .gap_2()
                 .items_start()
@@ -1559,10 +1563,32 @@ fn render_blockers(reasons: &[BlockingReason], cx: &App) -> impl IntoElement {
                 .text_color(muted)
                 .child(div().pt_0p5().child(Icon::new(IconName::Circle).xsmall()))
                 // Wraps inside the narrow side column instead of running past the card.
-                .child(div().id(("upload-blocker", ix)).flex_1().min_w_0().child(reason.to_string()).test_support())
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1p5()
+                        .child(div().id(("upload-blocker", ix)).child(reason.to_string()).test_support())
+                        .children(reconnect.map(|button| h_flex().child(button))),
+                )
         }))
         // Tests check that the reasons are on screen.
         .test_support()
+}
+
+/// "Reconnect" for an expired sign-in; `None` while the settings can't sign in
+/// (the account card then offers to open them).
+fn reconnect_button(service: &Entity<YoutubeService>, cx: &App) -> Option<Button> {
+    let service = service.clone();
+    let usable =
+        matches!(service.read(cx).connection(), Connection::NeedsSignIn(_)) && service.read(cx).config().is_ok();
+    usable.then(|| {
+        Button::new("upload-reconnect")
+            .label("Reconnect")
+            .small()
+            .outline()
+            .on_click(move |_, _, cx| service.update(cx, |service, cx| service.connect(cx)))
+    })
 }
 
 /// `Private · goes public Mon, 12 Oct at 09:00`, or just who can watch.

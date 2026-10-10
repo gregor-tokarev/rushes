@@ -22,7 +22,7 @@ mod uploads_page;
 pub use badge::AccountBadge;
 pub use chapters::{CHAPTERS_HEADING, Chapter, chapters, chapters_text, insert_chapters};
 pub use panel::PublishPanel;
-pub use rules::{BlockingReason, CATEGORIES, Category, blocking_reasons, tags_length};
+pub use rules::{AccountAccess, BlockingReason, CATEGORIES, Category, blocking_reasons, tags_length};
 pub use service::{Connection, EmulatorCheck, YoutubeEvent, YoutubeService, backend_config};
 pub use settings::YoutubeSettings;
 pub use transfer::Transfer;

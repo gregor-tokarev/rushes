@@ -48,10 +48,20 @@ pub fn tags_length(tags: &[String]) -> usize {
     quoted + tags.len().saturating_sub(1)
 }
 
+/// Whether uploads can use the YouTube account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountAccess {
+    Connected,
+    /// The account is known, but YouTube wants a new sign-in.
+    NeedsSignIn,
+    NotConnected,
+}
+
 /// Why a video cannot be uploaded yet. `Display` is the sentence shown to the user.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlockingReason {
     NotConnected,
+    NeedsSignIn,
     NoFile,
     FileMissing,
     EmptyTitle,
@@ -69,6 +79,7 @@ impl fmt::Display for BlockingReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BlockingReason::NotConnected => write!(f, "Connect a YouTube account."),
+            BlockingReason::NeedsSignIn => write!(f, "Sign in to YouTube again to upload."),
             BlockingReason::NoFile => write!(f, "Choose the video file to upload."),
             BlockingReason::FileMissing => write!(f, "The chosen video file no longer exists. Choose it again."),
             BlockingReason::EmptyTitle => write!(f, "Add a title."),
@@ -91,12 +102,19 @@ impl fmt::Display for BlockingReason {
 }
 
 /// Everything that stops `video` from being uploaded right now, in form order.
-pub fn blocking_reasons(video: &Video, connected: bool, file_exists: bool, now: DateTime<Utc>) -> Vec<BlockingReason> {
+pub fn blocking_reasons(
+    video: &Video,
+    account: AccountAccess,
+    file_exists: bool,
+    now: DateTime<Utc>,
+) -> Vec<BlockingReason> {
     let publish = &video.publish;
     let has_brackets = |text: &str| text.contains(['<', '>']);
     let mut reasons = Vec::new();
-    if !connected {
-        reasons.push(BlockingReason::NotConnected);
+    match account {
+        AccountAccess::Connected => {}
+        AccountAccess::NeedsSignIn => reasons.push(BlockingReason::NeedsSignIn),
+        AccountAccess::NotConnected => reasons.push(BlockingReason::NotConnected),
     }
     match (&publish.file, file_exists) {
         (None, _) => reasons.push(BlockingReason::NoFile),
@@ -199,33 +217,48 @@ mod tests {
 
     #[test]
     fn a_complete_video_has_no_blocking_reasons() {
-        assert_eq!(blocking_reasons(&ready_video(), true, true, Utc::now()), Vec::new());
+        assert_eq!(blocking_reasons(&ready_video(), AccountAccess::Connected, true, Utc::now()), Vec::new());
     }
 
     #[test]
     fn reports_connection_and_file_problems() {
         let mut video = ready_video();
         assert_eq!(
-            blocking_reasons(&video, false, false, Utc::now()),
+            blocking_reasons(&video, AccountAccess::NotConnected, false, Utc::now()),
             vec![BlockingReason::NotConnected, BlockingReason::FileMissing]
         );
+        // An expired sign-in says so, rather than asking to connect an account it knows.
+        assert_eq!(
+            blocking_reasons(&video, AccountAccess::NeedsSignIn, true, Utc::now()),
+            vec![BlockingReason::NeedsSignIn]
+        );
+        assert_eq!(BlockingReason::NeedsSignIn.to_string(), "Sign in to YouTube again to upload.");
         video.publish.file = None;
-        assert_eq!(blocking_reasons(&video, true, false, Utc::now()), vec![BlockingReason::NoFile]);
+        assert_eq!(blocking_reasons(&video, AccountAccess::Connected, false, Utc::now()), vec![BlockingReason::NoFile]);
     }
 
     #[test]
     fn title_falls_back_to_the_video_title_and_is_limited_to_100_characters() {
         let mut video = ready_video();
         video.title = "   ".into();
-        assert_eq!(blocking_reasons(&video, true, true, Utc::now()), vec![BlockingReason::EmptyTitle]);
+        assert_eq!(
+            blocking_reasons(&video, AccountAccess::Connected, true, Utc::now()),
+            vec![BlockingReason::EmptyTitle]
+        );
 
         video.publish.title = "é".repeat(100);
-        assert!(blocking_reasons(&video, true, true, Utc::now()).is_empty());
+        assert!(blocking_reasons(&video, AccountAccess::Connected, true, Utc::now()).is_empty());
         video.publish.title.push('x');
-        assert_eq!(blocking_reasons(&video, true, true, Utc::now()), vec![BlockingReason::TitleTooLong(101)]);
+        assert_eq!(
+            blocking_reasons(&video, AccountAccess::Connected, true, Utc::now()),
+            vec![BlockingReason::TitleTooLong(101)]
+        );
 
         video.publish.title = "a <b> title".into();
-        assert_eq!(blocking_reasons(&video, true, true, Utc::now()), vec![BlockingReason::TitleHasBrackets]);
+        assert_eq!(
+            blocking_reasons(&video, AccountAccess::Connected, true, Utc::now()),
+            vec![BlockingReason::TitleHasBrackets]
+        );
     }
 
     #[test]
@@ -233,16 +266,22 @@ mod tests {
         let mut video = ready_video();
         // 2,500 two-byte characters fit; one more ASCII byte does not.
         video.publish.description = "é".repeat(2500);
-        assert!(blocking_reasons(&video, true, true, Utc::now()).is_empty());
+        assert!(blocking_reasons(&video, AccountAccess::Connected, true, Utc::now()).is_empty());
         video.publish.description.push('.');
-        assert_eq!(blocking_reasons(&video, true, true, Utc::now()), vec![BlockingReason::DescriptionTooLong(5001)]);
+        assert_eq!(
+            blocking_reasons(&video, AccountAccess::Connected, true, Utc::now()),
+            vec![BlockingReason::DescriptionTooLong(5001)]
+        );
         assert_eq!(
             BlockingReason::DescriptionTooLong(5001).to_string(),
             "Shorten the description to 5,000 bytes (it has 5,001)."
         );
 
         video.publish.description = "1 < 2".into();
-        assert_eq!(blocking_reasons(&video, true, true, Utc::now()), vec![BlockingReason::DescriptionHasBrackets]);
+        assert_eq!(
+            blocking_reasons(&video, AccountAccess::Connected, true, Utc::now()),
+            vec![BlockingReason::DescriptionHasBrackets]
+        );
     }
 
     #[test]
@@ -254,12 +293,18 @@ mod tests {
 
         let mut video = ready_video();
         video.publish.tags = vec!["x".repeat(250), "y".repeat(249)];
-        assert!(blocking_reasons(&video, true, true, Utc::now()).is_empty());
+        assert!(blocking_reasons(&video, AccountAccess::Connected, true, Utc::now()).is_empty());
         video.publish.tags[1].push('y');
-        assert_eq!(blocking_reasons(&video, true, true, Utc::now()), vec![BlockingReason::TagsTooLong(501)]);
+        assert_eq!(
+            blocking_reasons(&video, AccountAccess::Connected, true, Utc::now()),
+            vec![BlockingReason::TagsTooLong(501)]
+        );
 
         video.publish.tags = vec!["<script>".into()];
-        assert_eq!(blocking_reasons(&video, true, true, Utc::now()), vec![BlockingReason::TagsHaveBrackets]);
+        assert_eq!(
+            blocking_reasons(&video, AccountAccess::Connected, true, Utc::now()),
+            vec![BlockingReason::TagsHaveBrackets]
+        );
     }
 
     #[test]
@@ -267,14 +312,17 @@ mod tests {
         let now = Utc::now();
         let mut video = ready_video();
         video.publish.publish_at = Some(now + TimeDelta::hours(1));
-        assert!(blocking_reasons(&video, true, true, now).is_empty());
+        assert!(blocking_reasons(&video, AccountAccess::Connected, true, now).is_empty());
 
         video.publish.privacy = Privacy::Public;
-        assert_eq!(blocking_reasons(&video, true, true, now), vec![BlockingReason::ScheduledNotPrivate]);
+        assert_eq!(
+            blocking_reasons(&video, AccountAccess::Connected, true, now),
+            vec![BlockingReason::ScheduledNotPrivate]
+        );
 
         video.publish.privacy = Privacy::Private;
         video.publish.publish_at = Some(now);
-        assert_eq!(blocking_reasons(&video, true, true, now), vec![BlockingReason::ScheduleInPast]);
+        assert_eq!(blocking_reasons(&video, AccountAccess::Connected, true, now), vec![BlockingReason::ScheduleInPast]);
     }
 
     #[test]

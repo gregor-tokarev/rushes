@@ -23,6 +23,7 @@ use videocrm_youtube::{
     begin_authorization, check_client,
 };
 
+use super::rules::AccountAccess;
 use super::upload::{ActiveUpload, ProcessingOutcome, Retired};
 use crate::state::{AppEvent, AppState, SharedStore};
 
@@ -265,6 +266,15 @@ impl YoutubeService {
 
     pub fn is_connected(&self) -> bool {
         self.client.is_some() && self.account().is_some()
+    }
+
+    /// Whether uploads can use the account now, or what they need first.
+    pub fn account_access(&self) -> AccountAccess {
+        match &self.connection {
+            _ if self.is_connected() => AccountAccess::Connected,
+            Connection::NeedsSignIn(_) => AccountAccess::NeedsSignIn,
+            _ => AccountAccess::NotConnected,
+        }
     }
 
     /// The backend the settings describe, or why they do not describe one yet.

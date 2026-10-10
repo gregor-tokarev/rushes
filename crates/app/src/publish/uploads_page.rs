@@ -14,6 +14,7 @@ use gpui_kit::{
 };
 use videocrm_core::{TagColor, UploadJob, UploadStatus};
 
+use super::rules::AccountAccess;
 use super::service::YoutubeService;
 use super::transfer::{format_bytes, format_eta, format_speed};
 use super::ui::{file_name, upload_chip, upload_label, youtube_link};
@@ -140,7 +141,7 @@ impl UploadsPage {
             _ => None,
         };
         let id = job.id.to_string();
-        let connected = service.is_connected();
+        let access = service.account_access();
         // The row itself opens the video's Publish tab; the trailing lane holds
         // what the job allows besides that.
         let action: Option<AnyElement> = match self.row_action(job, cx) {
@@ -154,7 +155,12 @@ impl UploadsPage {
                     .on_click(cx.listener(move |this, _, window, cx| this.run(action, &job, window, cx)));
                 Some(
                     match action {
-                        RowAction::Resume if !connected => button.disabled(true).tooltip("Connect YouTube to resume"),
+                        RowAction::Resume if access == AccountAccess::NeedsSignIn => {
+                            button.disabled(true).tooltip("Sign in to YouTube again to resume")
+                        }
+                        RowAction::Resume if access == AccountAccess::NotConnected => {
+                            button.disabled(true).tooltip("Connect YouTube to resume")
+                        }
                         RowAction::Cancel if cancelling => button.disabled(true),
                         _ => button,
                     }

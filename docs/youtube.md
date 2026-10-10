@@ -279,8 +279,12 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
 - **Schedule** forces private (YouTube makes the video public at the publish time) and
   restores the earlier visibility when turned off.
 - The Upload card lists what blocks an upload in every state, so a disabled **Upload to
-  YouTube**, **Upload again** or **Start over** always says why. A chosen file counts as
-  missing only once the background check finds it gone.
+  YouTube**, **Upload again…** or **Start over** always says why. An expired sign-in reads
+  "Sign in to YouTube again to upload." with **Reconnect** next to it, as the account card
+  says, rather than asking to connect an account. A chosen file counts as missing only
+  once the background check finds it gone. The primary button reads **Upload again…**
+  whenever the video is on YouTube already, because it then asks before making a second
+  copy.
 - The file menu offers the AI edit outputs (`final.mp4`, then `preview.mp4`), then the
   footage videos, then **Choose file…** (`cx.prompt_for_paths`; on Linux that needs the
   desktop portal). When no file chooser opens, "Couldn't open the file chooser" asks for
