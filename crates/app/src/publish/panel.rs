@@ -83,7 +83,6 @@ const NO_SECTIONS: &str = "Add Heading 2 sections to the script to make chapters
 const TOO_FEW_SECTIONS: &str =
     "YouTube shows chapters only for three or more sections of 10 seconds or longer. The script has fewer.";
 const SHORTS_HAVE_NO_CHAPTERS: &str = "Shorts don’t have chapters on YouTube.";
-/// Why the video file can't change right now.
 
 /// Chapters YouTube will show, as description text.
 #[derive(Clone, Debug, PartialEq)]
