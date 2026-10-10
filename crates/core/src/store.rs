@@ -7,7 +7,9 @@
 //! with their video through `ON DELETE CASCADE`.
 //!
 //! Writes take `&mut self`, reads `&self`. `Store` is `Send`; the app keeps it
-//! behind a mutex and calls it from background tasks.
+//! behind a mutex and calls it from background tasks. A file database can be
+//! opened by several connections at once ([`Store::reopen`]): WAL lets one
+//! read while another writes or waits for another program's lock.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -50,6 +52,18 @@ pub enum StoreError {
     NotFound { entity: &'static str, id: String },
 }
 
+impl StoreError {
+    /// Whether another connection holds the lock the operation needed, so it
+    /// may succeed when tried again later.
+    pub fn is_busy(&self) -> bool {
+        matches!(
+            self,
+            StoreError::Sqlite(error)
+                if matches!(error.sqlite_error_code(), Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked))
+        )
+    }
+}
+
 pub type StoreResult<T> = Result<T, StoreError>;
 
 fn not_found(entity: &'static str, id: impl ToString) -> StoreError {
@@ -64,6 +78,133 @@ pub struct NewVideo {
     pub hook: String,
     pub publish_date: Option<NaiveDate>,
     pub template: TemplateKind,
+}
+
+impl NewVideo {
+    /// The video at `position` with a Script document from the chosen template
+    /// and an empty Notes document, not stored yet. The template's icon becomes
+    /// the video icon.
+    pub fn build(self, position: f64) -> (Video, Vec<Document>) {
+        let video = Video {
+            icon: self.template.icon().map(str::to_string),
+            format: self.format,
+            hook: self.hook,
+            publish_date: self.publish_date,
+            position,
+            ..Video::new(self.title)
+        };
+        let now = video.created_at;
+        let documents = vec![
+            Document {
+                id: DocumentId::new(),
+                video_id: video.id,
+                kind: DocumentKind::Script,
+                title: "Script".to_string(),
+                blocks: script_template(self.template, &video),
+                position: 0,
+                updated_at: now,
+            },
+            Document {
+                id: DocumentId::new(),
+                video_id: video.id,
+                kind: DocumentKind::Notes,
+                title: "Notes".to_string(),
+                blocks: vec![Block::paragraph("")],
+                position: 1,
+                updated_at: now,
+            },
+        ];
+        (video, documents)
+    }
+}
+
+/// A copy of `original` and its `documents` placed right below it, before the
+/// video at `next_position` if there is one: title gets " (copy)", documents
+/// get fresh document and block ids. Things tied to the original's footage and
+/// YouTube upload are not copied (media folder, YouTube link, upload file,
+/// schedule), and a published or scheduled original yields an `Idea`.
+pub fn copy_of(original: &Video, documents: Vec<Document>, next_position: Option<f64>) -> (Video, Vec<Document>) {
+    let now = Utc::now();
+    let mut copy = Video {
+        id: VideoId::new(),
+        title: format!("{} (copy)", original.title),
+        folder: None,
+        youtube: None,
+        position: next_position.map_or(original.position + 1.0, |next| (original.position + next) / 2.0),
+        created_at: now,
+        updated_at: now,
+        ..original.clone()
+    };
+    copy.publish.file = None;
+    copy.publish.publish_at = None;
+    if matches!(copy.status, VideoStatus::Published | VideoStatus::Scheduled) {
+        copy.status = VideoStatus::Idea;
+    }
+    let documents = documents
+        .into_iter()
+        .map(|document| {
+            let blocks = document.blocks.into_iter().map(|block| Block { id: BlockId::new(), ..block }).collect();
+            Document { id: DocumentId::new(), video_id: copy.id, blocks, updated_at: now, ..document }
+        })
+        .collect();
+    (copy, documents)
+}
+
+/// An empty document of a video at `position`, not stored yet.
+pub fn blank_document(video_id: VideoId, kind: DocumentKind, title: &str, position: i32) -> Document {
+    Document {
+        id: DocumentId::new(),
+        video_id,
+        kind,
+        title: title.to_string(),
+        blocks: vec![Block::paragraph("")],
+        position,
+        updated_at: Utc::now(),
+    }
+}
+
+/// Keeps a video's value of `property` consistent with its changed definition,
+/// as [`Store::update_property`] does for stored videos: a new kind drops the
+/// value, removed options drop the values that pointed at them.
+pub fn reconcile_property_value(
+    old: &PropertyKind,
+    property: &PropertyDef,
+    values: &mut BTreeMap<PropertyId, PropertyValue>,
+) {
+    if std::mem::discriminant(old) != std::mem::discriminant(&property.kind) {
+        values.remove(&property.id);
+    } else if options_removed(old, &property.kind) {
+        prune_select_value(property, values);
+    }
+}
+
+/// Removes a deleted property's columns and sorts from `view`, as
+/// [`Store::delete_property`] does for stored views. Returns whether it changed.
+pub fn forget_property(view: &mut DatabaseView, id: PropertyId) -> bool {
+    let before = (view.columns.len(), view.sorts.len());
+    view.columns.retain(|layout| layout.column != Column::Custom(id));
+    view.sorts.retain(|sort| sort.column != Column::Custom(id));
+    (view.columns.len(), view.sorts.len()) != before
+}
+
+fn options_removed(old: &PropertyKind, new: &PropertyKind) -> bool {
+    old.options().iter().any(|option| !new.options().iter().any(|o| o.id == option.id))
+}
+
+/// Drops a select / multi-select value whose option no longer exists.
+fn prune_select_value(property: &PropertyDef, values: &mut BTreeMap<PropertyId, PropertyValue>) {
+    let exists = |option: &String| property.kind.options().iter().any(|o| &o.id == option);
+    let keep = match values.get_mut(&property.id) {
+        Some(PropertyValue::Select(Some(option))) => exists(option),
+        Some(PropertyValue::MultiSelect(options)) => {
+            options.retain(exists);
+            !options.is_empty()
+        }
+        _ => true,
+    };
+    if !keep {
+        values.remove(&property.id);
+    }
 }
 
 /// One entry of a pipeline run's append-only event log (agent messages, tool
@@ -103,6 +244,24 @@ impl Store {
     /// A private in-memory database (tests, previews).
     pub fn open_in_memory() -> StoreResult<Store> {
         Self::init(Connection::open_in_memory()?)
+    }
+
+    /// The database file, or `None` for an in-memory database.
+    pub fn path(&self) -> Option<PathBuf> {
+        self.conn.path().filter(|path| !path.is_empty()).map(PathBuf::from)
+    }
+
+    /// Another connection to the same database file, set up as [`Store::open`]
+    /// does. `None` for an in-memory database, which no other connection sees.
+    pub fn reopen(&self) -> StoreResult<Option<Store>> {
+        self.path().map(Store::open).transpose()
+    }
+
+    /// How long this connection waits for a lock held by another connection
+    /// before an operation fails as busy ([`StoreError::is_busy`]). Five seconds
+    /// after [`Store::open`].
+    pub fn set_busy_timeout(&self, timeout: Duration) -> StoreResult<()> {
+        Ok(self.conn.busy_timeout(timeout)?)
     }
 
     fn init(mut conn: Connection) -> StoreResult<Store> {
@@ -185,11 +344,8 @@ impl Store {
         Ok(())
     }
 
-    /// Copies a video right below the original: title gets " (copy)", documents
-    /// are copied with fresh document and block ids. Things tied to the
-    /// original's footage and YouTube upload are not copied (media folder,
-    /// YouTube link, upload file, schedule, runs, uploads), and a published or
-    /// scheduled original yields an `Idea`.
+    /// Copies a video right below the original, see [`copy_of`]. Runs and
+    /// uploads are not copied.
     pub fn duplicate_video(&mut self, id: VideoId) -> StoreResult<Video> {
         let tx = self.conn.transaction()?;
         let original = query_video(&tx, id)?.ok_or_else(|| not_found("video", id))?;
@@ -197,27 +353,10 @@ impl Store {
             tx.query_row("SELECT MIN(position) FROM videos WHERE position > ?1", [original.position], |row| {
                 row.get(0)
             })?;
-        let now = Utc::now();
-        let mut copy = Video {
-            id: VideoId::new(),
-            title: format!("{} (copy)", original.title),
-            folder: None,
-            youtube: None,
-            position: next_position.map_or(original.position + 1.0, |next| (original.position + next) / 2.0),
-            created_at: now,
-            updated_at: now,
-            ..original
-        };
-        copy.publish.file = None;
-        copy.publish.publish_at = None;
-        if matches!(copy.status, VideoStatus::Published | VideoStatus::Scheduled) {
-            copy.status = VideoStatus::Idea;
-        }
+        let (copy, documents) = copy_of(&original, query_documents(&tx, id)?, next_position);
         write_video(&tx, INSERT_VIDEO, &copy)?;
-        for document in query_documents(&tx, id)? {
-            let blocks = document.blocks.into_iter().map(|block| Block { id: BlockId::new(), ..block }).collect();
-            let document = Document { id: DocumentId::new(), video_id: copy.id, blocks, updated_at: now, ..document };
-            upsert_document(&tx, &document)?;
+        for document in &documents {
+            upsert_document(&tx, document)?;
         }
         tx.commit()?;
         Ok(copy)
@@ -229,45 +368,28 @@ impl Store {
     }
 
     /// Creates a video at the end of the list with a Script document from the
-    /// chosen template and an empty Notes document. The template's icon becomes
-    /// the video icon.
+    /// chosen template and an empty Notes document, see [`NewVideo::build`].
     pub fn create_video(&mut self, new: NewVideo) -> StoreResult<(Video, Vec<Document>)> {
         let tx = self.conn.transaction()?;
-        let video = Video {
-            icon: new.template.icon().map(str::to_string),
-            format: new.format,
-            hook: new.hook,
-            publish_date: new.publish_date,
-            position: next_video_position(&tx)?,
-            ..Video::new(new.title)
-        };
+        let (video, documents) = new.build(next_video_position(&tx)?);
         write_video(&tx, INSERT_VIDEO, &video)?;
-        let now = video.created_at;
-        let documents = vec![
-            Document {
-                id: DocumentId::new(),
-                video_id: video.id,
-                kind: DocumentKind::Script,
-                title: "Script".to_string(),
-                blocks: script_template(new.template, &video),
-                position: 0,
-                updated_at: now,
-            },
-            Document {
-                id: DocumentId::new(),
-                video_id: video.id,
-                kind: DocumentKind::Notes,
-                title: "Notes".to_string(),
-                blocks: vec![Block::paragraph("")],
-                position: 1,
-                updated_at: now,
-            },
-        ];
         for document in &documents {
             upsert_document(&tx, document)?;
         }
         tx.commit()?;
         Ok((video, documents))
+    }
+
+    /// Inserts a video built elsewhere ([`NewVideo::build`], [`copy_of`]) with
+    /// its documents, all or nothing.
+    pub fn insert_video_with_documents(&mut self, video: &Video, documents: &[Document]) -> StoreResult<()> {
+        let tx = self.conn.transaction()?;
+        write_video(&tx, INSERT_VIDEO, video)?;
+        for document in documents {
+            upsert_document(&tx, document)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     // --- properties -------------------------------------------------------
@@ -300,7 +422,7 @@ impl Store {
         )?;
         if std::mem::discriminant(&old) != std::mem::discriminant(&property.kind) {
             remove_property_values(&tx, property.id)?;
-        } else if old.options().iter().any(|option| !property.kind.options().iter().any(|o| o.id == option.id)) {
+        } else if options_removed(&old, &property.kind) {
             prune_select_values(&tx, property)?;
         }
         tx.commit()?;
@@ -313,10 +435,7 @@ impl Store {
         tx.execute("DELETE FROM property_defs WHERE id = ?1", [id])?;
         remove_property_values(&tx, id)?;
         for mut view in query_views(&tx)? {
-            let before = (view.columns.len(), view.sorts.len());
-            view.columns.retain(|layout| layout.column != Column::Custom(id));
-            view.sorts.retain(|sort| sort.column != Column::Custom(id));
-            if (view.columns.len(), view.sorts.len()) != before {
+            if forget_property(&mut view, id) {
                 upsert_view(&tx, &view)?;
             }
         }
@@ -355,15 +474,7 @@ impl Store {
             [video_id],
             |row| row.get(0),
         )?;
-        let document = Document {
-            id: DocumentId::new(),
-            video_id,
-            kind,
-            title: title.to_string(),
-            blocks: vec![Block::paragraph("")],
-            position,
-            updated_at: Utc::now(),
-        };
+        let document = blank_document(video_id, kind, title, position);
         upsert_document(&self.conn, &document)?;
         Ok(document)
     }
@@ -855,7 +966,6 @@ fn remove_property_values(conn: &Connection, id: PropertyId) -> rusqlite::Result
 
 /// Drops select / multi-select values whose option no longer exists.
 fn prune_select_values(conn: &Connection, property: &PropertyDef) -> rusqlite::Result<()> {
-    let exists = |option: &String| property.kind.options().iter().any(|o| &o.id == option);
     let mut stmt = conn.prepare("SELECT id, properties FROM videos WHERE json_type(properties, ?1) IS NOT NULL")?;
     let videos = stmt
         .query_map([property_path(property.id)], |row| {
@@ -863,17 +973,7 @@ fn prune_select_values(conn: &Connection, property: &PropertyDef) -> rusqlite::R
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (video_id, mut values) in videos {
-        let keep = match values.get_mut(&property.id) {
-            Some(PropertyValue::Select(Some(option))) => exists(option),
-            Some(PropertyValue::MultiSelect(options)) => {
-                options.retain(exists);
-                !options.is_empty()
-            }
-            _ => true,
-        };
-        if !keep {
-            values.remove(&property.id);
-        }
+        prune_select_value(property, &mut values);
         conn.execute("UPDATE videos SET properties = ?2 WHERE id = ?1", params![video_id, Json(&values)])?;
     }
     Ok(())

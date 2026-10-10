@@ -132,6 +132,66 @@ fn concurrent_first_opens_migrate_once() {
     }
 }
 
+#[test]
+fn a_second_connection_reads_during_another_programs_lock_and_fails_fast_on_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("videocrm.db");
+    let mut store = Store::open(&path).unwrap();
+    let mut video = insert(&mut store, "Locked out", 0.0);
+    assert_eq!(store.path(), Some(path.clone()));
+    let other = store.reopen().unwrap().expect("a file database opens again");
+    other.set_busy_timeout(Duration::from_millis(50)).unwrap();
+
+    let locker = Connection::open(&path).unwrap();
+    locker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    assert_eq!(other.list_video_rows().unwrap().len(), 1, "WAL readers don't wait for the lock");
+    let started = Instant::now();
+    let mut other = other;
+    let error = other.update_video(&mut video).expect_err("the lock is held");
+    assert!(error.is_busy(), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(1), "gave up after its busy timeout");
+    assert!(!not_found("video", video.id).is_busy());
+
+    locker.execute_batch("COMMIT").unwrap();
+    other.update_video(&mut video).unwrap();
+}
+
+#[test]
+fn in_memory_databases_have_no_second_connection() {
+    let store = store();
+    assert_eq!(store.path(), None);
+    assert!(store.reopen().unwrap().is_none());
+}
+
+#[test]
+fn videos_built_elsewhere_are_inserted_with_their_documents() {
+    let mut store = store();
+    let (video, documents) = NewVideo { title: "Built".into(), ..NewVideo::default() }.build(4.0);
+    store.insert_video_with_documents(&video, &documents).unwrap();
+    assert_eq!(store.get_video(video.id).unwrap(), Some(video.clone()));
+    assert_eq!(store.list_documents(video.id).unwrap(), documents);
+    assert!(store.insert_video_with_documents(&video, &documents).is_err(), "inserted once");
+    assert_eq!(store.list_documents(video.id).unwrap().len(), 2);
+}
+
+#[test]
+fn cached_values_follow_property_changes_like_stored_ones() {
+    let option = |id: &str| SelectOption { id: id.into(), name: id.into(), color: TagColor::Gray };
+    let old = PropertyKind::MultiSelect { options: vec![option("yt"), option("tt")] };
+    let property = PropertyDef {
+        id: PropertyId::new(),
+        name: "Platforms".into(),
+        kind: PropertyKind::MultiSelect { options: vec![option("yt")] },
+        position: 0,
+    };
+    let mut values = BTreeMap::from([(property.id, PropertyValue::MultiSelect(vec!["yt".into(), "tt".into()]))]);
+    reconcile_property_value(&old, &property, &mut values);
+    assert_eq!(values.get(&property.id), Some(&PropertyValue::MultiSelect(vec!["yt".into()])));
+    let text = PropertyDef { kind: PropertyKind::Text, ..property.clone() };
+    reconcile_property_value(&property.kind, &text, &mut values);
+    assert!(values.is_empty(), "a new kind drops the value");
+}
+
 #[cfg(unix)]
 #[test]
 fn new_database_files_are_private() {

@@ -1,17 +1,22 @@
 //! Application state: the single owner of persisted data and navigation.
 //!
 //! Every view reads through [`AppState`] and every mutation goes through it, so
-//! the cached rows stay consistent with the database. Background services
-//! (pipelines, uploads) write to the [`Store`] directly through [`AppState::store`]
-//! and then call [`AppState::reload`] on the foreground thread.
+//! the cached rows stay consistent with the database. Changes are written at
+//! once, or queued and retried in the background while another program holds
+//! the database (see [`writes`]); the UI thread never waits for a lock.
+//! Background services (pipelines, uploads) write to the [`Store`] directly
+//! through [`AppState::store`] and then call [`AppState::reload`] on the
+//! foreground thread.
 
 mod problem;
+mod writes;
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use gpui_kit::*;
 use videocrm_core::media;
 use videocrm_core::settings::AppSettings;
+use videocrm_core::store::{blank_document, copy_of};
 use videocrm_core::{
     DatabaseView, Document, DocumentKind, NewVideo, PropertyDef, PropertyId, Store, StoreError, Video, VideoId,
     VideoRow, ViewId,
@@ -21,6 +26,9 @@ use crate::route::{Route, SettingsSection, VideoTab};
 
 pub(crate) use problem::folder_error_reason;
 pub use problem::{Problem, Remedy};
+pub(crate) use writes::QueuedWrites;
+use writes::{Cached, Write, Writes};
+pub use writes::{QUIT_SAVE_TIMEOUT, SAVE_RETRY_DELAY, UI_BUSY_TIMEOUT, WRITE_BUSY_TIMEOUT};
 
 const RECENT_LIMIT: usize = 8;
 /// The key [`Store::load_settings`] reads, for reading what it can't parse.
@@ -42,7 +50,13 @@ pub enum AppEvent {
 }
 
 pub struct AppState {
-    store: SharedStore,
+    /// The UI thread's connection: reads, and writes while nothing is queued.
+    /// Waits at most [`UI_BUSY_TIMEOUT`] for another program's lock.
+    ui: SharedStore,
+    /// The background services' connection, see [`AppState::store`].
+    services: SharedStore,
+    /// Writes queued for the background writer, which has its own connection.
+    writes: Writes,
     settings: AppSettings,
     rows: Vec<VideoRow>,
     properties: Vec<PropertyDef>,
@@ -65,12 +79,24 @@ impl Global for GlobalAppState {}
 
 impl AppState {
     /// Loads settings and data from `store`. The first route is onboarding until
-    /// it has been completed.
+    /// it has been completed. A database file gets two more connections, for
+    /// the background writer and the background services; an in-memory one is
+    /// shared by all three.
     pub fn new(store: Store) -> Result<Self, StoreError> {
         let (settings, settings_problem) = load_settings(&store)?;
         let route = if settings.onboarding_completed { Route::default() } else { Route::Onboarding };
+        let database = store.path();
+        let services = store.reopen()?;
+        let writer = store.reopen()?;
+        store.set_busy_timeout(UI_BUSY_TIMEOUT)?;
+        let ui = Arc::new(Mutex::new(store));
+        let shared = |store: Option<Store>| store.map_or_else(|| ui.clone(), |store| Arc::new(Mutex::new(store)));
+        let (services, writer) = (shared(services), shared(writer));
+        let (writes, unsaved_problem) = Writes::new(writer, database.as_deref());
         let mut state = Self {
-            store: Arc::new(Mutex::new(store)),
+            ui,
+            services,
+            writes,
             settings,
             rows: Vec::new(),
             properties: Vec::new(),
@@ -80,7 +106,7 @@ impl AppState {
             forward: Vec::new(),
             recent: Vec::new(),
             script_focus: None,
-            startup_problems: settings_problem.into_iter().collect(),
+            startup_problems: settings_problem.into_iter().chain(unsaved_problem).collect(),
         };
         state.load()?;
         Ok(state)
@@ -91,8 +117,11 @@ impl AppState {
         std::mem::take(&mut self.startup_problems)
     }
 
-    /// Registers `state` as the app-wide instance returned by [`AppState::global`].
+    /// Registers `state` as the app-wide instance returned by [`AppState::global`],
+    /// and starts writing what is queued. From now on, quitting writes the queue
+    /// first, before the quit hooks registered later queue their last edits.
     pub fn set_global(state: Entity<AppState>, cx: &mut App) {
+        state.update(cx, |state, cx| state.start_writes(cx));
         cx.set_global(GlobalAppState(state));
     }
 
@@ -100,20 +129,27 @@ impl AppState {
         cx.global::<GlobalAppState>().0.clone()
     }
 
-    /// The database handle, for background work. Lock it briefly; never hold the
-    /// guard across `await` points or long operations. Change video rows through
+    /// The database handle for background services (pipelines, uploads), a
+    /// connection of their own. Lock it briefly; never hold the guard across
+    /// `await` points or long operations. Change video rows through
     /// [`AppState::update_video`] on the foreground instead: pages save whole rows
     /// from the cache, so a direct write is lost if an edit lands before the reload.
     pub fn store(&self) -> SharedStore {
-        self.store.clone()
+        self.services.clone()
     }
 
+    /// The UI thread's connection.
     fn lock(&self) -> MutexGuard<'_, Store> {
         // A panic while holding the lock leaves the store usable: SQLite
         // transactions roll back on their own.
-        self.store.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.ui.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    fn cached(&mut self) -> Cached<'_> {
+        Cached { rows: &mut self.rows, properties: &mut self.properties, views: &mut self.views }
+    }
+
+    /// Reads rows, properties and views, with the queued writes applied.
     fn load(&mut self) -> Result<(), StoreError> {
         let store = self.lock();
         let rows = store.list_video_rows()?;
@@ -123,6 +159,8 @@ impl AppState {
         self.rows = rows;
         self.properties = properties;
         self.views = views;
+        let mut cached = Cached { rows: &mut self.rows, properties: &mut self.properties, views: &mut self.views };
+        self.writes.overlay(&mut cached);
         let known: Vec<VideoId> = self.rows.iter().map(|row| row.video.id).collect();
         self.recent.retain(|id| known.contains(id));
         self.prune_history(&known);
@@ -164,19 +202,27 @@ impl AppState {
         cx.emit(AppEvent::Problem(problem));
     }
 
-    /// Runs a write against the store, then reloads. Errors become [`AppEvent::Problem`].
-    fn write<T>(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Store) -> Result<T, StoreError>) -> Option<T> {
-        let result = f(&mut self.lock());
-        match result {
-            Ok(value) => {
-                self.reload(cx);
-                Some(value)
-            }
-            Err(error) => {
-                self.report_problem(Problem::store("Couldn’t save your changes", &error), cx);
-                None
-            }
-        }
+    /// Whether changes to the video wait for a retry because the database
+    /// refused them; they are kept and written once it accepts them.
+    pub fn is_save_failing(&self, id: VideoId) -> bool {
+        self.writes.is_video_failing(id)
+    }
+
+    /// The writes not in the database yet, readable without a context.
+    pub(crate) fn queued_writes(&self) -> QueuedWrites {
+        self.writes.queued()
+    }
+
+    /// Whether changes wait to be written.
+    pub fn has_unsaved_changes(&self) -> bool {
+        !self.writes.is_empty()
+    }
+
+    /// Writes what is queued now, on the calling thread, waiting at most
+    /// [`QUIT_SAVE_TIMEOUT`] for a lock. For quitting: what can't be written
+    /// is kept and written at the next start.
+    pub fn write_queued_now(&mut self) {
+        self.write_before_quit();
     }
 
     // Settings
@@ -191,14 +237,10 @@ impl AppState {
         if settings == self.settings {
             return;
         }
-        let result = self.lock().save_settings(&settings);
-        match result {
-            Ok(()) => {
-                self.settings = settings;
-                cx.emit(AppEvent::SettingsChanged);
-                cx.notify();
-            }
-            Err(error) => self.report_problem(Problem::store("Couldn’t save the settings", &error), cx),
+        if self.save(Write::Settings(settings.clone()), cx) {
+            self.settings = settings;
+            cx.emit(AppEvent::SettingsChanged);
+            cx.notify();
         }
     }
 
@@ -219,38 +261,26 @@ impl AppState {
     /// Creates a video from a template, creates its media folder, and returns its id.
     pub fn create_video(&mut self, new: NewVideo, cx: &mut Context<Self>) -> Option<VideoId> {
         let media_root = self.settings.resolved_media_root();
-        let mut store = self.lock();
-        let mut folder_error = None;
-        let created = store.create_video(new).and_then(|(mut video, _documents)| {
-            // A missing folder is not fatal: footage import creates it later.
-            match media::ensure_video_folder(&media_root, &mut video) {
-                Ok(_) => store.update_video(&mut video)?,
-                Err(error) => folder_error = Some(error),
-            }
-            Ok(video.id)
-        });
-        drop(store);
-        match created {
-            Ok(id) => {
-                self.reload(cx);
-                if let Some(error) = folder_error {
-                    self.report_problem(Problem::media(&media_root, &error), cx);
-                }
-                Some(id)
-            }
-            Err(error) => {
-                self.report_problem(Problem::store("Couldn’t create the video", &error), cx);
-                None
-            }
+        let last = self.rows.iter().map(|row| row.video.position).reduce(f64::max);
+        let (mut video, documents) = new.build(last.map_or(0.0, |last| last + 1.0));
+        // A missing folder is not fatal: footage import creates it later.
+        let folder_error = media::ensure_video_folder(&media_root, &mut video).err();
+        let id = video.id;
+        if !self.save(Write::CreateVideo { video, documents }, cx) {
+            return None;
         }
+        if let Some(error) = folder_error {
+            self.report_problem(Problem::media(&media_root, &error), cx);
+        }
+        Some(id)
     }
 
-    pub fn update_video(&mut self, mut video: Video, cx: &mut Context<Self>) {
-        self.write(cx, |store| store.update_video(&mut video));
+    pub fn update_video(&mut self, video: Video, cx: &mut Context<Self>) {
+        self.save(Write::Video(video), cx);
     }
 
     pub fn delete_videos(&mut self, ids: &[VideoId], cx: &mut Context<Self>) {
-        self.write(cx, |store| ids.iter().try_for_each(|id| store.delete_video(*id)));
+        self.save(Write::DeleteVideos(ids.to_vec()), cx);
         let leaves_current_page = matches!(&self.route, Route::Video { id, .. } if ids.contains(id));
         if leaves_current_page {
             // The deleted page is replaced by the page the creator came from, so
@@ -262,8 +292,20 @@ impl AppState {
         }
     }
 
+    /// Copies a video right below it, with its documents; see [`copy_of`].
     pub fn duplicate_video(&mut self, id: VideoId, cx: &mut Context<Self>) -> Option<VideoId> {
-        self.write(cx, |store| store.duplicate_video(id)).map(|video| video.id)
+        let original = self.video(id)?.clone();
+        let documents = match self.read_documents(id) {
+            Ok(documents) => documents,
+            Err(error) => {
+                self.report_problem(Problem::store("Couldn’t duplicate the video", &error), cx);
+                return None;
+            }
+        };
+        let next = self.rows.iter().map(|row| row.video.position).filter(|&p| p > original.position).reduce(f64::min);
+        let (copy, documents) = copy_of(&original, documents, next);
+        let copy_id = copy.id;
+        self.save(Write::CreateVideo { video: copy, documents }, cx).then_some(copy_id)
     }
 
     /// Ensures the video has a media folder and returns it.
@@ -288,7 +330,7 @@ impl AppState {
     }
 
     pub fn seed_sample_workspace(&mut self, cx: &mut Context<Self>) {
-        self.write(cx, |store| store.seed_sample_workspace());
+        self.save(Write::SeedSample, cx);
     }
 
     // Properties and views
@@ -298,15 +340,15 @@ impl AppState {
     }
 
     pub fn insert_property(&mut self, property: PropertyDef, cx: &mut Context<Self>) {
-        self.write(cx, |store| store.insert_property(&property));
+        self.save(Write::InsertProperty(property), cx);
     }
 
     pub fn update_property(&mut self, property: PropertyDef, cx: &mut Context<Self>) {
-        self.write(cx, |store| store.update_property(&property));
+        self.save(Write::UpdateProperty(property), cx);
     }
 
     pub fn delete_property(&mut self, id: PropertyId, cx: &mut Context<Self>) {
-        self.write(cx, |store| store.delete_property(id));
+        self.save(Write::DeleteProperty(id), cx);
     }
 
     pub fn views(&self) -> &[DatabaseView] {
@@ -314,11 +356,11 @@ impl AppState {
     }
 
     pub fn save_view(&mut self, view: DatabaseView, cx: &mut Context<Self>) {
-        self.write(cx, |store| store.save_view(&view));
+        self.save(Write::SaveView(view), cx);
     }
 
     pub fn delete_view(&mut self, id: ViewId, cx: &mut Context<Self>) {
-        self.write(cx, |store| store.delete_view(id));
+        self.save(Write::DeleteView(id), cx);
         if matches!(self.route, Route::Database { view: Some(view) } if view == id) {
             // The first view takes the deleted one's place, in the history too.
             self.route = Route::default();
@@ -328,12 +370,35 @@ impl AppState {
 
     // Documents
 
+    /// The video's documents, with the edits not written yet.
     pub fn documents(&self, video_id: VideoId) -> Vec<Document> {
-        self.lock().list_documents(video_id).unwrap_or_default()
+        self.read_documents(video_id).unwrap_or_default()
     }
 
-    pub fn create_document(&mut self, video_id: VideoId, kind: DocumentKind, title: &str, cx: &mut Context<Self>) {
-        self.write(cx, |store| store.create_document(video_id, kind, title));
+    fn read_documents(&self, video_id: VideoId) -> Result<Vec<Document>, StoreError> {
+        let mut documents = self.lock().list_documents(video_id)?;
+        self.writes.overlay_documents(video_id, &mut documents);
+        Ok(documents)
+    }
+
+    /// Adds an empty document after the video's existing ones.
+    pub fn create_document(
+        &mut self,
+        video_id: VideoId,
+        kind: DocumentKind,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<Document> {
+        let documents = match self.read_documents(video_id) {
+            Ok(documents) => documents,
+            Err(error) => {
+                self.report_problem(Problem::store("Couldn’t create the document", &error), cx);
+                return None;
+            }
+        };
+        let position = documents.iter().map(|document| document.position + 1).max().unwrap_or(0);
+        let document = blank_document(video_id, kind, title, position);
+        self.save(Write::Document(document.clone()), cx).then_some(document)
     }
 
     /// The video's first document of `kind`, created when it has none.
@@ -343,7 +408,7 @@ impl AppState {
         kind: DocumentKind,
         cx: &mut Context<Self>,
     ) -> Option<Document> {
-        let existing = self.lock().list_documents(video_id).map(|documents| {
+        let existing = self.read_documents(video_id).map(|documents| {
             documents.into_iter().filter(|document| document.kind == kind).min_by_key(|document| document.position)
         });
         match existing {
@@ -354,7 +419,7 @@ impl AppState {
                     DocumentKind::Notes => "Notes",
                     DocumentKind::Custom => "Untitled",
                 };
-                self.write(cx, |store| store.create_document(video_id, kind, title))
+                self.create_document(video_id, kind, title, cx)
             }
             Err(error) => {
                 self.report_problem(Problem::store("Couldn’t open the document", &error), cx);
@@ -364,8 +429,14 @@ impl AppState {
     }
 
     /// Persists a document. Script edits change derived row stats, so rows reload.
-    pub fn save_document(&mut self, mut document: Document, cx: &mut Context<Self>) {
-        self.write(cx, |store| store.save_document(&mut document));
+    pub fn save_document(&mut self, document: Document, cx: &mut Context<Self>) {
+        self.save(Write::Document(document), cx);
+    }
+
+    /// Queues a document for the background writer, as typing does: it never
+    /// waits for the database on the UI thread.
+    pub fn queue_document(&mut self, document: Document, cx: &mut Context<Self>) {
+        self.queue(Write::Document(document), cx);
     }
 
     // Navigation

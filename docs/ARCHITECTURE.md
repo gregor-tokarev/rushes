@@ -30,12 +30,41 @@ progress back to the UI through channels (`smol::channel` / `futures::channel::m
 consumed by a foreground task (`cx.spawn`) that updates entities and calls `cx.notify()`.
 Long operations take a cancellation flag (`Arc<AtomicBool>`) and a progress callback.
 
+### Database access
+
+Another program (a second VideoCRM, a backup or sync tool, `sqlite3`) may hold the
+database's write lock for seconds. The UI thread never waits for it:
+
+- The database is in WAL mode and the app opens three connections to it: the UI
+  thread's, the background writer's and the background services' (`AppState::store()`,
+  used by pipelines and uploads). WAL readers never wait for a writer, so reading rows
+  and documents on the UI thread stays instant during a lock.
+- Every change goes through `AppState` (`state/writes.rs`): videos, properties, views,
+  settings, documents, new, copied and deleted videos. While nothing is queued a change
+  is written at once on the UI connection, which gives up on a lock after 100 ms.
+  Otherwise it joins one ordered write queue: the cached rows show it at once (reloads
+  replay the queue over what they read), and a background task writes the queue in order
+  on the writer's connection, retrying every 2 s until it lands. The queue keeps only the
+  newest value per video, document, view and the settings; writes whose effect depends on
+  order (creating, deleting, property definitions) are never overtaken.
+- A write that keeps failing is never dropped: the video page shows "Not saved —
+  retrying" and the creator is told once. Only writes that can never succeed (the video
+  was deleted) leave the queue, with a notification.
+- Quitting (Ctrl+Q, closing the window, SIGTERM/SIGINT/SIGHUP) writes the queue on the
+  UI thread, waiting at most 5 s in all for a lock. What still can't be written is kept
+  in `unsaved-changes.json` next to the database (mode 0600) and written at the next
+  start, which says so.
+- Background services keep their own connection with a 5 s busy timeout; keep their
+  store calls short and off the UI thread where they can wait for a lock.
+
 ## Data locations
 
 - Database and settings: `dirs::data_dir()/videocrm/` (`videocrm.db`, `credentials.json`).
   Overridable with env `VIDEOCRM_DATA_DIR` (used by tests and screenshots).
   The running app holds an exclusive lock on `videocrm.lock` there; a second copy on the
   same data dir shows "VideoCRM is already open" and quits without opening the database.
+  `unsaved-changes.json` appears there only when the app quit while another program
+  kept the database locked; the next start writes it to the database and removes it.
 - Media root (default `dirs::video_dir()/VideoCRM`, fallback `~/Videos/VideoCRM`):
   one folder per video `<slug>-<short id>/` containing `footage/` (raw takes).
   video-use writes all outputs to `footage/edit/` (`final.mp4`, `project.md`, ...).
@@ -102,8 +131,9 @@ CLI, the video-use skill, ffmpeg/ffprobe and the ElevenLabs key are available.
 
 GPUI Kit app. Main pieces:
 
-- `AppState` entity: owns the `Store` (behind a mutex), cached rows/properties/views,
-  settings, connected account; all mutations go through it and emit events.
+- `AppState` entity: owns the database connections (see "Database access"), the write
+  queue, cached rows/properties/views, settings, connected account; all mutations go
+  through it and emit events.
 - Shell: title bar, sidebar (Videos views, Pipelines, Uploads, recent pages, account,
   settings), routed main area.
 - `database/` — Notion-like videos database: table view (inline cell editing, column
