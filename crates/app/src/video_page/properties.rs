@@ -12,17 +12,19 @@ use gpui_kit::component::input::{Backspace, Input, InputEvent, InputState};
 use gpui_kit::component::link::Link;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Side, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, TestSupportExt as _, Window, div, rems,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
+    TestSupportExt as _, Window, div, rems,
 };
 use videocrm_core::input::{normalize_link, parse_number};
 use videocrm_core::{
-    Column, PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, Video, VideoFormat, VideoId,
+    Column, PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, Video, VideoFormat, VideoId, VideoRow,
     VideoStatus, ViewKind,
 };
 
@@ -559,19 +561,30 @@ impl PropertiesPanel {
             )
     }
 
+    /// The video's link on YouTube, or why there is none: never uploaded, or
+    /// gone from YouTube since, as the Publish tab says it.
     fn render_youtube(&self, video: &Video, cx: &App) -> AnyElement {
-        match &video.youtube {
-            Some(link) => h_flex()
+        if let Some(link) = &video.youtube {
+            return h_flex()
                 .gap_2()
                 .px_2()
                 .text_sm()
                 .child(Link::new("youtube-link").href(link.url.clone()).child(link.url.clone()))
                 .child(div().text_color(cx.theme().muted_foreground).child(link.privacy.label()))
-                .into_any_element(),
-            None => {
-                div().px_2().text_sm().text_color(cx.theme().muted_foreground).child("Not uploaded").into_any_element()
-            }
+                .into_any_element();
         }
+        let left = self.state.read(cx).row(self.video_id).is_some_and(VideoRow::left_youtube);
+        let label = if left { YOUTUBE_GONE } else { "Not uploaded" };
+        div()
+            .id("property-youtube-value")
+            .test_support()
+            .aria_label(label)
+            .px_2()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .when(left, |this| this.tooltip(|window, cx| Tooltip::new(YOUTUBE_GONE_DETAIL).build(window, cx)))
+            .child(label)
+            .into_any_element()
     }
 
     fn render_custom(&self, property: &PropertyDef, video: &Video, cx: &mut Context<Self>) -> AnyElement {
@@ -736,6 +749,9 @@ fn add_property_to_tables(property: PropertyDef, cx: &mut App) {
 
 /// Status, format, publish date, tags, media folder and YouTube.
 const BUILT_IN_ROWS: usize = 6;
+/// A video whose upload YouTube no longer has, in the Publish tab's words.
+const YOUTUBE_GONE: &str = "Not on YouTube anymore";
+const YOUTUBE_GONE_DETAIL: &str = "YouTube no longer has this video. It may have been deleted in YouTube Studio.";
 
 /// Kinds edited in a text input.
 fn is_text_like(kind: &PropertyKind) -> bool {

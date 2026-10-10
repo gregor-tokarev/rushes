@@ -21,7 +21,7 @@ use videocrm_core::settings::AppSettings;
 use videocrm_core::templates::TemplateKind;
 use videocrm_core::{
     BlockId, Column, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, Store,
-    TagColor, VideoFormat, VideoId, ViewKind,
+    TagColor, UploadId, UploadJob, UploadStatus, VideoFormat, VideoId, ViewKind,
 };
 
 struct Fixture {
@@ -585,6 +585,37 @@ fn the_publish_date_opens_a_calendar_and_clears_from_it(cx: &mut TestAppContext)
     app.click(cx, "clear-date");
     assert_eq!(cx.read(|cx| app.state.read(cx).video(id).and_then(|video| video.publish_date)), None);
     assert!(!app.has(cx, "clear-date"), "the calendar closes");
+}
+
+#[gpui_kit::test]
+fn a_video_gone_from_youtube_says_so(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    app.open_video(cx, id, VideoTab::Script);
+    let shown = |app: &Fixture, cx: &mut TestAppContext| {
+        cx.update_window(app.window, |_, window, _| window.find("property-youtube-value").label().map(str::to_string))
+            .expect("window is open")
+    };
+    assert_eq!(shown(&app, cx).as_deref(), Some("Not uploaded"));
+
+    // The upload reached YouTube; the link was dropped once YouTube no longer had it.
+    let now = chrono::Utc::now();
+    let job = UploadJob {
+        id: UploadId::new(),
+        video_id: id,
+        file: app._media.path().join("final.mp4"),
+        file_stamp: None,
+        status: UploadStatus::Done { video_id: "yt-gone".into() },
+        session_url: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| {
+        state.read(cx).store().lock().expect("store lock").insert_upload(&job).expect("insert upload");
+        state.update(cx, |state, cx| state.reload(cx));
+    });
+    assert_eq!(shown(&app, cx).as_deref(), Some("Not on YouTube anymore"), "as the Publish tab says it");
 }
 
 // Title

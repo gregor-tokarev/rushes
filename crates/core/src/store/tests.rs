@@ -413,6 +413,12 @@ fn a_video_gone_from_youtube_has_no_youtube_state() {
     // The app drops the link once YouTube no longer has the video; "Uploaded" would be wrong.
     let row = store.list_video_rows().unwrap().remove(0);
     assert_eq!(row.youtube_state(), None);
+    assert!(row.left_youtube(), "the page says it was there");
+
+    let never = insert(&mut store, "Never uploaded", 1.0);
+    store.insert_upload(&upload(never.id, UploadStatus::Cancelled, 1)).unwrap();
+    let rows = store.list_video_rows().unwrap();
+    assert!(!rows.iter().find(|row| row.video.id == never.id).unwrap().left_youtube());
 }
 
 #[test]

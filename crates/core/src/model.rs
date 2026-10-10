@@ -797,6 +797,14 @@ impl VideoRow {
         }
     }
 
+    /// Whether the video reached YouTube and is gone from there since (it was
+    /// deleted in YouTube Studio, say): its latest upload got there, but the
+    /// app dropped the link because YouTube no longer has the video.
+    pub fn left_youtube(&self) -> bool {
+        self.video.youtube.is_none()
+            && matches!(self.latest_upload, Some(UploadStatus::Processing { .. } | UploadStatus::Done { .. }))
+    }
+
     /// The latest upload attempt when [`Self::youtube_state`] shows the video
     /// already on YouTube and that attempt has not ended there (it is still
     /// running, failed or was cancelled).
