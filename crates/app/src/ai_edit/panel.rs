@@ -38,6 +38,19 @@ use crate::ui::{Card, SectionHeader};
 
 /// How long the brief form waits after a change before it is saved.
 const DRAFT_SAVE_DELAY: Duration = Duration::from_millis(500);
+/// For how many frames a revealed run's section is kept at the top of the page: what
+/// is above it (the page header, the footage list) may still settle after the first.
+const REVEAL_FRAMES: u8 = 10;
+
+/// Scrolling a revealed run into view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reveal {
+    Idle,
+    /// Waiting for the footage list above the section to load.
+    Pending,
+    /// Keeping the section at the top of the page for this many more frames.
+    Pinned(u8),
+}
 
 /// The "Footage & AI edit" tab of a video page: the raw takes, the edit brief, and
 /// the video's AI edits with the selected one in detail.
@@ -73,7 +86,7 @@ pub struct AiEditPanel {
     page_scroll: Option<ScrollHandle>,
     /// A run was revealed (from the Pipelines page): the page scrolls the AI edit
     /// section into view once the footage list above it has its final height.
-    reveal: Rc<Cell<bool>>,
+    reveal: Rc<Cell<Reveal>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -155,7 +168,7 @@ impl AiEditPanel {
             doctor,
             start_error: None,
             page_scroll: None,
-            reveal: Rc::new(Cell::new(revealed.is_some())),
+            reveal: Rc::new(Cell::new(if revealed.is_some() { Reveal::Pending } else { Reveal::Idle })),
             _subscriptions: subscriptions,
         };
         match draft {
@@ -310,7 +323,7 @@ impl AiEditPanel {
     fn on_runs_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.service.update(cx, |service, _| service.take_revealed(self.video_id)) {
             self.select_run(id, window, cx);
-            self.reveal.set(true);
+            self.reveal.set(Reveal::Pending);
             return;
         }
         let selected = self.run_view.read(cx).run_id();
@@ -562,9 +575,10 @@ impl AiEditPanel {
 
     /// While a revealed run waits to be shown: once laid out, scrolls the page so the
     /// AI edit section starts at its top, unless it is in the upper part of the view
-    /// already. Waits for the footage list, whose height moves the section.
+    /// already, and keeps it there while what is above it settles. Waits for the
+    /// footage list, whose height moves the section.
     fn render_reveal(&self, cx: &App) -> Option<impl IntoElement + use<>> {
-        if !self.reveal.get() || !self.footage.read(cx).is_loaded() {
+        if self.reveal.get() == Reveal::Idle || !self.footage.read(cx).is_loaded() {
             return None;
         }
         let scroll = self.page_scroll.clone()?;
@@ -572,14 +586,24 @@ impl AiEditPanel {
         Some(
             canvas(
                 move |section, window, _| {
-                    reveal.set(false);
                     let view = scroll.bounds();
                     let offset = section.top() - view.top();
-                    if offset < px(0.) || offset > view.size.height / 3. {
+                    let frames = match reveal.get() {
+                        Reveal::Pending if offset >= px(0.) && offset <= view.size.height / 3. => 0,
+                        Reveal::Pending => REVEAL_FRAMES,
+                        Reveal::Pinned(frames) => frames,
+                        Reveal::Idle => 0,
+                    };
+                    if frames == 0 {
+                        reveal.set(Reveal::Idle);
+                        return;
+                    }
+                    if offset.abs() >= px(1.) {
                         let current = scroll.offset();
                         scroll.set_offset(point(current.x, current.y - offset));
-                        window.refresh();
                     }
+                    reveal.set(Reveal::Pinned(frames - 1));
+                    window.request_animation_frame();
                 },
                 |_, _, _, _| {},
             )

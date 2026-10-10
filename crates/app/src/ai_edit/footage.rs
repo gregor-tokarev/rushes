@@ -491,8 +491,9 @@ impl FootageCard {
                 .when(ix + 1 < count, |this| this.border_b_1().border_color(theme.border))
                 .child(Icon::new(media_icon(take.file.kind)).small().text_color(theme.muted_foreground))
                 .child(div().flex_1().min_w_0().truncate().text_sm().child(take.file.name.clone()))
+                // One line whether probed or not, so rows keep their height as probes finish.
                 .child(
-                    div()
+                    h_flex()
                         .flex_shrink_0()
                         .text_sm()
                         .text_color(theme.muted_foreground)

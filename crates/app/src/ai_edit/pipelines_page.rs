@@ -95,10 +95,10 @@ impl PipelinesPage {
             .cell(started, div().truncate().text_color(muted).child(format_when(run.created_at, Local::now())))
             .cell(
                 agent_time_column,
-                div().text_color(muted).child(if run.status == RunStatus::Queued {
-                    "—".to_owned()
-                } else {
-                    format::elapsed(agent_time)
+                div().text_color(muted).child(match agent_time {
+                    _ if run.status == RunStatus::Queued => "—".to_owned(),
+                    time if !time.is_zero() && time < Duration::from_secs(1) => "<1s".to_owned(),
+                    time => format::elapsed(time),
                 }),
             )
             .cell(cost, div().text_color(muted).child(run.cost_usd.map_or("—".to_owned(), format::cost)))
