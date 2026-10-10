@@ -1,3 +1,5 @@
+// Log through `log_line!`: `eprintln!` panics once the launching terminal is closed.
+#![warn(clippy::print_stderr, clippy::print_stdout)]
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 use videocrm::ai_edit::PipelineService;
@@ -80,7 +82,7 @@ fn open_workspace(state: AppState, cx: &mut App) {
         workspace
     });
     if let Err(error) = opened {
-        eprintln!("videocrm: cannot open the main window: {error}");
+        videocrm::log_line!("videocrm: cannot open the main window: {error}");
         cx.quit();
     }
 }

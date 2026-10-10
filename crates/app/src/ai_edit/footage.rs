@@ -142,7 +142,7 @@ impl FootageImports {
                 });
                 report(ImportMessage::Copied(pending));
                 copied.map(drop).map_err(|error| {
-                    eprintln!("videocrm: couldn't copy {} into {}: {error}", source.display(), dir.display());
+                    log_line!("videocrm: couldn't copy {} into {}: {error}", source.display(), dir.display());
                     format!(
                         "Couldn’t copy {}. Check that the disk has room and the file can be read, then add it again.",
                         file_name(source)
@@ -381,7 +381,7 @@ impl FootageCard {
             Ok(Some(paths)) => self.import(paths, cx),
             Ok(None) => {}
             Err(error) => {
-                eprintln!("videocrm: file chooser failed: {error}");
+                log_line!("videocrm: file chooser failed: {error}");
                 let card = cx.weak_entity();
                 let request = PathRequest::new(
                     PathKind::File,

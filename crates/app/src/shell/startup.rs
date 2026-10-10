@@ -52,7 +52,7 @@ impl InstanceLock {
         let file = match file {
             Ok(file) => file,
             Err(error) => {
-                eprintln!("videocrm: cannot create the lock file {}: {error}", path.display());
+                log_line!("videocrm: cannot create the lock file {}: {error}", path.display());
                 return Ok(Self { _file: None });
             }
         };
@@ -60,7 +60,7 @@ impl InstanceLock {
             Ok(()) => Ok(Self { _file: Some(file) }),
             Err(TryLockError::WouldBlock) => Err(StartupProblem::AlreadyRunning),
             Err(TryLockError::Error(error)) => {
-                eprintln!("videocrm: cannot lock {}: {error}", path.display());
+                log_line!("videocrm: cannot lock {}: {error}", path.display());
                 Ok(Self { _file: None })
             }
         }
@@ -137,7 +137,7 @@ impl StartupProblem {
 /// error goes to the log.
 pub fn open_startup_notice(problem: StartupProblem, data_dir: PathBuf, cx: &mut App) {
     if let StartupProblem::Database(error) = &problem {
-        eprintln!("videocrm: cannot open the database in {}: {error}", data_dir.display());
+        log_line!("videocrm: cannot open the database in {}: {error}", data_dir.display());
     }
     cx.bind_keys([
         KeyBinding::new("escape", Dismiss, Some(KEY_CONTEXT)),
@@ -164,7 +164,7 @@ pub fn open_startup_notice(problem: StartupProblem, data_dir: PathBuf, cx: &mut 
         notice
     });
     if let Err(error) = opened {
-        eprintln!("videocrm: cannot open a window: {error}");
+        log_line!("videocrm: cannot open a window: {error}");
         cx.quit();
     }
 }

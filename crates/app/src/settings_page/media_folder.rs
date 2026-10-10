@@ -153,7 +153,7 @@ impl MediaFolderField {
                         true
                     }
                     Err(error) => {
-                        eprintln!("videocrm: media folder {} can't be used: {error}", folder.display());
+                        log_line!("videocrm: media folder {} can't be used: {error}", folder.display());
                         let reason = folder_error_reason(&folder, &error);
                         this.reject(format!("{reason} Choose another folder.").into(), on_error, window, cx);
                         false
@@ -176,7 +176,7 @@ impl MediaFolderField {
             Ok(()) => {
                 self.state.update(cx, |state, cx| state.update_settings(cx, |settings| settings.media_root = root))
             }
-            Err(error) => eprintln!("videocrm: media folder {} not saved: {error}", folder.display()),
+            Err(error) => log_line!("videocrm: media folder {} not saved: {error}", folder.display()),
         }
     }
 
@@ -217,7 +217,7 @@ impl MediaFolderField {
                 Ok(Ok(Some(paths))) => paths.into_iter().next(),
                 Ok(Ok(None)) | Err(_) => None,
                 Ok(Err(error)) => {
-                    eprintln!("videocrm: folder chooser failed: {error}");
+                    log_line!("videocrm: folder chooser failed: {error}");
                     _ = this.update_in(cx, |this, window, cx| this.prompt_for_folder(window, cx));
                     None
                 }
@@ -247,7 +247,7 @@ impl MediaFolderField {
             });
             cx.foreground_executor().spawn(async move {
                 check.await.map_err(|error| {
-                    eprintln!("videocrm: media folder {} can't be used: {error}", folder.display());
+                    log_line!("videocrm: media folder {} can't be used: {error}", folder.display());
                     SharedString::from(folder_error_reason(&folder, &error))
                 })?;
                 Ok(Box::new(move |window: &mut Window, cx: &mut App| {

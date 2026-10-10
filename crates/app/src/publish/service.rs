@@ -322,7 +322,7 @@ impl YoutubeService {
             .name("youtube-sign-in".into())
             .spawn(move || sign_in(config, tokens, &cancel, &sender));
         if let Err(error) = spawned {
-            eprintln!("videocrm: couldn't start the sign-in thread: {error}");
+            log_line!("videocrm: couldn't start the sign-in thread: {error}");
             self.sign_in = None;
             let message = "Couldn’t start the sign-in. Quit VideoCRM and open it again, then connect.";
             self.set_connection(Connection::Failed(message.into()), cx);
@@ -400,7 +400,7 @@ impl YoutubeService {
                     match signed_in.tokens.sign_in(&login) {
                         Ok(()) => Ok(signed_in),
                         Err(error) => {
-                            eprintln!("videocrm: couldn't save the YouTube sign-in: {error}");
+                            log_line!("videocrm: couldn't save the YouTube sign-in: {error}");
                             Err(SignInError::Failed(
                                 "Couldn’t save the YouTube sign-in: VideoCRM can’t write credentials.json in its \
                                  data folder. Check that the folder is writable, then connect again."
@@ -451,7 +451,7 @@ impl YoutubeService {
             // Tokens of another backend, or no account: not usable here.
             Ok(_) => {}
             Err(error) => {
-                eprintln!("videocrm: couldn't read the saved YouTube sign-in: {error}");
+                log_line!("videocrm: couldn't read the saved YouTube sign-in: {error}");
                 self.connection =
                     Connection::Failed("Couldn’t read the saved YouTube sign-in. Connect again to sign in.".into());
             }
@@ -788,7 +788,7 @@ pub(super) fn push_notification(cx: &mut App, notification: impl FnOnce() -> Not
 
 /// A YouTube error as the creator should read it. The technical detail goes to stderr.
 pub(super) fn describe_error(error: &YoutubeError) -> String {
-    eprintln!("videocrm: youtube: {error}");
+    log_line!("videocrm: youtube: {error}");
     let message = match error {
         error if error.is_network() => "Can’t reach YouTube. Check your internet connection and try again.",
         // Quota, upload limit, missing permission, rate limits, outages.
@@ -827,7 +827,7 @@ pub(super) fn describe_error(error: &YoutubeError) -> String {
 
 /// A failed write to the credentials file, as the creator should read it.
 fn credentials_problem(title: &str, error: &YoutubeError) -> Problem {
-    eprintln!("videocrm: {title}: {error}");
+    log_line!("videocrm: {title}: {error}");
     Problem::new(
         title.to_owned(),
         "VideoCRM can’t write credentials.json in its data folder. Check that the folder is writable, then try again.",

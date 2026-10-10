@@ -153,7 +153,7 @@ pub(crate) fn folder_error_reason(path: &Path, error: &io::Error) -> String {
 
 /// Keeps the technical detail out of the UI but in the log.
 fn log(context: &str, error: &dyn std::error::Error) {
-    eprintln!("videocrm: {context}: {error}");
+    log_line!("videocrm: {context}: {error}");
 }
 
 #[cfg(test)]

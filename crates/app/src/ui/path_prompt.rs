@@ -391,7 +391,7 @@ fn verdict(kind: PathKind, path: &Path, found: io::Result<Found>) -> Verdict {
     let found = match found {
         Ok(found) => found,
         Err(error) => {
-            eprintln!("videocrm: can't look up {}: {error}", path.display());
+            log_line!("videocrm: can't look up {}: {error}", path.display());
             return Verdict::Refuse(
                 match error.kind() {
                     io::ErrorKind::PermissionDenied => format!("VideoCRM isn’t allowed to open {shown}."),
@@ -417,7 +417,7 @@ fn verdict(kind: PathKind, path: &Path, found: io::Result<Found>) -> Verdict {
 
 /// One sentence on why the file at `path` couldn't be read. Logs the error.
 pub fn read_error_reason(path: &Path, error: &io::Error) -> SharedString {
-    eprintln!("videocrm: can't read {}: {error}", path.display());
+    log_line!("videocrm: can't read {}: {error}", path.display());
     let shown = display_user_path(path);
     match error.kind() {
         io::ErrorKind::NotFound => format!("There’s no file at {shown}."),
@@ -431,7 +431,7 @@ pub fn read_error_reason(path: &Path, error: &io::Error) -> SharedString {
 
 /// One sentence on why the file at `path` couldn't be written. Logs the error.
 pub fn write_error_reason(path: &Path, error: &io::Error) -> SharedString {
-    eprintln!("videocrm: can't write {}: {error}", path.display());
+    log_line!("videocrm: can't write {}: {error}", path.display());
     let shown = display_user_path(path);
     let folder = path.parent().map_or_else(|| shown.clone(), display_user_path);
     match error.kind() {

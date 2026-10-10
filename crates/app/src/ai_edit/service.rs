@@ -107,7 +107,7 @@ impl std::error::Error for RunError {}
 
 impl From<StoreError> for RunError {
     fn from(error: StoreError) -> Self {
-        eprintln!("videocrm: saving an AI edit failed: {error}");
+        log_line!("videocrm: saving an AI edit failed: {error}");
         RunError::Store(error.to_string())
     }
 }
@@ -314,7 +314,7 @@ impl PipelineService {
         let time = match self.state.read(cx).read_run_events(id) {
             Ok(events) => agent_time(&events.into_iter().map(TimelineEntry::from).collect::<Vec<_>>(), None),
             Err(error) => {
-                eprintln!("videocrm: couldn't read the log of run {id}: {error}");
+                log_line!("videocrm: couldn't read the log of run {id}: {error}");
                 Duration::ZERO
             }
         };
@@ -366,7 +366,7 @@ impl PipelineService {
                     .map(|stored| (stored.video_id, stored.draft))
                     .collect();
             }
-            Err(error) => eprintln!("videocrm: couldn't read the saved edit briefs: {error}"),
+            Err(error) => log_line!("videocrm: couldn't read the saved edit briefs: {error}"),
         }
     }
 
@@ -641,7 +641,7 @@ impl PipelineService {
             _ = stopped_tx.send(());
         });
         if let Err(error) = spawned {
-            eprintln!("videocrm: couldn't start the agent thread: {error}");
+            log_line!("videocrm: couldn't start the agent thread: {error}");
             let error = RunError::Spawn(error.to_string());
             self.settle_unfinished(id, Some(phase), Some(error.to_string()), cx);
             return Err(error);
@@ -718,7 +718,7 @@ impl PipelineService {
                 };
             }
             Err(error) => {
-                eprintln!("videocrm: AI edit phase failed: {error}");
+                log_line!("videocrm: AI edit phase failed: {error}");
                 return self.settle_unfinished(id, Some(phase), Some(pipeline_problem(&error)), cx);
             }
         };
@@ -820,7 +820,7 @@ impl PipelineService {
     ) -> Result<(), RunError> {
         let Some(shared) = media::edit_outputs(footage_dir).final_cut else { return Ok(()) };
         let kept = keep_final_cut(footage_dir).map_err(|error| {
-            eprintln!("videocrm: couldn't keep the earlier cut {}: {error}", shared.display());
+            log_line!("videocrm: couldn't keep the earlier cut {}: {error}", shared.display());
             RunError::CutNotKept
         })?;
         let owner = self.video_runs(video_id).find(|run| run.output.as_ref() == Some(&shared)).map(|run| run.id);

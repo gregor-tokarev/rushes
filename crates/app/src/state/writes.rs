@@ -638,7 +638,7 @@ impl Writes {
     /// the app last quit are queued again and tried once; the problem says so.
     pub(super) fn new(store: SharedStore, database: Option<&Path>) -> (Self, Option<Problem>) {
         if let Err(error) = lock(&store).set_busy_timeout(WRITE_BUSY_TIMEOUT) {
-            eprintln!("videocrm: can't set the writer's busy timeout: {error}");
+            log_line!("videocrm: can't set the writer's busy timeout: {error}");
         }
         let unsaved_file = database.and_then(Path::parent).map(|folder| folder.join(UNSAVED_FILE));
         let queue = Mutex::new(Queue::default());
@@ -708,7 +708,7 @@ impl Writes {
         let log = std::mem::replace(&mut self.logged_kept, writes.len()) != writes.len();
         let Some(file) = &self.unsaved_file else {
             if log && !writes.is_empty() {
-                eprintln!("videocrm: {changes} couldn’t be saved before quitting");
+                log_line!("videocrm: {changes} couldn’t be saved before quitting");
             }
             return;
         };
@@ -717,7 +717,7 @@ impl Writes {
                 match fs::remove_file(file) {
                     Ok(()) => self.unsaved_kept = false,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => self.unsaved_kept = false,
-                    Err(error) => eprintln!("videocrm: can't remove {}: {error}", file.display()),
+                    Err(error) => log_line!("videocrm: can't remove {}: {error}", file.display()),
                 }
             }
             return;
@@ -726,13 +726,13 @@ impl Writes {
             Ok(()) => {
                 self.unsaved_kept = true;
                 if log {
-                    eprintln!(
+                    log_line!(
                         "videocrm: {changes} couldn’t be saved before quitting; kept in {} for the next start",
                         file.display()
                     );
                 }
             }
-            Err(error) => eprintln!("videocrm: {changes} are lost, can't write {}: {error}", file.display()),
+            Err(error) => log_line!("videocrm: {changes} are lost, can't write {}: {error}", file.display()),
         }
     }
 }
@@ -755,7 +755,7 @@ impl AppState {
                     if write.reports_refusal(&error) {
                         self.report_problem(Problem::store(write.failure_title(), &error), cx);
                     } else {
-                        eprintln!("videocrm: {}: {error}", write.failure_title());
+                        log_line!("videocrm: {}: {error}", write.failure_title());
                     }
                     return false;
                 }
@@ -810,7 +810,7 @@ impl AppState {
             if write.reports_refusal(error) {
                 self.report_problem(Problem::store(write.failure_title(), error), cx);
             } else {
-                eprintln!("videocrm: {}: {error}", write.failure_title());
+                log_line!("videocrm: {}: {error}", write.failure_title());
             }
         }
         let known: Vec<VideoId> = self.rows.iter().map(|row| row.video.id).collect();
@@ -848,7 +848,7 @@ impl AppState {
         if std::mem::replace(&mut self.writes.reported, true) {
             return;
         }
-        eprintln!("videocrm: couldn’t save, retrying: {error}");
+        log_line!("videocrm: couldn’t save, retrying: {error}");
         let subject = lock(&self.writes.queue).failing_subject();
         let (what, it) = (subject.name(), if matches!(subject, Subject::Changes) { "them" } else { "it" });
         let code = match error {
@@ -888,7 +888,7 @@ impl AppState {
             // Taking the connection waits for a pass in flight, within the deadline.
             let store = lock(&self.writes.store);
             if let Err(error) = store.set_busy_timeout(deadline.saturating_duration_since(Instant::now())) {
-                eprintln!("videocrm: can't set the writer's busy timeout: {error}");
+                log_line!("videocrm: can't set the writer's busy timeout: {error}");
             }
             drop(store);
             let pass = write_queue(&self.writes.store, &self.writes.queue);
@@ -904,12 +904,12 @@ impl AppState {
             }
         }
         if let Err(error) = lock(&self.writes.store).set_busy_timeout(WRITE_BUSY_TIMEOUT) {
-            eprintln!("videocrm: can't set the writer's busy timeout: {error}");
+            log_line!("videocrm: can't set the writer's busy timeout: {error}");
         }
         if let Some(error) = failure
             && lock(&self.writes.queue).len() != self.writes.logged_kept
         {
-            eprintln!("videocrm: couldn’t save before quitting: {error}");
+            log_line!("videocrm: couldn’t save before quitting: {error}");
         }
         self.writes.keep_unsaved();
     }
@@ -917,7 +917,7 @@ impl AppState {
 
 fn log_refused(pass: &Pass) {
     for (write, error) in &pass.refused {
-        eprintln!("videocrm: {}: {error}", write.failure_title());
+        log_line!("videocrm: {}: {error}", write.failure_title());
     }
 }
 
@@ -953,17 +953,17 @@ fn read_unsaved(file: &Path) -> Option<Result<Vec<Write>, Problem>> {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
         Err(error) => {
-            eprintln!("videocrm: can't read {}: {error}", file.display());
+            log_line!("videocrm: can't read {}: {error}", file.display());
             return Some(Err(lost()));
         }
     };
     match serde_json::from_slice(&bytes) {
         Ok(writes) => Some(Ok(writes)),
         Err(error) => {
-            eprintln!("videocrm: can't read the unsaved changes in {}: {error}", file.display());
+            log_line!("videocrm: can't read the unsaved changes in {}: {error}", file.display());
             // Set aside, so it isn't read again at every start.
             if let Err(error) = fs::rename(file, file.with_extension("unreadable.json")) {
-                eprintln!("videocrm: can't set aside {}: {error}", file.display());
+                log_line!("videocrm: can't set aside {}: {error}", file.display());
             }
             Some(Err(lost()))
         }

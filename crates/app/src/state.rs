@@ -569,7 +569,7 @@ fn load_settings(store: &Store) -> Result<(AppSettings, Option<Problem>), StoreE
         Err(error @ StoreError::Sqlite(rusqlite::Error::FromSqlConversionFailure(..))) => error,
         Err(error) => return Err(error),
     };
-    eprintln!("videocrm: some settings can't be read, using their defaults: {error}");
+    log_line!("videocrm: some settings can't be read, using their defaults: {error}");
     let stored = match store.get_setting::<serde_json::Value>(APP_SETTINGS_KEY) {
         Ok(stored) => stored.unwrap_or_default(),
         Err(StoreError::Sqlite(rusqlite::Error::FromSqlConversionFailure(..))) => serde_json::Value::Null,

@@ -268,7 +268,7 @@ impl DocumentTab {
                 Ok(Ok(Some(path))) => path,
                 Ok(Ok(None)) | Err(_) => return,
                 Ok(Err(error)) => {
-                    eprintln!("videocrm: save dialog failed: {error}");
+                    log_line!("videocrm: save dialog failed: {error}");
                     _ = this.update_in(cx, |this, window, cx| this.prompt_for_path(PathPurpose::Export, window, cx));
                     return;
                 }
@@ -293,7 +293,7 @@ impl DocumentTab {
                 },
                 Ok(Ok(None)) | Err(_) => return,
                 Ok(Err(error)) => {
-                    eprintln!("videocrm: file dialog failed: {error}");
+                    log_line!("videocrm: file dialog failed: {error}");
                     _ = this.update_in(cx, |this, window, cx| this.prompt_for_path(PathPurpose::Import, window, cx));
                     return;
                 }

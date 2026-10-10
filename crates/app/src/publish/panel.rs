@@ -549,7 +549,7 @@ impl PublishPanel {
                 // Linux needs the desktop portal for file dialogs; without it the path
                 // can still be typed or the file dropped on the card.
                 Ok(Err(error)) => {
-                    eprintln!("videocrm: file chooser failed: {error}");
+                    log_line!("videocrm: file chooser failed: {error}");
                     this.update_in(cx, |this, window, cx| {
                         let target = if thumbnail { FileTarget::Thumbnail } else { FileTarget::Video };
                         this.prompt_for_path(target, window, cx);

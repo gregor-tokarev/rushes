@@ -28,7 +28,7 @@ const UI_FONT_FILES: [&[u8]; 5] = [
 pub fn register_fonts(cx: &mut App) {
     let fonts = UI_FONT_FILES.iter().map(|bytes| Cow::Borrowed(*bytes)).collect();
     if let Err(error) = cx.text_system().add_fonts(fonts) {
-        eprintln!("videocrm: cannot load the embedded UI font: {error}");
+        log_line!("videocrm: cannot load the embedded UI font: {error}");
     }
 }
 

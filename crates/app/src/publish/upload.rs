@@ -433,7 +433,7 @@ impl YoutubeService {
             .name("youtube-upload".into())
             .spawn(move || transfer_file(&worker.0, &file, &request, &worker.1, &sender));
         if let Err(error) = spawned {
-            eprintln!("videocrm: couldn't start the upload thread: {error}");
+            log_line!("videocrm: couldn't start the upload thread: {error}");
             self.update_job(id, cx, |job| {
                 job.status = UploadStatus::Failed {
                     error: "Couldn’t start the upload. Quit VideoCRM and open it again, then retry.".to_owned(),
@@ -579,7 +579,7 @@ impl YoutubeService {
                 _ => false,
             };
         let message = if session_gone {
-            eprintln!("videocrm: youtube: {error}");
+            log_line!("videocrm: youtube: {error}");
             SESSION_GONE.to_owned()
         } else {
             describe_error(error)
