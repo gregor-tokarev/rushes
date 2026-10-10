@@ -775,6 +775,26 @@ fn the_account_badge_opens_the_youtube_settings(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn settings_controls_end_on_one_edge(cx: &mut TestAppContext) {
+    let app = Fixture::open_sized(cx, true, &[], size(px(1440.), px(900.)));
+    app.click(cx, "sidebar-footer-0");
+    let (select, choose, open) = cx
+        .update_window(app.window, |_, window, cx| {
+            window.render_frame(cx);
+            let child =
+                |parent: &'static str, name: &'static str| ElementId::NamedChild(Arc::new(parent.into()), name.into());
+            // The theme select, then the media folder's and the data folder's buttons.
+            let select = window.within("group-0").find("btn").bounds();
+            let choose = window.find(child("settings-media-root", "choose")).bounds();
+            let open = window.find("open-data-folder").bounds();
+            (select.right(), choose.right(), open.right())
+        })
+        .unwrap();
+    assert_eq!(select, choose, "the select ends where the text field's button does");
+    assert_eq!(open, choose);
+}
+
+#[gpui_kit::test]
 fn folder_errors_explain_themselves_and_lead_to_the_settings(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, true, &[]);
     // A media folder inside a file can never be created.

@@ -788,16 +788,18 @@ impl PublishPanel {
         let uploaded = self.state.read(cx).video(self.video_id).is_some_and(|video| video.youtube.is_some());
         v_flex()
             .gap_5()
-            .child(v_flex().gap_1().child(section_heading("Details")).when(uploaded, |this| {
+            .child(v_flex().gap_0p5().child(section_heading("Details")).when(uploaded, |this| {
                 // The form doesn't reach the uploaded video; saying so avoids edits that go nowhere.
+                // It reads as the section's description.
                 this.child(
                     div()
                         .id("publish-next-upload-note")
-                        .child(help_text(
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(
                             "This video is on YouTube. Changes here apply to the next upload; change the \
-                                 uploaded one in YouTube Studio.",
-                            cx,
-                        ))
+                             uploaded one in YouTube Studio.",
+                        )
                         .test_support(),
                 )
             }))

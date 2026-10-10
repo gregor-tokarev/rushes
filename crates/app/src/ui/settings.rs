@@ -3,8 +3,9 @@
 //! The Settings page lays out every section with the kit's setting groups and
 //! items: a muted group title, the label and description on the leading side
 //! and the control trailing, stacked below once the page is narrow. Long values
-//! (paths, IDs, instructions) stack below their label at any width, capped at
-//! [`FIELD_MAX_WIDTH`].
+//! (paths, IDs, instructions) stack below their label at any width. Groups
+//! are [`FIELD_MAX_WIDTH`] wide at most, so trailing controls and stacked
+//! fields end on one edge.
 //!
 //! A view whose settings also appear outside the Settings page (YouTube and
 //! AI editing in onboarding) describes them once as [`SettingsSection`]s of
@@ -22,9 +23,15 @@ use gpui_kit::{
     Styled as _, Window, div,
 };
 
-/// The widest a settings text field grows: a path or an ID doesn't need the
-/// whole page.
-pub const FIELD_MAX_WIDTH: Rems = Rems(36.);
+/// The widest a settings group, and with it a text field, grows: a path or an
+/// ID doesn't need the whole page, and a switch or select beside a short
+/// label stays within reach of it.
+pub const FIELD_MAX_WIDTH: Rems = Rems(40.);
+
+/// A settings group on the column every group shares.
+pub fn setting_group() -> SettingGroup {
+    SettingGroup::new().max_w(FIELD_MAX_WIDTH)
+}
 
 /// Renders one part of a settings view.
 type Part<V> = Rc<dyn Fn(&mut V, &mut Window, &mut Context<V>) -> AnyElement>;
@@ -120,7 +127,7 @@ impl<V: 'static> SettingsSection<V> {
     /// The section as a group of the kit's Settings page, rendering its parts
     /// through `view`. The page must re-render when `view` notifies.
     pub fn setting_group(self, view: &Entity<V>) -> SettingGroup {
-        let mut group = SettingGroup::new();
+        let mut group = setting_group();
         if let Some(title) = self.title {
             group = group.title(title);
         }

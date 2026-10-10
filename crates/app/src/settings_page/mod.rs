@@ -10,7 +10,7 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::{
     App, AppContext as _, Axis, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, rems,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
 };
 use videocrm_core::input::display_user_path;
 use videocrm_core::settings::{ThemeMode, data_dir};
@@ -19,6 +19,7 @@ use crate::ai_edit::AiSettings;
 use crate::publish::YoutubeSettings;
 use crate::route::SettingsSection;
 use crate::state::{AppEvent, AppState};
+use crate::ui::settings::{FIELD_MAX_WIDTH, setting_group};
 
 pub use media_folder::{Commit, MediaFolderEvent, MediaFolderField};
 
@@ -101,7 +102,7 @@ impl SettingsPage {
                 .icon(Icon::new(IconName::Settings2))
                 .default_open(true)
                 .groups(vec![
-                    SettingGroup::new().title("Appearance").item(
+                    setting_group().title("Appearance").item(
                         SettingItem::new(
                             "Theme",
                             SettingField::dropdown(
@@ -124,7 +125,7 @@ impl SettingsPage {
                         .description("System follows your operating system’s light or dark appearance."),
                     ),
                     // Paths are long: their fields sit under the label at any width.
-                    SettingGroup::new().title("Storage").items(vec![
+                    setting_group().title("Storage").items(vec![
                         SettingItem::new("Media folder", media_folder_field(media_folder))
                             .layout(Axis::Vertical)
                             .description("Each video gets a folder here for raw footage and AI edit outputs.")
@@ -142,7 +143,7 @@ impl SettingsPage {
                 .icon(Icon::new(IconName::WandSparkles))
                 .groups(ai_groups),
             SettingPage::new(SettingsSection::About.label()).icon(Icon::new(IconName::Info)).group(
-                SettingGroup::new().item(
+                setting_group().item(
                     SettingItem::render(|_, _, cx| {
                         v_flex()
                             .w_full()
@@ -170,7 +171,7 @@ impl SettingsPage {
                                         ),
                                     ),
                             )
-                            .child(div().max_w(rems(40.)).text_sm().text_color(cx.theme().muted_foreground).child(
+                            .child(div().max_w(FIELD_MAX_WIDTH).text_sm().text_color(cx.theme().muted_foreground).child(
                                 "Plan videos in a Notion-like database, write scripts in rich documents, edit footage \
                              with AI and upload to YouTube, all on your own computer.",
                             ))
@@ -187,7 +188,7 @@ fn theme_key(mode: ThemeMode) -> SharedString {
 }
 
 fn media_folder_field(field: Entity<MediaFolderField>) -> SettingField<SharedString> {
-    SettingField::render(move |_, _, _| div().w_full().max_w(rems(36.)).child(field.clone()))
+    SettingField::render(move |_, _, _| div().w_full().max_w(FIELD_MAX_WIDTH).child(field.clone()))
 }
 
 fn data_folder_field() -> SettingField<SharedString> {
@@ -196,7 +197,7 @@ fn data_folder_field() -> SettingField<SharedString> {
         let shown: SharedString = display_user_path(&dir).into();
         h_flex()
             .w_full()
-            .max_w(rems(36.))
+            .max_w(FIELD_MAX_WIDTH)
             .min_w_0()
             .gap_2()
             .child(
