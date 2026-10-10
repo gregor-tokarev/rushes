@@ -1148,7 +1148,7 @@ fn the_panel_takes_an_edit_from_brief_to_publish(cx: &mut TestAppContext) {
     let id = latest_run(cx, &fx).expect("the panel started a run");
     let planned = fx.wait_for_status(cx, id, RunStatus::AwaitingApproval);
     assert!(planned.brief.contains("- Burn subtitles into the render."), "{}", planned.brief);
-    assert!(planned.brief.starts_with("Edit \"Desk setup 2026\""), "{}", planned.brief);
+    assert!(planned.brief.starts_with("Edit “Desk setup 2026”"), "{}", planned.brief);
 
     wait_for_window(cx, window, "the strategy card", |window, _| shows(window, "run-approve"));
     let composing = cx.update_window(window, |_, window, _| shows(window, "ai-edit-start")).unwrap();

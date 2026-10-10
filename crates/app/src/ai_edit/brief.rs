@@ -36,7 +36,7 @@ const PREFERENCES_HEADING: &str = "Edit preferences:";
 
 const NATURAL_LENGTH: &str = "- Keep the natural length; tighten the pacing only.";
 const TARGET_LENGTH: &str = "- Target length: ";
-const REMOVE_FILLERS: &str = "- Remove filler words (\"um\", \"uh\"), false starts, retakes and dead air.";
+const REMOVE_FILLERS: &str = "- Remove filler words (“um”, “uh”), false starts, retakes and dead air.";
 const KEEP_FILLERS: &str = "- Keep filler words and natural pauses.";
 const SUBTITLES: &str = "- Burn subtitles into the render.";
 const NO_SUBTITLES: &str = "- No subtitles.";
@@ -61,7 +61,7 @@ pub fn default_brief(
     let mut brief = if title.is_empty() {
         format!("Edit this footage into {}.\n", format_phrase(video.format))
     } else {
-        format!("Edit \"{title}\" into {}.\n", format_phrase(video.format))
+        format!("Edit “{title}” into {}.\n", format_phrase(video.format))
     };
     if !video.hook.trim().is_empty() {
         brief.push_str(&format!("Hook: {}\n", video.hook.trim()));
@@ -285,12 +285,12 @@ mod tests {
         let brief = default_brief(&video(), &script, &preferences(), "  Keep my intro jingle.  ");
         assert_eq!(
             brief,
-            "Edit \"Desk setup 2026\" into a long-form YouTube video.\n\
+            "Edit “Desk setup 2026” into a long-form YouTube video.\n\
              Hook: Everything on my desk, and what I regret buying.\n\
              \n\
              Edit preferences:\n\
              - Target length: 8-10 minutes.\n\
-             - Remove filler words (\"um\", \"uh\"), false starts, retakes and dead air.\n\
+             - Remove filler words (“um”, “uh”), false starts, retakes and dead air.\n\
              - Burn subtitles into the render.\n\
              - Colour grade: neutral punch.\n\
              \n\
@@ -316,7 +316,7 @@ mod tests {
              \n\
              Edit preferences:\n\
              - Keep the natural length; tighten the pacing only.\n\
-             - Remove filler words (\"um\", \"uh\"), false starts, retakes and dead air.\n\
+             - Remove filler words (“um”, “uh”), false starts, retakes and dead air.\n\
              - No subtitles.\n\
              - No colour grade: keep the original look.\n"
         );

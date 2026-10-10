@@ -88,7 +88,7 @@ fn check_agent(config: &AgentConfig) -> Check {
     let version = first_line(&output);
     // Any program runs; only Claude Code can run the edit.
     if !version.contains(CLAUDE_CODE) {
-        return Check::fail(format!("{} is not Claude Code: --version printed \"{version}\"", program.display()));
+        return Check::fail(format!("{} is not Claude Code: --version printed “{version}”", program.display()));
     }
     let number = version.split_whitespace().next().filter(|word| word.starts_with(|c: char| c.is_ascii_digit()));
     match number {
@@ -185,9 +185,9 @@ fn check_python(skill_dir: Option<&Path>, uv: Option<PathBuf>, python3: Option<P
     if let Some(python) = venv_python {
         Check::pass(format!("video-use virtualenv ({})", python.display()))
     } else if let Some(uv) = uv {
-        Check::pass(format!("uv ({}) runs the skill's helpers", uv.display()))
+        Check::pass(format!("uv ({}) runs the skill’s helpers", uv.display()))
     } else if let Some(python3) = python3 {
-        Check::pass(format!("{} (no virtualenv: the skill's dependencies are not verified)", python3.display()))
+        Check::pass(format!("{} (no virtualenv: the skill’s dependencies are not verified)", python3.display()))
     } else {
         Check::fail("no Python found")
     }
