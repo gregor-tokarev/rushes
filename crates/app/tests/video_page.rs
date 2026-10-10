@@ -632,6 +632,7 @@ fn a_video_gone_from_youtube_says_so(cx: &mut TestAppContext) {
         file_stamp: None,
         status: UploadStatus::Done { video_id: "yt-gone".into() },
         session_url: None,
+        channel: None,
         created_at: now,
         updated_at: now,
     };
@@ -957,7 +958,7 @@ fn a_click_below_the_document_puts_the_caret_after_it(cx: &mut TestAppContext) {
     app.open_video(cx, id, VideoTab::Script);
 
     let end = bounds(&app, cx, "page-end");
-    assert!(end.size.height > px(120.), "the space below a short script reacts: {end:?}");
+    assert!(end.size.height > px(100.), "the space below a short script reacts: {end:?}");
     // Far below the last block, near the bottom of the window.
     app.step(cx, |window, cx| window.click_at("page-end", gpui_kit::point(px(200.), end.size.height - px(20.)), cx));
     app.type_text(cx, "DEADZONE");

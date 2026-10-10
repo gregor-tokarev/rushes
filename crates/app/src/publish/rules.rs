@@ -57,6 +57,8 @@ pub enum AccountAccess {
     /// A sign-in in the browser is under way.
     SigningIn,
     NotConnected,
+    /// The account the video chose isn't signed in anymore.
+    Gone,
 }
 
 /// Why a video cannot be uploaded yet. `Display` is the sentence shown to the user.
@@ -65,6 +67,8 @@ pub enum BlockingReason {
     NotConnected,
     NeedsSignIn,
     SigningIn,
+    /// The account the video chose (by name) isn't signed in anymore.
+    AccountGone(String),
     NoFile,
     FileMissing,
     EmptyTitle,
@@ -84,6 +88,9 @@ impl fmt::Display for BlockingReason {
             BlockingReason::NotConnected => write!(f, "Connect a YouTube account."),
             BlockingReason::NeedsSignIn => write!(f, "Sign in to YouTube again to upload."),
             BlockingReason::SigningIn => write!(f, "Finish signing in with your browser."),
+            BlockingReason::AccountGone(name) => {
+                write!(f, "“{name}” isn’t connected. Connect it again or choose another account.")
+            }
             BlockingReason::NoFile => write!(f, "Choose the video file to upload."),
             BlockingReason::FileMissing => write!(f, "The chosen video file no longer exists. Choose it again."),
             BlockingReason::EmptyTitle => write!(f, "Add a title."),
@@ -120,6 +127,9 @@ pub fn blocking_reasons(
         AccountAccess::NeedsSignIn => reasons.push(BlockingReason::NeedsSignIn),
         AccountAccess::SigningIn => reasons.push(BlockingReason::SigningIn),
         AccountAccess::NotConnected => reasons.push(BlockingReason::NotConnected),
+        AccountAccess::Gone => reasons.push(BlockingReason::AccountGone(
+            publish.channel.as_ref().map_or_else(|| "The chosen account".to_owned(), |channel| channel.name.clone()),
+        )),
     }
     match (&publish.file, file_exists) {
         (None, _) => reasons.push(BlockingReason::NoFile),
@@ -211,6 +221,7 @@ pub fn group_thousands(value: usize) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::TimeDelta;
+    use videocrm_core::PublishChannel;
 
     use super::*;
 
@@ -244,6 +255,16 @@ mod tests {
             vec![BlockingReason::SigningIn]
         );
         assert_eq!(BlockingReason::SigningIn.to_string(), "Finish signing in with your browser.");
+        // The account the video chose was disconnected: it is named, not swapped for another.
+        video.publish.channel = Some(PublishChannel { id: "UC2".into(), name: "Second Channel".into() });
+        assert_eq!(
+            blocking_reasons(&video, AccountAccess::Gone, true, Utc::now()),
+            vec![BlockingReason::AccountGone("Second Channel".into())]
+        );
+        assert_eq!(
+            BlockingReason::AccountGone("Second Channel".into()).to_string(),
+            "“Second Channel” isn’t connected. Connect it again or choose another account."
+        );
         video.publish.file = None;
         assert_eq!(blocking_reasons(&video, AccountAccess::Connected, false, Utc::now()), vec![BlockingReason::NoFile]);
     }

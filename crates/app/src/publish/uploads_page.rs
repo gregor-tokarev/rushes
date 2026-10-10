@@ -17,7 +17,7 @@ use videocrm_core::{TagColor, UploadJob, UploadStatus};
 use super::rules::AccountAccess;
 use super::service::YoutubeService;
 use super::transfer::{format_bytes, format_eta, format_speed};
-use super::ui::{file_name, upload_chip, upload_label, youtube_link};
+use super::ui::{display_name, file_name, upload_chip, upload_label, youtube_link};
 use super::upload::ProcessingOutcome;
 use crate::database::Chip;
 use crate::route::{Route, VideoTab};
@@ -141,7 +141,22 @@ impl UploadsPage {
             _ => None,
         };
         let id = job.id.to_string();
-        let access = service.account_access();
+        // A stopped upload continues with the account it went to.
+        let channel = job.channel.clone().or_else(|| video.and_then(|video| service.channel_for(video)));
+        let access = service.account_access_for(channel.as_deref());
+        // With several accounts, which one the upload went to.
+        let channel_name = channel.filter(|_| service.accounts().len() > 1).and_then(|key| {
+            service.find_account(&key).map(|account| display_name(account.account())).or_else(|| {
+                video
+                    .and_then(|video| video.publish.channel.as_ref())
+                    .filter(|chosen| chosen.id == key)
+                    .map(|chosen| chosen.name.clone())
+            })
+        });
+        let source = match channel_name {
+            Some(channel) => format!("{} · {channel}", file_name(&job.file)),
+            None => file_name(&job.file),
+        };
         // The row itself opens the video's Publish tab; the trailing lane holds
         // what the job allows besides that.
         let action: Option<AnyElement> = match self.row_action(job, cx) {
@@ -161,6 +176,9 @@ impl UploadsPage {
                         Some("Finish signing in with your browser to resume")
                     }
                     RowAction::Resume if access == AccountAccess::NotConnected => Some("Connect YouTube to resume"),
+                    RowAction::Resume if access == AccountAccess::Gone => {
+                        Some("Connect the account this upload went to again to resume")
+                    }
                     _ => None,
                 };
                 let disabled = reason.is_some() || (action == RowAction::Cancel && cancelling);
@@ -190,9 +208,7 @@ impl UploadsPage {
                         .min_w_0()
                         .gap_0p5()
                         .child(div().font_weight(FontWeight::MEDIUM).truncate().child(title))
-                        .child(
-                            div().text_xs().text_color(theme.muted_foreground).truncate().child(file_name(&job.file)),
-                        ),
+                        .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(source)),
                 ),
             )
             .cell(

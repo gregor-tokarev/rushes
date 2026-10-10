@@ -1319,6 +1319,7 @@ mod tests {
             file_stamp: None,
             status: videocrm_core::UploadStatus::Pending,
             session_url: None,
+            channel: None,
             created_at: now,
             updated_at: now,
         };

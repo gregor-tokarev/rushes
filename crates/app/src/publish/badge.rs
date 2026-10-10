@@ -29,9 +29,12 @@ impl AccountBadge {
         Self { service, _subscription: subscription }
     }
 
-    /// The badge's two lines: who (or what to do), then the state.
+    /// The badge's two lines: who (or what to do), then the state. With several
+    /// accounts it names the default one.
     fn lines(&self, cx: &Context<Self>) -> (String, Option<String>) {
         let service = self.service.read(cx);
+        let accounts = service.accounts().len();
+        let signed_out = service.accounts().iter().filter(|account| !account.is_connected()).count();
         match service.connection() {
             Connection::Connected(account) => {
                 let uploading = service
@@ -40,18 +43,24 @@ impl AccountBadge {
                     .filter_map(|job| Some((service.transfer(job.id)?, service.retry(job.id))))
                     .collect::<Vec<_>>();
                 let detail = match uploading.as_slice() {
-                    [] => account.channel_handle.clone().unwrap_or_else(|| account.email.clone()),
+                    [] if service.is_signing_in() => "Finish in your browser".to_owned(),
+                    [] if signed_out == 1 => "1 account needs a new sign-in".to_owned(),
+                    [] if signed_out > 1 => format!("{signed_out} accounts need a new sign-in"),
+                    [] => {
+                        let who = account.channel_handle.clone().unwrap_or_else(|| account.email.clone());
+                        if accounts > 1 { format!("{who} · {accounts} accounts") } else { who }
+                    }
                     // The sidebar is narrow; the Upload card says what went wrong.
                     [(_, Some(_))] => "Retrying the upload…".to_owned(),
                     [(transfer, None)] => format!("Uploading · {}%", (transfer.fraction() * 100.0).floor()),
                     several => format!("Uploading {} videos", several.len()),
                 };
-                (display_name(account), Some(detail))
+                (display_name(&account), Some(detail))
             }
             Connection::Connecting { .. } => {
                 ("Connecting YouTube…".to_owned(), Some("Finish in your browser".to_owned()))
             }
-            Connection::NeedsSignIn(account) => (display_name(account), Some("Sign in again".to_owned())),
+            Connection::NeedsSignIn(account) => (display_name(&account), Some("Sign in again".to_owned())),
             Connection::Failed(_) => ("Connect YouTube".to_owned(), Some("Couldn’t connect".to_owned())),
             Connection::Disconnected => ("Connect YouTube".to_owned(), None),
         }
@@ -68,7 +77,7 @@ impl AccountBadge {
                 .relative()
                 .flex_shrink_0()
                 .child(
-                    avatar(account, service.avatar().map(ToOwned::to_owned))
+                    avatar(&account, service.avatar().map(ToOwned::to_owned))
                         .with_size(Size::Size(window.rem_size() * 2.)),
                 )
                 .child(
@@ -80,7 +89,12 @@ impl AccountBadge {
                         .rounded_full()
                         .border_2()
                         .border_color(theme.sidebar)
-                        .bg(if service.is_connected() { theme.success } else { theme.warning }),
+                        // Amber also while another account waits for its new sign-in.
+                        .bg(if service.accounts().iter().all(|account| account.is_connected()) {
+                            theme.success
+                        } else {
+                            theme.warning
+                        }),
                 )
                 .into_any_element(),
             Connection::Connecting { .. } => {

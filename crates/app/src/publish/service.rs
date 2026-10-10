@@ -1,15 +1,17 @@
 //! [`YoutubeService`]: the app-wide YouTube connection. Settings decide the backend,
-//! a browser sign-in produces credentials, and the credentials file keeps them (with
-//! the account) across restarts. Uploads live in `upload.rs`.
+//! browser sign-ins add YouTube accounts, and one credentials file per account keeps
+//! it across restarts. A video uploads to the account it chose, or to the default
+//! account. Uploads live in `upload.rs`.
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt as _;
 use futures::channel::mpsc;
@@ -17,7 +19,7 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Subscription};
 use videocrm_core::settings::{self, YoutubeBackend};
-use videocrm_core::{UploadId, UploadJob, UploadStatus, Video};
+use videocrm_core::{PublishChannel, UploadId, UploadJob, UploadStatus, Video, VideoId, YoutubeLink};
 use videocrm_youtube::{
     Account, CredentialStore, Credentials, Error as YoutubeError, SavedLogin, VideoInfo, YoutubeClient, YoutubeConfig,
     begin_authorization, check_client,
@@ -28,7 +30,10 @@ use super::ui::display_name;
 use super::upload::{ActiveUpload, ProcessingOutcome, Retired};
 use crate::state::{AppEvent, AppState, Problem, Severity};
 
-const CREDENTIALS_FILE: &str = "credentials.json";
+/// One credentials file per account, in this folder of the data directory.
+const ACCOUNTS_DIR: &str = "youtube-accounts";
+/// Where the one sign-in lived before VideoCRM kept several; it moves to [`ACCOUNTS_DIR`].
+const LEGACY_CREDENTIALS_FILE: &str = "credentials.json";
 const AVATAR_DIR: &str = "avatars";
 /// A browser sign-in left open longer than this is abandoned.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -44,8 +49,10 @@ const REMOTE_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Settings key of the videos YouTube said it no longer has, by YouTube video id.
 const GONE_KEY: &str = "youtube.gone_videos";
+/// Settings key of the account videos upload to unless they chose another, by [`Account::key`].
+const DEFAULT_ACCOUNT_KEY: &str = "youtube.default_account";
 
-/// Where the YouTube account stands.
+/// Where a YouTube account stands, as a view that shows one account sees it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Connection {
     Disconnected,
@@ -72,30 +79,76 @@ pub enum EmulatorCheck {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum YoutubeEvent {
+    /// An account was added, removed, made the default, or changed state, or a
+    /// sign-in started or ended.
     ConnectionChanged,
     /// An upload job was created or changed status.
     UploadsChanged,
 }
 
-/// App-wide YouTube connection: settings -> client, OAuth sign-in, credentials, uploads.
+/// A YouTube account VideoCRM signed in to.
+pub struct YoutubeAccount {
+    account: Account,
+    /// `None` once YouTube rejected the saved sign-in: the account needs a new one.
+    client: Option<Arc<YoutubeClient>>,
+    /// The account's credentials file, while the sign-in lasts.
+    tokens: TokenSink,
+    /// The channel picture (or account picture), once downloaded.
+    avatar: Option<PathBuf>,
+}
+
+impl YoutubeAccount {
+    pub fn account(&self) -> &Account {
+        &self.account
+    }
+
+    /// See [`Account::key`].
+    pub fn key(&self) -> &str {
+        self.account.key()
+    }
+
+    /// Whether uploads can use the account now; otherwise it needs a new sign-in.
+    pub fn is_connected(&self) -> bool {
+        self.client.is_some()
+    }
+
+    pub fn avatar(&self) -> Option<&Path> {
+        self.avatar.as_deref()
+    }
+
+    /// The channel title, falling back to the account name and email.
+    pub fn name(&self) -> String {
+        display_name(&self.account)
+    }
+
+    /// Whether videos can upload to it: an account without a channel has nowhere to put them.
+    pub fn has_channel(&self) -> bool {
+        self.account.channel_id.is_some()
+    }
+
+    /// The account as a video's choice of where to upload.
+    pub fn publish_channel(&self) -> PublishChannel {
+        PublishChannel { id: self.key().to_owned(), name: display_name(&self.account) }
+    }
+}
+
+/// App-wide YouTube connection: settings -> clients, OAuth sign-ins, credentials, uploads.
 pub struct YoutubeService {
     pub(super) state: Entity<AppState>,
     data_dir: PathBuf,
-    credentials: CredentialStore,
     config: Result<YoutubeConfig, SharedString>,
     /// The config comes from `VIDEOCRM_GOOGLE_URL` / `VIDEOCRM_YOUTUBE_URL`, not settings.
     env_override: bool,
-    connection: Connection,
-    pub(super) client: Option<Arc<YoutubeClient>>,
-    /// Where `client` saves refreshed tokens.
-    tokens: Option<TokenSink>,
-    /// Cancel flag of the sign-in in progress.
-    sign_in: Option<Arc<AtomicBool>>,
+    /// The signed-in accounts, by name.
+    accounts: Vec<YoutubeAccount>,
+    /// Key of the account videos upload to unless they chose another. Names one of
+    /// `accounts` whenever there are any.
+    default_account: Option<String>,
+    /// The browser sign-in in progress.
+    sign_in: Option<SignIn>,
     sign_in_attempt: u64,
-    /// The account a sign-in in progress signs in again: cancelling it leaves
-    /// that account asking for a new sign-in, as before.
-    reconnecting: Option<Account>,
-    avatar: Option<PathBuf>,
+    /// Why the last sign-in failed, until the next one starts.
+    sign_in_problem: Option<SharedString>,
     /// Every upload job, newest first, as stored.
     pub(super) jobs: Vec<UploadJob>,
     pub(super) active: HashMap<UploadId, ActiveUpload>,
@@ -123,6 +176,18 @@ struct GlobalYoutubeService(Entity<YoutubeService>);
 impl Global for GlobalYoutubeService {}
 
 impl EventEmitter<YoutubeEvent> for YoutubeService {}
+
+/// A browser sign-in in progress.
+struct SignIn {
+    cancel: Arc<AtomicBool>,
+    /// The consent page, once it exists.
+    authorize_url: Option<SharedString>,
+    /// The account signing in again, by key. It keeps asking for a new sign-in
+    /// until one succeeds.
+    reconnecting: Option<String>,
+    /// The video whose Publish tab added the account: it uploads to the account.
+    for_video: Option<VideoId>,
+}
 
 enum SignInStep {
     Opened(String),
@@ -156,7 +221,7 @@ struct SignedIn {
     account: Account,
 }
 
-/// Saves a client's refreshed tokens to the credentials file while its sign-in lasts.
+/// Saves a client's refreshed tokens to its credentials file while its sign-in lasts.
 /// A request still running after a sign-out must not write the tokens back.
 #[derive(Clone)]
 struct TokenSink {
@@ -210,7 +275,7 @@ impl YoutubeService {
         Self::init_in(state, settings::data_dir(), cx);
     }
 
-    /// [`YoutubeService::init`] with the credentials file and cached avatars in `data_dir`.
+    /// [`YoutubeService::init`] with the credentials files and cached avatars in `data_dir`.
     pub fn init_in(state: Entity<AppState>, data_dir: PathBuf, cx: &mut App) -> Entity<YoutubeService> {
         let service = cx.new(|cx| Self::new(state, data_dir, cx));
         cx.set_global(GlobalYoutubeService(service.clone()));
@@ -226,6 +291,11 @@ impl YoutubeService {
         cx.try_global::<GlobalYoutubeService>().map(|global| global.0.clone())
     }
 
+    /// The folder of the credentials files in `data_dir`, one per signed-in account.
+    pub fn accounts_dir(data_dir: &Path) -> PathBuf {
+        data_dir.join(ACCOUNTS_DIR)
+    }
+
     fn new(state: Entity<AppState>, data_dir: PathBuf, cx: &mut Context<Self>) -> Self {
         let (config, env_override) = backend_config(&state.read(cx).settings().youtube);
         let subscription = cx.subscribe(&state, |this, _, event: &AppEvent, cx| match event {
@@ -238,17 +308,14 @@ impl YoutubeService {
         });
         let mut service = Self {
             state,
-            credentials: CredentialStore::new(data_dir.join(CREDENTIALS_FILE)),
             data_dir,
             config,
             env_override,
-            connection: Connection::Disconnected,
-            client: None,
-            tokens: None,
+            accounts: Vec::new(),
+            default_account: None,
             sign_in: None,
             sign_in_attempt: 0,
-            reconnecting: None,
-            avatar: None,
+            sign_in_problem: None,
             jobs: Vec::new(),
             active: HashMap::new(),
             outcomes: HashMap::new(),
@@ -261,7 +328,7 @@ impl YoutubeService {
             remote_asked: HashMap::new(),
             _subscription: subscription,
         };
-        service.restore_login(cx);
+        service.restore_logins(cx);
         service.recover_interrupted_uploads(cx);
         service.load_gone(cx);
         service.check_stopped_uploads(cx);
@@ -272,29 +339,112 @@ impl YoutubeService {
         &self.state
     }
 
-    pub fn connection(&self) -> &Connection {
-        &self.connection
+    /// Every signed-in account, by name.
+    pub fn accounts(&self) -> &[YoutubeAccount] {
+        &self.accounts
     }
 
+    /// The signed-in account with this [`Account::key`].
+    pub fn find_account(&self, key: &str) -> Option<&YoutubeAccount> {
+        self.accounts.iter().find(|account| account.key() == key)
+    }
+
+    fn find_account_mut(&mut self, key: &str) -> Option<&mut YoutubeAccount> {
+        self.accounts.iter_mut().find(|account| account.key() == key)
+    }
+
+    /// The account videos upload to unless they chose another.
+    pub fn default_account(&self) -> Option<&YoutubeAccount> {
+        self.default_account.as_deref().and_then(|key| self.find_account(key))
+    }
+
+    /// The account `key` names, or the default account for `None`.
+    fn account_or_default(&self, key: Option<&str>) -> Option<&YoutubeAccount> {
+        match key {
+            Some(key) => self.find_account(key),
+            None => self.default_account(),
+        }
+    }
+
+    /// Key of the account `video` uploads to: the one it chose, else the default account.
+    pub fn channel_for(&self, video: &Video) -> Option<String> {
+        match &video.publish.channel {
+            Some(channel) => Some(channel.id.clone()),
+            None => self.default_account.clone(),
+        }
+    }
+
+    /// Where the default account stands; see [`Self::connection_for`].
+    pub fn connection(&self) -> Connection {
+        self.connection_for(None)
+    }
+
+    /// Where the account `key` (the default account for `None`) stands: signed in,
+    /// asking for a new sign-in, or signing in again. Without such an account, the
+    /// sign-in that adds one, the last failed sign-in, or nothing.
+    pub fn connection_for(&self, key: Option<&str>) -> Connection {
+        let connecting = |sign_in: &SignIn| Connection::Connecting { authorize_url: sign_in.authorize_url.clone() };
+        match (self.account_or_default(key), &self.sign_in) {
+            (Some(account), Some(sign_in)) if sign_in.reconnecting.as_deref() == Some(account.key()) => {
+                connecting(sign_in)
+            }
+            (Some(account), _) if account.is_connected() => Connection::Connected(account.account.clone()),
+            (Some(account), _) => Connection::NeedsSignIn(account.account.clone()),
+            (None, Some(sign_in)) if sign_in.reconnecting.is_none() => connecting(sign_in),
+            (None, _) => self.sign_in_problem.clone().map_or(Connection::Disconnected, Connection::Failed),
+        }
+    }
+
+    /// The default account, while uploads can use it.
     pub fn account(&self) -> Option<&Account> {
-        match &self.connection {
-            Connection::Connected(account) => Some(account),
-            _ => None,
-        }
+        self.default_account().filter(|account| account.is_connected()).map(YoutubeAccount::account)
     }
 
+    /// Whether uploads can use the default account now.
     pub fn is_connected(&self) -> bool {
-        self.client.is_some() && self.account().is_some()
+        self.account().is_some()
     }
 
-    /// Whether uploads can use the account now, or what they need first.
+    /// Whether uploads can use the default account now, or what they need first.
     pub fn account_access(&self) -> AccountAccess {
-        match &self.connection {
-            _ if self.is_connected() => AccountAccess::Connected,
-            Connection::NeedsSignIn(_) => AccountAccess::NeedsSignIn,
-            Connection::Connecting { .. } => AccountAccess::SigningIn,
-            _ => AccountAccess::NotConnected,
+        self.account_access_for(None)
+    }
+
+    /// Whether uploads can use the account `key` (the default account for `None`)
+    /// now, or what they need first.
+    pub fn account_access_for(&self, key: Option<&str>) -> AccountAccess {
+        let signing_in = |reconnecting: Option<&str>| {
+            self.sign_in.as_ref().is_some_and(|sign_in| sign_in.reconnecting.as_deref() == reconnecting)
+        };
+        match self.account_or_default(key) {
+            Some(account) if account.is_connected() => AccountAccess::Connected,
+            Some(account) if signing_in(Some(account.key())) => AccountAccess::SigningIn,
+            Some(_) => AccountAccess::NeedsSignIn,
+            None if signing_in(None) => AccountAccess::SigningIn,
+            // The account the video chose isn't signed in anymore.
+            None if key.is_some() => AccountAccess::Gone,
+            None => AccountAccess::NotConnected,
         }
+    }
+
+    /// Whether a browser sign-in is under way.
+    pub fn is_signing_in(&self) -> bool {
+        self.sign_in.is_some()
+    }
+
+    /// The consent page of the sign-in under way, once it exists.
+    pub fn sign_in_url(&self) -> Option<&SharedString> {
+        self.sign_in.as_ref().and_then(|sign_in| sign_in.authorize_url.as_ref())
+    }
+
+    /// The account the sign-in under way signs in again, by key.
+    pub fn reconnecting(&self) -> Option<&str> {
+        self.sign_in.as_ref().and_then(|sign_in| sign_in.reconnecting.as_deref())
+    }
+
+    /// Why the last sign-in failed, until the next one starts.
+    pub fn sign_in_problem(&self) -> Option<&SharedString> {
+        self.sign_in_problem.as_ref()
     }
 
     /// The backend the settings describe, or why they do not describe one yet.
@@ -307,40 +457,59 @@ impl YoutubeService {
         self.env_override
     }
 
-    /// The channel picture (or account picture), once downloaded.
+    /// The default account's channel picture (or account picture), once downloaded.
     pub fn avatar(&self) -> Option<&Path> {
-        self.avatar.as_deref()
+        self.default_account().and_then(YoutubeAccount::avatar)
     }
 
-    /// Client for the connected account. Refreshed tokens are saved to the credentials file.
+    /// Client for the default account. Refreshed tokens are saved to its credentials file.
     pub fn client(&self) -> Option<Arc<YoutubeClient>> {
-        self.client.clone()
+        self.default_account().and_then(|account| account.client.clone())
     }
 
-    /// Opens the consent page in the browser and waits for the sign-in in the background.
+    /// Client for the account `key`, while uploads can use it.
+    pub(super) fn client_for(&self, key: &str) -> Option<Arc<YoutubeClient>> {
+        self.find_account(key).and_then(|account| account.client.clone())
+    }
+
+    /// Adds an account: opens the consent page in the browser and waits for the
+    /// sign-in in the background. Signing in to an account that is already there
+    /// signs it in again.
     pub fn connect(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.connection, Connection::Connecting { .. } | Connection::Connected(_)) {
+        self.begin_sign_in(None, None, cx);
+    }
+
+    /// [`Self::connect`] for `video_id`: the video uploads to the account signed in.
+    pub fn connect_for(&mut self, video_id: VideoId, cx: &mut Context<Self>) {
+        self.begin_sign_in(None, Some(video_id), cx);
+    }
+
+    /// Signs the account `key` in again, after YouTube stopped accepting its sign-in.
+    pub fn reconnect(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.begin_sign_in(Some(key.to_owned()), None, cx);
+    }
+
+    fn begin_sign_in(&mut self, reconnecting: Option<String>, for_video: Option<VideoId>, cx: &mut Context<Self>) {
+        // One browser sign-in at a time: the consent page names no account.
+        if self.sign_in.is_some() {
             return;
         }
         let config = match &self.config {
             Ok(config) => config.clone(),
             Err(problem) => {
-                let problem = problem.clone();
-                self.set_connection(Connection::Failed(problem), cx);
+                self.sign_in_problem = Some(problem.clone());
+                self.connection_changed(cx);
                 return;
             }
         };
         let cancel = Arc::new(AtomicBool::new(false));
-        self.sign_in = Some(cancel.clone());
         self.sign_in_attempt += 1;
-        self.reconnecting = match &self.connection {
-            Connection::NeedsSignIn(account) => Some(account.clone()),
-            _ => None,
-        };
         let attempt = self.sign_in_attempt;
-        self.set_connection(Connection::Connecting { authorize_url: None }, cx);
+        self.sign_in = Some(SignIn { cancel: cancel.clone(), authorize_url: None, reconnecting, for_video });
+        self.sign_in_problem = None;
+        self.connection_changed(cx);
 
-        let tokens = TokenSink::new(self.credentials.clone(), false);
+        let tokens = TokenSink::new(CredentialStore::new(self.new_account_file(attempt)), false);
         let (sender, mut steps) = mpsc::unbounded();
         let spawned = thread::Builder::new()
             .name("youtube-sign-in".into())
@@ -349,7 +518,8 @@ impl YoutubeService {
             log_line!("videocrm: couldn't start the sign-in thread: {error}");
             self.sign_in = None;
             let message = "Couldn’t start the sign-in. Quit VideoCRM and open it again, then connect.";
-            self.set_connection(Connection::Failed(message.into()), cx);
+            self.sign_in_problem = Some(message.into());
+            self.connection_changed(cx);
             return;
         }
         cx.spawn(async move |this, cx| {
@@ -362,70 +532,116 @@ impl YoutubeService {
         .detach();
     }
 
+    /// A credentials file no account uses yet.
+    fn new_account_file(&self, attempt: u64) -> PathBuf {
+        let millis = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis());
+        Self::accounts_dir(&self.data_dir).join(format!("{millis}-{attempt}.json"))
+    }
+
     /// Stops waiting for the browser sign-in. An account that was signing in
-    /// again still needs its new sign-in; otherwise nothing is connected.
+    /// again still needs its new sign-in.
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
-        self.cancel_sign_in();
-        if matches!(self.connection, Connection::Connecting { .. }) {
-            let connection = self.connection_before_sign_in();
-            self.set_connection(connection, cx);
+        if self.cancel_sign_in() {
+            self.connection_changed(cx);
         }
     }
 
-    /// Where the account stood before the sign-in that ended without one.
-    fn connection_before_sign_in(&mut self) -> Connection {
-        self.reconnecting.take().map_or(Connection::Disconnected, Connection::NeedsSignIn)
-    }
-
-    /// Signs out: forgets the tokens and revokes them with Google, best effort.
-    /// Uploads in progress stop and can be resumed after connecting again.
-    pub fn disconnect(&mut self, cx: &mut Context<Self>) {
-        self.cancel_sign_in();
-        for upload in self.active.values() {
-            upload.cancel();
+    /// Signs the account `key` out: forgets its tokens and revokes them with Google,
+    /// best effort. Its uploads in progress stop and can be resumed after connecting
+    /// it again. Videos that chose it keep their choice.
+    pub fn disconnect(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(ix) = self.accounts.iter().position(|account| account.key() == key) else { return };
+        let account = self.accounts.remove(ix);
+        for (id, upload) in &self.active {
+            if self.job(*id).is_some_and(|job| job.channel.as_deref() == Some(key)) {
+                upload.cancel();
+            }
         }
-        let cleared = match self.tokens.take() {
-            Some(tokens) => tokens.sign_out(),
-            None => self.credentials.clear(),
-        };
-        if let Err(error) = cleared {
+        if let Err(error) = account.tokens.sign_out() {
             report_problem(&self.state, credentials_problem("Couldn’t remove the saved YouTube sign-in", &error), cx);
         }
-        if let Some(client) = self.client.take() {
+        if let Some(client) = account.client {
             // The local tokens are gone either way; revoking also ends the grant at Google.
             cx.background_spawn(async move { client.revoke() }).detach();
         }
-        self.avatar = None;
-        self.reconnecting = None;
-        self.set_connection(Connection::Disconnected, cx);
+        if self.default_account.as_deref() == Some(key) {
+            // Another account takes over, by choice rather than by name: a later
+            // account must not take the videos without a choice by sorting first.
+            let next = self.accounts.first().map(|account| account.key().to_owned());
+            self.save_default(next, cx);
+        }
+        self.connection_changed(cx);
     }
 
-    fn cancel_sign_in(&mut self) {
-        if let Some(cancel) = self.sign_in.take() {
-            cancel.store(true, Ordering::Relaxed);
+    /// Signs every account out, as [`Self::disconnect`] does.
+    pub fn disconnect_all(&mut self, cx: &mut Context<Self>) {
+        let keys: Vec<String> = self.accounts.iter().map(|account| account.key().to_owned()).collect();
+        for key in keys {
+            self.disconnect(&key, cx);
         }
     }
 
-    fn set_connection(&mut self, connection: Connection, cx: &mut Context<Self>) {
+    /// Makes the account `key` the one videos upload to unless they chose another.
+    pub fn set_default(&mut self, key: &str, cx: &mut Context<Self>) {
+        if self.find_account(key).is_some() && self.default_account.as_deref() != Some(key) {
+            self.save_default(Some(key.to_owned()), cx);
+            self.connection_changed(cx);
+        }
+    }
+
+    fn save_default(&mut self, key: Option<String>, cx: &mut Context<Self>) {
+        // A refusal is reported by the state; this run still knows.
+        self.state.update(cx, |state, cx| state.save_setting(DEFAULT_ACCOUNT_KEY, &key, cx));
+        self.default_account = key;
+    }
+
+    /// The stored default account, or the first account when that one isn't signed in.
+    fn load_default(&mut self, cx: &mut Context<Self>) {
+        let stored = match self.state.read(cx).read_setting::<Option<String>>(DEFAULT_ACCOUNT_KEY) {
+            Ok(stored) => stored.flatten(),
+            Err(error) => {
+                log_line!("videocrm: couldn't read the default YouTube account: {error}");
+                None
+            }
+        };
+        match stored {
+            Some(key) if self.find_account(&key).is_some() => self.default_account = Some(key),
+            _ if self.accounts.is_empty() => self.default_account = None,
+            _ => {
+                let first = self.accounts.first().map(|account| account.key().to_owned());
+                self.save_default(first, cx);
+            }
+        }
+    }
+
+    /// Stops the sign-in under way; `false` when there was none.
+    fn cancel_sign_in(&mut self) -> bool {
+        let Some(sign_in) = self.sign_in.take() else { return false };
+        sign_in.cancel.store(true, Ordering::Relaxed);
+        true
+    }
+
+    fn connection_changed(&mut self, cx: &mut Context<Self>) {
         // Another account may see the videos differently.
         self.remote_asked.clear();
-        self.connection = connection;
         cx.emit(YoutubeEvent::ConnectionChanged);
         cx.notify();
     }
 
     fn on_sign_in_step(&mut self, attempt: u64, step: SignInStep, cx: &mut Context<Self>) {
         // A cancelled or superseded sign-in reports nothing.
-        if attempt != self.sign_in_attempt || self.sign_in.is_none() {
+        if attempt != self.sign_in_attempt {
             return;
         }
+        let Some(sign_in) = self.sign_in.as_mut() else { return };
         match step {
             SignInStep::Opened(url) => {
                 cx.open_url(&url);
-                self.set_connection(Connection::Connecting { authorize_url: Some(url.into()) }, cx);
+                sign_in.authorize_url = Some(url.into());
+                self.connection_changed(cx);
             }
             SignInStep::Finished(result) => {
-                self.sign_in = None;
+                let Some(SignIn { reconnecting, for_video, .. }) = self.sign_in.take() else { return };
                 let signed_in = (*result).and_then(|signed_in| {
                     let login = SavedLogin {
                         credentials: signed_in.client.credentials(),
@@ -436,83 +652,158 @@ impl YoutubeService {
                         Err(error) => {
                             log_line!("videocrm: couldn't save the YouTube sign-in: {error}");
                             Err(SignInError::Failed(
-                                "Couldn’t save the YouTube sign-in: VideoCRM can’t write credentials.json in its \
-                                 data folder. Check that the folder is writable, then connect again."
+                                "Couldn’t save the YouTube sign-in: VideoCRM can’t write to its data folder. Check \
+                                 that the folder is writable, then connect again."
                                     .to_owned(),
                             ))
                         }
                     }
                 });
                 match signed_in {
-                    Ok(SignedIn { client, tokens, account }) => {
-                        self.reconnecting = None;
-                        self.client = Some(client);
-                        self.tokens = Some(tokens);
-                        self.set_connection(Connection::Connected(account), cx);
-                        self.refresh_avatar(cx);
+                    Ok(signed_in) => {
+                        let key = signed_in.account.key().to_owned();
+                        self.add_account(signed_in, reconnecting.as_deref(), cx);
+                        if let Some(video_id) = for_video {
+                            self.choose_channel(video_id, &key, cx);
+                        }
                     }
-                    Err(SignInError::Cancelled) => {
-                        let connection = self.connection_before_sign_in();
-                        self.set_connection(connection, cx);
-                    }
+                    Err(SignInError::Cancelled) => self.connection_changed(cx),
                     // Cancelled in the browser while signing in again: as with Cancel
                     // in the app, the account still asks for its new sign-in.
-                    Err(SignInError::Denied(message)) => match self.connection_before_sign_in() {
-                        Connection::NeedsSignIn(account) => {
-                            let notice = Problem::new(
-                                "Sign-in cancelled",
-                                format!(
-                                    "The sign-in was cancelled in the browser. Reconnect to keep uploading as {}.",
-                                    display_name(&account)
-                                ),
-                            )
-                            .with_severity(Severity::Info);
-                            report_problem(&self.state, notice, cx);
-                            self.set_connection(Connection::NeedsSignIn(account), cx);
+                    Err(SignInError::Denied(message)) => {
+                        match reconnecting.as_deref().and_then(|key| self.find_account(key)) {
+                            Some(account) => {
+                                let notice = Problem::new(
+                                    "Sign-in cancelled",
+                                    format!(
+                                        "The sign-in was cancelled in the browser. Reconnect to keep uploading as {}.",
+                                        display_name(&account.account)
+                                    ),
+                                )
+                                .with_severity(Severity::Info);
+                                report_problem(&self.state, notice, cx);
+                            }
+                            None => self.sign_in_problem = Some(message.into()),
                         }
-                        _ => self.set_connection(Connection::Failed(message.into()), cx),
-                    },
+                        self.connection_changed(cx);
+                    }
                     Err(SignInError::Failed(message)) => {
-                        self.reconnecting = None;
-                        self.set_connection(Connection::Failed(message.into()), cx);
+                        self.sign_in_problem = Some(message.into());
+                        self.connection_changed(cx);
                     }
                 }
             }
         }
     }
 
-    /// Asks for a new sign-in after YouTube rejected the stored tokens. The account stays
-    /// on screen, so the creator knows whom to sign in as.
-    pub(super) fn require_sign_in(&mut self, cx: &mut Context<Self>) {
-        self.client = None;
-        self.tokens = None;
-        let connection = match self.connection.clone() {
-            Connection::Connected(account) | Connection::NeedsSignIn(account) => Connection::NeedsSignIn(account),
-            _ => Connection::Failed("YouTube needs you to connect the account again.".into()),
-        };
-        self.set_connection(connection, cx);
+    /// Keeps a finished sign-in. One of an account that is already there replaces
+    /// its earlier sign-in.
+    fn add_account(&mut self, signed_in: SignedIn, reconnecting: Option<&str>, cx: &mut Context<Self>) {
+        let SignedIn { client, tokens, account } = signed_in;
+        let key = account.key().to_owned();
+        if let Some(ix) = self.accounts.iter().position(|known| known.key() == key) {
+            // The new sign-in has its own credentials file; the earlier one goes. Its
+            // grant stays: it is the same account and app.
+            let earlier = self.accounts.remove(ix);
+            if let Err(error) = earlier.tokens.sign_out() {
+                log_line!("videocrm: couldn't remove the earlier YouTube sign-in: {error}");
+            }
+        }
+        // Signing in again picks the account on the consent page: another one
+        // may come back, and the account signing in again still waits for its turn.
+        if let Some(waiting) = reconnecting.filter(|waiting| *waiting != key).and_then(|key| self.find_account(key)) {
+            let notice = Problem::new(
+                format!("Signed in as {}", display_name(&account)),
+                format!(
+                    "{} still needs a new sign-in. Reconnect it and pick it in the browser to keep uploading as it.",
+                    display_name(&waiting.account)
+                ),
+            )
+            .with_severity(Severity::Info);
+            report_problem(&self.state, notice, cx);
+        }
+        self.accounts.push(YoutubeAccount { account, client: Some(client), tokens, avatar: None });
+        self.sort_accounts();
+        if self.default_account().is_none() {
+            self.save_default(Some(key.clone()), cx);
+        }
+        self.connection_changed(cx);
+        self.refresh_avatar(&key, cx);
     }
 
-    fn restore_login(&mut self, cx: &mut Context<Self>) {
-        let Ok(config) = &self.config else { return };
-        match self.credentials.load() {
-            Ok(Some(SavedLogin { credentials, account: Some(account) }))
-                if account.backend == config.backend_label() =>
-            {
-                let tokens = TokenSink::new(self.credentials.clone(), true);
-                self.client = Some(new_client(config.clone(), credentials, tokens.clone()));
-                self.tokens = Some(tokens);
-                self.connection = Connection::Connected(account);
-                self.refresh_avatar(cx);
-                self.refresh_account(cx);
-            }
-            // Tokens of another backend, or no account: not usable here.
-            Ok(_) => {}
+    fn sort_accounts(&mut self) {
+        self.accounts
+            .sort_by_cached_key(|account| (display_name(&account.account).to_lowercase(), account.key().to_owned()));
+    }
+
+    /// Asks for a new sign-in of the account `key` after YouTube rejected its tokens.
+    /// The account stays on screen, so the creator knows whom to sign in as.
+    pub(super) fn require_sign_in(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(account) = self.find_account_mut(key) else { return };
+        if account.client.take().is_some() {
+            self.connection_changed(cx);
+        }
+    }
+
+    /// Restores the saved accounts without network access, then reads them again
+    /// in the background.
+    fn restore_logins(&mut self, cx: &mut Context<Self>) {
+        let Ok(config) = self.config.clone() else { return };
+        self.move_legacy_login();
+        let dir = Self::accounts_dir(&self.data_dir);
+        let mut files: Vec<PathBuf> = match fs::read_dir(&dir) {
+            Ok(entries) => entries
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                // Skips the temporary files of a write that never finished.
+                .filter(|path| path.extension().is_some_and(|extension| extension == "json"))
+                .collect(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => {
-                log_line!("videocrm: couldn't read the saved YouTube sign-in: {error}");
-                self.connection =
-                    Connection::Failed("Couldn’t read the saved YouTube sign-in. Connect again to sign in.".into());
+                log_line!("videocrm: couldn't read {}: {error}", dir.display());
+                self.sign_in_problem =
+                    Some("Couldn’t read the saved YouTube sign-ins. Connect your accounts again.".into());
+                Vec::new()
             }
+        };
+        files.sort();
+        for file in files {
+            let store = CredentialStore::new(file);
+            match store.load() {
+                // Tokens of another backend are not usable here.
+                Ok(Some(SavedLogin { credentials, account: Some(account) }))
+                    if account.backend == config.backend_label() && self.find_account(account.key()).is_none() =>
+                {
+                    let tokens = TokenSink::new(store, true);
+                    let client = new_client(config.clone(), credentials, tokens.clone());
+                    self.accounts.push(YoutubeAccount { account, client: Some(client), tokens, avatar: None });
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log_line!("videocrm: couldn't read the saved YouTube sign-in: {error}");
+                    self.sign_in_problem =
+                        Some("Couldn’t read a saved YouTube sign-in. Connect the account again.".into());
+                }
+            }
+        }
+        self.sort_accounts();
+        self.load_default(cx);
+        let keys: Vec<String> = self.accounts.iter().map(|account| account.key().to_owned()).collect();
+        for key in keys {
+            self.refresh_avatar(&key, cx);
+            self.refresh_account(&key, cx);
+        }
+    }
+
+    /// Moves the sign-in of a release that kept one account to the accounts folder.
+    fn move_legacy_login(&self) {
+        let legacy = self.data_dir.join(LEGACY_CREDENTIALS_FILE);
+        if !legacy.is_file() {
+            return;
+        }
+        let target = self.new_account_file(0);
+        let moved = target.parent().map_or(Ok(()), fs::create_dir_all).and_then(|()| fs::rename(&legacy, &target));
+        if let Err(error) = moved {
+            log_line!("videocrm: couldn't move {} to {}: {error}", legacy.display(), target.display());
         }
     }
 
@@ -524,31 +815,30 @@ impl YoutubeService {
         self.config = config;
         self.env_override = env_override;
         // Tokens belong to the backend that issued them.
-        let signed_in = self.client.is_some() || !matches!(self.connection, Connection::Disconnected);
-        if signed_in {
-            self.disconnect(cx);
-        } else {
-            cx.emit(YoutubeEvent::ConnectionChanged);
-            cx.notify();
-        }
+        self.cancel_sign_in();
+        self.sign_in_problem = None;
+        self.disconnect_all(cx);
+        self.connection_changed(cx);
     }
 
-    /// Reads the account and channel again (name, picture, subscriber and video counts)
-    /// and saves them. Offline, the saved account stays; rejected tokens ask for a new
-    /// sign-in right away instead of at the next upload.
-    pub(super) fn refresh_account(&mut self, cx: &mut Context<Self>) {
-        let (Some(client), Some(tokens), Ok(config)) = (self.client.clone(), self.tokens.clone(), self.config.clone())
-        else {
-            return;
-        };
+    /// Reads the account `key` and its channel again (name, picture, subscriber and
+    /// video counts) and saves them. Offline, the saved account stays; rejected
+    /// tokens ask for a new sign-in right away instead of at the next upload.
+    pub(super) fn refresh_account(&mut self, key: &str, cx: &mut Context<Self>) {
+        let (Some(account), Ok(config)) = (self.find_account(key), self.config.clone()) else { return };
+        let (Some(client), tokens) = (account.client.clone(), account.tokens.clone()) else { return };
         cx.spawn(async move |this, cx| {
             let reader = client.clone();
             let account = cx.background_spawn(async move { read_account(&reader, &config) }).await;
             this.update(cx, |this, cx| {
                 // A sign-out or another sign-in since then makes this answer stale.
-                if !this.client.as_ref().is_some_and(|current| Arc::ptr_eq(current, &client)) {
+                let Some(known) = this
+                    .accounts
+                    .iter_mut()
+                    .find(|known| known.client.as_ref().is_some_and(|current| Arc::ptr_eq(current, &client)))
+                else {
                     return;
-                }
+                };
                 match account {
                     Ok(account) => {
                         let login = SavedLogin { credentials: client.credentials(), account: Some(account.clone()) };
@@ -559,12 +849,22 @@ impl YoutubeService {
                                 cx,
                             );
                         }
-                        if this.account() != Some(&account) {
-                            this.set_connection(Connection::Connected(account), cx);
-                            this.refresh_avatar(cx);
+                        if known.account != account {
+                            let (before, after) = (known.key().to_owned(), account.key().to_owned());
+                            known.account = account;
+                            // An account that got a channel since is known by the channel now.
+                            if this.default_account.as_deref() == Some(before.as_str()) && before != after {
+                                this.save_default(Some(after.clone()), cx);
+                            }
+                            this.sort_accounts();
+                            this.connection_changed(cx);
+                            this.refresh_avatar(&after, cx);
                         }
                     }
-                    Err(error) if error.needs_sign_in() => this.require_sign_in(cx),
+                    Err(error) if error.needs_sign_in() => {
+                        known.client = None;
+                        this.connection_changed(cx);
+                    }
                     Err(_) => {}
                 }
             })
@@ -573,21 +873,24 @@ impl YoutubeService {
         .detach();
     }
 
-    /// Downloads the channel picture into the data directory, once per picture URL.
-    fn refresh_avatar(&mut self, cx: &mut Context<Self>) {
-        let Some(account) = self.account() else { return };
-        let Some(url) = account.channel_thumbnail.clone().or_else(|| account.picture.clone()) else {
-            self.avatar = None;
+    /// Downloads the channel picture of the account `key` into the data directory,
+    /// once per picture URL.
+    fn refresh_avatar(&mut self, key: &str, cx: &mut Context<Self>) {
+        let avatars = self.data_dir.join(AVATAR_DIR);
+        let Some(account) = self.find_account_mut(key) else { return };
+        let Some(url) = account.account.channel_thumbnail.clone().or_else(|| account.account.picture.clone()) else {
+            account.avatar = None;
             return;
         };
-        let path = self.data_dir.join(AVATAR_DIR).join(avatar_file_name(&url));
+        let path = avatars.join(avatar_file_name(&url));
+        let key = key.to_owned();
         cx.spawn(async move |this, cx| {
             let fetched = cx.background_spawn(async move { download_avatar(&url, &path).map(|()| path) }).await;
             // Without a picture the account shows its initials.
             if let Ok(path) = fetched {
                 this.update(cx, |this, cx| {
-                    if this.account().is_some() {
-                        this.avatar = Some(path);
+                    if let Some(account) = this.find_account_mut(&key) {
+                        account.avatar = Some(path);
                         cx.notify();
                     }
                 })
@@ -595,6 +898,19 @@ impl YoutubeService {
             }
         })
         .detach();
+    }
+
+    /// Lets `video_id` upload to the account `key`, keeping that choice whatever
+    /// the default account becomes.
+    pub(super) fn choose_channel(&mut self, video_id: VideoId, key: &str, cx: &mut Context<Self>) {
+        let Some(channel) = self.find_account(key).map(YoutubeAccount::publish_channel) else { return };
+        self.state.update(cx, |state, cx| {
+            let Some(mut video) = state.video(video_id).cloned() else { return };
+            if video.publish.channel.as_ref() != Some(&channel) {
+                video.publish.channel = Some(channel);
+                state.update_video(video, cx);
+            }
+        });
     }
 
     /// What YouTube last said about an uploaded video (visibility, schedule, processing).
@@ -617,16 +933,18 @@ impl YoutubeService {
 
     /// Asks YouTube about an uploaded video in the background (one quota unit), so the
     /// Publish tab shows what YouTube has rather than what was asked for. An answer
-    /// younger than [`REMOTE_REFRESH_INTERVAL`] is kept instead.
-    pub fn refresh_youtube_video(&mut self, youtube_id: &str, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else { return };
+    /// younger than [`REMOTE_REFRESH_INTERVAL`] is kept instead. Only the channel it
+    /// went to sees a private video, so that account asks, while it is signed in.
+    pub fn refresh_youtube_video(&mut self, link: &YoutubeLink, cx: &mut Context<Self>) {
+        let Some(client) = self.client_for(&link.channel_id) else { return };
+        let youtube_id = link.video_id.clone();
         let now = cx.background_executor().now();
-        let recent = self.remote_asked.get(youtube_id).is_some_and(|asked| now < *asked + REMOTE_REFRESH_INTERVAL);
-        if recent || !self.remote_requests.insert(youtube_id.to_owned()) {
+        let recent = self.remote_asked.get(&youtube_id).is_some_and(|asked| now < *asked + REMOTE_REFRESH_INTERVAL);
+        if recent || !self.remote_requests.insert(youtube_id.clone()) {
             return;
         }
-        self.remote_asked.insert(youtube_id.to_owned(), now);
-        let youtube_id = youtube_id.to_owned();
+        self.remote_asked.insert(youtube_id.clone(), now);
+        let channel = link.channel_id.clone();
         cx.spawn(async move |this, cx| {
             let lookup = youtube_id.clone();
             let info = cx.background_spawn(async move { client.get_video(&lookup) }).await;
@@ -637,7 +955,7 @@ impl YoutubeService {
                         this.remote.insert(youtube_id, info);
                         cx.notify();
                     }
-                    Ok(None) => this.on_video_gone(&youtube_id, cx),
+                    Ok(None) => this.on_video_gone(&youtube_id, &channel, cx),
                     // Offline, the stored link is what the tab shows.
                     Err(_) => {}
                 }
@@ -671,11 +989,9 @@ impl YoutubeService {
         self.state.update(cx, |state, cx| state.save_setting(GONE_KEY, &gone, cx));
     }
 
-    /// YouTube has no video `youtube_id`. Only its owner sees a private video, so
-    /// that counts only when the connected channel is the one it was uploaded to.
-    /// The videos linking to it stop pointing at a dead page.
-    fn on_video_gone(&mut self, youtube_id: &str, cx: &mut Context<Self>) {
-        let Some(channel) = self.account().and_then(|account| account.channel_id.clone()) else { return };
+    /// The channel `channel` has no video `youtube_id`: the videos uploaded there
+    /// stop pointing at a dead page.
+    fn on_video_gone(&mut self, youtube_id: &str, channel: &str, cx: &mut Context<Self>) {
         let linked: Vec<Video> = self
             .state
             .read(cx)
@@ -917,7 +1233,7 @@ fn credentials_problem(title: &str, error: &YoutubeError) -> Problem {
     log_line!("videocrm: {title}: {error}");
     Problem::new(
         title.to_owned(),
-        "VideoCRM can’t write credentials.json in its data folder. Check that the folder is writable, then try again.",
+        "VideoCRM can’t write to its data folder. Check that the folder is writable, then try again.",
     )
 }
 

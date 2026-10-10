@@ -104,6 +104,7 @@ pub(crate) fn column_icon(column: Column, properties: &[PropertyDef]) -> IconNam
             BuiltinField::Script => IconName::FileText,
             BuiltinField::Edit => IconName::WandSparkles,
             BuiltinField::Youtube => IconName::CirclePlay,
+            BuiltinField::Channel => IconName::CircleUser,
             BuiltinField::CreatedAt | BuiltinField::UpdatedAt => IconName::Clock,
         },
         Column::Custom(id) => properties
