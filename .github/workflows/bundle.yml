@@ -1,0 +1,222 @@
+# Builds the macOS and Linux bundles of VideoCRM, starts each once to check that it
+# opens a window, and publishes them:
+#   - a tag v<version> (matching the workspace version) creates a GitHub release with them;
+#   - a manual run, or a pull request that touches the bundling, keeps them as run artifacts.
+name: Bundle
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/bundle.yml
+      - scripts/bundle-*.sh
+      - assets/icon.svg
+  workflow_dispatch:
+
+concurrency:
+  group: bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: version
+        name: Version from the workspace (and the tag)
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version=${GITHUB_REF_NAME#v}
+            if [[ "$version" != "$crate" ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME doesn't match the workspace version $crate in Cargo.toml."
+              exit 1
+            fi
+          else
+            version=$crate-dev.${GITHUB_SHA::7}
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Version: $version"
+
+  macos:
+    name: macOS (universal)
+    needs: version
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      # The oldest macOS GPUI's Metal shaders support.
+      MACOSX_DEPLOYMENT_TARGET: "10.15.7"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bundle
+
+      - name: Metal toolchain
+        # GPUI compiles its shaders with `xcrun metal`; newer Xcode ships it separately.
+        run: |
+          if ! xcrun -sdk macosx metal --version; then
+            xcodebuild -downloadComponent MetalToolchain
+            xcrun -sdk macosx metal --version
+          fi
+
+      - name: Build
+        run: |
+          cargo build --release --locked -p videocrm --target aarch64-apple-darwin
+          cargo build --release --locked -p videocrm --target x86_64-apple-darwin
+
+      - name: Bundle
+        run: |
+          brew install librsvg
+          scripts/bundle-macos.sh "$VERSION" \
+            target/aarch64-apple-darwin/release/videocrm \
+            target/x86_64-apple-darwin/release/videocrm
+          lipo -info target/bundle/VideoCRM.app/Contents/MacOS/videocrm
+
+      - name: Smoke test (opens the app from the disk image)
+        run: |
+          dmg=$(ls target/bundle/*.dmg)
+          hdiutil attach "$dmg" -nobrowse -mountpoint /tmp/videocrm-dmg
+          open -n /tmp/videocrm-dmg/VideoCRM.app
+          sleep 20
+          mkdir -p smoke
+          screencapture -x smoke/macos.png || echo "::warning::screencapture failed"
+          if ! pgrep -x videocrm; then
+            echo "::error::VideoCRM quit within 20 s of starting."
+            exit 1
+          fi
+          osascript -e 'quit app "VideoCRM"' || pkill -x videocrm
+          sleep 3
+          hdiutil detach /tmp/videocrm-dmg || hdiutil detach -force /tmp/videocrm-dmg
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: videocrm-macos
+          path: target/bundle/*.dmg
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: smoke-macos
+          path: smoke/
+          if-no-files-found: ignore
+
+  linux:
+    name: Linux (x86_64)
+    needs: version
+    # The oldest supported Ubuntu sets the glibc floor of the binary.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake pkg-config \
+            libfontconfig-dev libfreetype-dev libssl-dev \
+            libwayland-dev libx11-xcb-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev \
+            librsvg2-bin desktop-file-utils \
+            xvfb x11-utils imagemagick mesa-vulkan-drivers libgl1-mesa-dri libegl1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bundle
+
+      - name: Build
+        run: cargo build --release --locked -p videocrm
+
+      - name: Bundle
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          APPIMAGE_EXTRACT_AND_RUN=1 APPIMAGETOOL="$RUNNER_TEMP/appimagetool" \
+            scripts/bundle-linux.sh "$VERSION" target/release/videocrm
+
+      - name: Smoke test (starts the AppImage under Xvfb)
+        run: |
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1440x900x24 &
+          sleep 2
+          mkdir -p smoke
+          # No FUSE on the runner: run the AppImage's own contents.
+          (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE"/target/bundle/VideoCRM-"$VERSION"-x86_64.AppImage --appimage-extract >/dev/null)
+          VIDEOCRM_DATA_DIR="$RUNNER_TEMP/data" "$RUNNER_TEMP/squashfs-root/AppRun" > smoke/linux.log 2>&1 &
+          app=$!
+          sleep 20
+          import -window root smoke/linux.png || echo "::warning::screenshot failed"
+          if ! kill -0 "$app"; then
+            echo "::error::VideoCRM quit within 20 s of starting."
+            cat smoke/linux.log
+            exit 1
+          fi
+          if ! xwininfo -root -tree | grep -q '"VideoCRM"'; then
+            echo "::error::VideoCRM is running but has no window."
+            cat smoke/linux.log
+            exit 1
+          fi
+          kill -TERM "$app"
+          wait "$app"
+          tar -tzf target/bundle/videocrm-"$VERSION"-linux-x86_64.tar.gz
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: videocrm-linux
+          path: |
+            target/bundle/*.tar.gz
+            target/bundle/*.AppImage
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: smoke-linux
+          path: smoke/
+          if-no-files-found: ignore
+
+  release:
+    name: Release
+    if: github.ref_type == 'tag'
+    needs: [version, macos, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: videocrm-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "VideoCRM ${{ needs.version.outputs.version }}" \
+            --generate-notes

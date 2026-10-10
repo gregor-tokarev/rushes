@@ -21,6 +21,20 @@
 
 Everything stays on your computer: one local database and a folder per video.
 
+## Download
+
+Get the latest build from the repository's Releases page:
+
+- **macOS** (Apple silicon and Intel): open `VideoCRM-….dmg` and drag VideoCRM to
+  Applications. The app isn't notarized yet, so the first time, right-click it, choose
+  **Open**, and confirm.
+- **Linux** (x86_64): make `VideoCRM-….AppImage` executable and run it. Or unpack
+  `videocrm-…-linux-x86_64.tar.gz` into `~/.local` to get VideoCRM in your app menu:
+  `tar -xzf videocrm-…-linux-x86_64.tar.gz -C ~/.local --strip-components=1`.
+
+AI editing also needs [Claude Code](https://claude.com/claude-code), ffmpeg and the
+video-use skill; the app checks for them and says what's missing.
+
 ## Build from source
 
 Install Rust. On Linux, also install a C/C++ toolchain, CMake, `pkg-config`, and the
