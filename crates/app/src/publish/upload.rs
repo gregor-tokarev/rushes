@@ -15,7 +15,7 @@ use futures::channel::mpsc;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, AppContext as _, Context, SharedString};
-use videocrm_core::{FileStamp, Privacy, UploadId, UploadJob, UploadStatus, VideoId, VideoStatus, YoutubeLink};
+use videocrm_core::{FileStamp, Privacy, UploadId, UploadJob, UploadStatus, Video, VideoId, VideoStatus, YoutubeLink};
 use videocrm_youtube::{
     Error as YoutubeError, ProcessingStatus, RetryCause, UploadProgress, UploadStatus as YoutubeUploadStatus,
     UploadedVideo, VideoInfo, VideoMetadata, YoutubeClient,
@@ -38,6 +38,8 @@ const PROCESSING_POLLS: usize = 24;
 const PERSISTED_STEPS: f32 = 10.0;
 /// Why a video's upload file can't be changed now, wherever it is chosen.
 pub const UPLOAD_FILE_LOCKED: &str = "The upload file can’t change while the video uploads. Cancel the upload first.";
+/// Why a video's account can't be changed now.
+pub const UPLOAD_ACCOUNT_LOCKED: &str = "The account can’t change while the video uploads. Cancel the upload first.";
 /// What a stopped upload says once YouTube no longer takes the rest of its file.
 const SESSION_GONE: &str = "YouTube can’t continue this upload. Upload the video again to send it from the beginning.";
 
@@ -331,14 +333,18 @@ impl YoutubeService {
     pub fn blocking_reasons(&self, video_id: VideoId, cx: &App) -> Vec<BlockingReason> {
         let Some(video) = self.state.read(cx).video(video_id) else { return Vec::new() };
         let file_exists = video.publish.file.as_deref().is_some_and(Path::is_file);
-        rules::blocking_reasons(video, self.account_access(), file_exists, Utc::now())
+        let access = self.account_access_for(video.publish.channel.as_ref().map(|channel| channel.id.as_str()));
+        rules::blocking_reasons(video, access, file_exists, Utc::now())
     }
 
-    /// What uploads need from the account before they can start.
-    fn account_blocker(&self) -> BlockingReason {
-        match self.account_access() {
+    /// What uploads need from the account `key` before they can start.
+    fn account_blocker(&self, key: Option<&str>, video: &Video) -> BlockingReason {
+        match self.account_access_for(key) {
             AccountAccess::NeedsSignIn => BlockingReason::NeedsSignIn,
             AccountAccess::SigningIn => BlockingReason::SigningIn,
+            AccountAccess::Gone => BlockingReason::AccountGone(
+                video.publish.channel.as_ref().map_or_else(|| "The chosen account".to_owned(), |c| c.name.clone()),
+            ),
             _ => BlockingReason::NotConnected,
         }
     }
@@ -353,8 +359,11 @@ impl YoutubeService {
         if !reasons.is_empty() {
             return Err(UploadError::Blocked(reasons));
         }
-        let (Some(client), Some(file)) = (self.client.clone(), video.publish.file.clone()) else {
-            return Err(UploadError::Blocked(vec![self.account_blocker()]));
+        let channel = self.channel_for(&video);
+        let client = channel.as_deref().and_then(|key| self.client_for(key));
+        let (Some(channel), Some(client), Some(file)) = (channel, client, video.publish.file.clone()) else {
+            let key = video.publish.channel.as_ref().map(|channel| channel.id.as_str());
+            return Err(UploadError::Blocked(vec![self.account_blocker(key, &video)]));
         };
         let stamp = file_stamp(&file).ok_or(UploadError::Blocked(vec![BlockingReason::FileMissing]))?;
         let now = Utc::now();
@@ -365,6 +374,7 @@ impl YoutubeService {
             file_stamp: Some(stamp),
             status: UploadStatus::Pending,
             session_url: None,
+            channel: Some(channel.clone()),
             created_at: now,
             updated_at: now,
         };
@@ -373,6 +383,10 @@ impl YoutubeService {
             return Err(UploadError::Storage);
         }
         self.jobs.insert(0, job.clone());
+        // The video stays with the account it went to, whatever the default becomes.
+        if video.publish.channel.is_none() {
+            self.choose_channel(video_id, &channel, cx);
+        }
         // Resuming an earlier, stopped upload as well would put a second copy on YouTube.
         let stopped: Vec<UploadId> = self
             .jobs
@@ -397,11 +411,16 @@ impl YoutubeService {
         let Some(session_url) = job.session_url.clone().filter(|_| self.is_resumable(&job)) else {
             return Err(UploadError::NotResumable);
         };
-        let Some(client) = self.client.clone() else {
-            return Err(UploadError::Blocked(vec![self.account_blocker()]));
+        let video = self.state.read(cx).video(job.video_id).cloned().ok_or(UploadError::UnknownVideo)?;
+        // The session belongs to the account that opened it; jobs from before
+        // accounts were recorded went to the video's.
+        let channel = job.channel.clone().or_else(|| self.channel_for(&video));
+        let Some((channel, client)) = channel.and_then(|key| Some((key.clone(), self.client_for(&key)?))) else {
+            let key = job.channel.as_deref().or(video.publish.channel.as_ref().map(|channel| channel.id.as_str()));
+            return Err(UploadError::Blocked(vec![self.account_blocker(key, &video)]));
         };
         // The session takes the rest of the bytes it was opened for, and nothing else.
-        let chosen = self.state.read(cx).video(job.video_id).and_then(|video| video.publish.file.clone());
+        let chosen = video.publish.file.clone();
         if chosen.as_ref() != Some(&job.file) {
             self.retire(id, Retired::OtherFile, cx);
             return Err(UploadError::Stale(Retired::OtherFile));
@@ -413,7 +432,10 @@ impl YoutubeService {
         }
         let total = stamp.size;
         if self.spawn_transfer(id, client, job.file, total, Request::Resume(session_url), cx) {
-            self.update_job(id, cx, |job| job.status = UploadStatus::Uploading { sent: 0, total });
+            self.update_job(id, cx, |job| {
+                job.status = UploadStatus::Uploading { sent: 0, total };
+                job.channel = Some(channel);
+            });
         }
         Ok(())
     }
@@ -600,8 +622,10 @@ impl YoutubeService {
                 job.session_url = None;
             }
         });
-        if error.needs_sign_in() {
-            self.require_sign_in(cx);
+        if error.needs_sign_in()
+            && let Some(channel) = self.job(id).and_then(|job| job.channel.clone())
+        {
+            self.require_sign_in(&channel, cx);
         }
         let title = self.video_title(id, cx);
         let headline = if resumed { "Couldn’t resume" } else { "Couldn’t upload" };
@@ -732,7 +756,9 @@ impl YoutubeService {
                     }
                 });
                 // The channel's video count may have changed.
-                self.refresh_account(cx);
+                if let Some(channel) = self.job(id).and_then(|job| job.channel.clone()) {
+                    self.refresh_account(&channel, cx);
+                }
             }
             Err(error) => {
                 self.outcomes.remove(&id);
@@ -773,7 +799,7 @@ impl YoutubeService {
     /// Applies `change` to the job, saves it and tells everyone. The state
     /// saves it through its write queue, so a lock on the database holds up
     /// neither the upload nor the UI.
-    fn update_job(&mut self, id: UploadId, cx: &mut Context<Self>, change: impl FnOnce(&mut UploadJob)) {
+    pub(super) fn update_job(&mut self, id: UploadId, cx: &mut Context<Self>, change: impl FnOnce(&mut UploadJob)) {
         let Some(job) = self.jobs.iter_mut().find(|job| job.id == id) else { return };
         change(job);
         job.updated_at = Utc::now();

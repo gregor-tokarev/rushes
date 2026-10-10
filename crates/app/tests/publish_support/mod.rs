@@ -18,10 +18,11 @@ use base64::engine::general_purpose::STANDARD;
 use gpui_kit::{AppContext as _, Entity, TestAppContext};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use videocrm::publish::{Connection, YoutubeService};
+use videocrm::publish::YoutubeService;
 use videocrm::state::AppState;
 use videocrm_core::settings::{AppSettings, YoutubeBackend};
 use videocrm_core::{NewVideo, Store, UploadJob, Video, VideoId};
+use videocrm_youtube::{CredentialStore, SavedLogin};
 
 /// YouTube marks uploads processed this long after they finish.
 const PROCESSING_MS: u64 = 300;
@@ -303,16 +304,41 @@ impl Workspace {
         cx.update(|cx| YoutubeService::init_in(state, data_dir, cx))
     }
 
-    /// Signs in through the emulator's consent page.
+    /// Signs in through the emulator's consent page; with accounts already
+    /// signed in, it adds one.
     pub fn sign_in(&self, cx: &mut TestAppContext, email: &str) {
         self.service.update(cx, |service, cx| service.connect(cx));
-        let url =
-            wait_until(cx, "the consent page", |cx| match self.service.read_with(cx, |s, _| s.connection().clone()) {
-                Connection::Connecting { authorize_url: Some(url) } => Some(url.to_string()),
-                _ => None,
-            });
+        let url = wait_until(cx, "the consent page", |cx| {
+            self.service.read_with(cx, |s, _| s.sign_in_url().map(ToString::to_string))
+        });
         consent_in_browser(&url, email);
-        wait_until(cx, "the connection", |cx| self.service.read_with(cx, |s, _| s.is_connected().then_some(())));
+        wait_until(cx, "the connection", |cx| {
+            self.service.read_with(cx, |s, _| {
+                let connected =
+                    s.accounts().iter().any(|account| account.account().email == email && account.is_connected());
+                (connected && !s.is_signing_in()).then_some(())
+            })
+        });
+    }
+
+    /// The account `email` signed in, by its key.
+    pub fn account_key(&self, cx: &mut TestAppContext, email: &str) -> String {
+        self.service.read_with(cx, |s, _| {
+            s.accounts()
+                .iter()
+                .find(|account| account.account().email == email)
+                .map(|account| account.key().to_owned())
+                .unwrap_or_else(|| panic!("{email} is not signed in"))
+        })
+    }
+
+    /// The saved sign-ins, one file per account.
+    pub fn saved_logins(&self) -> Vec<(PathBuf, SavedLogin)> {
+        let dir = YoutubeService::accounts_dir(self.dir.path());
+        let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+        let mut files: Vec<PathBuf> = entries.map(|entry| entry.unwrap().path()).collect();
+        files.sort();
+        files.into_iter().map(|path| (path.clone(), CredentialStore::new(path).load().unwrap().unwrap())).collect()
     }
 
     pub fn create_video(&self, cx: &mut TestAppContext, title: &str, edit: impl FnOnce(&mut Video)) -> VideoId {
@@ -327,6 +353,11 @@ impl Workspace {
 
     pub fn video(&self, cx: &mut TestAppContext, id: VideoId) -> Video {
         self.state.read_with(cx, |state, _| state.video(id).cloned()).unwrap()
+    }
+
+    /// [`Self::video`] inside an update or a read of another entity.
+    pub fn video_in(&self, cx: &gpui_kit::App, id: VideoId) -> Video {
+        self.state.read(cx).video(id).cloned().unwrap()
     }
 
     pub fn stored_jobs(&self, cx: &mut TestAppContext) -> Vec<UploadJob> {

@@ -38,15 +38,18 @@ use videocrm_core::{
 };
 use videocrm_pipeline::{MediaInfo, kept_cuts};
 
+use super::channel::{ChannelChoices, ChooseChannel};
 use super::chapters::{MIN_CHAPTERS, chapters, chapters_text, insert_chapters, timestamp};
 use super::rules::{
     self, AccountAccess, BlockingReason, CATEGORIES, Category, DESCRIPTION_MAX_BYTES, TAGS_MAX_CHARS,
     THUMBNAIL_MAX_BYTES, TITLE_MAX_CHARS, tags_length,
 };
-use super::service::{Connection, YoutubeEvent, YoutubeService};
+use super::service::{Connection, YoutubeAccount, YoutubeEvent, YoutubeService};
 use super::transfer::{format_bytes, format_duration, format_eta, format_speed};
-use super::ui::{ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, status_line, youtube_link};
-use super::upload::{ProcessingOutcome, Retired, UPLOAD_FILE_LOCKED, UploadError};
+use super::ui::{
+    ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, sign_in_progress, status_line, youtube_link,
+};
+use super::upload::{ProcessingOutcome, Retired, UPLOAD_ACCOUNT_LOCKED, UPLOAD_FILE_LOCKED, UploadError};
 use crate::ai_edit::PipelineService;
 use crate::route::{Route, VideoTab};
 use crate::state::{AppEvent, AppState};
@@ -138,11 +141,13 @@ enum Field {
     Audience,
     File,
     Thumbnail,
+    /// The account the video uploads to.
+    Channel,
 }
 
 /// The fields the form changed since its last save.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Edited(u8);
+struct Edited(u16);
 
 impl Edited {
     fn insert(&mut self, field: Field) {
@@ -185,6 +190,9 @@ impl Edited {
         }
         if self.contains(Field::Thumbnail) {
             merged.thumbnail.clone_from(&draft.thumbnail);
+        }
+        if self.contains(Field::Channel) {
+            merged.channel.clone_from(&draft.channel);
         }
         merged
     }
@@ -345,7 +353,7 @@ impl PublishPanel {
         let Some(link) = self.state.read(cx).video(self.video_id).and_then(|video| video.youtube.clone()) else {
             return;
         };
-        self.service.update(cx, |service, cx| service.refresh_youtube_video(&link.video_id, cx));
+        self.service.update(cx, |service, cx| service.refresh_youtube_video(&link, cx));
     }
 
     pub fn video_id(&self) -> VideoId {
@@ -361,7 +369,47 @@ impl PublishPanel {
             (Some(path), Some(details)) if &details.path == path => details.size.is_some(),
             _ => true,
         };
-        rules::blocking_reasons(&video, self.service.read(cx).account_access(), file_exists, Utc::now())
+        let access = self.service.read(cx).account_access_for(self.channel_key());
+        rules::blocking_reasons(&video, access, file_exists, Utc::now())
+    }
+
+    /// Key of the account the video chose, `None` while it uploads to the default one.
+    fn channel_key(&self) -> Option<&str> {
+        self.draft.channel.as_ref().map(|channel| channel.id.as_str())
+    }
+
+    /// Lets the video upload to the account `key`.
+    fn set_channel(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(channel) = self.service.read(cx).find_account(key).map(YoutubeAccount::publish_channel) else {
+            return;
+        };
+        if self.draft.channel.as_ref() != Some(&channel) {
+            self.draft.channel = Some(channel);
+            self.schedule_save(Field::Channel, cx);
+        }
+    }
+
+    /// Which account a running or stopped upload goes to, when that needs saying:
+    /// with several accounts, or when it isn't the account the video uploads to now.
+    fn upload_destination(&self, job: &UploadJob, cx: &App) -> Option<String> {
+        let service = self.service.read(cx);
+        let key = job.channel.as_deref()?;
+        let current = self.draft_video(cx).and_then(|video| service.channel_for(&video));
+        if service.accounts().len() < 2 && current.as_deref() == Some(key) {
+            return None;
+        }
+        service
+            .find_account(key)
+            .map(YoutubeAccount::name)
+            .or_else(|| self.draft.channel.as_ref().filter(|chosen| chosen.id == key).map(|chosen| chosen.name.clone()))
+    }
+
+    /// Signs another account in for this video: once signed in, the video uploads to it.
+    fn add_account(&mut self, cx: &mut Context<Self>) {
+        // A channel picked a moment ago must not overwrite the one the sign-in picks.
+        self.save_pending(cx);
+        let video_id = self.video_id;
+        self.service.update(cx, |service, cx| service.connect_for(video_id, cx));
     }
 
     /// Saves pending form edits now instead of after the delay. Only the fields the form
@@ -939,6 +987,7 @@ impl PublishPanel {
         let reasons = self.blocking_reasons(cx);
         let service = self.service.read(cx);
         let job = service.latest_job(self.video_id).cloned();
+        let destination = job.as_ref().and_then(|job| self.upload_destination(job, cx));
         let theme = cx.theme();
         let youtube_url = self
             .state
@@ -1005,7 +1054,10 @@ impl PublishPanel {
                     .child(
                         v_flex()
                             .when_some(amount, |this, amount| this.child(help_text(amount, cx)))
-                            .when_some(eta, |this, eta| this.child(help_text(eta, cx))),
+                            .when_some(eta, |this, eta| this.child(help_text(eta, cx)))
+                            .when_some(destination, |this, name| {
+                                this.child(help_text(format!("Uploading to {name}."), cx))
+                            }),
                     )
                     .child(h_flex().pt_1().child(
                         Button::new("cancel-upload").label("Cancel").small().outline().disabled(cancelling).on_click(
@@ -1121,7 +1173,9 @@ impl PublishPanel {
                                     .on_click(cx.listener(|this, _, window, cx| this.start_upload(window, cx))),
                             ),
                     )
-                    .when(!reasons.is_empty(), |this| this.child(render_blockers(&reasons, &self.service, cx)))
+                    .when(!reasons.is_empty(), |this| {
+                        this.child(render_blockers(&reasons, &self.service, self.channel_key(), cx))
+                    })
                     .into_any_element()
             }
             // Resume sends the rest of the file the upload started with, so only while
@@ -1144,9 +1198,20 @@ impl PublishPanel {
                     ),
                 };
                 let resume_job = job.clone();
+                // The session belongs to the account that opened it.
+                let resume_key = job.channel.clone().or_else(|| self.draft.channel.as_ref().map(|c| c.id.clone()));
+                let resume_access = service.account_access_for(resume_key.as_deref());
                 v_flex()
                     .gap_3()
                     .child(status)
+                    .when_some(destination, |this, name| {
+                        this.child(
+                            help_text(format!("Resume continues the upload to {name}."), cx)
+                                .id("resume-destination")
+                                // Tests check that the account is on screen.
+                                .test_support(),
+                        )
+                    })
                     .child(
                         h_flex()
                             .gap_2()
@@ -1156,7 +1221,7 @@ impl PublishPanel {
                                     .icon(IconName::Upload)
                                     .small()
                                     .primary()
-                                    .disabled(!service.is_connected())
+                                    .disabled(resume_access != AccountAccess::Connected)
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.resume_upload(&resume_job, window, cx)
                                     })),
@@ -1171,20 +1236,25 @@ impl PublishPanel {
                                     .on_click(cx.listener(|this, _, window, cx| this.start_upload(window, cx))),
                             ),
                     )
-                    .map(|this| match service.account_access() {
+                    .map(|this| match resume_access {
                         AccountAccess::NotConnected => this.child(help_text("Connect YouTube to resume.", cx)),
+                        AccountAccess::Gone => {
+                            this.child(help_text("Connect the account this upload went to again to resume.", cx))
+                        }
                         AccountAccess::SigningIn => {
                             this.child(help_text("Finish signing in with your browser to resume.", cx))
                         }
                         AccountAccess::NeedsSignIn => this.child(
-                            v_flex()
-                                .gap_1p5()
-                                .child(help_text("Sign in to YouTube again to resume.", cx))
-                                .children(reconnect_button(&self.service, cx).map(|button| h_flex().child(button))),
+                            v_flex().gap_1p5().child(help_text("Sign in to YouTube again to resume.", cx)).children(
+                                reconnect_button(&self.service, resume_key.as_deref(), cx)
+                                    .map(|button| h_flex().child(button)),
+                            ),
                         ),
                         AccountAccess::Connected if reasons.is_empty() => this,
                         // Resume only needs the account; starting over needs the whole form.
-                        AccountAccess::Connected => this.child(render_blockers(&reasons, &self.service, cx)),
+                        AccountAccess::Connected => {
+                            this.child(render_blockers(&reasons, &self.service, self.channel_key(), cx))
+                        }
                     })
                     .into_any_element()
             }
@@ -1202,7 +1272,13 @@ impl PublishPanel {
     }
 
     fn render_upload_button(&self, reasons: Vec<BlockingReason>, cx: &mut Context<Self>) -> impl IntoElement {
-        let summary = self.draft_video(cx).map(|video| upload_summary(&video));
+        // With several accounts, which one it goes to.
+        let service = self.service.read(cx);
+        let channel = (service.accounts().len() > 1)
+            .then(|| self.draft_video(cx).and_then(|video| service.channel_for(&video)))
+            .flatten()
+            .and_then(|key| service.find_account(&key).map(YoutubeAccount::name));
+        let summary = self.draft_video(cx).map(|video| upload_summary(&video, channel.as_deref()));
         v_flex()
             .gap_3()
             .child(
@@ -1222,7 +1298,7 @@ impl PublishPanel {
                 if reasons.is_empty() {
                     this.when_some(summary, |this, summary| this.child(help_text(summary, cx)))
                 } else {
-                    this.child(render_blockers(&reasons, &self.service, cx))
+                    this.child(render_blockers(&reasons, &self.service, self.channel_key(), cx))
                 }
             })
     }
@@ -1271,6 +1347,123 @@ impl PublishPanel {
             }
             _ => None,
         }
+    }
+
+    /// The account the video uploads to, where it stands, and the menu to choose
+    /// another one or add one.
+    fn render_account(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let service = self.service.read(cx);
+        let theme = cx.theme();
+        let chosen = self.draft.channel.clone();
+        let key = chosen.as_ref().map(|channel| channel.id.clone());
+        // The video chose an account that was disconnected since: it says so rather
+        // than quietly uploading to another one.
+        let gone = chosen.filter(|channel| service.find_account(&channel.id).is_none());
+        let shown = match &gone {
+            Some(_) => None,
+            None => Some(service.connection_for(key.as_deref())),
+        };
+        // A sign-in that adds an account, while the panel shows another one.
+        let adding = service.is_signing_in() && !matches!(shown, Some(Connection::Connecting { .. }));
+        let signing_in = service.is_signing_in();
+        // Why the last sign-in failed, also while the card shows an account: the
+        // panel says it only without one.
+        let problem =
+            service.sign_in_problem().filter(|_| !signing_in && !matches!(shown, Some(Connection::Failed(_)))).cloned();
+        let uploading = self.is_uploading(cx);
+        // The form's choice, which may not be saved yet.
+        let choices = self.draft_video(cx).map(|video| ChannelChoices::of(&video, cx));
+        let panel = cx.weak_entity();
+        let picker = choices.filter(|_| !service.accounts().is_empty()).map(|choices| {
+            let button = Button::new("choose-account").label("Change").small().outline().dropdown_caret(true);
+            let control = if uploading {
+                // The upload goes to this account. A disabled button would still open
+                // the menu, which owns the click.
+                button.disabled(true).into_any_element()
+            } else {
+                let choose: ChooseChannel = {
+                    let panel = panel.clone();
+                    Rc::new(move |key, cx| {
+                        panel.update(cx, |panel, cx| panel.set_channel(key, cx)).ok();
+                    })
+                };
+                button
+                    .dropdown_menu(move |menu, _, _| {
+                        let panel = panel.clone();
+                        choices.menu(menu.check_side(Side::Right), choose.clone()).separator().item(
+                            PopupMenuItem::new("Add account…").icon(IconName::Plus).disabled(signing_in).on_click(
+                                move |_, _, cx| {
+                                    panel.update(cx, |panel, cx| panel.add_account(cx)).ok();
+                                },
+                            ),
+                        )
+                    })
+                    .into_any_element()
+            };
+            state_tooltip(
+                "choose-account-reason",
+                uploading.then_some(SharedString::from(UPLOAD_ACCOUNT_LOCKED)),
+                control,
+            )
+        });
+        let uses_default =
+            key.is_none() && service.accounts().iter().filter(|account| account.has_channel()).count() > 1;
+        v_flex()
+            .gap_3()
+            .map(|this| match &gone {
+                Some(channel) => this.child(
+                    div()
+                        .id("publish-account-gone")
+                        .child(status_line(
+                            IconName::CircleAlert,
+                            theme.warning,
+                            format!("“{}” isn’t connected", channel.name),
+                            Some("Connect it again, or choose another account.".into()),
+                            cx,
+                        ))
+                        // Tests check that the note is on screen.
+                        .test_support(),
+                ),
+                None => {
+                    this.child(ConnectionPanel::new("publish-connection", self.service.clone()).account(key.clone()))
+                }
+            })
+            .when(adding, |this| {
+                this.child(div().id("publish-adding-account").child(sign_in_progress(
+                    &self.service,
+                    service.sign_in_url().cloned(),
+                    cx,
+                )))
+            })
+            .when_some(problem, |this, problem| {
+                this.child(
+                    div()
+                        .id("publish-sign-in-failed")
+                        .child(status_line(IconName::CircleAlert, theme.danger, "Couldn’t connect", Some(problem), cx))
+                        // Tests check that the reason is on screen.
+                        .test_support(),
+                )
+            })
+            .when(gone.is_some() && !signing_in, |this| {
+                this.child(
+                    h_flex().child(
+                        Button::new("connect-account")
+                            .label("Connect")
+                            .small()
+                            .disabled(service.config().is_err())
+                            .on_click(cx.listener(|this, _, _, cx| this.add_account(cx))),
+                    ),
+                )
+            })
+            .when(uses_default, |this| {
+                this.child(
+                    help_text("Uploads to the default account.", cx)
+                        .id("publish-uses-default")
+                        // Tests check that the note is on screen.
+                        .test_support(),
+                )
+            })
+            .children(picker.map(|picker| h_flex().child(picker)))
     }
 
     fn render_file(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1492,9 +1685,7 @@ impl Render for PublishPanel {
         let upload = self.render_upload(cx);
         // The cards that clear the upload's blocking reasons follow it.
         let cards = [
-            card("publish-account", "YouTube account")
-                .child(ConnectionPanel::new("publish-connection", self.service.clone()))
-                .into_any_element(),
+            card("publish-account", "YouTube account").child(self.render_account(cx)).into_any_element(),
             self.render_file(cx).into_any_element(),
             self.render_thumbnail(cx).into_any_element(),
         ];
@@ -1541,13 +1732,19 @@ impl Render for PublishPanel {
 
 /// What stops the upload, one line each, so a disabled upload button never goes unexplained.
 /// An expired sign-in comes with the way back.
-fn render_blockers(reasons: &[BlockingReason], service: &Entity<YoutubeService>, cx: &App) -> impl IntoElement {
+fn render_blockers(
+    reasons: &[BlockingReason],
+    service: &Entity<YoutubeService>,
+    key: Option<&str>,
+    cx: &App,
+) -> impl IntoElement {
     let muted = cx.theme().muted_foreground;
     v_flex()
         .id("upload-blockers")
         .gap_1()
         .children(reasons.iter().enumerate().map(|(ix, reason)| {
-            let reconnect = (*reason == BlockingReason::NeedsSignIn).then(|| reconnect_button(service, cx)).flatten();
+            let reconnect =
+                (*reason == BlockingReason::NeedsSignIn).then(|| reconnect_button(service, key, cx)).flatten();
             h_flex()
                 .gap_2()
                 .items_start()
@@ -1568,18 +1765,21 @@ fn render_blockers(reasons: &[BlockingReason], service: &Entity<YoutubeService>,
         .test_support()
 }
 
-/// "Reconnect" for an expired sign-in; `None` while the settings can't sign in
-/// (the account card then offers to open them).
-fn reconnect_button(service: &Entity<YoutubeService>, cx: &App) -> Option<Button> {
+/// "Reconnect" for the expired sign-in of the account `key` (the default account
+/// for `None`); `None` while the settings can't sign in (the account card then
+/// offers to open them).
+fn reconnect_button(service: &Entity<YoutubeService>, key: Option<&str>, cx: &App) -> Option<Button> {
+    let Connection::NeedsSignIn(account) = service.read(cx).connection_for(key) else { return None };
+    // One browser sign-in at a time: another one must end first.
+    let busy = service.read(cx).is_signing_in();
     let service = service.clone();
-    let usable =
-        matches!(service.read(cx).connection(), Connection::NeedsSignIn(_)) && service.read(cx).config().is_ok();
-    usable.then(|| {
+    service.read(cx).config().is_ok().then(|| {
         Button::new("upload-reconnect")
             .label("Reconnect")
             .small()
             .outline()
-            .on_click(move |_, _, cx| service.update(cx, |service, cx| service.connect(cx)))
+            .disabled(busy)
+            .on_click(move |_, _, cx| service.update(cx, |service, cx| service.reconnect(account.key(), cx)))
     })
 }
 
@@ -1591,13 +1791,18 @@ fn visibility_text(privacy: Privacy, publish_at: Option<DateTime<Utc>>) -> Strin
     }
 }
 
-/// "Uploads as unlisted." / "Publishes Fri, 10 Oct at 09:00."
-fn upload_summary(video: &Video) -> String {
+/// "Uploads as unlisted." / "Uploads to Second Channel as private and goes public
+/// on Fri, 10 Oct at 09:00."
+fn upload_summary(video: &Video, channel: Option<&str>) -> String {
+    let uploads = match channel {
+        Some(channel) => format!("Uploads to {channel} as"),
+        None => "Uploads as".to_owned(),
+    };
     match video.publish.publish_at {
         Some(at) => {
-            format!("Uploads as private and goes public {}.", at.with_timezone(&Local).format("on %a, %-d %b at %H:%M"))
+            format!("{uploads} private and goes public {}.", at.with_timezone(&Local).format("on %a, %-d %b at %H:%M"))
         }
-        None => format!("Uploads as {}.", video.publish.privacy.label().to_lowercase()),
+        None => format!("{uploads} {}.", video.publish.privacy.label().to_lowercase()),
     }
 }
 

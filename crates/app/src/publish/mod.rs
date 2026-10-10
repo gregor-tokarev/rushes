@@ -9,6 +9,7 @@
 //! registers the full catalog (`gpui_kit::assets::AllAssets`).
 
 mod badge;
+mod channel;
 mod chapters;
 mod panel;
 mod rules;
@@ -20,10 +21,11 @@ mod upload;
 mod uploads_page;
 
 pub use badge::AccountBadge;
+pub use channel::{ChannelChoices, ChooseChannel};
 pub use chapters::{CHAPTERS_HEADING, Chapter, chapters, chapters_text, insert_chapters};
 pub use panel::PublishPanel;
 pub use rules::{AccountAccess, BlockingReason, CATEGORIES, Category, blocking_reasons, tags_length};
-pub use service::{Connection, EmulatorCheck, YoutubeEvent, YoutubeService, backend_config};
+pub use service::{Connection, EmulatorCheck, YoutubeAccount, YoutubeEvent, YoutubeService, backend_config};
 pub use settings::YoutubeSettings;
 pub use transfer::Transfer;
 pub use upload::{

@@ -39,6 +39,7 @@ use super::icons::column_icon;
 use super::panel::{CELL_EDITOR_CONTEXT, CellRef, DatabasePanel, TEXT_ENTRY_CONTEXT};
 use super::property_editor::PropertyEditorMode;
 use super::query::column_name;
+use crate::publish::{ChannelChoices, ChooseChannel};
 use crate::ui::{EmptyState, format_when, video_icon};
 
 /// Narrowest a column can be resized to, in pixels.
@@ -133,6 +134,7 @@ impl VideoTable {
                 }
                 BuiltinField::Edit => self.render_edit(row, cx),
                 BuiltinField::Youtube => self.render_youtube(row, cx),
+                BuiltinField::Channel => self.render_channel(row, cx),
                 BuiltinField::CreatedAt => {
                     static_cell(muted_text(format_when(video.created_at, self.model.now.with_timezone(&Local)), cx))
                         .into_any_element()
@@ -305,6 +307,29 @@ impl VideoTable {
                 }),
         )
         .into_any_element()
+    }
+
+    /// The YouTube account the video uploads to, with a menu of the signed-in
+    /// accounts. A video that chose none shows the default account, muted.
+    fn render_channel(&self, row: &VideoRow, cx: &mut App) -> AnyElement {
+        let id = row.video.id;
+        let choices = ChannelChoices::of(&row.video, cx);
+        let content =
+            choices.label(cx).map_or_else(|| empty_value(cx).into_any_element(), IntoElement::into_any_element);
+        // Nothing to choose from, or the upload goes to the account it has.
+        if !choices.is_choosable() {
+            return static_cell(div().id(element_id("channel", id)).min_w_0().child(content).test_support())
+                .into_any_element();
+        }
+        let panel = self.panel.clone();
+        let choose: ChooseChannel = Rc::new(move |key, cx| {
+            _ = panel.update(cx, |panel, cx| panel.set_channel(id, key, cx));
+        });
+        CellButton::new(element_id("channel", id))
+            .mx_neg_1()
+            .child(content)
+            .dropdown_menu(move |menu, _, _| choices.menu(menu, choose.clone()))
+            .into_any_element()
     }
 
     fn render_status(&self, id: VideoId, current: VideoStatus) -> AnyElement {

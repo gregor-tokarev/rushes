@@ -598,8 +598,8 @@ fn hidden_properties_show_how_many_there_are(cx: &mut TestAppContext) {
     let label = cx
         .update_window(app.window, |_, window, _| window.find("show-properties").label().map(str::to_string))
         .expect("window is open");
-    // Status, format, publish date, tags, media folder, YouTube and Sponsor.
-    assert_eq!(label.as_deref(), Some("7 properties"));
+    // Status, format, publish date, tags, media folder, YouTube, channel and Sponsor.
+    assert_eq!(label.as_deref(), Some("8 properties"));
 }
 
 #[gpui_kit::test]

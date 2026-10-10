@@ -32,6 +32,7 @@ use super::format;
 use super::property_editor::{PropertyEditor, PropertyEditorMode};
 use super::query::{self, resolve_columns, view_rows, visible_columns};
 use super::table::{CellEditors, EmptyReason, TableModel, VideoTable};
+use crate::publish::{YoutubeAccount, YoutubeEvent, YoutubeService};
 use crate::ui::PAGE_INSET;
 use crate::ui::dialog::confirm_delete_videos;
 
@@ -196,7 +197,7 @@ impl DatabasePanel {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let view_name = cx.new(|cx| InputState::new(window, cx));
 
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.subscribe_in(&table, window, Self::on_table_event),
             cx.subscribe_in(&search, window, |this, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -218,6 +219,14 @@ impl DatabasePanel {
                 }
             }),
         ];
+        // The Channel column names accounts: it follows sign-ins, sign-outs and the default.
+        if let Some(service) = YoutubeService::try_global(cx) {
+            subscriptions.push(cx.subscribe(&service, |this, _, event: &YoutubeEvent, cx| {
+                if *event == YoutubeEvent::ConnectionChanged {
+                    this.table.update(cx, |_, cx| cx.notify());
+                }
+            }));
+        }
 
         Self {
             rows: Vec::new(),
@@ -331,6 +340,13 @@ impl DatabasePanel {
 
     pub fn set_status(&mut self, id: VideoId, status: VideoStatus, cx: &mut Context<Self>) {
         self.update_video(id, |video| video.status = status, cx);
+    }
+
+    /// Lets the video upload to the signed-in YouTube account `key`.
+    pub fn set_channel(&mut self, id: VideoId, key: &str, cx: &mut Context<Self>) {
+        let Some(service) = YoutubeService::try_global(cx) else { return };
+        let Some(channel) = service.read(cx).find_account(key).map(YoutubeAccount::publish_channel) else { return };
+        self.update_video(id, |video| video.publish.channel = Some(channel), cx);
     }
 
     pub fn open_video(&mut self, id: VideoId, cx: &mut Context<Self>) {

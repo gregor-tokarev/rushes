@@ -14,13 +14,14 @@ use chrono::{Local, Utc};
 use gpui_kit::{Entity, TestAppContext};
 use publish_support::{Emulators, Workspace, wait_until};
 use serde_json::json;
+use videocrm::publish::BlockingReason;
 use videocrm::publish::{
     Connection, INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, Retired, UploadError, YoutubeEvent,
     YoutubeService, delete_upload_notice,
 };
 use videocrm::state::{AppEvent, SAVE_RETRY_DELAY};
 use videocrm_core::settings::YoutubeBackend;
-use videocrm_core::{Privacy, UploadId, UploadJob, UploadStatus, VideoId, VideoStatus};
+use videocrm_core::{Privacy, PublishChannel, UploadId, UploadJob, UploadStatus, VideoId, VideoStatus};
 use videocrm_youtube::{Account, CredentialStore, Credentials, SavedLogin};
 
 #[gpui_kit::test]
@@ -44,12 +45,12 @@ fn connects_through_the_browser_and_keeps_the_account(cx: &mut TestAppContext) {
     assert_eq!(account.channel_handle.as_deref(), Some("@creator"));
     assert!(service.read_with(cx, |s, _| s.is_connected() && s.client().is_some()));
 
-    let saved = CredentialStore::new(workspace.dir.path().join("credentials.json")).load().unwrap().unwrap();
+    let [(path, saved)] = workspace.saved_logins().try_into().expect("one saved sign-in");
     assert_eq!(saved.account.as_ref(), Some(&account));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(workspace.dir.path().join("credentials.json")).unwrap().permissions().mode();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
     }
     // The channel picture is cached for the account badge.
@@ -58,12 +59,12 @@ fn connects_through_the_browser_and_keeps_the_account(cx: &mut TestAppContext) {
 
     // A restart finds the account again without a sign-in.
     let restarted = workspace.restart(cx);
-    assert_eq!(restarted.read_with(cx, |s, _| s.account().cloned()), Some(account));
+    assert_eq!(restarted.read_with(cx, |s, _| s.account().cloned()), Some(account.clone()));
 
-    restarted.update(cx, |service, cx| service.disconnect(cx));
+    restarted.update(cx, |service, cx| service.disconnect(account.key(), cx));
     cx.run_until_parked();
     assert_eq!(restarted.read_with(cx, |s, _| s.connection().clone()), Connection::Disconnected);
-    assert!(!workspace.dir.path().join("credentials.json").exists());
+    assert!(workspace.saved_logins().is_empty());
 }
 
 #[gpui_kit::test]
@@ -150,7 +151,7 @@ fn uploads_a_video_and_follows_processing(cx: &mut TestAppContext) {
         service.read_with(cx, |s, _| s.account().and_then(|account| account.video_count)).filter(|count| *count > 0)
     });
     assert_eq!(videos, 1);
-    let saved = CredentialStore::new(workspace.dir.path().join("credentials.json")).load().unwrap().unwrap();
+    let saved = workspace.saved_logins().pop().unwrap().1;
     assert_eq!(saved.account.and_then(|account| account.video_count), Some(1));
 
     // The custom thumbnail was set after the upload.
@@ -478,6 +479,7 @@ fn a_session_the_connection_cannot_use_is_not_offered_again(cx: &mut TestAppCont
         file_stamp: None,
         status: UploadStatus::Cancelled,
         session_url: Some("http://127.0.0.1:1/upload/youtube/v3/videos?uploadType=resumable&upload_id=old".into()),
+        channel: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -537,6 +539,7 @@ fn interrupted_uploads_become_resumable_failures_at_startup(cx: &mut TestAppCont
         file_stamp: None,
         status,
         session_url: session_url.map(str::to_owned),
+        channel: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -586,10 +589,13 @@ fn switching_the_backend_signs_out(cx: &mut TestAppContext) {
         scope: "openid".into(),
         id_token: None,
     };
+    // Saved by a release that kept one account: it moves next to the others.
     let path = workspace.dir.path().join("credentials.json");
     CredentialStore::new(&path).save(&SavedLogin { credentials, account: Some(account.clone()) }).unwrap();
     let service = workspace.restart(cx);
     assert_eq!(service.read_with(cx, |s, _| s.account().cloned()), Some(account));
+    assert!(!path.exists());
+    assert_eq!(workspace.saved_logins().len(), 1);
 
     workspace.state.update(cx, |state, cx| {
         state.update_settings(cx, |settings| {
@@ -598,7 +604,7 @@ fn switching_the_backend_signs_out(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert_eq!(service.read_with(cx, |s, _| s.connection().clone()), Connection::Disconnected);
-    assert!(!path.exists(), "the other backend’s tokens are forgotten");
+    assert!(workspace.saved_logins().is_empty(), "the other backend’s tokens are forgotten");
     let problem = service.read_with(cx, |s, _| s.config().err().cloned()).unwrap();
     assert_eq!(problem.as_ref(), "Add the client ID and client secret of your Google OAuth client.");
 
@@ -661,6 +667,7 @@ fn the_uploads_of_a_deleted_video_leave_the_list(cx: &mut TestAppContext) {
         file_stamp: None,
         status: UploadStatus::Done { video_id: "abc".into() },
         session_url: None,
+        channel: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -670,4 +677,194 @@ fn the_uploads_of_a_deleted_video_leave_the_list(cx: &mut TestAppContext) {
     workspace.state.update(cx, |state, cx| state.delete_videos(&[video_id], cx));
     cx.run_until_parked();
     assert!(service.read_with(cx, |s, _| s.jobs().is_empty()), "the Uploads page no longer lists it");
+}
+
+#[gpui_kit::test]
+fn each_video_uploads_to_its_own_account(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    workspace.sign_in(cx, "editor@example.com");
+    let service = workspace.service.clone();
+    let creator = workspace.account_key(cx, "creator@example.com");
+    let editor = workspace.account_key(cx, "editor@example.com");
+    // Listed by name; the first account signed in stays the default.
+    let names = service.read_with(cx, |s, _| s.accounts().iter().map(|account| account.name()).collect::<Vec<_>>());
+    assert_eq!(names, ["Demo Creator", "Second Channel"]);
+    let default = |cx: &mut TestAppContext| {
+        service.read_with(cx, |s, _| s.default_account().map(|account| account.key().to_owned()))
+    };
+    assert_eq!(default(cx), Some(creator.clone()));
+    assert_eq!(workspace.saved_logins().len(), 2, "one credentials file per account");
+
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let unchosen = workspace.create_video(cx, "Desk tour", |video| video.publish.file = Some(file.clone()));
+    let chosen = workspace.create_video(cx, "Behind the scenes", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.channel = Some(PublishChannel { id: editor.clone(), name: "Second Channel".into() });
+    });
+    let uploads = [unchosen, chosen]
+        .map(|video_id| service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap());
+    let youtube_ids = uploads.map(|upload| {
+        wait_until(cx, "the upload", |cx| {
+            cx.executor().advance_clock(Duration::from_secs(5));
+            match service.read_with(cx, |s, _| s.job(upload).map(|job| job.status.clone())) {
+                Some(UploadStatus::Done { video_id }) => Some(video_id),
+                Some(UploadStatus::Failed { error }) => panic!("upload failed: {error}"),
+                _ => None,
+            }
+        })
+    });
+
+    // YouTube has each video on its own channel, and so do the jobs and the links.
+    let received = emulators.uploads();
+    let channel_of = |youtube_id: &str| {
+        let upload = received.iter().find(|upload| upload["videoId"] == youtube_id).expect("upload on YouTube");
+        upload["channelId"].as_str().unwrap().to_owned()
+    };
+    assert_eq!(channel_of(&youtube_ids[0]), creator);
+    assert_eq!(channel_of(&youtube_ids[1]), editor);
+    let jobs = workspace.stored_jobs(cx);
+    let job_channel = |upload: UploadId| jobs.iter().find(|job| job.id == upload).and_then(|job| job.channel.clone());
+    assert_eq!(job_channel(uploads[0]), Some(creator.clone()));
+    assert_eq!(job_channel(uploads[1]), Some(editor.clone()));
+    assert_eq!(workspace.video(cx, chosen).youtube.unwrap().channel_id, editor);
+    // The video that went to the default account stays with it, whatever the default becomes.
+    let unchosen_video = workspace.video(cx, unchosen);
+    assert_eq!(unchosen_video.youtube.unwrap().channel_id, creator);
+    assert_eq!(
+        unchosen_video.publish.channel,
+        Some(PublishChannel { id: creator.clone(), name: "Demo Creator".into() })
+    );
+    service.update(cx, |service, cx| service.set_default(&editor, cx));
+    assert_eq!(default(cx), Some(editor.clone()));
+    assert_eq!(service.read_with(cx, |s, cx| s.channel_for(&workspace.video_in(cx, unchosen))), Some(creator));
+}
+
+#[gpui_kit::test]
+fn the_default_account_and_the_choices_survive_sign_outs(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    // Signing in to an account again replaces its sign-in rather than adding it twice.
+    workspace.sign_in(cx, "creator@example.com");
+    assert_eq!(workspace.service.read_with(cx, |s, _| s.accounts().len()), 1);
+    assert_eq!(workspace.saved_logins().len(), 1);
+    workspace.sign_in(cx, "editor@example.com");
+    let creator = workspace.account_key(cx, "creator@example.com");
+    let editor = workspace.account_key(cx, "editor@example.com");
+    workspace.service.update(cx, |service, cx| service.set_default(&editor, cx));
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let chosen = workspace.create_video(cx, "Behind the scenes", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.channel = Some(PublishChannel { id: editor.clone(), name: "Second Channel".into() });
+    });
+    let unchosen = workspace.create_video(cx, "Desk tour", |video| video.publish.file = Some(file.clone()));
+
+    // A restart signs both accounts in again and keeps the default.
+    let service = workspace.restart(cx);
+    let default = |cx: &mut TestAppContext| {
+        service.read_with(cx, |s, _| s.default_account().map(|account| account.key().to_owned()))
+    };
+    assert_eq!(service.read_with(cx, |s, _| s.accounts().len()), 2);
+    assert_eq!(default(cx), Some(editor.clone()));
+
+    // Disconnecting the default hands the videos without a choice to the other
+    // account, by choice; the video that chose it keeps the choice and says so.
+    service.update(cx, |service, cx| service.disconnect(&editor, cx));
+    cx.run_until_parked();
+    assert_eq!(default(cx), Some(creator.clone()));
+    assert_eq!(workspace.saved_logins().len(), 1);
+    assert_eq!(
+        service.read_with(cx, |s, cx| s.blocking_reasons(chosen, cx)),
+        [BlockingReason::AccountGone("Second Channel".into())]
+    );
+    assert!(matches!(
+        service.update(cx, |service, cx| service.start_upload(chosen, cx)),
+        Err(UploadError::Blocked(reasons)) if reasons == [BlockingReason::AccountGone("Second Channel".into())]
+    ));
+    assert_eq!(service.read_with(cx, |s, cx| s.blocking_reasons(unchosen, cx)), []);
+    let restarted = workspace.restart(cx);
+    assert_eq!(
+        restarted.read_with(cx, |s, _| s.default_account().map(|account| account.key().to_owned())),
+        Some(creator)
+    );
+}
+
+#[gpui_kit::test]
+fn stopped_uploads_from_the_one_account_release_resume_with_that_account(cx: &mut TestAppContext) {
+    let emulator = YoutubeBackend::Emulator { google_url: String::new(), youtube_url: String::new() };
+    let workspace = Workspace::open(cx, emulator);
+    let config = workspace.service.read_with(cx, |s, _| s.config().ok().cloned()).unwrap();
+    let account = Account {
+        email: "creator@example.com".into(),
+        name: Some("Demo Creator".into()),
+        picture: None,
+        channel_id: Some("UC1".into()),
+        channel_title: Some("Demo Creator".into()),
+        channel_handle: None,
+        channel_thumbnail: None,
+        subscriber_count: None,
+        video_count: None,
+        backend: config.backend_label(),
+    };
+    let credentials = Credentials {
+        access_token: "google_token".into(),
+        refresh_token: Some("refresh".into()),
+        expires_at: Utc::now() + chrono::TimeDelta::hours(1),
+        scope: "openid".into(),
+        id_token: None,
+    };
+    let path = workspace.dir.path().join("credentials.json");
+    CredentialStore::new(&path).save(&SavedLogin { credentials, account: Some(account) }).unwrap();
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Desk tour", |video| video.publish.file = Some(file.clone()));
+    let job = |status: UploadStatus, session_url: Option<&str>| UploadJob {
+        id: UploadId::new(),
+        video_id,
+        file: file.clone(),
+        file_stamp: None,
+        status,
+        session_url: session_url.map(str::to_owned),
+        channel: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let stopped = job(UploadStatus::Uploading { sent: 10, total: 100 }, Some("http://127.0.0.1:1/upload/session"));
+    let done = job(UploadStatus::Done { video_id: "abc".into() }, None);
+    workspace.insert_jobs(cx, &[&stopped, &done]);
+
+    // The release kept one account, so the stopped upload went to it: it stays
+    // with it, whichever account becomes the default later.
+    let service = workspace.restart(cx);
+    cx.run_until_parked();
+    let channel = |id: UploadId, cx: &mut TestAppContext| {
+        service.read_with(cx, |s, _| s.job(id).and_then(|job| job.channel.clone()))
+    };
+    assert_eq!(channel(stopped.id, cx).as_deref(), Some("UC1"));
+    // Finished uploads are left alone: who knows which account they went to.
+    assert_eq!(channel(done.id, cx), None);
+    let stored = workspace.stored_jobs(cx);
+    assert_eq!(stored.iter().find(|job| job.id == stopped.id).and_then(|job| job.channel.as_deref()), Some("UC1"));
+}
+
+#[gpui_kit::test]
+fn disconnecting_an_account_that_signs_in_again_stops_the_sign_in(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let key = workspace.account_key(cx, "creator@example.com");
+    service.update(cx, |service, cx| service.reconnect(&key, cx));
+    let url =
+        wait_until(cx, "the consent page", |cx| service.read_with(cx, |s, _| s.sign_in_url().map(ToString::to_string)));
+
+    service.update(cx, |service, cx| service.disconnect(&key, cx));
+    assert!(!service.read_with(cx, |s, _| s.is_signing_in()));
+    // Finishing the consent now brings nothing back.
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(publish_support::try_consent_in_browser(&url, "creator@example.com").is_err());
+    cx.run_until_parked();
+    assert!(service.read_with(cx, |s, _| s.accounts().is_empty()));
+    assert!(workspace.saved_logins().is_empty());
 }

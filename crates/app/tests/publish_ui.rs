@@ -14,7 +14,7 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Entity, ExternalPaths, FileDropEvent, PlatformInput, Render,
-    TestAppContext, Window, WindowBounds, WindowOptions, px, size,
+    SharedString, TestAppContext, Window, WindowBounds, WindowOptions, px, size,
 };
 use publish_support::{Emulators, Workspace, wait_until};
 use serde_json::json;
@@ -26,8 +26,8 @@ use videocrm::route::{Route, SettingsSection, VideoTab};
 use videocrm::state::{AppEvent, Severity};
 use videocrm_core::settings::YoutubeBackend;
 use videocrm_core::{
-    Block, BlockKind, DocumentKind, PipelineRun, Privacy, RunId, RunStatus, UploadId, UploadJob, UploadStatus, VideoId,
-    YoutubeLink,
+    Block, BlockKind, DocumentKind, PipelineRun, Privacy, PublishChannel, RunId, RunStatus, UploadId, UploadJob,
+    UploadStatus, VideoId, YoutubeLink,
 };
 use videocrm_youtube::{CredentialStore, RetryCause};
 
@@ -248,6 +248,7 @@ fn a_finished_upload_says_why_it_cannot_go_up_again(cx: &mut TestAppContext) {
         file_stamp: None,
         status: UploadStatus::Done { video_id: youtube_id.into() },
         session_url: None,
+        channel: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -290,6 +291,7 @@ fn after_a_failed_reupload_the_button_still_says_upload_again(cx: &mut TestAppCo
         file_stamp: None,
         status: UploadStatus::Failed { error: "The YouTube API quota for today is used up.".into() },
         session_url: None,
+        channel: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -466,6 +468,7 @@ fn the_uploads_page_offers_what_each_job_allows(cx: &mut TestAppContext) {
         file_stamp: None,
         status,
         session_url: session_url.map(str::to_owned),
+        channel: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -579,6 +582,7 @@ fn a_narrow_uploads_page_keeps_each_jobs_action_in_view(cx: &mut TestAppContext)
         file_stamp: None,
         status: UploadStatus::Uploading { sent: 10, total: 100 },
         session_url: Some("http://127.0.0.1:1/upload/session".into()),
+        channel: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -1012,7 +1016,7 @@ fn an_expired_sign_in_names_the_account_and_offers_reconnect(cx: &mut TestAppCon
     // and the access token has expired by the next start.
     let client = workspace.service.read_with(cx, |s, _| s.client()).unwrap();
     client.revoke().unwrap();
-    let store = CredentialStore::new(workspace.dir.path().join("credentials.json"));
+    let store = CredentialStore::new(workspace.saved_logins().pop().unwrap().0);
     let mut login = store.load().unwrap().unwrap();
     login.credentials.expires_at = Utc::now() - chrono::TimeDelta::hours(1);
     store.save(&login).unwrap();
@@ -1032,9 +1036,10 @@ fn an_expired_sign_in_names_the_account_and_offers_reconnect(cx: &mut TestAppCon
         assert_eq!(window.find("account-badge").label(), Some("Demo Creator, Sign in again. Open YouTube settings"));
     });
     let (handle, _settings) = open(cx, |window, cx| cx.new(|cx| YoutubeSettings::new(window, cx)));
+    let row = SharedString::from(format!("youtube-account-{}", account.key()));
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
-        window.within("youtube-connection").click("connect", cx);
+        window.within(row.clone()).click("reconnect", cx);
     });
     let url = wait_until(cx, "the consent page", |cx| match service.read_with(cx, |s, _| s.connection().clone()) {
         Connection::Connecting { authorize_url: Some(url) } => Some(url.to_string()),
@@ -1056,7 +1061,7 @@ fn an_expired_sign_in_blocks_the_upload_with_reconnect(cx: &mut TestAppContext) 
     // The grant ended and the access token expired by the next start.
     let client = workspace.service.read_with(cx, |s, _| s.client()).unwrap();
     client.revoke().unwrap();
-    let store = CredentialStore::new(workspace.dir.path().join("credentials.json"));
+    let store = CredentialStore::new(workspace.saved_logins().pop().unwrap().0);
     let mut login = store.load().unwrap().unwrap();
     login.credentials.expires_at = Utc::now() - chrono::TimeDelta::hours(1);
     store.save(&login).unwrap();
@@ -1352,4 +1357,200 @@ fn files_dropped_on_the_cards_become_the_video_and_thumbnail(cx: &mut TestAppCon
     let publish = workspace.video(cx, video_id).publish;
     assert_eq!(publish.file, Some(take));
     assert_eq!(publish.thumbnail, Some(image));
+}
+
+#[gpui_kit::test]
+fn the_publish_tab_chooses_the_account_a_video_uploads_to(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    workspace.sign_in(cx, "editor@example.com");
+    let editor = workspace.account_key(cx, "editor@example.com");
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Behind the scenes", |video| video.publish.file = Some(file.clone()));
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    cx.run_until_parked();
+
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        // Without a choice the video goes to the default account, and the card says so.
+        assert!(window.within("publish-account").find("publish-uses-default").visible());
+        window.within("publish-account").click("choose-account", cx);
+        // Demo Creator, Second Channel, a separator, Add account.
+        window.within("popup-menu").click(1usize, cx);
+    });
+    settle(cx);
+    assert_eq!(
+        workspace.video(cx, video_id).publish.channel,
+        Some(PublishChannel { id: editor.clone(), name: "Second Channel".into() })
+    );
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), []);
+
+    // Signed out since: the video keeps its choice and names it, rather than
+    // going to the other account.
+    workspace.service.update(cx, |service, cx| service.disconnect(&editor, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)),
+        [BlockingReason::AccountGone("Second Channel".into())]
+    );
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("publish-account-gone").visible());
+        assert!(window.find(("upload-blocker", 0usize)).visible());
+        // Choosing the other account is one click away.
+        window.within("publish-account").click("choose-account", cx);
+        window.within("popup-menu").click(0usize, cx);
+    });
+    settle(cx);
+    assert_eq!(workspace.video(cx, video_id).publish.channel.map(|channel| channel.name), Some("Demo Creator".into()));
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.blocking_reasons(cx)), []);
+}
+
+#[gpui_kit::test]
+fn adding_an_account_from_the_publish_tab_chooses_it_for_the_video(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let video_id = workspace.create_video(cx, "Behind the scenes", |_| {});
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    cx.run_until_parked();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.within("publish-account").click("choose-account", cx);
+        // Demo Creator, a separator, Add account.
+        window.within("popup-menu").click(2usize, cx);
+    });
+    let service = workspace.service.clone();
+    let url =
+        wait_until(cx, "the consent page", |cx| service.read_with(cx, |s, _| s.sign_in_url().map(ToString::to_string)));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        // The card follows the sign-in under the account it shows now.
+        assert!(window.within("publish-adding-account").find("cancel").visible());
+    });
+    publish_support::consent_in_browser(&url, "editor@example.com");
+    let channel = wait_until(cx, "the new account", |cx| workspace.video(cx, video_id).publish.channel);
+    assert_eq!(channel.name, "Second Channel");
+    assert_eq!(service.read_with(cx, |s, _| s.accounts().len()), 2);
+    // The default stays: only this video chose the new account.
+    assert_eq!(
+        service.read_with(cx, |s, _| s.default_account().map(|account| account.name())),
+        Some("Demo Creator".into())
+    );
+}
+
+#[gpui_kit::test]
+fn youtube_settings_list_every_account(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    workspace.sign_in(cx, "editor@example.com");
+    let creator = workspace.account_key(cx, "creator@example.com");
+    let editor = workspace.account_key(cx, "editor@example.com");
+    let service = workspace.service.clone();
+    let default =
+        |cx: &mut TestAppContext| service.read_with(cx, |s, _| s.default_account().map(|a| a.key().to_owned()));
+    let row = |key: &str| SharedString::from(format!("youtube-account-{key}"));
+    let (handle, _settings) = open(cx, |window, cx| cx.new(|cx| YoutubeSettings::new(window, cx)));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        let first = window.find(row(&creator)).bounds();
+        let second = window.find(row(&editor)).bounds();
+        assert!(first.bottom() <= second.top(), "listed by name");
+        // The default account has no Make default of its own.
+        assert!(window.within(row(&creator)).try_find("make-default").is_none());
+        window.within(row(&editor)).click("make-default", cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(default(cx), Some(editor.clone()));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.within(row(&editor)).click("disconnect", cx);
+        assert!(window.has_active_dialog(cx));
+    });
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        // Enter confirms, as the dialog's Disconnect.
+        window.press("enter", cx);
+    });
+    cx.run_until_parked();
+    // The other account takes over as the default.
+    assert_eq!(service.read_with(cx, |s, _| s.accounts().len()), 1);
+    assert_eq!(default(cx), Some(creator.clone()));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find(row(&editor)).is_none());
+        // Another account is one click away.
+        window.click("add-account", cx);
+    });
+    wait_until(cx, "the consent page", |cx| service.read_with(cx, |s, _| s.sign_in_url().map(ToString::to_string)));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.within("youtube-adding-account").find("copy-link").visible());
+        window.within("youtube-adding-account").click("cancel", cx);
+    });
+    cx.run_until_parked();
+    assert!(!service.read_with(cx, |s, _| s.is_signing_in()));
+    assert_eq!(
+        service.read_with(cx, |s, _| s.connection()),
+        Connection::Connected(service.read_with(cx, |s, _| s.account().cloned().unwrap()))
+    );
+}
+
+#[gpui_kit::test]
+fn a_failed_sign_in_shows_on_the_publish_tab_beside_the_account(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let video_id = workspace.create_video(cx, "Behind the scenes", |_| {});
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let service = workspace.service.clone();
+    service.update(cx, |service, cx| service.connect_for(video_id, cx));
+    let url =
+        wait_until(cx, "the consent page", |cx| service.read_with(cx, |s, _| s.sign_in_url().map(ToString::to_string)));
+    publish_support::cancel_in_browser(&url);
+    wait_until(cx, "the failed sign-in", |cx| service.read_with(cx, |s, _| s.sign_in_problem().map(|_| ())));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        // The card keeps the account it shows, and says why adding one didn't work.
+        assert!(window.find("publish-sign-in-failed").visible());
+    });
+    assert_eq!(workspace.video(cx, video_id).publish.channel, None);
+}
+
+#[gpui_kit::test]
+fn a_stopped_upload_names_the_account_it_resumes_to(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    workspace.sign_in(cx, "editor@example.com");
+    let creator = workspace.account_key(cx, "creator@example.com");
+    let editor = workspace.account_key(cx, "editor@example.com");
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    // The upload started on Second Channel; the video chose Demo Creator since.
+    let video_id = workspace.create_video(cx, "Behind the scenes", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.channel = Some(PublishChannel { id: creator.clone(), name: "Demo Creator".into() });
+    });
+    let stopped = UploadJob {
+        id: UploadId::new(),
+        video_id,
+        file: file.clone(),
+        file_stamp: None,
+        status: UploadStatus::Cancelled,
+        session_url: Some("http://127.0.0.1:1/upload/session".into()),
+        channel: Some(editor),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    workspace.insert_jobs(cx, &[&stopped]);
+    let _service = workspace.restart(cx);
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    cx.run_until_parked();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("resume-upload").visible());
+        assert!(window.find("resume-destination").visible());
+    });
 }

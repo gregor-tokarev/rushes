@@ -14,13 +14,16 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Subscription, Task, Window, div,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div,
 };
 use videocrm_core::settings::{DEFAULT_EMULATOR_GOOGLE_URL, DEFAULT_EMULATOR_YOUTUBE_URL, YoutubeBackend};
 
-use super::service::{Connection, EmulatorCheck, YoutubeService, probe_emulators};
-use super::ui::{ConnectionPanel, help_text, status_line};
+use super::service::{EmulatorCheck, YoutubeAccount, YoutubeService, probe_emulators};
+use super::ui::{
+    AccountSummary, ConnectionPanel, confirm_disconnect, help_text, needs_sign_in_line, reconnect_button,
+    sign_in_progress, status_line,
+};
 use crate::state::{AppEvent, AppState};
 use crate::ui::settings::{FIELD_MAX_WIDTH, SettingsField, SettingsSection};
 
@@ -332,21 +335,71 @@ impl YoutubeSettings {
             .test_support()
     }
 
-    /// The account and what can be done about the connection.
+    /// The signed-in accounts, the sign-in under way, and adding another account.
     fn render_account(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let connection = self.service.read(cx).connection().clone();
-        let note = match connection {
-            Connection::Connected(_) => {
-                Some("Disconnect to change the OAuth client or how VideoCRM connects to YouTube.")
-            }
-            Connection::Connecting { .. } => Some("Cancel the sign-in to change these settings."),
-            _ => None,
+        let service = self.service.read(cx);
+        if service.accounts().is_empty() {
+            let note = service.is_signing_in().then_some("Cancel the sign-in to change these settings.");
+            return v_flex()
+                .w_full()
+                .gap_3()
+                .child(ConnectionPanel::new("youtube-connection", self.service.clone()).manage(true))
+                .children(note.map(|note| help_text(note, cx)));
+        }
+        let theme = cx.theme();
+        let default = service.default_account().map(|account| account.key().to_owned());
+        let rows: Vec<AnyElement> = service
+            .accounts()
+            .iter()
+            .enumerate()
+            .map(|(ix, account)| {
+                account_row(&self.service, account, default.as_deref() == Some(account.key()), ix == 0, cx)
+                    .into_any_element()
+            })
+            .collect();
+        // A sign-in of an account the list doesn't show yet: it adds one.
+        let adding =
+            service.is_signing_in() && service.reconnecting().is_none_or(|key| service.find_account(key).is_none());
+        let problem = service.sign_in_problem().filter(|_| !service.is_signing_in()).cloned();
+        let add = {
+            let service = self.service.clone();
+            Button::new("add-account")
+                .label("Add account…")
+                .icon(IconName::Plus)
+                .small()
+                .outline()
+                .disabled(self.service.read(cx).is_signing_in() || self.service.read(cx).config().is_err())
+                .on_click(move |_, _, cx| service.update(cx, |service, cx| service.connect(cx)))
         };
         v_flex()
             .w_full()
-            .gap_3()
-            .child(ConnectionPanel::new("youtube-connection", self.service.clone()).manage(true))
-            .children(note.map(|note| help_text(note, cx)))
+            .gap_4()
+            .child(
+                v_flex()
+                    .id("youtube-accounts")
+                    .rounded(theme.radius_lg)
+                    .border_1()
+                    .border_color(theme.border)
+                    .children(rows)
+                    // Tests find the rows here.
+                    .test_support(),
+            )
+            .when(adding, |this| {
+                this.child(div().id("youtube-adding-account").child(sign_in_progress(
+                    &self.service,
+                    self.service.read(cx).sign_in_url().cloned(),
+                    cx,
+                )))
+            })
+            .when_some(problem, |this, problem| {
+                this.child(status_line(IconName::CircleAlert, theme.danger, "Couldn’t connect", Some(problem), cx))
+            })
+            .child(h_flex().child(add))
+            .child(help_text(
+                "Videos upload to the default account unless their Publish tab chooses another. Disconnect every \
+                 account to change the OAuth client or how VideoCRM connects to YouTube.",
+                cx,
+            ))
     }
 
     /// The developer switch: the local emulators instead of YouTube.
@@ -390,11 +443,11 @@ impl YoutubeSettings {
     /// The settings as the Settings page groups them, for the connection as it is now.
     pub fn sections(&self, cx: &App) -> Vec<SettingsSection<Self>> {
         let service = self.service.read(cx);
-        let connection = service.connection().clone();
         let env_override = service.is_env_override();
         let emulator = self.kind == BackendKind::Emulator || env_override;
-        let connected = matches!(connection, Connection::Connected(_));
-        let connecting = matches!(connection, Connection::Connecting { .. });
+        // Accounts asking for a new sign-in hold tokens of this client too.
+        let connected = !service.accounts().is_empty();
+        let connecting = service.is_signing_in();
         let ready = service.config().is_ok();
         let locked = connected || connecting;
         let mut sections = Vec::new();
@@ -444,8 +497,8 @@ impl YoutubeSettings {
             ),
         }
         let mut account = SettingsSection::new()
-            .title("Account")
-            .keywords(["connect", "sign in", "google", "youtube", "channel", "upload"])
+            .title("Accounts")
+            .keywords(["account", "connect", "sign in", "google", "youtube", "channel", "upload", "default"])
             .element(|this: &mut Self, _, cx| this.render_account(cx));
         // In the account's group rather than a group of its own: a group that
         // comes and goes as the client ID is typed would scroll the Settings
@@ -509,4 +562,71 @@ impl Render for YoutubeSettings {
             developer.map(|developer| div().pt_4().border_t_1().border_color(cx.theme().border).child(developer)),
         )
     }
+}
+
+/// One signed-in account: who it is, whether it is the default, and what can be
+/// done with it. A rejected sign-in shows the way back under it.
+fn account_row(
+    service: &Entity<YoutubeService>,
+    account: &YoutubeAccount,
+    is_default: bool,
+    first: bool,
+    cx: &App,
+) -> impl IntoElement + use<> {
+    let youtube = service.read(cx);
+    let key = account.key().to_owned();
+    let reconnecting = youtube.reconnecting() == Some(key.as_str());
+    let make_default = {
+        let (service, key) = (service.clone(), key.clone());
+        Button::new("make-default")
+            .label("Make default")
+            .small()
+            .ghost()
+            .on_click(move |_, _, cx| service.update(cx, |service, cx| service.set_default(&key, cx)))
+    };
+    let disconnect = {
+        let (service, key) = (service.clone(), key.clone());
+        Button::new("disconnect")
+            .label("Disconnect…")
+            .small()
+            .outline()
+            .on_click(move |_, window, cx| confirm_disconnect(service.clone(), key.clone(), window, cx))
+    };
+    v_flex()
+        .id(ElementId::Name(format!("youtube-account-{key}").into()))
+        .gap_3()
+        .p_3()
+        // The list's border closes the first row; a hairline separates the others.
+        .when(!first, |row| row.border_t_1().border_color(cx.theme().border))
+        .child(
+            h_flex()
+                .gap_3()
+                .items_start()
+                .child(
+                    div().flex_1().min_w_0().child(
+                        AccountSummary::new(account.account().clone(), account.avatar().map(ToOwned::to_owned))
+                            .tag(is_default.then_some("Default")),
+                    ),
+                )
+                .child(
+                    h_flex()
+                        .flex_shrink_0()
+                        .gap_2()
+                        // Without a channel there is nowhere to upload to.
+                        .when(!is_default && account.has_channel(), |this| this.child(make_default))
+                        .child(disconnect),
+                ),
+        )
+        .map(|this| {
+            if reconnecting {
+                this.child(sign_in_progress(service, youtube.sign_in_url().cloned(), cx))
+            } else if !account.is_connected() {
+                let reconnect = reconnect_button(service, account.account()).disabled(youtube.is_signing_in());
+                this.child(needs_sign_in_line(account.account(), youtube, cx)).child(h_flex().child(reconnect))
+            } else {
+                this
+            }
+        })
+        // Tests find an account's buttons through its row.
+        .test_support()
 }

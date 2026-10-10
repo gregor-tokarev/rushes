@@ -151,6 +151,7 @@ pub fn default_width(column: Column, properties: &[PropertyDef]) -> f32 {
             BuiltinField::Tags => 220.0,
             BuiltinField::Script => 180.0,
             BuiltinField::Format | BuiltinField::Youtube => 130.0,
+            BuiltinField::Channel => 170.0,
             BuiltinField::Status
             | BuiltinField::PublishDate
             | BuiltinField::Edit
@@ -269,6 +270,10 @@ fn sort_key(row: &VideoRow, column: Column, properties: &[PropertyDef]) -> SortK
                 None if row.left_youtube() => SortKey::Rank(LEFT_YOUTUBE_RANK),
                 None => SortKey::Empty,
             },
+            // The account the video chose; one that uploads to the default account has none.
+            BuiltinField::Channel => {
+                video.publish.channel.as_ref().map_or(SortKey::Empty, |channel| text_key(&channel.name))
+            }
             BuiltinField::CreatedAt => SortKey::Timestamp(video.created_at),
             BuiltinField::UpdatedAt => SortKey::Timestamp(video.updated_at),
         },
@@ -344,7 +349,7 @@ fn upload_rank(status: &UploadStatus) -> usize {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone as _;
-    use videocrm_core::{PropertyId, SelectOption, Video, ViewId, ViewKind};
+    use videocrm_core::{PropertyId, PublishChannel, SelectOption, Video, ViewId, ViewKind};
 
     use super::*;
 
@@ -574,6 +579,18 @@ mod tests {
         rows[2].latest_upload = Some(UploadStatus::Failed { error: "quota".into() });
         let youtube = Column::Builtin(BuiltinField::Youtube);
         assert_eq!(sorted(&rows, &[sort(youtube, SortDirection::Ascending)], &[]), ["failed", "gone", "never"]);
+    }
+
+    #[test]
+    fn channels_sort_by_name_with_the_default_account_last() {
+        let mut rows = vec![row("default", 0.0), row("second", 1.0), row("demo", 2.0)];
+        let channel = |name: &str| Some(PublishChannel { id: format!("UC-{name}"), name: name.into() });
+        rows[1].video.publish.channel = channel("Second Channel");
+        rows[2].video.publish.channel = channel("demo creator");
+
+        let column = Column::Builtin(BuiltinField::Channel);
+        assert_eq!(sorted(&rows, &[sort(column, SortDirection::Ascending)], &[]), ["demo", "second", "default"]);
+        assert_eq!(sorted(&rows, &[sort(column, SortDirection::Descending)], &[]), ["second", "demo", "default"]);
     }
 
     #[test]

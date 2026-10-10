@@ -2,6 +2,7 @@
 //! with an editor for each kind, and the dialog that adds a property.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use chrono::{NaiveDate, Utc};
 use gpui_kit::assets::IconName;
@@ -33,6 +34,7 @@ use crate::database::colors::{format_color, free_tag_color, tag_colors};
 use crate::database::{
     NO_OPTIONS_ON_PAGE, PropertyEditor, PropertyEditorMode, format, kind_icon, multi_select_list, query, select_menu,
 };
+use crate::publish::{ChannelChoices, ChooseChannel, YoutubeAccount, YoutubeEvent, YoutubeService};
 use crate::state::{AppEvent, AppState};
 
 /// Retained editors of one video's properties. Values are written through
@@ -79,7 +81,7 @@ impl PropertiesPanel {
         let state = AppState::global(cx);
         let calendar = cx.new(|cx| CalendarState::new(window, cx));
         let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("Add a tag…"));
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.subscribe_in(&state, window, |this, _, event: &AppEvent, window, cx| {
                 if *event == AppEvent::DataChanged {
                     this.sync(window, cx);
@@ -103,6 +105,14 @@ impl PropertiesPanel {
                 }
             }),
         ];
+        // The Channel row names accounts: it follows sign-ins, sign-outs and the default.
+        if let Some(service) = YoutubeService::try_global(cx) {
+            subscriptions.push(cx.subscribe(&service, |_, _, event: &YoutubeEvent, cx| {
+                if *event == YoutubeEvent::ConnectionChanged {
+                    cx.notify();
+                }
+            }));
+        }
         let mut panel = Self {
             state,
             video_id,
@@ -587,6 +597,46 @@ impl PropertiesPanel {
             .into_any_element()
     }
 
+    /// The YouTube account the video uploads to, with the signed-in accounts to
+    /// choose from. Without a choice it is the default account, muted.
+    fn render_channel(&self, video: &Video, cx: &mut Context<Self>) -> AnyElement {
+        let choices = ChannelChoices::of(video, cx);
+        let label = choices.label(cx);
+        if !choices.is_choosable() {
+            let muted = cx.theme().muted_foreground;
+            return div()
+                .id("property-channel-value")
+                .test_support()
+                .px_2()
+                .text_sm()
+                .map(|this| match label {
+                    Some(label) => this.child(label),
+                    None => this.text_color(muted).child("No YouTube account"),
+                })
+                .into_any_element();
+        }
+        let panel = cx.weak_entity();
+        let choose: ChooseChannel = Rc::new(move |key, cx| {
+            _ = panel.update(cx, |panel, cx| panel.set_channel(key, cx));
+        });
+        Button::new("property-channel-value")
+            .ghost()
+            .small()
+            .accessibility_label("Channel")
+            .children(label)
+            .dropdown_menu(move |menu, _, _| choices.menu(menu.check_side(Side::Right), choose.clone()))
+            .into_any_element()
+    }
+
+    /// Lets the video upload to the signed-in YouTube account `key`.
+    fn set_channel(&mut self, key: &str, cx: &mut Context<Self>) {
+        let channel = YoutubeService::try_global(cx)
+            .and_then(|service| service.read(cx).find_account(key).map(YoutubeAccount::publish_channel));
+        if let Some(channel) = channel {
+            self.edit(cx, |video| video.publish.channel = Some(channel));
+        }
+    }
+
     fn render_custom(&self, property: &PropertyDef, video: &Video, cx: &mut Context<Self>) -> AnyElement {
         let value = video.properties.get(&property.id);
         let id = property.id;
@@ -747,8 +797,8 @@ fn add_property_to_tables(property: PropertyDef, cx: &mut App) {
     });
 }
 
-/// Status, format, publish date, tags, media folder and YouTube.
-const BUILT_IN_ROWS: usize = 6;
+/// Status, format, publish date, tags, media folder, YouTube and channel.
+const BUILT_IN_ROWS: usize = 7;
 
 /// Kinds edited in a text input.
 fn is_text_like(kind: &PropertyKind) -> bool {
@@ -820,6 +870,7 @@ impl Render for PropertiesPanel {
         let tags = self.render_tags(&video, cx).into_any_element();
         let folder = self.render_media_folder(&video, cx).into_any_element();
         let youtube = self.render_youtube(&video, cx);
+        let channel = self.render_channel(&video, cx);
         let publish_date = self.render_date(DateField::Publish, cx);
 
         v_flex()
@@ -832,6 +883,7 @@ impl Render for PropertiesPanel {
             .child(self.render_row("tags", IconName::Tags, "Tags", tags, cx))
             .child(self.render_row("media-folder", IconName::Folder, "Media folder", folder, cx))
             .child(self.render_row("youtube", IconName::CirclePlay, "YouTube", youtube, cx))
+            .child(self.render_row("channel", IconName::CircleUser, "Channel", channel, cx))
             .children(custom)
             .child(
                 h_flex()

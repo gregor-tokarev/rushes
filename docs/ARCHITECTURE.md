@@ -69,7 +69,7 @@ database's write lock for seconds. The UI thread never waits for it:
 
 ## Data locations
 
-- Database and settings: `dirs::data_dir()/videocrm/` (`videocrm.db`, `credentials.json`).
+- Database and settings: `dirs::data_dir()/videocrm/` (`videocrm.db`, `youtube-accounts/`).
   Overridable with env `VIDEOCRM_DATA_DIR` (used by tests and screenshots).
   The running app holds an exclusive lock on `videocrm.lock` there; a second copy on the
   same data dir shows "VideoCRM is already open" and quits without opening the database.
@@ -78,7 +78,9 @@ database's write lock for seconds. The UI thread never waits for it:
 - Media root (default `dirs::video_dir()/VideoCRM`, fallback `~/Videos/VideoCRM`):
   one folder per video `<slug>-<short id>/` containing `footage/` (raw takes).
   video-use writes all outputs to `footage/edit/` (`final.mp4`, `project.md`, ...).
-- OAuth credentials: `credentials.json`, file mode 0600. Never logged.
+- OAuth credentials: one file per signed-in YouTube account in `youtube-accounts/`, file
+  mode 0600. Never logged. A `credentials.json` left by a release that kept one account
+  moves there at the next start.
 
 ## core (`videocrm-core`)
 
@@ -142,7 +144,7 @@ CLI, the video-use skill, ffmpeg/ffprobe and the ElevenLabs key are available.
 GPUI Kit app. Main pieces:
 
 - `AppState` entity: owns the database connections (see "Database access"), the write
-  queue, cached rows/properties/views, settings, connected account; all mutations go
+  queue, cached rows/properties/views, settings; all mutations go
   through it and emit events.
 - Shell: title bar, sidebar (Videos views, Pipelines, Uploads, recent pages, account,
   settings), routed main area.
@@ -152,7 +154,8 @@ GPUI Kit app. Main pieces:
   keyboard navigation between blocks, drag to reorder, inline formatting, live stats).
 - Video page: icon + title, properties panel, tabs Script / Notes / Footage & AI edit / Publish.
 - Onboarding (first run) and New-video wizard (templates).
-- Publish: YouTube account connect, metadata form, upload with progress, resume.
+- Publish: the video's YouTube account (one of several connected accounts, or the
+  default one), metadata form, upload with progress, resume.
 - AI edit: footage list, edit brief, run timeline (agent messages/tool calls), approve /
   feedback, output preview and "use for upload".
 

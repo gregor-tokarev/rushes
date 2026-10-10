@@ -10,6 +10,7 @@ use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::link::Link;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, Size, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -164,11 +165,18 @@ pub(super) struct AccountSummary {
     account: Account,
     avatar: Option<PathBuf>,
     compact: bool,
+    tag: Option<SharedString>,
 }
 
 impl AccountSummary {
     pub(super) fn new(account: Account, avatar: Option<PathBuf>) -> Self {
-        Self { account, avatar, compact: false }
+        Self { account, avatar, compact: false, tag: None }
+    }
+
+    /// A short state beside the name, such as "Default".
+    pub(super) fn tag(mut self, tag: Option<impl Into<SharedString>>) -> Self {
+        self.tag = tag.map(Into::into);
+        self
     }
 
     /// A smaller avatar and no video count, for narrow columns.
@@ -207,7 +215,15 @@ impl RenderOnce for AccountSummary {
                 v_flex()
                     .min_w_0()
                     .gap_0p5()
-                    .child(div().font_weight(FontWeight::MEDIUM).truncate().child(title))
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .gap_2()
+                            .child(div().min_w_0().font_weight(FontWeight::MEDIUM).truncate().child(title))
+                            .when_some(self.tag, |this, tag| {
+                                this.child(Tag::secondary().small().flex_shrink_0().child(tag))
+                            }),
+                    )
                     .child(div().text_sm().text_color(cx.theme().muted_foreground).truncate().child(account.email))
                     .when(!details.is_empty(), |this| this.child(help_text(details.join(" · "), cx))),
             )
@@ -229,20 +245,27 @@ fn plural(count: u64, noun: &str) -> String {
     if count == 1 { format!("{count_text} {noun}") } else { format!("{count_text} {noun}s") }
 }
 
-/// Where the connection stands and what can be done about it: connect, follow the
-/// browser sign-in (with the link to copy when no browser opened), or try again.
-/// Its buttons are scoped by `id`, so several panels can share a window.
+/// Where an account stands and what can be done about it: connect, follow the
+/// browser sign-in (with the link to copy when no browser opened), sign in again,
+/// or try again. Its buttons are scoped by `id`, so several panels can share a window.
 #[derive(IntoElement)]
 pub(super) struct ConnectionPanel {
     id: ElementId,
     service: Entity<YoutubeService>,
-    /// In settings: offer "Disconnect", and leave fixing the settings to the form below.
+    /// Which account, by key; the default account for `None`.
+    account: Option<SharedString>,
+    /// In settings: leave fixing the settings to the form below.
     manage: bool,
 }
 
 impl ConnectionPanel {
     pub(super) fn new(id: impl Into<ElementId>, service: Entity<YoutubeService>) -> Self {
-        Self { id: id.into(), service, manage: false }
+        Self { id: id.into(), service, account: None, manage: false }
+    }
+
+    pub(super) fn account(mut self, key: Option<impl Into<SharedString>>) -> Self {
+        self.account = key.map(Into::into);
+        self
     }
 
     pub(super) fn manage(mut self, manage: bool) -> Self {
@@ -256,9 +279,11 @@ impl RenderOnce for ConnectionPanel {
         let service = self.service.read(cx);
         let config_problem = service.config().err().cloned();
         let theme = cx.theme();
+        // One browser sign-in at a time: another one must end first.
+        let busy = service.is_signing_in();
         let connect = {
             let service = self.service.clone();
-            Button::new("connect").label("Connect").small().on_click(move |_, _, cx| {
+            Button::new("connect").label("Connect").small().disabled(busy).on_click(move |_, _, cx| {
                 service.update(cx, |service, cx| service.connect(cx));
             })
         };
@@ -267,109 +292,28 @@ impl RenderOnce for ConnectionPanel {
             state.update(cx, |state, cx| state.open_settings(SettingsSection::Youtube, cx));
         });
 
-        let body = match service.connection().clone() {
-            Connection::Connected(account) => h_flex()
-                .gap_3()
-                .justify_between()
-                .child(div().flex_1().min_w_0().child(
-                    // Settings has room for every detail; the Publish side column does not.
-                    AccountSummary::new(account.clone(), service.avatar().map(ToOwned::to_owned)).compact(!self.manage),
-                ))
-                .when(self.manage, |this| {
-                    let service = self.service.clone();
-                    let name = display_name(&account);
-                    this.child(
-                        Button::new("disconnect").label("Disconnect…").small().outline().on_click(
-                            move |_, window, cx| confirm_disconnect(service.clone(), name.clone(), window, cx),
-                        ),
-                    )
-                }),
-            Connection::Connecting { authorize_url } => {
-                let cancel = {
-                    let service = self.service.clone();
-                    Button::new("cancel")
-                        .label("Cancel")
-                        .small()
-                        .outline()
-                        .on_click(move |_, _, cx| service.update(cx, |service, cx| service.cancel(cx)))
-                };
-                let google = service.config().is_ok_and(|config| config.is_google());
-                // Before the browser opens, the sign-in is checked: emulators up, client known.
-                let (title, help) = match &authorize_url {
-                    None => ("Getting ready to sign in…", None),
-                    Some(_) => (
-                        "Finish signing in with your browser",
-                        Some(if google {
-                            "If no browser opened, copy the sign-in link and open it in a browser on this computer. \
-                             If Google shows “Error 401: invalid_client”, the client ID or secret is wrong: cancel \
-                             and copy them again."
-                        } else {
-                            "If no browser opened, copy the sign-in link and open it in a browser on this computer."
-                        }),
-                    ),
-                };
-                v_flex()
-                    .gap_3()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_start()
-                            .child(div().pt_0p5().child(Spinner::new().small().color(theme.muted_foreground)))
-                            .child(
-                                v_flex()
-                                    .min_w_0()
-                                    .gap_0p5()
-                                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
-                                    .when_some(help, |this, help| this.child(help_text(help, cx))),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .when_some(authorize_url, |this, url| {
-                                this.child(
-                                    Button::new("copy-link")
-                                        .label("Copy link")
-                                        .icon(IconName::Copy)
-                                        .small()
-                                        .outline()
-                                        .on_click(move |_, window, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(url.to_string()));
-                                            let copied = Notification::success(
-                                                "Open it in a browser on this computer to finish signing in.",
-                                            )
-                                            .title("Sign-in link copied");
-                                            window.push_notification(copied, cx);
-                                        }),
-                                )
-                            })
-                            .child(cancel),
-                    )
-            }
+        let body = match service.connection_for(self.account.as_deref()) {
+            // Settings has room for every detail; the Publish side column does not.
+            Connection::Connected(account) => div().child(
+                AccountSummary::new(
+                    account.clone(),
+                    service.find_account(account.key()).and_then(|known| known.avatar()).map(ToOwned::to_owned),
+                )
+                .compact(!self.manage),
+            ),
+            Connection::Connecting { authorize_url } => sign_in_progress(&self.service, authorize_url, cx),
             Connection::NeedsSignIn(account) => {
-                let who = match &account.channel_handle {
-                    Some(handle) => format!("{} ({handle})", display_name(&account)),
-                    None => display_name(&account),
-                };
-                let mut detail = format!("Reconnect to keep uploading as {who}.");
-                if service.config().is_ok_and(|config| config.is_google()) {
-                    detail.push_str(" Google ends the sign-ins of apps in Testing after 7 days.");
-                }
                 let action = match (&config_problem, self.manage) {
-                    (Some(_), true) => connect.label("Reconnect").primary().disabled(true),
-                    (Some(_), false) => open_settings,
-                    (None, _) => connect.label("Reconnect").primary(),
+                    (Some(_), true) => Some(reconnect_button(&self.service, &account).disabled(true)),
+                    (Some(_), false) => None,
+                    (None, _) => Some(reconnect_button(&self.service, &account).disabled(busy)),
                 };
-                v_flex()
-                    .gap_3()
-                    .child(status_line(
-                        IconName::TriangleAlert,
-                        theme.warning,
-                        "Sign in again",
-                        Some(detail.into()),
-                        cx,
-                    ))
-                    .child(h_flex().child(action))
+                v_flex().gap_3().child(needs_sign_in_line(&account, service, cx)).child(h_flex().map(
+                    |this| match action {
+                        Some(button) => this.child(button),
+                        None => this.child(open_settings),
+                    },
+                ))
             }
             Connection::Failed(message) => {
                 let action = match (&config_problem, self.manage) {
@@ -406,23 +350,126 @@ impl RenderOnce for ConnectionPanel {
     }
 }
 
-fn confirm_disconnect(service: Entity<YoutubeService>, name: String, window: &mut Window, cx: &mut App) {
-    let uploading = service.read(cx).active_upload_count() > 0;
-    window.open_alert_dialog(cx, move |dialog, _, _| {
+/// "Sign in again · Reconnect to keep uploading as Demo Creator (@creator)."
+pub(super) fn needs_sign_in_line(account: &Account, service: &YoutubeService, cx: &App) -> Div {
+    let who = match &account.channel_handle {
+        Some(handle) => format!("{} ({handle})", display_name(account)),
+        None => display_name(account),
+    };
+    let mut detail = format!("Reconnect to keep uploading as {who}.");
+    if service.config().is_ok_and(|config| config.is_google()) {
+        detail.push_str(" Google ends the sign-ins of apps in Testing after 7 days.");
+    }
+    status_line(IconName::TriangleAlert, cx.theme().warning, "Sign in again", Some(detail.into()), cx)
+}
+
+/// "Reconnect" for an account whose sign-in YouTube no longer accepts.
+pub(super) fn reconnect_button(service: &Entity<YoutubeService>, account: &Account) -> Button {
+    let service = service.clone();
+    let key = account.key().to_owned();
+    Button::new("reconnect")
+        .label("Reconnect")
+        .small()
+        .primary()
+        .on_click(move |_, _, cx| service.update(cx, |service, cx| service.reconnect(&key, cx)))
+}
+
+/// The browser sign-in under way: what to do in the browser, the link to copy
+/// once there is one, and Cancel.
+pub(super) fn sign_in_progress(service: &Entity<YoutubeService>, authorize_url: Option<SharedString>, cx: &App) -> Div {
+    let theme = cx.theme();
+    let cancel = {
         let service = service.clone();
-        let consequence = if uploading {
-            "VideoCRM forgets the sign-in and Google revokes it. Uploads in progress stop; you can resume them after connecting again."
-        } else {
-            "VideoCRM forgets the sign-in and Google revokes it. Connect again to upload."
-        };
+        Button::new("cancel")
+            .label("Cancel")
+            .small()
+            .outline()
+            .on_click(move |_, _, cx| service.update(cx, |service, cx| service.cancel(cx)))
+    };
+    let google = service.read(cx).config().is_ok_and(|config| config.is_google());
+    // Before the browser opens, the sign-in is checked: emulators up, client known.
+    let (title, help) = match &authorize_url {
+        None => ("Getting ready to sign in…", None),
+        Some(_) => (
+            "Finish signing in with your browser",
+            Some(if google {
+                "If no browser opened, copy the sign-in link and open it in a browser on this computer. \
+                 If Google shows “Error 401: invalid_client”, the client ID or secret is wrong: cancel \
+                 and copy them again."
+            } else {
+                "If no browser opened, copy the sign-in link and open it in a browser on this computer."
+            }),
+        ),
+    };
+    v_flex()
+        .gap_3()
+        .child(
+            h_flex()
+                .gap_2()
+                .items_start()
+                .child(div().pt_0p5().child(Spinner::new().small().color(theme.muted_foreground)))
+                .child(
+                    v_flex()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
+                        .when_some(help, |this, help| this.child(help_text(help, cx))),
+                ),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .when_some(authorize_url, |this, url| {
+                    this.child(
+                        Button::new("copy-link").label("Copy link").icon(IconName::Copy).small().outline().on_click(
+                            move |_, window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(url.to_string()));
+                                let copied = Notification::success(
+                                    "Open it in a browser on this computer to finish signing in.",
+                                )
+                                .title("Sign-in link copied");
+                                window.push_notification(copied, cx);
+                            },
+                        ),
+                    )
+                })
+                .child(cancel),
+        )
+}
+
+/// Asks before signing the account `key` out, saying what happens to its uploads
+/// and to the videos that upload to the default account.
+pub(super) fn confirm_disconnect(service: Entity<YoutubeService>, key: String, window: &mut Window, cx: &mut App) {
+    let youtube = service.read(cx);
+    let Some(account) = youtube.find_account(&key) else { return };
+    let name = display_name(account.account());
+    let uploading =
+        youtube.jobs().iter().any(|job| youtube.is_active(job.id) && job.channel.as_deref() == Some(key.as_str()));
+    let successor = (youtube.default_account().map(|default| default.key()) == Some(key.as_str()))
+        .then(|| youtube.accounts().iter().find(|other| other.key() != key))
+        .flatten()
+        .map(|other| display_name(other.account()));
+    let mut consequence = "VideoCRM forgets the sign-in and Google revokes it.".to_owned();
+    if uploading {
+        consequence.push_str(" Its uploads in progress stop; you can resume them after connecting it again.");
+    }
+    match successor {
+        Some(successor) => {
+            consequence.push_str(&format!(" Videos that haven’t chosen an account upload to “{successor}” instead."))
+        }
+        None if !uploading => consequence.push_str(" Connect it again to upload as it."),
+        None => {}
+    }
+    window.open_alert_dialog(cx, move |dialog, _, _| {
+        let (service, key) = (service.clone(), key.clone());
         dialog
             .title(format!("Disconnect “{name}”?"))
-            .description(consequence)
+            .description(consequence.clone())
             .confirm()
             .ok_text("Disconnect")
             .ok_variant(ButtonVariant::Danger)
             .on_ok(move |_, _, cx| {
-                service.update(cx, |service, cx| service.disconnect(cx));
+                service.update(cx, |service, cx| service.disconnect(&key, cx));
                 true
             })
     });

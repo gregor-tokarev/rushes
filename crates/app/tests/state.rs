@@ -338,6 +338,7 @@ fn ai_edits_and_uploads_change_during_a_lock_without_waiting_and_land_after_it(c
         file_stamp: None,
         status: UploadStatus::Failed { error: "Interrupted — you can resume".into() },
         session_url: Some("http://127.0.0.1:9/upload/session".into()),
+        channel: None,
         created_at: now,
         updated_at: now,
     };

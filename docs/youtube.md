@@ -148,7 +148,8 @@ views and the `YoutubeService` global.
 | `PublishPanel::new(video_id, window, cx)` | `panel.rs` | Publish tab of a video page |
 | `UploadsPage::new(window, cx)` | `uploads_page.rs` | All upload jobs, newest first |
 | `YoutubeSettings::new(window, cx)` | `settings.rs` | YouTube section of Settings and onboarding |
-| `AccountBadge::new(window, cx)` | `badge.rs` | Sidebar footer account; click opens `Route::Settings` |
+| `AccountBadge::new(window, cx)` | `badge.rs` | Sidebar footer: the default account; click opens `Route::Settings` |
+| `ChannelChoices::of(video, cx)` | `channel.rs` | Which account a video uploads to and the menu to choose another, for the Channel column, the Channel property and the Publish tab |
 | rules, chapters, progress maths | `rules.rs`, `chapters.rs`, `transfer.rs` | Pure functions, unit tested |
 
 The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `ListOrdered`,
@@ -167,12 +168,18 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   connection with Connect, and what Google will show once Connect is usable (unverified-app
   warning, permission boxes, 7-day reconnect in Testing, private uploads until the audit).
   The emulator is a switch under the folded **Developer: local emulator**; turning it on
-  puts the emulator addresses where the client fields were. Signed in, the section shows
-  the account first. The service re-reads it on `AppEvent::SettingsChanged`; a different backend signs
-  out, because tokens belong to the backend that issued them (`Account::backend`).
-- `connection()` is `Disconnected | Connecting { authorize_url } | Connected(Account) |
-  NeedsSignIn(Account) | Failed(message)`; the service emits `YoutubeEvent::ConnectionChanged` and notifies on
-  every change. `connect` runs the sign-in on a `youtube-sign-in` thread. Before the
+  puts the emulator addresses where the client fields were. Signed in, the section lists
+  the accounts first (see "Accounts" below); the client fields wait until every account is
+  disconnected. The service re-reads it on `AppEvent::SettingsChanged`; a different backend signs
+  every account out, because tokens belong to the backend that issued them (`Account::backend`).
+- `connection_for(key)` says where one account stands: `Connected(Account)`,
+  `NeedsSignIn(Account)`, or `Connecting { authorize_url }` while that account signs in again.
+  Without such an account it is the sign-in that adds one (`Connecting`), the last failed
+  sign-in (`Failed(message)`) or `Disconnected`; `connection()` is the default account's. The
+  service emits `YoutubeEvent::ConnectionChanged` and notifies on every change. `connect`
+  adds an account, `reconnect(key)` signs one in again and `connect_for(video_id)` adds one
+  that the video then uploads to; one browser sign-in runs at a time, on a
+  `youtube-sign-in` thread. Before the
   browser opens it checks that the sign-in can work: for the emulators both must answer
   (the same probe as **Check**), and `check_client` must accept the OAuth client. Either
   failure ends the sign-in at once with a sentence saying what to fix ("Google doesn’t
@@ -183,13 +190,15 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   Google, that "Error 401: invalid_client" there means a wrong client ID or secret; the
   Upload card's blocker says the same ("Finish signing in with your browser."). Cancelling
   a reconnect of a `NeedsSignIn` account leaves it `NeedsSignIn`, also when it is cancelled
-  on the consent page (`error=access_denied`, with a "Sign-in cancelled" notice); any other
-  cancelled sign-in leaves VideoCRM disconnected.
+  on the consent page (`error=access_denied`, with a "Sign-in cancelled" notice); a
+  cancelled sign-in that would have added an account leaves the accounts as they were.
+  Picking another account on the consent page while reconnecting one adds (or signs in
+  again) the picked one, and a notice says the other still needs its sign-in.
 - The sign-in thread only produces the client and account. The service saves the login
   when it accepts the result, so a cancelled or superseded sign-in leaves no file behind.
   Refreshed tokens go to the file only while that sign-in lasts: a request still running
   after **Disconnect** cannot write the tokens back.
-- At startup the saved login is restored without network access, then the account is read
+- At startup the saved logins are restored without network access, then each account is read
   again in the background (it is also re-read after each upload finishes processing) so
   the subscriber and video counts stay current. Rejected tokens (`needs_sign_in`, such as
   the weekly expiry of apps in Testing) turn the connection into `NeedsSignIn(account)`:
@@ -198,12 +207,56 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   button, and the badge's dot turns amber.
 - The channel picture is downloaded once per URL into `<data dir>/avatars/` for the
   account card and the sidebar badge; without it the avatar shows initials.
-- `disconnect` cancels running uploads (they stay resumable), removes the credentials file
-  and revokes the grant in the background.
+- `disconnect(key)` cancels that account's running uploads (they stay resumable), removes
+  its credentials file and revokes the grant in the background.
+
+### Accounts
+
+- Several accounts can be signed in at once, for example a main channel and a second
+  one. Each has its own client and credentials file in `<data dir>/youtube-accounts/`
+  (one JSON file per sign-in, mode 0600). A `credentials.json` left in the data dir by a
+  release that kept one account moves there at the next start, and the stopped uploads of
+  that release are recorded as that account's, so they resume with it. Accounts are told
+  apart by `Account::key()`: the channel id, or the email while the account has no
+  channel. Signing in to an account that is already there replaces its earlier sign-in.
+  An account that gets a channel is known by it from then on: the default, the videos
+  that chose it and its uploads follow (`rekey`), whether a refresh or a new sign-in
+  notices it.
+- One browser sign-in runs at a time: while one is open, Connect, Reconnect and **Add
+  account…** are disabled everywhere. Disconnecting an account that is signing in again
+  cancels that sign-in, so finishing it in the browser doesn't bring the account back.
+- One account is the default (settings key `youtube.default_account`): the first one
+  signed in, until **Make default** in Settings → YouTube picks another. Disconnecting the
+  default hands it to another account by storing that choice, so an account added later
+  that sorts first by name never takes over the videos without a choice.
+- A video uploads to `PublishSettings::channel` (`PublishChannel { id, name }`, the
+  account's key and its name when chosen), or to the default account while that is
+  `None`. It is chosen in the Publish tab's account card (**Change** lists the accounts
+  with a channel, by name with the handle or email when two share a name, and **Add
+  account…**, which signs one in and chooses it for the video),
+  in the videos table's **Channel** column and in the video page's **Channel** property;
+  the table and the property show the default account muted. The choice can't change
+  while the video uploads.
+- Every upload job records the account it goes to (`UploadJob::channel`); resuming uses
+  that account. Uploading a video without a choice records the account it went to as the
+  video's choice, so changing the default later doesn't move its next upload. With
+  several accounts (or when a stopped upload goes elsewhere than the video's account now),
+  the Upload card names the account ("Uploads to Second Channel as private.", "Uploading
+  to …", "Resume continues the upload to …") and the Uploads page shows it next to the
+  file. The account card also shows why the last sign-in failed beside the account it
+  shows.
+- A video whose chosen account was disconnected keeps the choice and never falls back to
+  another account: the account card says "“Second Channel” isn’t connected" with
+  **Connect** and **Change**, and the upload is blocked with "“Second Channel” isn’t
+  connected. Connect it again or choose another account."
+- Only the owner sees a private video, so `refresh_youtube_video(link)` asks with the
+  account of the channel the video was uploaded to, and only while it is signed in.
+- The sidebar badge names the default account and, with several, how many there are
+  ("@creator · 2 accounts"); its dot turns amber while any account needs a new sign-in.
 
 ### Uploads
 
-- `start_upload(video_id, cx)` checks `blocking_reasons` first: connected, a video file that
+- `start_upload(video_id, cx)` checks `blocking_reasons` first: the video's account connected, a video file that
   exists, title 1–100 characters without `<` or `>` (empty falls back to the video
   title), description up to 5,000 bytes, tags up to 500 characters counted the way
   YouTube does (commas between tags, quotes around tags with spaces), and a schedule only
@@ -323,10 +376,12 @@ cargo test -p videocrm --test publish_ui    # the views in headless windows, cli
 `tests/publish.rs` covers sign-in (consent posted like a browser), restart, disconnect,
 cancelling a sign-in, an upload verified byte for byte through `/_emulator/uploads`, a
 scheduled upload, cancel and resume, validation, interrupted-job recovery and backend
-switches, and deleting a video while it uploads. `tests/publish_ui.rs` drives the form,
-chapters, Uploads page, settings and badge, connect-and-upload from the Publish tab, the
-retry state during an outage, the done card, an expired sign-in, file drops, and a stopped
-emulator failing fast. Both start their own emulators and skip with
+switches, deleting a video while it uploads, two accounts uploading each video to its own
+channel, and the default account and the videos' choices across sign-outs and restarts.
+`tests/publish_ui.rs` drives the form, chapters, Uploads page, settings and badge,
+connect-and-upload from the Publish tab, the retry state during an outage, the done card,
+an expired sign-in, file drops, a stopped emulator failing fast, choosing a video's
+account (and adding one) from the Publish tab, and the account list in settings. Both start their own emulators and skip with
 a notice without Node.
 
 ## Connecting a real YouTube account

@@ -252,6 +252,18 @@ pub struct PublishSettings {
     /// File that will be uploaded. Usually the AI edit output.
     pub file: Option<PathBuf>,
     pub thumbnail: Option<PathBuf>,
+    /// The YouTube account the video uploads to; `None` uploads to the default account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<PublishChannel>,
+}
+
+/// The YouTube account a video uploads to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishChannel {
+    /// The account's key: its channel id, or its email while it has no channel.
+    pub id: String,
+    /// The channel's name when it was chosen, shown while the account isn't connected.
+    pub name: String,
 }
 
 /// Where a video lives on YouTube once uploaded.
@@ -402,12 +414,14 @@ pub enum BuiltinField {
     Edit,
     /// Derived: YouTube upload state.
     Youtube,
+    /// The YouTube account the video uploads to (`PublishSettings::channel`).
+    Channel,
     CreatedAt,
     UpdatedAt,
 }
 
 impl BuiltinField {
-    pub const ALL: [BuiltinField; 10] = [
+    pub const ALL: [BuiltinField; 11] = [
         BuiltinField::Title,
         BuiltinField::Status,
         BuiltinField::Format,
@@ -416,6 +430,7 @@ impl BuiltinField {
         BuiltinField::Script,
         BuiltinField::Edit,
         BuiltinField::Youtube,
+        BuiltinField::Channel,
         BuiltinField::CreatedAt,
         BuiltinField::UpdatedAt,
     ];
@@ -430,6 +445,7 @@ impl BuiltinField {
             BuiltinField::Script => "Script",
             BuiltinField::Edit => "AI edit",
             BuiltinField::Youtube => "YouTube",
+            BuiltinField::Channel => "Channel",
             BuiltinField::CreatedAt => "Created",
             BuiltinField::UpdatedAt => "Updated",
         }
@@ -444,6 +460,7 @@ impl BuiltinField {
                 | BuiltinField::Format
                 | BuiltinField::PublishDate
                 | BuiltinField::Tags
+                | BuiltinField::Channel
         )
     }
 }
@@ -734,6 +751,9 @@ pub struct UploadJob {
     pub status: UploadStatus,
     /// Resumable session URL returned by YouTube; lets an interrupted upload continue.
     pub session_url: Option<String>,
+    /// Key of the YouTube account the upload goes to (see [`PublishChannel::id`]);
+    /// `None` for jobs stored before uploads recorded it.
+    pub channel: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
