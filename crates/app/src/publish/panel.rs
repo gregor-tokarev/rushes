@@ -1,7 +1,9 @@
 //! The Publish tab: YouTube metadata on the left, account, file, thumbnail and the
 //! upload itself on the right.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::{DateTime, Local, NaiveTime, TimeDelta, TimeZone as _, Utc};
@@ -27,8 +29,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, ExternalPaths, FontWeight, InteractiveElement as _, IntoElement,
-    ObjectFit, ParentElement as _, PathPromptOptions, Rems, Render, SharedString, Styled as _, StyledImage as _,
-    Subscription, Task, Window, div, img, rems,
+    ObjectFit, ParentElement as _, PathPromptOptions, Pixels, Rems, Render, SharedString, Styled as _,
+    StyledImage as _, Subscription, Task, Window, canvas, div, img, rems,
 };
 use videocrm_core::document::DEFAULT_WPM;
 use videocrm_core::input::{PathInputError, expand_user_path};
@@ -45,7 +47,7 @@ use super::rules::{
 };
 use super::service::{YoutubeEvent, YoutubeService};
 use super::transfer::{format_bytes, format_duration, format_eta, format_speed};
-use super::ui::{ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, status_line};
+use super::ui::{ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, status_line, youtube_link};
 use super::upload::{ProcessingOutcome, UploadError};
 use crate::state::{AppEvent, AppState};
 
@@ -56,6 +58,10 @@ const PRIVACY_HELP: [&str; 3] =
 const THUMBNAIL_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "gif", "bmp"];
 /// Wide enough for the cards' buttons; the form takes the rest of the page column.
 const SIDE_COLUMN_WIDTH: Rems = Rems(17.);
+/// The narrowest the form gets beside the side column.
+const FORM_MIN_WIDTH: Rems = Rems(20.);
+/// Form, gap and side column; a narrower panel stacks them.
+const TWO_COLUMN_MIN_WIDTH: Rems = Rems(FORM_MIN_WIDTH.0 + 2. + SIDE_COLUMN_WIDTH.0);
 
 #[derive(Clone)]
 struct CategoryItem(Category);
@@ -236,6 +242,9 @@ pub struct PublishPanel {
     chapters: Result<ChapterList, &'static str>,
     /// Who could watch before "Schedule" forced private, restored when it is turned off.
     unscheduled_privacy: Option<Privacy>,
+    /// The panel's width in the last frame; below [`TWO_COLUMN_MIN_WIDTH`] the
+    /// side cards go under the form.
+    width: Rc<Cell<Option<Pixels>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -336,6 +345,7 @@ impl PublishPanel {
             thumbnail_size: None,
             chapters: Err(NO_SECTIONS),
             unscheduled_privacy: None,
+            width: Rc::default(),
             _subscriptions: subscriptions,
         };
         panel.refresh_chapters(cx);
@@ -778,16 +788,18 @@ impl PublishPanel {
         let uploaded = self.state.read(cx).video(self.video_id).is_some_and(|video| video.youtube.is_some());
         v_flex()
             .gap_5()
-            .child(v_flex().gap_1().child(section_heading("Details", cx)).when(uploaded, |this| {
+            .child(v_flex().gap_0p5().child(section_heading("Details")).when(uploaded, |this| {
                 // The form doesn't reach the uploaded video; saying so avoids edits that go nowhere.
+                // It reads as the section's description.
                 this.child(
                     div()
                         .id("publish-next-upload-note")
-                        .child(help_text(
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(
                             "This video is on YouTube. Changes here apply to the next upload; change the \
-                                 uploaded one in YouTube Studio.",
-                            cx,
-                        ))
+                             uploaded one in YouTube Studio.",
+                        )
                         .test_support(),
                 )
             }))
@@ -852,7 +864,7 @@ impl PublishPanel {
         let google = self.service.read(cx).config().is_ok_and(|config| config.is_google());
         v_flex()
             .gap_5()
-            .child(section_heading("Visibility", cx))
+            .child(section_heading("Visibility"))
             .child(
                 FieldRow::new("Who can watch")
                     .help(if scheduled {
@@ -906,7 +918,7 @@ impl PublishPanel {
     }
 
     fn render_audience(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex().gap_5().child(section_heading("Audience", cx)).child(
+        v_flex().gap_5().child(section_heading("Audience")).child(
             FieldRow::new("Is this video made for kids?")
                 .help("YouTube requires an answer for every video. Videos made for kids have comments and personalized ads turned off.")
                 .control(
@@ -932,17 +944,7 @@ impl PublishPanel {
             .video(self.video_id)
             .and_then(|video| video.youtube.as_ref())
             .map(|link| link.url.clone());
-        let open_link =
-            |url: String| {
-                div()
-                    .id("open-on-youtube")
-                    .text_sm()
-                    .child(Link::new("open-on-youtube-link").href(url).child(
-                        h_flex().gap_1().child("Open on YouTube").child(Icon::new(IconName::ExternalLink).xsmall()),
-                    ))
-                    // Links are not observable on their own; tests find the link through this frame.
-                    .test_support()
-            };
+        let open_link = |url: String| youtube_link("open-on-youtube", url);
 
         let body = match &job {
             Some(job) if service.is_active(job.id) => {
@@ -1203,13 +1205,15 @@ impl PublishPanel {
         v_flex()
             .gap_3()
             .child(
-                Button::new("upload-to-youtube")
-                    .label("Upload to YouTube")
-                    .icon(IconName::Upload)
-                    .primary()
-                    .w_full()
-                    .disabled(!reasons.is_empty())
-                    .on_click(cx.listener(|this, _, window, cx| this.start_upload(window, cx))),
+                h_flex().child(
+                    Button::new("upload-to-youtube")
+                        .label("Upload to YouTube")
+                        .icon(IconName::Upload)
+                        .primary()
+                        .small()
+                        .disabled(!reasons.is_empty())
+                        .on_click(cx.listener(|this, _, window, cx| this.start_upload(window, cx))),
+                ),
             )
             .map(|this| {
                 if reasons.is_empty() {
@@ -1407,17 +1411,18 @@ impl PublishPanel {
 }
 
 impl Render for PublishPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let two_columns = TWO_COLUMN_MIN_WIDTH.to_pixels(window.rem_size());
+        let stacked = self.width.get().is_some_and(|width| width < two_columns);
         let form = v_flex()
             .flex_1()
-            .min_w(rems(20.))
+            .min_w(FORM_MIN_WIDTH)
             .gap_10()
             .child(self.render_details(cx))
             .child(self.render_visibility(cx))
             .child(self.render_audience(cx));
         let side = v_flex()
-            .w(SIDE_COLUMN_WIDTH)
-            .flex_shrink_0()
+            .map(|this| if stacked { this.w_full() } else { this.w(SIDE_COLUMN_WIDTH).flex_shrink_0() })
             .gap_6()
             // The cards that clear the upload's blocking reasons follow it.
             .child(self.render_upload(cx))
@@ -1427,8 +1432,37 @@ impl Render for PublishPanel {
             )
             .child(self.render_file(cx))
             .child(self.render_thumbnail(cx));
+        // Too narrow for both columns (a small window, the rail beside it), the
+        // cards follow the form.
+        let measure = {
+            let width = self.width.clone();
+            canvas(
+                move |bounds, window, _| {
+                    let previous = width.replace(Some(bounds.size.width));
+                    let was_stacked = previous.is_some_and(|width| width < two_columns);
+                    if previous.is_none() || was_stacked != (bounds.size.width < two_columns) {
+                        window.request_animation_frame();
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full()
+        };
         // The video page owns scrolling and the page inset.
-        h_flex().id("publish-panel").w_full().items_start().gap_8().child(form).child(side)
+        div()
+            .id("publish-panel")
+            .test_support()
+            .relative()
+            .w_full()
+            .map(|this| {
+                if stacked {
+                    this.flex().flex_col().gap_10().child(form).child(side)
+                } else {
+                    this.flex().flex_row().items_start().gap_8().child(form).child(side)
+                }
+            })
+            .child(measure)
     }
 }
 

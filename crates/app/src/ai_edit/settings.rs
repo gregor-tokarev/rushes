@@ -3,17 +3,14 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
-use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::form::{Field, Form};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Div, Entity, Focusable as _, FontWeight, InteractiveElement as _, IntoElement,
+    AnyElement, App, AppContext as _, Context, Div, Entity, Focusable as _, InteractiveElement as _, IntoElement,
     ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Subscription, Task, TestSupportExt as _,
     Window, div,
 };
@@ -25,6 +22,7 @@ use super::brief::{COLOR_GRADES, color_grade_label};
 use super::doctor::DoctorChecklist;
 use super::service::PipelineService;
 use crate::state::{AppEvent, AppState};
+use crate::ui::settings::{SettingsField, SettingsSection};
 
 /// How long typing pauses before text fields are saved.
 const SAVE_DELAY: Duration = Duration::from_millis(600);
@@ -119,7 +117,7 @@ impl AiSettings {
         let extra_instructions = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 10)
-                .placeholder("For example: keep my intro jingle, end on the subscribe card, never cut mid-sentence.")
+                .placeholder("For example: keep my intro jingle, never cut mid-sentence.")
                 .default_value(settings.extra_instructions.clone())
         });
         let doctor = cx.new(|cx| DoctorChecklist::new(window, cx));
@@ -328,6 +326,9 @@ impl AiSettings {
         let current = self.model;
         h_flex()
             .gap_2()
+            .when(current == ModelChoice::Custom, |this| {
+                this.child(div().w_48().child(Input::new(&self.custom_model).id("ai-settings-custom-model")))
+            })
             .child(
                 Button::new("ai-settings-model")
                     .outline()
@@ -345,73 +346,138 @@ impl AiSettings {
                         menu
                     }),
             )
-            .when(current == ModelChoice::Custom, |this| {
-                this.child(div().flex_1().child(Input::new(&self.custom_model)))
+    }
+
+    fn render_skill_dir(&self, cx: &mut Context<Self>) -> Div {
+        v_flex()
+            .gap_1p5()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().child(Input::new(&self.skill_dir).id("ai-settings-skill-dir")))
+                    .child(
+                        Button::new("ai-settings-choose-skill")
+                            .outline()
+                            .label("Choose…")
+                            .on_click(cx.listener(|this, _, window, cx| this.choose_skill_dir(window, cx))),
+                    ),
+            )
+            .children(self.render_skill_dir_status(cx))
+    }
+
+    /// A switch for one boolean of the pipeline settings, saved at once.
+    fn render_switch(
+        &self,
+        id: &'static str,
+        value: impl Fn(&PipelineSettings) -> bool,
+        set: fn(&mut PipelineSettings, bool),
+        cx: &mut Context<Self>,
+    ) -> Switch {
+        let checked = value(&self.state.read(cx).settings().pipeline);
+        Switch::new(id).checked(checked).on_change(cx.listener(move |this, checked: &bool, _, cx| {
+            let checked = *checked;
+            this.update(cx, |pipeline| set(pipeline, checked))
+        }))
+    }
+
+    fn render_grade(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let settings = cx.weak_entity();
+        let grade = self.state.read(cx).settings().pipeline.default_preferences.color_grade.clone();
+        Button::new("ai-settings-grade")
+            .outline()
+            .label(color_grade_label(&grade).to_owned())
+            .dropdown_caret(true)
+            .dropdown_menu(move |mut menu, _, _| {
+                for (value, label) in COLOR_GRADES {
+                    let settings = settings.clone();
+                    menu = menu.item(PopupMenuItem::new(label).checked(grade == value).on_click(move |_, _, cx| {
+                        _ = settings.update(cx, |this, cx| {
+                            this.update(cx, |pipeline| pipeline.default_preferences.color_grade = value.to_owned())
+                        });
+                    }));
+                }
+                menu
             })
     }
 
-    fn render_preferences(&self, cx: &mut Context<Self>) -> Div {
-        let preferences = self.state.read(cx).settings().pipeline.default_preferences.clone();
-        let settings = cx.weak_entity();
-        let grade = preferences.color_grade.clone();
-        let theme = cx.theme();
-        v_flex()
-            .gap_3()
-            .child(
-                h_flex()
-                    .gap_6()
-                    .child(
-                        Checkbox::new("ai-settings-remove-fillers")
-                            .label("Remove fillers")
-                            .checked(preferences.remove_fillers)
-                            .on_change(cx.listener(|this, checked: &bool, _, cx| {
-                                let checked = *checked;
-                                this.update(cx, |pipeline| pipeline.default_preferences.remove_fillers = checked)
-                            })),
+    /// The settings, grouped as the Settings page shows them.
+    pub fn sections() -> Vec<SettingsSection<Self>> {
+        vec![
+            SettingsSection::new()
+                .title("Agent")
+                .field(
+                    SettingsField::new("Agent command", |this: &mut Self, _, _| {
+                        Input::new(&this.agent_command).id("ai-settings-agent-command")
+                    })
+                    .description("The Claude Code CLI: a command on PATH or the full path to it.")
+                    .stacked(),
+                )
+                .field(
+                    SettingsField::new("Model", |this: &mut Self, _, cx| this.render_model(cx))
+                        .description("Agent default is the model Claude Code is set to use."),
+                )
+                .field(
+                    SettingsField::new("video-use skill folder", |this: &mut Self, _, cx| this.render_skill_dir(cx))
+                        .description("The folder with video-use’s SKILL.md. Empty looks in ~/.claude/skills/video-use.")
+                        .stacked(),
+                ),
+            SettingsSection::new()
+                .title("Edits")
+                .field(
+                    SettingsField::new("Standing instructions", |this: &mut Self, _, _| {
+                        Textarea::new(&this.extra_instructions)
+                    })
+                    .description("Added to every edit brief: house style, intro and outro rules, branding.")
+                    .stacked(),
+                )
+                .field(
+                    SettingsField::new("Skip strategy review", |this: &mut Self, _, cx| {
+                        this.render_switch(
+                            "ai-settings-auto-approve",
+                            |pipeline| pipeline.auto_approve,
+                            |pipeline, on| pipeline.auto_approve = on,
+                            cx,
+                        )
+                    })
+                    .description(
+                        "Plan and render in one pass. Off: the agent proposes a strategy and waits for your approval.",
+                    ),
+                ),
+            SettingsSection::new()
+                .title("New edits")
+                .description("Where every new edit brief starts.")
+                .field(SettingsField::new("Remove fillers", |this: &mut Self, _, cx| {
+                    this.render_switch(
+                        "ai-settings-remove-fillers",
+                        |pipeline| pipeline.default_preferences.remove_fillers,
+                        |pipeline, on| pipeline.default_preferences.remove_fillers = on,
+                        cx,
                     )
-                    .child(
-                        Checkbox::new("ai-settings-subtitles")
-                            .label("Burn subtitles")
-                            .checked(preferences.subtitles)
-                            .on_change(cx.listener(|this, checked: &bool, _, cx| {
-                                let checked = *checked;
-                                this.update(cx, |pipeline| pipeline.default_preferences.subtitles = checked)
-                            })),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .child(div().w_32().text_sm().text_color(theme.muted_foreground).child("Colour grade"))
-                    .child(
-                        Button::new("ai-settings-grade")
-                            .outline()
-                            .small()
-                            .label(color_grade_label(&grade).to_owned())
-                            .dropdown_caret(true)
-                            .dropdown_menu(move |mut menu, _, _| {
-                                for (value, label) in COLOR_GRADES {
-                                    let settings = settings.clone();
-                                    menu = menu.item(PopupMenuItem::new(label).checked(grade == value).on_click(
-                                        move |_, _, cx| {
-                                            _ = settings.update(cx, |this, cx| {
-                                                this.update(cx, |pipeline| {
-                                                    pipeline.default_preferences.color_grade = value.to_owned()
-                                                })
-                                            });
-                                        },
-                                    ));
-                                }
-                                menu
-                            }),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .child(div().w_32().text_sm().text_color(theme.muted_foreground).child("Target length"))
-                    .child(div().w_48().child(Input::new(&self.target_length).small())),
-            )
+                }))
+                .field(SettingsField::new("Burn subtitles", |this: &mut Self, _, cx| {
+                    this.render_switch(
+                        "ai-settings-subtitles",
+                        |pipeline| pipeline.default_preferences.subtitles,
+                        |pipeline, on| pipeline.default_preferences.subtitles = on,
+                        cx,
+                    )
+                }))
+                .field(SettingsField::new("Colour grade", |this: &mut Self, _, cx| this.render_grade(cx)))
+                .field(
+                    SettingsField::new("Target length", |this: &mut Self, _, _| {
+                        div().w_48().child(Input::new(&this.target_length).id("ai-settings-target-length"))
+                    })
+                    .description("For example 60 seconds; empty keeps the natural length."),
+                ),
+            SettingsSection::new()
+                .title("Requirements")
+                .description(
+                    "AI edits run video-use inside Claude Code on this computer. The key and the tools stay local.",
+                )
+                // The checklist's rows, which the search can't see.
+                .keywords(["claude", "video-use", "ffmpeg", "ffprobe", "elevenlabs", "python", "re-check"])
+                .element(|this: &mut Self, _, _| this.doctor.clone()),
+        ]
     }
 }
 
@@ -446,82 +512,10 @@ fn skill_dir_input(text: &str) -> Result<Option<PathBuf>, String> {
 }
 
 impl Render for AiSettings {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let auto_approve = self.state.read(cx).settings().pipeline.auto_approve;
-        let model = self.render_model(cx);
-        let preferences = self.render_preferences(cx);
-        let theme = cx.theme();
-        let heading = |title: &'static str| div().text_base().font_weight(FontWeight::SEMIBOLD).child(title);
-
-        let skill_dir = v_flex()
-            .gap_1p5()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.skill_dir).id("ai-settings-skill-dir")))
-                    .child(
-                        Button::new("ai-settings-choose-skill")
-                            .outline()
-                            .icon(IconName::FolderOpen)
-                            .label("Choose…")
-                            .on_click(cx.listener(|this, _, window, cx| this.choose_skill_dir(window, cx))),
-                    ),
-            )
-            .children(self.render_skill_dir_status(cx));
-        let agent = Form::new()
-            .child(
-                Field::new()
-                    .label("Agent command")
-                    .description("The Claude Code CLI: a command on PATH or the full path to it.")
-                    .child(Input::new(&self.agent_command).id("ai-settings-agent-command")),
-            )
-            .child(Field::new().label("Model").child(model))
-            .child(
-                Field::new()
-                    .label("video-use skill folder")
-                    .description("The folder with video-use's SKILL.md. Empty looks in ~/.claude/skills/video-use.")
-                    .child(skill_dir),
-            );
-
-        let review = Switch::new("ai-settings-auto-approve").label("Skip by default").checked(auto_approve).on_change(
-            cx.listener(|this, checked: &bool, _, cx| {
-                let checked = *checked;
-                this.update(cx, |pipeline| pipeline.auto_approve = checked)
-            }),
-        );
-        let edits = Form::new()
-            .child(
-                Field::new()
-                    .label("Standing instructions")
-                    .description("Added to every edit brief: house style, intro and outro rules, branding.")
-                    .child(Textarea::new(&self.extra_instructions)),
-            )
-            .child(
-                Field::new()
-                    .label("Strategy review")
-                    .description("Off: the agent proposes a strategy and waits for your approval before it renders.")
-                    .child(review),
-            )
-            .child(
-                Field::new()
-                    .label("Default edit preferences")
-                    .description("Where every new edit brief starts.")
-                    .child(preferences),
-            );
-
-        let requirements = v_flex().gap_1().child(heading("Requirements")).child(
-            div()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child("AI edits run video-use inside Claude Code on this computer. The key and the tools stay local."),
-        );
-
-        v_flex()
-            .w_full()
-            .gap_10()
-            .child(v_flex().gap_4().child(heading("Agent")).child(agent))
-            .child(v_flex().gap_4().child(heading("Edits")).child(edits))
-            .child(v_flex().gap_4().child(requirements).child(self.doctor.clone()))
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let sections: Vec<AnyElement> =
+            Self::sections().iter().map(|section| section.render(self, window, cx)).collect();
+        v_flex().w_full().gap_8().children(sections)
     }
 }
 

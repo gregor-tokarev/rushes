@@ -19,7 +19,7 @@ use serde_json::json;
 use videocrm::publish::{
     AccountBadge, BlockingReason, CHAPTERS_HEADING, Connection, PublishPanel, UploadsPage, YoutubeSettings,
 };
-use videocrm::route::{Route, SettingsSection};
+use videocrm::route::{Route, SettingsSection, VideoTab};
 use videocrm_core::settings::YoutubeBackend;
 use videocrm_core::{Block, BlockKind, DocumentKind, Privacy, UploadId, UploadJob, UploadStatus, VideoId, YoutubeLink};
 use videocrm_youtube::{CredentialStore, RetryCause};
@@ -47,6 +47,35 @@ fn window(cx: &mut TestAppContext, handle: AnyWindowHandle, f: impl FnOnce(&mut 
 fn settle(cx: &mut TestAppContext) {
     cx.executor().advance_clock(SAVED);
     cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn a_narrow_publish_tab_puts_the_cards_under_the_form(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |_| {});
+    let options = WindowOptions {
+        // The page column at the app's minimum window size.
+        window_bounds: Some(WindowBounds::Windowed(Bounds::new(Default::default(), size(px(560.), px(2400.))))),
+        ..WindowOptions::default()
+    };
+    let (handle, _panel) = cx
+        .update(|cx| {
+            gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)))
+        })
+        .unwrap();
+    // The first frame measures the panel, the next one lays it out for that width.
+    for _ in 0..2 {
+        window(cx, handle, |window, cx| window.render_frame(cx));
+        cx.run_until_parked();
+    }
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        let panel = window.find("publish-panel").bounds();
+        let title = window.find("publish-title").bounds();
+        let upload = window.find("publish-upload").bounds();
+        assert!(upload.top() > title.bottom(), "the cards follow the form: {upload:?} vs {title:?}");
+        assert!(upload.right() <= panel.right(), "nothing reaches past the column: {upload:?} vs {panel:?}");
+    });
 }
 
 #[gpui_kit::test]
@@ -397,13 +426,63 @@ fn the_uploads_page_offers_what_each_job_allows(cx: &mut TestAppContext) {
         Some(UploadStatus::Failed { error: videocrm::publish::INTERRUPTED_RESUMABLE.into() })
     );
     assert_eq!(cx.opened_url().as_deref(), Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ"));
+
+    // Like a Pipelines row, the row itself opens the video, on its Publish tab.
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click(format!("upload-{}", done.id), cx);
+    });
+    assert_eq!(
+        workspace.state.read_with(cx, |state, _| state.route().clone()),
+        Route::Video { id: video_id, tab: VideoTab::Publish }
+    );
+}
+
+#[gpui_kit::test]
+fn a_narrow_uploads_page_keeps_each_jobs_action_in_view(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    let video_id = workspace.create_video(cx, "Why I left macOS for Linux", |_| {});
+    let job = UploadJob {
+        id: UploadId::new(),
+        video_id,
+        file: workspace.dir.path().join("final.mp4"),
+        status: UploadStatus::Uploading { sent: 10, total: 100 },
+        session_url: Some("http://127.0.0.1:1/upload/session".into()),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    workspace.insert_jobs(cx, &[&job]);
+    workspace.restart(cx);
+    let options = WindowOptions {
+        // The page column at the app's minimum window size, beside the sidebar.
+        window_bounds: Some(WindowBounds::Windowed(Bounds::new(Default::default(), size(px(703.), px(600.))))),
+        ..WindowOptions::default()
+    };
+    let (handle, _page) = cx
+        .update(|cx| gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| UploadsPage::new(window, cx))))
+        .unwrap();
+    // The first frame measures the table, the next one drops what does not fit.
+    for _ in 0..2 {
+        window(cx, handle, |window, cx| window.render_frame(cx));
+        cx.run_until_parked();
+    }
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        let row = window.find(format!("upload-{}", job.id)).bounds();
+        let resume = window.find(format!("upload-{}-resume", job.id)).bounds();
+        assert!(resume.right() <= row.right(), "the action stays in the row: {resume:?} vs {row:?}");
+    });
 }
 
 #[gpui_kit::test]
 fn youtube_settings_start_with_the_google_client_and_hide_the_emulator(cx: &mut TestAppContext) {
     // A fresh install: the creator's own YouTube account, not the developer emulator.
     let workspace = Workspace::open(cx, YoutubeBackend::default());
-    let (handle, _settings) = open(cx, |window, cx| cx.new(|cx| YoutubeSettings::new(window, cx)));
+    let (handle, settings) = open(cx, |window, cx| cx.new(|cx| YoutubeSettings::new(window, cx)));
+    // The Settings page shows a group per section; one that came and went as
+    // the client is typed would scroll the page back to the top.
+    let groups = |cx: &mut TestAppContext| settings.read_with(cx, |settings, cx| settings.sections(cx).len());
+    let groups_before = groups(cx);
     let backend = |cx: &mut TestAppContext| workspace.state.read_with(cx, |state, _| state.settings().youtube.clone());
     let problem = |cx: &mut TestAppContext| {
         workspace.service.read_with(cx, |service, _| service.config().err().map(|problem| problem.to_string()))
@@ -463,6 +542,7 @@ fn youtube_settings_start_with_the_google_client_and_hide_the_emulator(cx: &mut 
     assert!(
         config.is_some_and(|config| config.is_google() && config.client_id == "1234-abc.apps.googleusercontent.com")
     );
+    assert_eq!(groups(cx), groups_before, "a valid client adds no settings group");
     // Connect can be clicked now: what Google will show comes with it.
     window(cx, handle, |window, cx| {
         window.render_frame(cx);

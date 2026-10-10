@@ -17,12 +17,12 @@ use std::collections::HashSet;
 use chrono::{Local, NaiveDate};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
     KeyBinding, ParentElement as _, Render, SharedString, Styled as _, Subscription, TestSupportExt as _, Window,
-    actions, div,
+    actions,
 };
 use videocrm_core::settings::ThemeMode;
 use videocrm_core::{RunStatus, VideoId, VideoRow, VideoStatus, ViewId};
@@ -34,6 +34,7 @@ use crate::publish::{AccountBadge, UploadsPage};
 use crate::route::{Route, SettingsSection, VideoTab};
 use crate::settings_page::SettingsPage;
 use crate::state::{AppEvent, AppState, Problem, Remedy};
+use crate::ui::{PageHeader, page_frame};
 use crate::video_page::VideoPage;
 use crate::wizard;
 
@@ -440,21 +441,7 @@ impl Workspace {
 
     fn render_database_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let summary = production_summary(self.state.read(cx).rows(), Local::now().date_naive());
-        v_flex()
-            .size_full()
-            .min_h_0()
-            .child(
-                v_flex()
-                    .flex_shrink_0()
-                    .px_4()
-                    .pt_6()
-                    .pb_2()
-                    .gap_1()
-                    .child(div().text_2xl().font_semibold().child("Videos"))
-                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(summary)),
-            )
-            .child(div().flex_1().min_h_0().child(self.database.clone()))
-            .into_any_element()
+        page_frame(PageHeader::new("Videos").subtitle(summary), self.database.clone()).into_any_element()
     }
 }
 

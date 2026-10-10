@@ -580,6 +580,30 @@ fn a_typed_option_is_kept_without_pressing_enter(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_property_dialog_commits_when_nothing_in_it_has_focus(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+
+    db.step(cx, |window, cx| window.click("properties", cx));
+    db.step(cx, |window, cx| window.click("new-property", cx));
+    db.step(cx, |window, cx| {
+        window.click("property-name", cx);
+        window.input("Sponsor", cx);
+    });
+    // The focused field can leave the dialog (its option row removed, say),
+    // and footer buttons don't take focus when clicked: Create still reaches
+    // the dialog.
+    db.step(cx, |window, cx| window.blur(cx));
+    db.step(cx, |window, cx| window.click("property-commit", cx));
+
+    let events = db.take_events();
+    let Some(DatabaseEvent::CreateProperty(property)) = events.first() else {
+        panic!("expected CreateProperty, got {events:?}");
+    };
+    assert_eq!(property.name, "Sponsor");
+    assert!(db.with_window(cx, |window, _| window.try_find("property-commit").is_none()), "the dialog closed");
+}
+
+#[gpui_kit::test]
 fn resizing_a_column_saves_its_width(cx: &mut TestAppContext) {
     let db = Fixture::open(cx);
 

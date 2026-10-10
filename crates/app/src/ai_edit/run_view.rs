@@ -32,6 +32,7 @@ use super::service::{LivePhase, PipelineService, split_failure};
 use super::timeline::{LogEvent, MarkerKind, PhaseKind, TimelineItem, fold_timeline};
 use crate::route::VideoTab;
 use crate::state::AppState;
+use crate::ui::Card;
 
 /// Height of the activity box once the log outgrows it, in rems.
 const TIMELINE_HEIGHT: f32 = 30.;
@@ -306,11 +307,12 @@ impl RunView {
 
     fn render_stepper(&self, run: &PipelineRun, cx: &App) -> impl IntoElement {
         let rendering_step = self.last_phase(cx).is_some_and(PhaseKind::renders);
+        // A discarded strategy is still there to review.
+        let restorable = run.status == RunStatus::Cancelled && self.service.read(cx).can_restore(run.id);
         let step = match run.status {
             RunStatus::Queued | RunStatus::Planning => 0,
             RunStatus::AwaitingApproval => 1,
-            // A discarded strategy is still there to review.
-            RunStatus::Cancelled if self.service.read(cx).can_restore(run.id) => 1,
+            RunStatus::Cancelled if restorable => 1,
             RunStatus::Rendering => 2,
             RunStatus::Succeeded => 4,
             RunStatus::Failed | RunStatus::Cancelled => {
@@ -321,14 +323,27 @@ impl RunView {
                 }
             }
         };
-        Stepper::new("run-stepper").small().selected_index(step).items(
-            [
-                (IconName::Search, "Plan"),
-                (IconName::FileText, "Review strategy"),
-                (IconName::Film, "Render"),
-                (IconName::CircleCheck, "Done"),
-            ]
-            .map(|(icon, label)| StepperItem::new().icon(icon).child(div().text_sm().child(label))),
+        // The step a run stopped at says so: its icon and its label, not only a colour.
+        let stopped = match run.status {
+            RunStatus::Failed => Some((IconName::CircleX, "failed", cx.theme().danger)),
+            RunStatus::Cancelled if !restorable => {
+                Some((IconName::CircleSlash, "stopped", cx.theme().muted_foreground))
+            }
+            _ => None,
+        };
+        let steps = [
+            (IconName::Search, "Plan"),
+            (IconName::FileText, "Review strategy"),
+            (IconName::Film, "Render"),
+            (IconName::CircleCheck, "Done"),
+        ];
+        Stepper::new("run-stepper").small().text_center(true).selected_index(step).items(
+            steps.into_iter().enumerate().map(|(ix, (icon, label))| match stopped {
+                Some((icon, state, color)) if ix == step => StepperItem::new().icon(Icon::new(icon)).child(
+                    div().id("run-stopped-step").test_support().text_color(color).child(format!("{label} {state}")),
+                ),
+                _ => StepperItem::new().icon(icon).child(label),
+            }),
         )
     }
 
@@ -367,13 +382,16 @@ impl RunView {
             )
     }
 
-    fn render_strategy(&self, run: &PipelineRun, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn render_strategy(&self, run: &PipelineRun, window: &mut Window, cx: &mut Context<Self>) -> Card {
         let strategy = run.summary.clone().unwrap_or_else(|| "The agent did not describe a strategy.".to_owned());
         let id = run.id;
         let feedback = self.render_feedback(FeedbackPurpose::Strategy, window, cx);
         let theme = cx.theme();
-        card(cx)
-            .child(card_title(IconName::FileText, "Proposed strategy", "Approve it to render, or ask for changes.", cx))
+        Card::new()
+            .gap_4()
+            .icon(Icon::new(IconName::FileText).text_color(theme.muted_foreground))
+            .title("Proposed strategy")
+            .description("Approve it to render, or ask for changes.")
             .child(markdown(element_id("strategy", id), strategy).into_any_element())
             .child(
                 v_flex()
@@ -414,7 +432,7 @@ impl RunView {
             })
     }
 
-    fn render_output(&self, run: &PipelineRun, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn render_output(&self, run: &PipelineRun, window: &mut Window, cx: &mut Context<Self>) -> Card {
         let output = run.output.clone().unwrap_or_default();
         let is_upload_file =
             self.state.read(cx).video(run.video_id).is_some_and(|video| video.publish.file.as_ref() == Some(&output));
@@ -437,7 +455,8 @@ impl RunView {
         let name =
             output.file_name().map_or_else(|| output.display().to_string(), |name| name.to_string_lossy().into_owned());
 
-        card(cx)
+        Card::new()
+            .gap_4()
             .child(
                 h_flex()
                     .gap_3()
@@ -494,7 +513,7 @@ impl RunView {
                                 .ghost()
                                 .small()
                                 .icon(IconName::FolderOpen)
-                                .label("Show in folder")
+                                .label("Open folder")
                                 .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
                         )
                         .child(div().flex_1())
@@ -520,7 +539,7 @@ impl RunView {
             })
     }
 
-    fn render_failure(&self, run: &PipelineRun, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn render_failure(&self, run: &PipelineRun, window: &mut Window, cx: &mut Context<Self>) -> Card {
         let cancelled = run.status == RunStatus::Cancelled;
         // A discarded strategy is kept; bringing it back costs nothing.
         let restorable = cancelled && self.service.read(cx).can_restore(run.id);
@@ -540,14 +559,11 @@ impl RunView {
             (IconName::CircleX, "Edit failed", theme.danger)
         };
 
-        card(cx)
+        Card::new()
+            .gap_4()
             .when(!cancelled, |this| this.border_color(theme.danger.opacity(0.4)))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(Icon::new(icon).small().text_color(color))
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title)),
-            )
+            .icon(Icon::new(icon).text_color(color))
+            .title(title)
             .when(!message.is_empty(), |this| this.child(div().text_sm().child(message)))
             .when_some(stderr, |this, stderr| this.child(code_block(stderr, cx)))
             .children(feedback)
@@ -749,8 +765,9 @@ impl RunView {
                     _ => markdown(element_id(&format!("message-{seq}"), run_id), text.clone()).into_any_element(),
                 };
                 let toggle = preview.is_some().then(|| {
+                    // An in-app disclosure: a quiet button, not a link.
                     Button::new(element_id(&format!("message-toggle-{seq}"), run_id))
-                        .link()
+                        .ghost()
                         .xsmall()
                         .label(if expanded { "Show less" } else { "Show more" })
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_row(seq, cx)))
@@ -761,7 +778,8 @@ impl RunView {
                         .min_w_0()
                         .gap_1()
                         .child(body)
-                        .children(toggle.map(|toggle| h_flex().child(toggle))),
+                        // Bleeds out by the button's padding, so its label lines up with the text.
+                        .children(toggle.map(|toggle| h_flex().ml_neg_1().child(toggle))),
                 )
             }
             TimelineItem::Thinking { text, .. } => {
@@ -857,11 +875,13 @@ impl Render for RunView {
         };
         let live = self.live(cx);
         let stepper = self.render_stepper(&run, cx).into_any_element();
-        let state_card = match (live, run.status) {
-            (Some(live), _) => Some(self.render_live(live, cx)),
-            (None, RunStatus::AwaitingApproval) => Some(self.render_strategy(&run, window, cx)),
-            (None, RunStatus::Succeeded) => Some(self.render_output(&run, window, cx)),
-            (None, RunStatus::Failed | RunStatus::Cancelled) => Some(self.render_failure(&run, window, cx)),
+        let state_card: Option<AnyElement> = match (live, run.status) {
+            (Some(live), _) => Some(self.render_live(live, cx).into_any_element()),
+            (None, RunStatus::AwaitingApproval) => Some(self.render_strategy(&run, window, cx).into_any_element()),
+            (None, RunStatus::Succeeded) => Some(self.render_output(&run, window, cx).into_any_element()),
+            (None, RunStatus::Failed | RunStatus::Cancelled) => {
+                Some(self.render_failure(&run, window, cx).into_any_element())
+            }
             (None, _) => None,
         };
         let timeline = self.render_timeline(live.is_some(), window, cx);
@@ -898,21 +918,6 @@ fn log_edges(rows: &ListState, padding: Pixels) -> (bool, bool) {
     let end = log_content_height(rows, padding)
         .map_or(px(0.), |content| (content - rows.viewport_bounds().size.height).max(px(0.)));
     (scrolled <= px(0.), scrolled >= end - px(1.))
-}
-
-/// A bordered section of the run view.
-fn card(cx: &App) -> Div {
-    let theme = cx.theme();
-    v_flex().gap_4().p_4().rounded(theme.radius_lg).border_1().border_color(theme.border)
-}
-
-fn card_title(icon: IconName, title: &'static str, description: &'static str, cx: &App) -> Div {
-    let theme = cx.theme();
-    h_flex().gap_3().child(Icon::new(icon).text_color(theme.muted_foreground)).child(
-        v_flex()
-            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(div().text_xs().text_color(theme.muted_foreground).child(description)),
-    )
 }
 
 /// A timeline row that marks a turn of the run: a label between two rules.

@@ -30,6 +30,8 @@ use super::format;
 use super::property_editor::{PropertyEditor, PropertyEditorMode};
 use super::query::{self, resolve_columns, view_rows, visible_columns};
 use super::table::{CellEditors, EmptyReason, TableModel, VideoTable};
+use crate::ui::PAGE_INSET;
+use crate::ui::dialog::confirm_delete_videos;
 
 actions!(video_database, [OpenSelected, RenameSelected, DeleteSelected, CancelEdit]);
 
@@ -351,32 +353,11 @@ impl DatabasePanel {
     }
 
     pub(crate) fn confirm_delete_videos(&mut self, ids: Vec<VideoId>, window: &mut Window, cx: &mut Context<Self>) {
-        let title: SharedString = match ids.as_slice() {
-            [id] => {
-                let name = self.video(*id).map(|video| video.title.trim()).unwrap_or_default();
-                if name.is_empty() { "Delete this video?".into() } else { format!("Delete “{name}”?").into() }
-            }
-            ids => format!("Delete {} videos?", ids.len()).into(),
-        };
-        let consequence = "Scripts, notes and edit history go with it. This can’t be undone.";
-        let description: SharedString = match crate::publish::delete_upload_notice(&ids, cx) {
-            Some(notice) => format!("{notice} {consequence}").into(),
-            None => consequence.into(),
-        };
+        let videos =
+            ids.iter().map(|id| (*id, self.video(*id).map(|video| video.title.clone()).unwrap_or_default())).collect();
         let panel = cx.weak_entity();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let panel = panel.clone();
-            let ids = ids.clone();
-            alert
-                .title(title.clone())
-                .description(description.clone())
-                .confirm()
-                .ok_text("Delete")
-                .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, _, cx| {
-                    _ = panel.update(cx, |panel, cx| panel.delete_videos(ids.clone(), cx));
-                    true
-                })
+        confirm_delete_videos(videos, window, cx, move |ids, cx| {
+            _ = panel.update(cx, |panel, cx| panel.delete_videos(ids, cx));
         });
     }
 
@@ -737,7 +718,15 @@ impl DatabasePanel {
         }
         let position = self.properties.iter().map(|def| def.position + 1).max().unwrap_or(0);
         let editor = cx.new(|cx| PropertyEditor::new(existing, mode, position, window, cx));
-        PropertyEditor::open(editor, cx.weak_entity(), window, cx);
+        let panel = cx.weak_entity();
+        PropertyEditor::open(
+            editor,
+            move |def, cx| {
+                _ = panel.update(cx, |panel, cx| panel.save_property(def, cx));
+            },
+            window,
+            cx,
+        );
     }
 
     /// Adds a new property, shown in the active view, or replaces an existing one.
@@ -1017,7 +1006,7 @@ impl DatabasePanel {
         v_flex()
             .flex_1()
             .min_h_0()
-            .px_4()
+            .px(PAGE_INSET)
             .pb_2()
             .child(
                 div()
@@ -1047,7 +1036,7 @@ impl DatabasePanel {
                                 .ghost()
                                 .small()
                                 .icon(IconName::Plus)
-                                .label("New video")
+                                .label("New video…")
                                 .text_color(cx.theme().muted_foreground)
                                 .on_click(move |_, _, cx| {
                                     _ = panel.update(cx, |panel, cx| panel.create_video_in_view(cx));

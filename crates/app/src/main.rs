@@ -11,9 +11,9 @@ fn main() {
     let data_dir = data_dir();
     let started = start(&data_dir);
 
-    // The complete Lucide catalog: covers the icons of every feature module
-    // (editor, database, publish, AI edit), which are Lucide icons too.
-    gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx| {
+    // The page icon images and the complete Lucide catalog, which covers the
+    // icons of every feature module (editor, database, publish, AI edit).
+    gpui_kit::application().with_assets(videocrm::ui::Assets).run(move |cx| {
         gpui_kit::init(cx);
         shell::register_fonts(cx);
         shell::init(cx);

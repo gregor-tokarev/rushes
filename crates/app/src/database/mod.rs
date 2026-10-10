@@ -17,5 +17,8 @@ mod table;
 mod toolbar;
 
 pub use elements::Chip;
+pub(crate) use elements::{NO_OPTIONS_ON_PAGE, multi_select_list, select_menu};
+pub(crate) use icons::kind_icon;
 pub use icons::{DatabaseIcons, WithDatabaseIcons};
 pub use panel::{DatabaseEvent, DatabasePanel};
+pub(crate) use property_editor::{PropertyEditor, PropertyEditorMode};

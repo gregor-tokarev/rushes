@@ -7,8 +7,9 @@ use std::sync::Arc;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, ElementId, Entity, Focusable as _, TestAppContext, Window,
-    WindowBounds, WindowOptions, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, ElementId, Entity, Focusable as _, InputEvent as _, Modifiers,
+    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Size, TestAppContext, Window, WindowBounds, WindowOptions,
+    point, px, size,
 };
 use videocrm::ai_edit::PipelineService;
 use videocrm::onboarding::{StartChoice, Step};
@@ -34,6 +35,11 @@ struct Fixture {
 impl Fixture {
     /// A workspace over a fresh in-memory store holding `titles` as videos.
     fn open(cx: &mut TestAppContext, onboarded: bool, titles: &[&str]) -> Self {
+        Self::open_sized(cx, onboarded, titles, size(px(1440.), px(900.)))
+    }
+
+    /// [`Fixture::open`] in a window of `window_size`.
+    fn open_sized(cx: &mut TestAppContext, onboarded: bool, titles: &[&str], window_size: Size<Pixels>) -> Self {
         cx.update(|cx| {
             gpui_kit::init(cx);
             shell::init(cx);
@@ -61,7 +67,7 @@ impl Fixture {
             YoutubeService::init(state.clone(), cx);
             PipelineService::init(state.clone(), cx);
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::new(Default::default(), size(px(1440.), px(900.))))),
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(Default::default(), window_size))),
                 ..Default::default()
             };
             let handle = state.clone();
@@ -269,6 +275,46 @@ fn a_board_column_preselects_the_status_and_enter_submits(cx: &mut TestAppContex
     app.press(cx, "escape");
     assert!(!app.has_dialog(cx));
     assert_eq!(cx.read(|cx| app.state.read(cx).rows().len()), 1);
+}
+
+#[gpui_kit::test]
+fn onboarding_keeps_its_buttons_in_view_at_the_minimum_window_size(cx: &mut TestAppContext) {
+    // main.rs's minimum window size.
+    let app = Fixture::open_sized(cx, false, &[], size(px(960.), px(600.)));
+    let onboarding = cx.read(|cx| app.workspace.read(cx).onboarding().cloned().expect("onboarding"));
+    for _ in Step::ALL {
+        let in_view = cx
+            .update_window(app.window, |_, window, _| {
+                let viewport = window.viewport_size();
+                let next = window.find("onboarding-next").bounds();
+                next.bottom() <= viewport.height && next.right() <= viewport.width
+            })
+            .unwrap();
+        let step = cx.read(|cx| onboarding.read(cx).step());
+        assert!(in_view, "Continue is on screen on the {step:?} step");
+        if step == Step::GetStarted {
+            break;
+        }
+        app.click(cx, "onboarding-next");
+    }
+}
+
+#[gpui_kit::test]
+fn onboarding_keeps_continue_in_one_place_across_steps(cx: &mut TestAppContext) {
+    let app = Fixture::open_sized(cx, false, &[], size(px(1440.), px(900.)));
+    let onboarding = cx.read(|cx| app.workspace.read(cx).onboarding().cloned().expect("onboarding"));
+    let next = |cx: &mut TestAppContext| {
+        cx.update_window(app.window, |_, window, _| window.find("onboarding-next").bounds().bottom_right()).unwrap()
+    };
+    let first = next(cx);
+    loop {
+        let step = cx.read(|cx| onboarding.read(cx).step());
+        assert_eq!(next(cx), first, "Continue moved on the {step:?} step");
+        if step == Step::GetStarted {
+            break;
+        }
+        app.click(cx, "onboarding-next");
+    }
 }
 
 #[gpui_kit::test]
@@ -727,6 +773,60 @@ fn the_account_badge_opens_the_youtube_settings(cx: &mut TestAppContext) {
     // Back returns to the section that was open.
     app.press(cx, "alt-left");
     assert!(app.has(cx, "settings-media-root"));
+}
+
+#[gpui_kit::test]
+fn settings_search_finds_the_youtube_account_and_the_requirements(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    let search = |app: &Fixture, cx: &mut TestAppContext, query: &'static str| {
+        app.step(cx, |window, cx| {
+            // The search field, which has no id of its own, sits right above
+            // the list's first page.
+            let first = window.within("settings-sidebar").find("0-0").bounds();
+            let position = point(first.center().x, first.top() - px(29.));
+            let (button, modifiers) = (MouseButton::Left, Modifiers::default());
+            let press = MouseDownEvent { button, position, modifiers, click_count: 1, first_mouse: false };
+            window.dispatch_event(press.to_platform_input(), cx);
+            let release = MouseUpEvent { button, position, modifiers, click_count: 1 };
+            window.dispatch_event(release.to_platform_input(), cx);
+            window.press("secondary-a", cx);
+            window.input(query, cx);
+        });
+        // The settings list measures its groups in the first frame.
+        app.step(cx, |_, _| {});
+    };
+    let shows_connect = |app: &Fixture, cx: &mut TestAppContext| {
+        cx.update_window(app.window, |_, window, _| window.within("youtube-connection").try_find("connect").is_some())
+            .expect("window is open")
+    };
+    app.click(cx, "account-badge");
+    app.step(cx, |_, _| {});
+    assert!(shows_connect(&app, cx));
+    // The account has no label of its own; its section's words find it.
+    search(&app, cx, "connect");
+    assert!(shows_connect(&app, cx), "searching for connect shows the account");
+    search(&app, cx, "ffmpeg");
+    assert!(app.has(cx, "doctor-recheck"), "searching for a requirement shows the checklist");
+}
+
+#[gpui_kit::test]
+fn settings_controls_end_on_one_edge(cx: &mut TestAppContext) {
+    let app = Fixture::open_sized(cx, true, &[], size(px(1440.), px(900.)));
+    app.click(cx, "sidebar-footer-0");
+    let (select, choose, open) = cx
+        .update_window(app.window, |_, window, cx| {
+            window.render_frame(cx);
+            let child =
+                |parent: &'static str, name: &'static str| ElementId::NamedChild(Arc::new(parent.into()), name.into());
+            // The theme select, then the media folder's and the data folder's buttons.
+            let select = window.within("group-0").find("btn").bounds();
+            let choose = window.find(child("settings-media-root", "choose")).bounds();
+            let open = window.find("open-data-folder").bounds();
+            (select.right(), choose.right(), open.right())
+        })
+        .unwrap();
+    assert_eq!(select, choose, "the select ends where the text field's button does");
+    assert_eq!(open, choose);
 }
 
 #[gpui_kit::test]

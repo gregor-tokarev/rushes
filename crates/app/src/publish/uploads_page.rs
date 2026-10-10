@@ -2,30 +2,28 @@
 
 use chrono::Local;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::progress::Progress;
-use gpui_kit::component::table::{Table, TableBody, TableCell, TableHead, TableHeader, TableRow};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, rems,
+    AnyElement, App, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
 };
 use videocrm_core::{UploadJob, UploadStatus};
 
 use super::service::YoutubeService;
 use super::transfer::{format_bytes, format_eta, format_speed};
-use super::ui::{file_name, format_when, help_text, upload_chip};
+use super::ui::{file_name, upload_chip, upload_label, youtube_link};
 use super::upload::ProcessingOutcome;
 use crate::route::{Route, VideoTab};
 use crate::state::AppState;
-
-const STATUS_WIDTH: Rems = Rems(13.);
-const TIME_WIDTH: Rems = Rems(8.5);
-const ACTIONS_WIDTH: Rems = Rems(10.);
+use crate::ui::{
+    CollectionTable, EmptyState, PAGE_INSET, PageHeader, TableColumn, TableRowButton, format_when, page_frame,
+    video_icon,
+};
 
 /// The Uploads page: every upload job, with resume for interrupted ones.
 pub struct UploadsPage {
@@ -34,13 +32,12 @@ pub struct UploadsPage {
     _subscriptions: Vec<Subscription>,
 }
 
-/// The one action a row offers as a button; the rest live in its menu.
+/// What a row offers besides opening its video.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RowAction {
     Cancel,
     Resume,
     Open,
-    GoToVideo,
 }
 
 impl UploadsPage {
@@ -70,16 +67,14 @@ impl UploadsPage {
         parts.join(" · ")
     }
 
-    fn primary_action(&self, job: &UploadJob, cx: &App) -> RowAction {
+    fn row_action(&self, job: &UploadJob, cx: &App) -> Option<RowAction> {
         let service = self.service.read(cx);
         if service.is_active(job.id) {
-            RowAction::Cancel
+            Some(RowAction::Cancel)
         } else if service.is_resumable(job) {
-            RowAction::Resume
-        } else if watch_url(job).is_some() {
-            RowAction::Open
+            Some(RowAction::Resume)
         } else {
-            RowAction::GoToVideo
+            watch_url(job).map(|_| RowAction::Open)
         }
     }
 
@@ -100,18 +95,15 @@ impl UploadsPage {
                     cx.open_url(&url);
                 }
             }
-            RowAction::GoToVideo => {
-                let video = job.video_id;
-                self.state.update(cx, |state, cx| state.open_video(video, VideoTab::Publish, cx));
-            }
         }
     }
 
-    fn render_row(&self, job: &UploadJob, cx: &mut Context<Self>) -> TableRow {
+    fn render_row(&self, job: &UploadJob, cx: &mut Context<Self>) -> TableRowButton {
         let service = self.service.read(cx);
         let theme = cx.theme();
         let video = self.state.read(cx).video(job.video_id);
         let title = video.map_or_else(|| "Deleted video".to_owned(), |video| display_title(video.upload_title()));
+        let icon = video.and_then(|video| video.icon.clone());
         let transfer = service.transfer(job.id);
         let cancelling = service.is_cancelling(job.id);
         let detail: Option<SharedString> = match (&job.status, transfer) {
@@ -140,57 +132,37 @@ impl UploadsPage {
             _ => None,
         };
         let id = job.id.to_string();
-        let primary = self.primary_action(job, cx);
         let connected = service.is_connected();
-        let has_video = video.is_some();
-        let url = watch_url(job);
-        let action_button = |action: RowAction| {
-            let job = job.clone();
-            let button = Button::new(SharedString::from(format!("upload-{id}-{}", action_id(action))))
-                .label(action_label(action))
-                .small()
-                .outline()
-                .on_click(cx.listener(move |this, _, window, cx| this.run(action, &job, window, cx)));
-            match action {
-                RowAction::Resume if !connected => button.disabled(true).tooltip("Connect YouTube to resume"),
-                RowAction::Cancel if cancelling => button.disabled(true),
-                RowAction::GoToVideo if !has_video => button.disabled(true),
-                _ => button,
+        // The row itself opens the video's Publish tab; the trailing lane holds
+        // what the job allows besides that.
+        let action: Option<AnyElement> = match self.row_action(job, cx) {
+            Some(RowAction::Open) => watch_url(job).map(|url| youtube_link(format!("upload-{id}-open"), url)),
+            Some(action) => {
+                let job = job.clone();
+                let button = Button::new(SharedString::from(format!("upload-{id}-{}", action_id(action))))
+                    .label(action_label(action))
+                    .small()
+                    .outline()
+                    .on_click(cx.listener(move |this, _, window, cx| this.run(action, &job, window, cx)));
+                Some(
+                    match action {
+                        RowAction::Resume if !connected => button.disabled(true).tooltip("Connect YouTube to resume"),
+                        RowAction::Cancel if cancelling => button.disabled(true),
+                        _ => button,
+                    }
+                    .into_any_element(),
+                )
             }
+            None => None,
         };
-        let page = cx.weak_entity();
-        let menu_job = job.clone();
-        let menu_actions: Vec<RowAction> = [
-            has_video.then_some(RowAction::GoToVideo),
-            url.as_ref().map(|_| RowAction::Open),
-            service.is_resumable(job).then_some(RowAction::Resume),
-            (service.is_active(job.id) && !cancelling).then_some(RowAction::Cancel),
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|action| *action != primary)
-        .collect();
-        let more = Button::new(SharedString::from(format!("upload-{id}-more")))
-            .icon(IconName::Ellipsis)
-            .small()
-            .ghost()
-            .accessibility_label("More actions")
-            .disabled(menu_actions.is_empty())
-            .dropdown_menu_with_anchor(gpui_kit::Anchor::TopRight, move |mut menu, _, _| {
-                for action in &menu_actions {
-                    let (page, job, action) = (page.clone(), menu_job.clone(), *action);
-                    menu = menu.item(PopupMenuItem::new(action_label(action)).icon(action_icon(action)).on_click(
-                        move |_, window, cx| {
-                            page.update(cx, |page, cx| page.run(action, &job, window, cx)).ok();
-                        },
-                    ));
-                }
-                menu
-            });
-
-        TableRow::new()
-            .child(
-                TableCell::new().flex_1().min_w(rems(12.)).child(
+        let status_label =
+            upload_label(&job.status, transfer.map(|transfer| transfer.fraction()), service.is_resumable(job));
+        let [video_column, status, started, updated, actions] = COLUMNS;
+        let video_id = job.video_id;
+        let row = TableRowButton::new(SharedString::from(format!("upload-{id}")), format!("{title}, {status_label}"))
+            .cell(
+                video_column,
+                h_flex().min_w_0().gap_1p5().items_start().child(video_icon(icon.as_deref())).child(
                     v_flex()
                         .min_w_0()
                         .gap_0p5()
@@ -200,135 +172,102 @@ impl UploadsPage {
                         ),
                 ),
             )
-            .child(
-                TableCell::new().w(STATUS_WIDTH).child(
-                    v_flex()
-                        .w_full()
-                        .min_w_0()
-                        .gap_1()
-                        .child(h_flex().child(upload_chip(
-                            &job.status,
-                            transfer.map(|transfer| transfer.fraction()),
-                            service.is_resumable(job),
-                        )))
-                        .when_some(transfer, |this, transfer| {
-                            this.child(
-                                Progress::new(SharedString::from(format!("upload-{id}-progress")))
-                                    .value(transfer.fraction() * 100.0)
-                                    .xsmall()
-                                    .accessibility_label("Upload progress"),
-                            )
-                        })
-                        .when_some(detail, |this, detail| {
-                            this.child(
-                                div()
-                                    .id(SharedString::from(format!("upload-{id}-detail")))
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .truncate()
-                                    .tooltip({
-                                        let detail = detail.clone();
-                                        move |window, cx| Tooltip::new(detail.clone()).build(window, cx)
-                                    })
-                                    .child(detail),
-                            )
-                        }),
-                ),
+            .cell(
+                status,
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_1()
+                    .child(h_flex().child(upload_chip(
+                        &job.status,
+                        transfer.map(|transfer| transfer.fraction()),
+                        service.is_resumable(job),
+                    )))
+                    .when_some(transfer, |this, transfer| {
+                        this.child(
+                            Progress::new(SharedString::from(format!("upload-{id}-progress")))
+                                .value(transfer.fraction() * 100.0)
+                                .xsmall()
+                                .accessibility_label("Upload progress"),
+                        )
+                    })
+                    .when_some(detail, |this, detail| {
+                        this.child(
+                            div()
+                                .id(SharedString::from(format!("upload-{id}-detail")))
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .truncate()
+                                .tooltip({
+                                    let detail = detail.clone();
+                                    move |window, cx| Tooltip::new(detail.clone()).build(window, cx)
+                                })
+                                .child(detail),
+                        )
+                    }),
             )
-            .child(time_cell(format_when(job.created_at, Local::now()), cx))
-            .child(time_cell(format_when(job.updated_at, Local::now()), cx))
-            .child(
-                TableCell::new()
-                    .w(ACTIONS_WIDTH)
-                    .child(h_flex().w_full().justify_end().gap_1().child(action_button(primary)).child(more)),
-            )
+            .cell(started, time_text(format_when(job.created_at, Local::now()), cx))
+            .cell(updated, time_text(format_when(job.updated_at, Local::now()), cx))
+            .cell(actions, h_flex().children(action));
+        if video.is_none() {
+            return row;
+        }
+        row.on_open(move |_, cx| crate::video_page::open_tab_at_top(video_id, VideoTab::Publish, cx))
     }
 
-    fn render_empty(&self, cx: &App) -> AnyElement {
-        let theme = cx.theme();
+    fn render_empty(&self) -> EmptyState {
         let state = self.state.clone();
-        v_flex()
-            .id("uploads-empty")
-            .w_full()
-            .items_center()
-            .gap_4()
-            .py_16()
-            .child(
-                div()
-                    .size_12()
-                    .rounded_full()
-                    .bg(theme.muted)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(Icon::new(IconName::CloudUpload).text_color(theme.muted_foreground)),
-            )
-            .child(
-                v_flex()
-                    .items_center()
-                    .gap_1()
-                    .child(div().font_weight(FontWeight::MEDIUM).child("No uploads yet"))
-                    .child(help_text("Upload a video from its Publish tab. Its progress shows up here.", cx).text_sm()),
-            )
-            .child(
-                Button::new("uploads-go-to-videos")
-                    .label("Go to videos")
-                    .small()
-                    .outline()
-                    .on_click(move |_, _, cx| state.update(cx, |state, cx| state.navigate(Route::default(), cx))),
-            )
-            .into_any_element()
+        EmptyState::new(
+            "uploads-empty",
+            IconName::CloudUpload,
+            "No uploads yet",
+            "Upload a video from its Publish tab. Its progress shows up here.",
+        )
+        .action(
+            Button::new("uploads-go-to-videos")
+                .label("Go to videos")
+                .small()
+                .outline()
+                .on_click(move |_, _, cx| state.update(cx, |state, cx| state.navigate(Route::default(), cx))),
+        )
     }
 }
+
+/// Video, status, started, updated and the job's action; a narrow page drops
+/// the update time.
+const COLUMNS: [TableColumn; 5] = [
+    TableColumn::fill("Video"),
+    TableColumn::fixed("Status", Rems(10.5)),
+    TableColumn::fixed("Started", Rems(9.)),
+    TableColumn::fixed("Updated", Rems(9.)).optional(),
+    TableColumn::fixed("", Rems(9.)).end(),
+];
 
 impl Render for UploadsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let jobs: Vec<UploadJob> = self.service.read(cx).jobs().to_vec();
-        let theme = cx.theme();
-        let header = v_flex().gap_1().child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child("Uploads")).child(
-            div().text_sm().text_color(theme.muted_foreground).child(if jobs.is_empty() {
-                "Videos you send to YouTube, newest first.".to_owned()
-            } else {
-                self.summary(cx)
-            }),
-        );
-        let content = if jobs.is_empty() {
-            self.render_empty(cx)
+        let header = PageHeader::new("Uploads").subtitle(if jobs.is_empty() {
+            "Videos you send to YouTube, newest first.".to_owned()
         } else {
-            let head = |label: &'static str| TableHead::new().child(label);
+            self.summary(cx)
+        });
+        let content = if jobs.is_empty() {
+            self.render_empty().into_any_element()
+        } else {
+            let rows: Vec<TableRowButton> = jobs.iter().map(|job| self.render_row(job, cx)).collect();
             div()
-                .w_full()
-                .rounded(theme.radius)
-                .border_1()
-                .border_color(theme.border)
-                .overflow_hidden()
-                .child(
-                    Table::new()
-                        .accessibility_label("Uploads")
-                        .child(
-                            TableHeader::new().child(
-                                TableRow::new()
-                                    .child(head("Video").flex_1().min_w(rems(12.)))
-                                    .child(head("Status").w(STATUS_WIDTH))
-                                    .child(head("Started").w(TIME_WIDTH))
-                                    .child(head("Updated").w(TIME_WIDTH))
-                                    .child(TableHead::new().w(ACTIONS_WIDTH)),
-                            ),
-                        )
-                        .child(TableBody::new().children(jobs.iter().map(|job| self.render_row(job, cx)))),
-                )
+                .id("uploads-list")
+                .size_full()
+                .overflow_y_scroll()
+                .child(div().px(PAGE_INSET).pb_8().child(CollectionTable::new("uploads-table", &COLUMNS).rows(rows)))
                 .into_any_element()
         };
-        div()
-            .id("uploads-page")
-            .size_full()
-            .overflow_y_scroll()
-            .child(v_flex().w_full().max_w(rems(72.)).px_10().py_8().gap_6().child(header).child(content))
+        page_frame(header, content).id("uploads-page")
     }
 }
 
-fn time_cell(text: String, cx: &App) -> TableCell {
-    TableCell::new().w(TIME_WIDTH).child(div().text_color(cx.theme().muted_foreground).truncate().child(text))
+fn time_text(text: String, cx: &App) -> Div {
+    div().text_color(cx.theme().muted_foreground).truncate().child(text)
 }
 
 fn action_id(action: RowAction) -> &'static str {
@@ -336,7 +275,6 @@ fn action_id(action: RowAction) -> &'static str {
         RowAction::Cancel => "cancel",
         RowAction::Resume => "resume",
         RowAction::Open => "open",
-        RowAction::GoToVideo => "go-to-video",
     }
 }
 
@@ -345,16 +283,6 @@ fn action_label(action: RowAction) -> &'static str {
         RowAction::Cancel => "Cancel",
         RowAction::Resume => "Resume",
         RowAction::Open => "Open on YouTube",
-        RowAction::GoToVideo => "Go to video",
-    }
-}
-
-fn action_icon(action: RowAction) -> IconName {
-    match action {
-        RowAction::Cancel => IconName::CircleX,
-        RowAction::Resume => IconName::Upload,
-        RowAction::Open => IconName::ExternalLink,
-        RowAction::GoToVideo => IconName::ArrowRight,
     }
 }
 

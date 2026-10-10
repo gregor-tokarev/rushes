@@ -19,9 +19,7 @@ use super::elements::shortcut_hint;
 use super::{NewVideo, OpenCommandPalette, Workspace};
 use crate::route::{Route, SettingsSection, VideoTab};
 use crate::state::AppState;
-
-/// Emoji shown for a video without its own icon.
-pub(crate) const DEFAULT_VIDEO_ICON: &str = "🎬";
+use crate::ui::PageIcon;
 
 /// One block of the sidebar. The kit's sidebar takes a single item type, so
 /// menus, labelled groups and the recent-pages list share this enum.
@@ -60,7 +58,7 @@ impl SidebarItem for Section {
     }
 }
 
-/// A labelled list of video pages, each led by its emoji. Mirrors the
+/// A labelled list of video pages, each led by its page icon. Mirrors the
 /// geometry of the kit's group label and menu rows, which only take icons.
 #[derive(Clone)]
 struct PageList {
@@ -72,7 +70,7 @@ struct PageList {
 #[derive(Clone)]
 struct PageLink {
     id: VideoId,
-    emoji: SharedString,
+    icon: Option<SharedString>,
     title: SharedString,
     active: bool,
 }
@@ -104,9 +102,7 @@ impl PageList {
                     .text_sm()
                     .when(!page.active, |this| this.hover(move |this| this.bg(hover_bg).text_color(hover_fg)))
                     .when(page.active, |this| this.font_medium().bg(active_bg).text_color(hover_fg))
-                    .child(
-                        div().flex_none().size_4().flex().items_center().justify_center().text_xs().child(page.emoji),
-                    )
+                    .child(PageIcon::new(page.icon.as_deref()))
                     .child(div().flex_1().min_w_0().truncate().child(page.title))
                     .on_click(move |_, _, cx| {
                         state.update(cx, |state, cx| state.open_video(id, VideoTab::Script, cx));
@@ -215,7 +211,7 @@ impl Workspace {
             .into_iter()
             .map(|video| PageLink {
                 id: video.id,
-                emoji: video_emoji(video.icon.as_deref()).to_string().into(),
+                icon: video.icon.clone().map(Into::into),
                 title: display_title(&video.title).into(),
                 active: active_video == Some(video.id),
             })
@@ -299,7 +295,7 @@ impl Workspace {
                     .w_full()
                     .outline()
                     .icon(IconName::Plus)
-                    .label("New video")
+                    .label("New video…")
                     .when_some(shortcut, |this, hint| this.child(div().flex_1()).child(hint))
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(NewVideo), cx)),
             )
@@ -327,9 +323,4 @@ impl Workspace {
 pub(crate) fn display_title(title: &str) -> String {
     let title = title.trim();
     if title.is_empty() { "Untitled".to_string() } else { title.to_string() }
-}
-
-/// The emoji of a video for navigation and breadcrumbs.
-pub(crate) fn video_emoji(icon: Option<&str>) -> &str {
-    icon.filter(|icon| !icon.is_empty()).unwrap_or(DEFAULT_VIDEO_ICON)
 }

@@ -1,21 +1,21 @@
 //! The title bar: sidebar toggle, history, breadcrumb, search and theme.
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::breadcrumb::{Breadcrumb, BreadcrumbItem};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::sidebar::SidebarToggleButton;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, TitleBar, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, TitleBar, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, SharedString, Styled as _,
-    Window, div,
+    App, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Role, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::elements::shortcut_hint;
-use super::sidebar::{display_title, video_emoji};
+use super::sidebar::display_title;
 use super::{GoBack, GoForward, OpenCommandPalette, ToggleSidebar, ToggleTheme, Workspace};
 use crate::route::{Route, VideoTab};
 use crate::state::AppState;
+use crate::ui::PageIcon;
 
 impl Workspace {
     pub(super) fn render_title_bar(
@@ -114,37 +114,86 @@ fn shorten(title: &str) -> String {
     }
 }
 
-/// Where the main area is: `Videos › Board`, `Videos › 🎬 Title › Script`.
-fn breadcrumb(state: &gpui_kit::Entity<AppState>, cx: &App) -> Breadcrumb {
-    let navigate = |route: Route| {
-        let state = state.clone();
-        move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
-            state.update(cx, |state, cx| state.navigate(route.clone(), cx));
-        }
-    };
+/// One step of the breadcrumb: a label, the page icon of a video, and where
+/// a click on it goes.
+struct Crumb {
+    label: SharedString,
+    page_icon: Option<Option<SharedString>>,
+    route: Option<Route>,
+}
+
+impl Crumb {
+    fn new(label: impl Into<SharedString>) -> Self {
+        Self { label: label.into(), page_icon: None, route: None }
+    }
+
+    fn to(mut self, route: Route) -> Self {
+        self.route = Some(route);
+        self
+    }
+
+    /// Leads the label with a video's page icon (`None`: it has none).
+    fn page_icon(mut self, icon: Option<&str>) -> Self {
+        self.page_icon = Some(icon.map(|icon| SharedString::from(icon.to_owned())));
+        self
+    }
+}
+
+/// Where the main area is: `Videos › Board`, `Videos › [icon] Title › Script`.
+///
+/// The kit's breadcrumb takes text only; this one keeps its geometry (gap,
+/// chevron separators, muted steps and a foreground last step) and leads a
+/// video's step with its page icon.
+fn breadcrumb(state: &gpui_kit::Entity<AppState>, cx: &App) -> impl IntoElement {
     let app = state.read(cx);
-    let videos = || BreadcrumbItem::new("Videos").on_click(navigate(Route::default()));
-    match app.route().clone() {
+    let videos = || Crumb::new("Videos").to(Route::default());
+    let crumbs = match app.route().clone() {
         Route::Database { view } => {
             let view = view
                 .and_then(|id| app.views().iter().find(|known| known.id == id))
                 .or_else(|| app.views().iter().min_by_key(|view| view.position));
-            Breadcrumb::new().child(videos()).when_some(view, |this, view| this.child(view.name.clone()))
+            let mut crumbs = vec![videos()];
+            crumbs.extend(view.map(|view| Crumb::new(view.name.clone())));
+            crumbs
         }
         Route::Video { id, tab } => match app.video(id) {
-            Some(video) => {
-                let page: SharedString =
-                    format!("{} {}", video_emoji(video.icon.as_deref()), shorten(&display_title(&video.title))).into();
-                Breadcrumb::new()
-                    .child(videos())
-                    .child(BreadcrumbItem::new(page).on_click(navigate(Route::Video { id, tab: VideoTab::Script })))
-                    .child(tab.label())
-            }
-            None => Breadcrumb::new().child(videos()).child("Not found"),
+            Some(video) => vec![
+                videos(),
+                Crumb::new(shorten(&display_title(&video.title)))
+                    .page_icon(video.icon.as_deref())
+                    .to(Route::Video { id, tab: VideoTab::Script }),
+                Crumb::new(tab.label()),
+            ],
+            None => vec![videos(), Crumb::new("Not found")],
         },
-        Route::Pipelines => Breadcrumb::new().child("Pipelines"),
-        Route::Uploads => Breadcrumb::new().child("Uploads"),
-        Route::Settings { section } => Breadcrumb::new().child("Settings").child(section.label()),
-        Route::Onboarding => Breadcrumb::new().child("Welcome"),
-    }
+        Route::Pipelines => vec![Crumb::new("Pipelines")],
+        Route::Uploads => vec![Crumb::new("Uploads")],
+        // The settings list picks sections on its own, so the route's section can be stale.
+        Route::Settings { .. } => vec![Crumb::new("Settings")],
+        Route::Onboarding => vec![Crumb::new("Welcome")],
+    };
+    let theme = cx.theme();
+    let (muted, foreground) = (theme.muted_foreground, theme.foreground);
+    let last = crumbs.len().saturating_sub(1);
+    h_flex().min_w_0().gap_1p5().text_sm().text_color(muted).children(crumbs.into_iter().enumerate().flat_map(
+        |(ix, crumb)| {
+            let separator = (ix > 0)
+                .then(|| Icon::new(IconName::ChevronRight).size_3p5().text_color(muted).flex_none().into_any_element());
+            let state = state.clone();
+            let step = h_flex()
+                .id(("breadcrumb", ix))
+                .min_w_0()
+                .gap_1()
+                .when(ix == last, |this| this.text_color(foreground))
+                .when_some(crumb.page_icon, |this, icon| this.child(PageIcon::new(icon.as_deref())))
+                .child(div().min_w_0().truncate().child(crumb.label))
+                .when_some(crumb.route, |this, route| {
+                    this.role(Role::Link).cursor_pointer().on_click(move |_, _, cx| {
+                        state.update(cx, |state, cx| state.navigate(route.clone(), cx));
+                    })
+                })
+                .into_any_element();
+            separator.into_iter().chain([step])
+        },
+    ))
 }
