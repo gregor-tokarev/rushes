@@ -77,7 +77,8 @@ macOS minutes count ten times on private repositories, and the macOS job compile
 app twice (one per architecture). That's why bundles build on tags (at most one daily
 release), on demand, and for bundling changes only, not on every push.
 
-Artifacts count against the account's Actions storage quota (500 MB on the Free plan,
-shared by all its private repositories). When it's full, uploading the bundles fails
-and so does the release. A release's bundles move between its jobs as artifacts kept
-for one day (the release has its own copy); other runs keep them for 7 days.
+On a private repository, artifacts also count against the account's Actions storage
+quota (500 MB on the Free plan, shared by all its private repositories); when it's
+full, uploading the bundles fails and so does the release. A release's bundles move
+between its jobs as artifacts kept for one day (the release has its own copy); other
+runs keep them for 7 days.
