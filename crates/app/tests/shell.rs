@@ -590,9 +590,10 @@ fn going_back_to_a_deleted_view_shows_the_first_view(cx: &mut TestAppContext) {
     app.step(cx, move |_, cx| state.update(cx, |state, cx| state.delete_view(shorts.id, cx)));
     app.press(cx, "alt-left");
 
-    assert_eq!(app.route(cx), Route::Database { view: Some(shorts.id) });
     let shown = cx.read(|cx| app.workspace.read(cx).database().read(cx).active_view().map(|view| view.id));
     assert_eq!(shown, Some(first));
+    // The deleted view and the first view it fell back to were one page.
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_back()));
 }
 
 #[gpui_kit::test]
@@ -1110,11 +1111,11 @@ fn history_skips_deleted_videos(cx: &mut TestAppContext) {
     app.navigate(cx, video(desk));
     app.navigate(cx, video(rust));
 
-    // Deleting the open video leaves its page without keeping it in the history.
+    // Deleting the open video goes back to where the creator came from,
+    // without keeping the deleted page in the history.
     delete(&app, cx, rust);
-    assert_eq!(app.route(cx), Route::default());
-    app.press(cx, "alt-left");
     assert_eq!(app.route(cx), video(desk));
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_forward()));
     app.press(cx, "alt-left");
     assert_eq!(app.route(cx), Route::Pipelines);
 
@@ -1136,6 +1137,29 @@ fn history_skips_deleted_videos(cx: &mut TestAppContext) {
     app.press(cx, "alt-left");
     assert_eq!(app.route(cx), Route::default());
     assert!(!cx.read(|cx| app.state.read(cx).can_go_back()));
+}
+
+#[gpui_kit::test]
+fn back_after_deleting_the_open_video_shows_another_page(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &[]);
+    let views = cx.read(|cx| app.state.read(cx).views().to_vec());
+    let (all_videos, board) = (views[0].id, views[1].id);
+    // The sidebar names the view; the first route named none. Both show All videos.
+    app.navigate(cx, Route::Database { view: Some(board) });
+    app.navigate(cx, Route::Database { view: Some(all_videos) });
+    app.press(cx, "ctrl-n");
+    app.type_text(cx, "Del test");
+    app.press(cx, "enter");
+    let id = app.video_id(cx, "Del test");
+    assert_eq!(app.route(cx), Route::Video { id, tab: VideoTab::Script });
+
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| state.update(cx, |state, cx| state.delete_videos(&[id], cx)));
+    assert_eq!(app.route(cx), Route::Database { view: Some(all_videos) });
+    app.press(cx, "alt-left");
+    assert_eq!(app.route(cx), Route::Database { view: Some(board) }, "the first Back shows another page");
+    app.press(cx, "alt-left");
+    assert!(!cx.read(|cx| app.state.read(cx).can_go_back()), "All videos under its other name is skipped");
 }
 
 #[gpui_kit::test]
