@@ -50,7 +50,7 @@ fn settle(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_narrow_publish_tab_puts_the_cards_under_the_form(cx: &mut TestAppContext) {
+fn a_narrow_publish_tab_starts_with_the_upload_card(cx: &mut TestAppContext) {
     let workspace = Workspace::open(cx, YoutubeBackend::default());
     let video_id = workspace.create_video(cx, "Desk setup 2026", |_| {});
     let options = WindowOptions {
@@ -73,7 +73,10 @@ fn a_narrow_publish_tab_puts_the_cards_under_the_form(cx: &mut TestAppContext) {
         let panel = window.find("publish-panel").bounds();
         let title = window.find("publish-title").bounds();
         let upload = window.find("publish-upload").bounds();
-        assert!(upload.top() > title.bottom(), "the cards follow the form: {upload:?} vs {title:?}");
+        let account = window.find("publish-account").bounds();
+        // The next step and what blocks it come first; the other cards follow the form.
+        assert!(upload.bottom() < title.top(), "the Upload card leads: {upload:?} vs {title:?}");
+        assert!(account.top() > title.bottom(), "the other cards follow the form: {account:?} vs {title:?}");
         assert!(upload.right() <= panel.right(), "nothing reaches past the column: {upload:?} vs {panel:?}");
     });
 }

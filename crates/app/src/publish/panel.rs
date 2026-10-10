@@ -1502,19 +1502,18 @@ impl Render for PublishPanel {
             .child(self.render_details(cx))
             .child(self.render_visibility(cx))
             .child(self.render_audience(cx));
-        let side = v_flex()
-            .map(|this| if stacked { this.w_full() } else { this.w(SIDE_COLUMN_WIDTH).flex_shrink_0() })
-            .gap_6()
-            // The cards that clear the upload's blocking reasons follow it.
-            .child(self.render_upload(cx))
-            .child(
-                card("publish-account", "YouTube account")
-                    .child(ConnectionPanel::new("publish-connection", self.service.clone())),
-            )
-            .child(self.render_file(cx))
-            .child(self.render_thumbnail(cx));
+        let upload = self.render_upload(cx);
+        // The cards that clear the upload's blocking reasons follow it.
+        let cards = [
+            card("publish-account", "YouTube account")
+                .child(ConnectionPanel::new("publish-connection", self.service.clone()))
+                .into_any_element(),
+            self.render_file(cx).into_any_element(),
+            self.render_thumbnail(cx).into_any_element(),
+        ];
         // Too narrow for both columns (a small window, the rail beside it), the
-        // cards follow the form.
+        // Upload card (state, blockers, the upload button) comes first, so the tab
+        // opens on the next step; the other cards follow the form.
         let measure = {
             let width = self.width.clone();
             canvas(
@@ -1538,8 +1537,14 @@ impl Render for PublishPanel {
             .w_full()
             .map(|this| {
                 if stacked {
-                    this.flex().flex_col().gap_10().child(form).child(side)
+                    this.flex()
+                        .flex_col()
+                        .gap_10()
+                        .child(upload)
+                        .child(form)
+                        .child(v_flex().w_full().gap_6().children(cards))
                 } else {
+                    let side = v_flex().w(SIDE_COLUMN_WIDTH).flex_shrink_0().gap_6().child(upload).children(cards);
                     this.flex().flex_row().items_start().gap_8().child(form).child(side)
                 }
             })
