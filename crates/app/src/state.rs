@@ -70,6 +70,8 @@ pub struct AppState {
     script_focus: Option<VideoId>,
     /// Problems found while loading, shown once the window is open.
     startup_problems: Vec<Problem>,
+    /// How often the UI thread waited for another program's lock.
+    lock_waits: usize,
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -116,6 +118,7 @@ impl AppState {
             recent: Vec::new(),
             script_focus: None,
             startup_problems: settings_problem.into_iter().chain(unsaved_problem).collect(),
+            lock_waits: 0,
         };
         state.load()?;
         Ok(state)
@@ -222,6 +225,13 @@ impl AppState {
     /// The writes not in the database yet, readable without a context.
     pub(crate) fn queued_writes(&self) -> QueuedWrites {
         self.writes.queued()
+    }
+
+    /// How often the UI thread waited for another program's lock, each time at
+    /// most [`UI_BUSY_TIMEOUT`]: only a change made while nothing is queued
+    /// tries the database first; the ones after it join the queue at once.
+    pub fn lock_waits(&self) -> usize {
+        self.lock_waits
     }
 
     /// Whether changes wait to be written.

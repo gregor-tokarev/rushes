@@ -768,7 +768,11 @@ impl AppState {
                     return false;
                 }
                 // Busy or failing: the background writer retries it.
-                Err(_) => {}
+                Err(error) => {
+                    if error.is_busy() {
+                        self.lock_waits += 1;
+                    }
+                }
             }
         }
         self.queue(write, cx);
