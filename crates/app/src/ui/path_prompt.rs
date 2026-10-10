@@ -65,6 +65,13 @@ pub type Finish = Box<dyn FnOnce(&mut Window, &mut App)>;
 /// can't be used, which the dialog shows next to the field.
 pub type Accepted = Task<Result<Finish, SharedString>>;
 
+/// Turns down a path before it is looked up.
+type Check = Rc<dyn Fn(&Path) -> Result<(), SharedString>>;
+/// Takes a path that names what was asked for.
+type Accept = Rc<dyn Fn(PathBuf, &mut Window, &mut App) -> Accepted>;
+/// The request's own action.
+type Run = Rc<dyn Fn(&mut Window, &mut App)>;
+
 /// Takes a path right away; nothing about it can fail any more.
 pub fn accept_now(finish: impl FnOnce(&mut Window, &mut App) + 'static) -> Accepted {
     Task::ready(Ok(Box::new(finish)))
@@ -77,7 +84,7 @@ pub struct PathRequest {
     commit: SharedString,
     example: SharedString,
     value: String,
-    check: Option<Rc<dyn Fn(&Path) -> Result<(), SharedString>>>,
+    check: Option<Check>,
     secondary: Option<Secondary>,
 }
 
@@ -86,7 +93,7 @@ pub struct PathRequest {
 struct Secondary {
     label: SharedString,
     icon: IconName,
-    run: Rc<dyn Fn(&mut Window, &mut App)>,
+    run: Run,
 }
 
 impl PathRequest {
@@ -177,9 +184,9 @@ struct PathForm {
     hint: SharedString,
     commit: SharedString,
     example: SharedString,
-    check: Option<Rc<dyn Fn(&Path) -> Result<(), SharedString>>>,
+    check: Option<Check>,
     secondary: Option<Secondary>,
-    accept: Rc<dyn Fn(PathBuf, &mut Window, &mut App) -> Accepted>,
+    accept: Accept,
     input: Entity<InputState>,
     error: Option<SharedString>,
     /// The existing file the creator was asked about; taking the same path again replaces it.
@@ -193,12 +200,7 @@ struct PathForm {
 }
 
 impl PathForm {
-    fn new(
-        request: PathRequest,
-        accept: Rc<dyn Fn(PathBuf, &mut Window, &mut App) -> Accepted>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(request: PathRequest, accept: Accept, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| {
             InputState::new(window, cx).placeholder(request.example.clone()).default_value(request.value.clone())
         });
