@@ -1,9 +1,14 @@
 //! Dialog footers and the confirmations the app shares.
 
+use std::rc::Rc;
+
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::dialog::{Cancel, Confirm, DialogFooter};
-use gpui_kit::{App, ElementId, ParentElement as _, SharedString, Window};
+use gpui_kit::{
+    Action, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    Styled as _, Window, div,
+};
 use videocrm_core::VideoId;
 
 /// The footer of a form dialog: Cancel and the commit at their natural width on
@@ -17,17 +22,48 @@ pub fn form_footer(
     commit: impl Into<SharedString>,
 ) -> DialogFooter {
     DialogFooter::new()
-        .child(
-            Button::new(cancel_id)
-                .label("Cancel")
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(Cancel), cx)),
-        )
-        .child(
-            Button::new(commit_id)
-                .primary()
-                .label(commit)
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(Confirm { secondary: false }), cx)),
-        )
+        .child(FooterButton {
+            anchor: "form-footer-cancel",
+            button: Button::new(cancel_id).label("Cancel"),
+            action: Rc::new(Cancel),
+        })
+        .child(FooterButton {
+            anchor: "form-footer-commit",
+            button: Button::new(commit_id).primary().label(commit),
+            action: Rc::new(Confirm { secondary: false }),
+        })
+}
+
+/// A footer button that dispatches `action` on the dialog it sits in.
+///
+/// Kit buttons don't take focus when clicked, so an action dispatched from
+/// the focused element misses the dialog once nothing in it has focus (its
+/// focused field was removed, say). Like the kit's own dialog buttons, this
+/// one dispatches from a focus node inside itself, whose ancestors end at
+/// its dialog.
+#[derive(IntoElement)]
+struct FooterButton {
+    /// Distinct per button: both sit in one element scope.
+    anchor: &'static str,
+    button: Button,
+    action: Rc<dyn Action>,
+}
+
+impl RenderOnce for FooterButton {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let anchor = window.use_keyed_state(self.anchor, cx, |_, cx| cx.focus_handle()).read(cx).clone();
+        let action = self.action;
+        self.button
+            // Never hovered, so it takes no focus and stays out of the Tab order.
+            .child(div().absolute().size_0().track_focus(&anchor))
+            .on_click(move |_, window, cx| {
+                if anchor.contains(&anchor, window) {
+                    anchor.dispatch_action(&*action, window, cx);
+                } else {
+                    window.dispatch_action(action.boxed_clone(), cx);
+                }
+            })
+    }
 }
 
 /// Asks before deleting `videos` (id and title) and calls `delete` once the
