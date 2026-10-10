@@ -364,7 +364,7 @@ impl YoutubeSettings {
         let add = {
             let service = self.service.clone();
             Button::new("add-account")
-                .label("Add account")
+                .label("Add account…")
                 .icon(IconName::Plus)
                 .small()
                 .outline()

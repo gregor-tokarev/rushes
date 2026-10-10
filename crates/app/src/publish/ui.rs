@@ -279,9 +279,11 @@ impl RenderOnce for ConnectionPanel {
         let service = self.service.read(cx);
         let config_problem = service.config().err().cloned();
         let theme = cx.theme();
+        // One browser sign-in at a time: another one must end first.
+        let busy = service.is_signing_in();
         let connect = {
             let service = self.service.clone();
-            Button::new("connect").label("Connect").small().on_click(move |_, _, cx| {
+            Button::new("connect").label("Connect").small().disabled(busy).on_click(move |_, _, cx| {
                 service.update(cx, |service, cx| service.connect(cx));
             })
         };
@@ -304,7 +306,7 @@ impl RenderOnce for ConnectionPanel {
                 let action = match (&config_problem, self.manage) {
                     (Some(_), true) => Some(reconnect_button(&self.service, &account).disabled(true)),
                     (Some(_), false) => None,
-                    (None, _) => Some(reconnect_button(&self.service, &account)),
+                    (None, _) => Some(reconnect_button(&self.service, &account).disabled(busy)),
                 };
                 v_flex().gap_3().child(needs_sign_in_line(&account, service, cx)).child(h_flex().map(
                     |this| match action {

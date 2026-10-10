@@ -215,9 +215,16 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
 - Several accounts can be signed in at once, for example a main channel and a second
   one. Each has its own client and credentials file in `<data dir>/youtube-accounts/`
   (one JSON file per sign-in, mode 0600). A `credentials.json` left in the data dir by a
-  release that kept one account moves there at the next start. Accounts are told apart
-  by `Account::key()`: the channel id, or the email while the account has no channel.
-  Signing in to an account that is already there replaces its earlier sign-in.
+  release that kept one account moves there at the next start, and the stopped uploads of
+  that release are recorded as that account's, so they resume with it. Accounts are told
+  apart by `Account::key()`: the channel id, or the email while the account has no
+  channel. Signing in to an account that is already there replaces its earlier sign-in.
+  An account that gets a channel is known by it from then on: the default, the videos
+  that chose it and its uploads follow (`rekey`), whether a refresh or a new sign-in
+  notices it.
+- One browser sign-in runs at a time: while one is open, Connect, Reconnect and **Add
+  account…** are disabled everywhere. Disconnecting an account that is signing in again
+  cancels that sign-in, so finishing it in the browser doesn't bring the account back.
 - One account is the default (settings key `youtube.default_account`): the first one
   signed in, until **Make default** in Settings → YouTube picks another. Disconnecting the
   default hands it to another account by storing that choice, so an account added later
@@ -225,15 +232,19 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
 - A video uploads to `PublishSettings::channel` (`PublishChannel { id, name }`, the
   account's key and its name when chosen), or to the default account while that is
   `None`. It is chosen in the Publish tab's account card (**Change** lists the accounts
-  with a channel and **Add account**, which signs one in and chooses it for the video),
+  with a channel, by name with the handle or email when two share a name, and **Add
+  account…**, which signs one in and chooses it for the video),
   in the videos table's **Channel** column and in the video page's **Channel** property;
   the table and the property show the default account muted. The choice can't change
   while the video uploads.
 - Every upload job records the account it goes to (`UploadJob::channel`); resuming uses
   that account. Uploading a video without a choice records the account it went to as the
   video's choice, so changing the default later doesn't move its next upload. With
-  several accounts, the Upload card names the account ("Uploads to Second Channel as
-  private.") and the Uploads page shows it next to the file.
+  several accounts (or when a stopped upload goes elsewhere than the video's account now),
+  the Upload card names the account ("Uploads to Second Channel as private.", "Uploading
+  to …", "Resume continues the upload to …") and the Uploads page shows it next to the
+  file. The account card also shows why the last sign-in failed beside the account it
+  shows.
 - A video whose chosen account was disconnected keeps the choice and never falls back to
   another account: the account card says "“Second Channel” isn’t connected" with
   **Connect** and **Change**, and the upload is blocked with "“Second Channel” isn’t

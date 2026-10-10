@@ -1497,3 +1497,60 @@ fn youtube_settings_list_every_account(cx: &mut TestAppContext) {
         Connection::Connected(service.read_with(cx, |s, _| s.account().cloned().unwrap()))
     );
 }
+
+#[gpui_kit::test]
+fn a_failed_sign_in_shows_on_the_publish_tab_beside_the_account(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let video_id = workspace.create_video(cx, "Behind the scenes", |_| {});
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let service = workspace.service.clone();
+    service.update(cx, |service, cx| service.connect_for(video_id, cx));
+    let url =
+        wait_until(cx, "the consent page", |cx| service.read_with(cx, |s, _| s.sign_in_url().map(ToString::to_string)));
+    publish_support::cancel_in_browser(&url);
+    wait_until(cx, "the failed sign-in", |cx| service.read_with(cx, |s, _| s.sign_in_problem().map(|_| ())));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        // The card keeps the account it shows, and says why adding one didn't work.
+        assert!(window.find("publish-sign-in-failed").visible());
+    });
+    assert_eq!(workspace.video(cx, video_id).publish.channel, None);
+}
+
+#[gpui_kit::test]
+fn a_stopped_upload_names_the_account_it_resumes_to(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    workspace.sign_in(cx, "editor@example.com");
+    let creator = workspace.account_key(cx, "creator@example.com");
+    let editor = workspace.account_key(cx, "editor@example.com");
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    // The upload started on Second Channel; the video chose Demo Creator since.
+    let video_id = workspace.create_video(cx, "Behind the scenes", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.channel = Some(PublishChannel { id: creator.clone(), name: "Demo Creator".into() });
+    });
+    let stopped = UploadJob {
+        id: UploadId::new(),
+        video_id,
+        file: file.clone(),
+        file_stamp: None,
+        status: UploadStatus::Cancelled,
+        session_url: Some("http://127.0.0.1:1/upload/session".into()),
+        channel: Some(editor),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    workspace.insert_jobs(cx, &[&stopped]);
+    let _service = workspace.restart(cx);
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    cx.run_until_parked();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("resume-upload").visible());
+        assert!(window.find("resume-destination").visible());
+    });
+}

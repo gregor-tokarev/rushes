@@ -602,7 +602,7 @@ impl PropertiesPanel {
     fn render_channel(&self, video: &Video, cx: &mut Context<Self>) -> AnyElement {
         let choices = ChannelChoices::of(video, cx);
         let label = choices.label(cx);
-        if !choices.can_choose() {
+        if !choices.is_choosable() {
             let muted = cx.theme().muted_foreground;
             return div()
                 .id("property-channel-value")
@@ -624,7 +624,7 @@ impl PropertiesPanel {
             .small()
             .accessibility_label("Channel")
             .children(label)
-            .dropdown_menu(move |menu, _, cx| choices.menu(menu.check_side(Side::Right), cx, choose.clone()))
+            .dropdown_menu(move |menu, _, _| choices.menu(menu.check_side(Side::Right), choose.clone()))
             .into_any_element()
     }
 

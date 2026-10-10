@@ -8,7 +8,7 @@ use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{AnyElement, App, Div, IntoElement, ParentElement as _, Styled as _, div};
+use gpui_kit::{App, Div, ParentElement as _, Styled as _, div};
 use videocrm_core::Video;
 
 use super::service::YoutubeService;
@@ -38,8 +38,8 @@ struct Shown {
 
 struct Choice {
     key: String,
-    name: String,
-    is_default: bool,
+    /// The name, with the handle or email when another account has the same one.
+    label: String,
 }
 
 impl ChannelChoices {
@@ -64,21 +64,28 @@ impl ChannelChoices {
             (None, None) => None,
         };
         let default = youtube.default_account().map(|account| account.key().to_owned());
-        let accounts = youtube
-            .accounts()
+        let choosable: Vec<_> = youtube.accounts().iter().filter(|account| account.has_channel()).collect();
+        let accounts = choosable
             .iter()
-            .filter(|account| account.has_channel())
-            .map(|account| Choice {
-                key: account.key().to_owned(),
-                name: account.name(),
-                is_default: default.as_deref() == Some(account.key()),
+            .map(|account| {
+                let name = account.name();
+                let mut label = if choosable.iter().filter(|other| other.name() == name).count() > 1 {
+                    let detail = account.account().channel_handle.as_deref().unwrap_or(&account.account().email);
+                    format!("{name} ({detail})")
+                } else {
+                    name
+                };
+                if default.as_deref() == Some(account.key()) {
+                    label.push_str(" · Default");
+                }
+                Choice { key: account.key().to_owned(), label }
             })
             .collect();
         Self { current, shown, accounts, locked: youtube.is_uploading_any(&[video.id]) }
     }
 
     /// Whether another account can be chosen now.
-    pub fn can_choose(&self) -> bool {
+    pub fn is_choosable(&self) -> bool {
         !self.locked && !self.accounts.is_empty()
     }
 
@@ -106,23 +113,16 @@ impl ChannelChoices {
         )
     }
 
-    /// One item per account, the current one checked and the default one
-    /// marked; choosing one calls `choose` with its key.
-    pub fn menu(&self, menu: PopupMenu, cx: &App, choose: ChooseChannel) -> PopupMenu {
-        let muted = cx.theme().muted_foreground;
+    /// One item per account, named so screen readers can tell them apart, the
+    /// current one checked and the default one marked; choosing one calls
+    /// `choose` with its key.
+    pub fn menu(&self, menu: PopupMenu, choose: ChooseChannel) -> PopupMenu {
         self.accounts.iter().fold(menu, |menu, choice| {
-            let (name, is_default, key) = (choice.name.clone(), choice.is_default, choice.key.clone());
-            let choose = choose.clone();
+            let (key, choose) = (choice.key.clone(), choose.clone());
             menu.item(
-                PopupMenuItem::element(move |_, _| -> AnyElement {
-                    h_flex()
-                        .gap_2()
-                        .child(name.clone())
-                        .when(is_default, |this| this.child(div().text_color(muted).child("Default")))
-                        .into_any_element()
-                })
-                .checked(self.current.as_deref() == Some(choice.key.as_str()))
-                .on_click(move |_, _, cx| choose(&key, cx)),
+                PopupMenuItem::new(choice.label.clone())
+                    .checked(self.current.as_deref() == Some(choice.key.as_str()))
+                    .on_click(move |_, _, cx| choose(&key, cx)),
             )
         })
     }

@@ -799,7 +799,7 @@ impl YoutubeService {
     /// Applies `change` to the job, saves it and tells everyone. The state
     /// saves it through its write queue, so a lock on the database holds up
     /// neither the upload nor the UI.
-    fn update_job(&mut self, id: UploadId, cx: &mut Context<Self>, change: impl FnOnce(&mut UploadJob)) {
+    pub(super) fn update_job(&mut self, id: UploadId, cx: &mut Context<Self>, change: impl FnOnce(&mut UploadJob)) {
         let Some(job) = self.jobs.iter_mut().find(|job| job.id == id) else { return };
         change(job);
         job.updated_at = Utc::now();

@@ -328,8 +328,11 @@ impl YoutubeService {
             remote_asked: HashMap::new(),
             _subscription: subscription,
         };
-        service.restore_logins(cx);
+        let legacy = service.restore_logins(cx);
         service.recover_interrupted_uploads(cx);
+        if let Some(key) = legacy {
+            service.adopt_legacy_uploads(&key, cx);
+        }
         service.load_gone(cx);
         service.check_stopped_uploads(cx);
         service
@@ -551,6 +554,10 @@ impl YoutubeService {
     /// it again. Videos that chose it keep their choice.
     pub fn disconnect(&mut self, key: &str, cx: &mut Context<Self>) {
         let Some(ix) = self.accounts.iter().position(|account| account.key() == key) else { return };
+        // A sign-in finishing later must not bring the account back.
+        if self.reconnecting() == Some(key) {
+            self.cancel_sign_in();
+        }
         let account = self.accounts.remove(ix);
         for (id, upload) in &self.active {
             if self.job(*id).is_some_and(|job| job.channel.as_deref() == Some(key)) {
@@ -701,13 +708,22 @@ impl YoutubeService {
     fn add_account(&mut self, signed_in: SignedIn, reconnecting: Option<&str>, cx: &mut Context<Self>) {
         let SignedIn { client, tokens, account } = signed_in;
         let key = account.key().to_owned();
-        if let Some(ix) = self.accounts.iter().position(|known| known.key() == key) {
+        // The same account, also when it got a channel since its earlier sign-in.
+        let same = |known: &YoutubeAccount| {
+            known.key() == key
+                || (known.account.channel_id.is_none()
+                    && account.channel_id.is_some()
+                    && known.account.email == account.email)
+        };
+        let mut earlier_key = None;
+        if let Some(ix) = self.accounts.iter().position(same) {
             // The new sign-in has its own credentials file; the earlier one goes. Its
             // grant stays: it is the same account and app.
             let earlier = self.accounts.remove(ix);
             if let Err(error) = earlier.tokens.sign_out() {
                 log_line!("videocrm: couldn't remove the earlier YouTube sign-in: {error}");
             }
+            earlier_key = Some(earlier.key().to_owned());
         }
         // Signing in again picks the account on the consent page: another one
         // may come back, and the account signing in again still waits for its turn.
@@ -724,6 +740,9 @@ impl YoutubeService {
         }
         self.accounts.push(YoutubeAccount { account, client: Some(client), tokens, avatar: None });
         self.sort_accounts();
+        if let Some(earlier) = earlier_key {
+            self.rekey(&earlier, &key, cx);
+        }
         if self.default_account().is_none() {
             self.save_default(Some(key.clone()), cx);
         }
@@ -746,10 +765,11 @@ impl YoutubeService {
     }
 
     /// Restores the saved accounts without network access, then reads them again
-    /// in the background.
-    fn restore_logins(&mut self, cx: &mut Context<Self>) {
-        let Ok(config) = self.config.clone() else { return };
-        self.move_legacy_login();
+    /// in the background. Returns the key of the account a release that kept one
+    /// account had signed in, when its sign-in moved to the accounts folder now.
+    fn restore_logins(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let Ok(config) = self.config.clone() else { return None };
+        let legacy = self.move_legacy_login();
         let dir = Self::accounts_dir(&self.data_dir);
         let mut files: Vec<PathBuf> = match fs::read_dir(&dir) {
             Ok(entries) => entries
@@ -792,18 +812,71 @@ impl YoutubeService {
             self.refresh_avatar(&key, cx);
             self.refresh_account(&key, cx);
         }
+        legacy
     }
 
-    /// Moves the sign-in of a release that kept one account to the accounts folder.
-    fn move_legacy_login(&self) {
+    /// Moves the sign-in of a release that kept one account to the accounts folder;
+    /// the key of its account once moved.
+    fn move_legacy_login(&self) -> Option<String> {
         let legacy = self.data_dir.join(LEGACY_CREDENTIALS_FILE);
         if !legacy.is_file() {
-            return;
+            return None;
         }
+        let key = match CredentialStore::new(&legacy).load() {
+            Ok(login) => login.and_then(|login| login.account).map(|account| account.key().to_owned()),
+            Err(error) => {
+                log_line!("videocrm: couldn't read {}: {error}", legacy.display());
+                None
+            }
+        };
         let target = self.new_account_file(0);
         let moved = target.parent().map_or(Ok(()), fs::create_dir_all).and_then(|()| fs::rename(&legacy, &target));
-        if let Err(error) = moved {
-            log_line!("videocrm: couldn't move {} to {}: {error}", legacy.display(), target.display());
+        match moved {
+            Ok(()) => key,
+            Err(error) => {
+                log_line!("videocrm: couldn't move {} to {}: {error}", legacy.display(), target.display());
+                None
+            }
+        }
+    }
+
+    /// Stopped uploads stored before uploads recorded their account went to the one
+    /// account that release kept: they resume with it, whatever the default becomes.
+    fn adopt_legacy_uploads(&mut self, key: &str, cx: &mut Context<Self>) {
+        let stopped: Vec<UploadId> =
+            self.jobs.iter().filter(|job| job.channel.is_none() && self.is_resumable(job)).map(|job| job.id).collect();
+        for id in stopped {
+            self.update_job(id, cx, |job| job.channel = Some(key.to_owned()));
+        }
+    }
+
+    /// The account known as `before` is known as `after` now (it got a channel):
+    /// the default, the videos that chose it and its uploads follow.
+    fn rekey(&mut self, before: &str, after: &str, cx: &mut Context<Self>) {
+        let Some(channel) = self.find_account(after).map(YoutubeAccount::publish_channel) else { return };
+        if before == after {
+            return;
+        }
+        if self.default_account.as_deref() == Some(before) {
+            self.save_default(Some(after.to_owned()), cx);
+        }
+        self.state.update(cx, |state, cx| {
+            let chosen: Vec<Video> = state
+                .rows()
+                .iter()
+                .map(|row| &row.video)
+                .filter(|video| video.publish.channel.as_ref().is_some_and(|chosen| chosen.id == before))
+                .cloned()
+                .collect();
+            for mut video in chosen {
+                video.publish.channel = Some(channel.clone());
+                state.update_video(video, cx);
+            }
+        });
+        let jobs: Vec<UploadId> =
+            self.jobs.iter().filter(|job| job.channel.as_deref() == Some(before)).map(|job| job.id).collect();
+        for id in jobs {
+            self.update_job(id, cx, |job| job.channel = Some(after.to_owned()));
         }
     }
 
@@ -852,11 +925,9 @@ impl YoutubeService {
                         if known.account != account {
                             let (before, after) = (known.key().to_owned(), account.key().to_owned());
                             known.account = account;
-                            // An account that got a channel since is known by the channel now.
-                            if this.default_account.as_deref() == Some(before.as_str()) && before != after {
-                                this.save_default(Some(after.clone()), cx);
-                            }
                             this.sort_accounts();
+                            // An account that got a channel since is known by the channel now.
+                            this.rekey(&before, &after, cx);
                             this.connection_changed(cx);
                             this.refresh_avatar(&after, cx);
                         }

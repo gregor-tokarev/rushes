@@ -17,7 +17,7 @@ use videocrm_core::{TagColor, UploadJob, UploadStatus};
 use super::rules::AccountAccess;
 use super::service::YoutubeService;
 use super::transfer::{format_bytes, format_eta, format_speed};
-use super::ui::{display_name, file_name, upload_chip, upload_label, youtube_link};
+use super::ui::{file_name, upload_chip, upload_label, youtube_link};
 use super::upload::ProcessingOutcome;
 use crate::database::Chip;
 use crate::route::{Route, VideoTab};
@@ -144,9 +144,10 @@ impl UploadsPage {
         // A stopped upload continues with the account it went to.
         let channel = job.channel.clone().or_else(|| video.and_then(|video| service.channel_for(video)));
         let access = service.account_access_for(channel.as_deref());
-        // With several accounts, which one the upload went to.
-        let channel_name = channel.filter(|_| service.accounts().len() > 1).and_then(|key| {
-            service.find_account(&key).map(|account| display_name(account.account())).or_else(|| {
+        // With several accounts, which one the upload went to. Jobs stored before
+        // uploads recorded it don't say.
+        let channel_name = job.channel.as_deref().filter(|_| service.accounts().len() > 1).and_then(|key| {
+            service.find_account(key).map(|account| account.name()).or_else(|| {
                 video
                     .and_then(|video| video.publish.channel.as_ref())
                     .filter(|chosen| chosen.id == key)

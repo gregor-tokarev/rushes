@@ -389,6 +389,21 @@ impl PublishPanel {
         }
     }
 
+    /// Which account a running or stopped upload goes to, when that needs saying:
+    /// with several accounts, or when it isn't the account the video uploads to now.
+    fn upload_destination(&self, job: &UploadJob, cx: &App) -> Option<String> {
+        let service = self.service.read(cx);
+        let key = job.channel.as_deref()?;
+        let current = self.draft_video(cx).and_then(|video| service.channel_for(&video));
+        if service.accounts().len() < 2 && current.as_deref() == Some(key) {
+            return None;
+        }
+        service
+            .find_account(key)
+            .map(YoutubeAccount::name)
+            .or_else(|| self.draft.channel.as_ref().filter(|chosen| chosen.id == key).map(|chosen| chosen.name.clone()))
+    }
+
     /// Signs another account in for this video: once signed in, the video uploads to it.
     fn add_account(&mut self, cx: &mut Context<Self>) {
         // A channel picked a moment ago must not overwrite the one the sign-in picks.
@@ -972,6 +987,7 @@ impl PublishPanel {
         let reasons = self.blocking_reasons(cx);
         let service = self.service.read(cx);
         let job = service.latest_job(self.video_id).cloned();
+        let destination = job.as_ref().and_then(|job| self.upload_destination(job, cx));
         let theme = cx.theme();
         let youtube_url = self
             .state
@@ -1038,7 +1054,10 @@ impl PublishPanel {
                     .child(
                         v_flex()
                             .when_some(amount, |this, amount| this.child(help_text(amount, cx)))
-                            .when_some(eta, |this, eta| this.child(help_text(eta, cx))),
+                            .when_some(eta, |this, eta| this.child(help_text(eta, cx)))
+                            .when_some(destination, |this, name| {
+                                this.child(help_text(format!("Uploading to {name}."), cx))
+                            }),
                     )
                     .child(h_flex().pt_1().child(
                         Button::new("cancel-upload").label("Cancel").small().outline().disabled(cancelling).on_click(
@@ -1185,6 +1204,14 @@ impl PublishPanel {
                 v_flex()
                     .gap_3()
                     .child(status)
+                    .when_some(destination, |this, name| {
+                        this.child(
+                            help_text(format!("Resume continues the upload to {name}."), cx)
+                                .id("resume-destination")
+                                // Tests check that the account is on screen.
+                                .test_support(),
+                        )
+                    })
                     .child(
                         h_flex()
                             .gap_2()
@@ -1339,6 +1366,10 @@ impl PublishPanel {
         // A sign-in that adds an account, while the panel shows another one.
         let adding = service.is_signing_in() && !matches!(shown, Some(Connection::Connecting { .. }));
         let signing_in = service.is_signing_in();
+        // Why the last sign-in failed, also while the card shows an account: the
+        // panel says it only without one.
+        let problem =
+            service.sign_in_problem().filter(|_| !signing_in && !matches!(shown, Some(Connection::Failed(_)))).cloned();
         let uploading = self.is_uploading(cx);
         // The form's choice, which may not be saved yet.
         let choices = self.draft_video(cx).map(|video| ChannelChoices::of(&video, cx));
@@ -1357,10 +1388,10 @@ impl PublishPanel {
                     })
                 };
                 button
-                    .dropdown_menu(move |menu, _, cx| {
+                    .dropdown_menu(move |menu, _, _| {
                         let panel = panel.clone();
-                        choices.menu(menu.check_side(Side::Right), cx, choose.clone()).separator().item(
-                            PopupMenuItem::new("Add account").icon(IconName::Plus).disabled(signing_in).on_click(
+                        choices.menu(menu.check_side(Side::Right), choose.clone()).separator().item(
+                            PopupMenuItem::new("Add account…").icon(IconName::Plus).disabled(signing_in).on_click(
                                 move |_, _, cx| {
                                     panel.update(cx, |panel, cx| panel.add_account(cx)).ok();
                                 },
@@ -1403,6 +1434,15 @@ impl PublishPanel {
                     service.sign_in_url().cloned(),
                     cx,
                 )))
+            })
+            .when_some(problem, |this, problem| {
+                this.child(
+                    div()
+                        .id("publish-sign-in-failed")
+                        .child(status_line(IconName::CircleAlert, theme.danger, "Couldn’t connect", Some(problem), cx))
+                        // Tests check that the reason is on screen.
+                        .test_support(),
+                )
             })
             .when(gone.is_some() && !signing_in, |this| {
                 this.child(
@@ -1730,12 +1770,15 @@ fn render_blockers(
 /// offers to open them).
 fn reconnect_button(service: &Entity<YoutubeService>, key: Option<&str>, cx: &App) -> Option<Button> {
     let Connection::NeedsSignIn(account) = service.read(cx).connection_for(key) else { return None };
+    // One browser sign-in at a time: another one must end first.
+    let busy = service.read(cx).is_signing_in();
     let service = service.clone();
     service.read(cx).config().is_ok().then(|| {
         Button::new("upload-reconnect")
             .label("Reconnect")
             .small()
             .outline()
+            .disabled(busy)
             .on_click(move |_, _, cx| service.update(cx, |service, cx| service.reconnect(account.key(), cx)))
     })
 }

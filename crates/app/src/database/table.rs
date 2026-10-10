@@ -317,7 +317,7 @@ impl VideoTable {
         let content =
             choices.label(cx).map_or_else(|| empty_value(cx).into_any_element(), IntoElement::into_any_element);
         // Nothing to choose from, or the upload goes to the account it has.
-        if !choices.can_choose() {
+        if !choices.is_choosable() {
             return static_cell(div().id(element_id("channel", id)).min_w_0().child(content).test_support())
                 .into_any_element();
         }
@@ -328,7 +328,7 @@ impl VideoTable {
         CellButton::new(element_id("channel", id))
             .mx_neg_1()
             .child(content)
-            .dropdown_menu(move |menu, _, cx| choices.menu(menu, cx, choose.clone()))
+            .dropdown_menu(move |menu, _, _| choices.menu(menu, choose.clone()))
             .into_any_element()
     }
 

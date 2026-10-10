@@ -790,3 +790,81 @@ fn the_default_account_and_the_choices_survive_sign_outs(cx: &mut TestAppContext
         Some(creator)
     );
 }
+
+#[gpui_kit::test]
+fn stopped_uploads_from_the_one_account_release_resume_with_that_account(cx: &mut TestAppContext) {
+    let emulator = YoutubeBackend::Emulator { google_url: String::new(), youtube_url: String::new() };
+    let workspace = Workspace::open(cx, emulator);
+    let config = workspace.service.read_with(cx, |s, _| s.config().ok().cloned()).unwrap();
+    let account = Account {
+        email: "creator@example.com".into(),
+        name: Some("Demo Creator".into()),
+        picture: None,
+        channel_id: Some("UC1".into()),
+        channel_title: Some("Demo Creator".into()),
+        channel_handle: None,
+        channel_thumbnail: None,
+        subscriber_count: None,
+        video_count: None,
+        backend: config.backend_label(),
+    };
+    let credentials = Credentials {
+        access_token: "google_token".into(),
+        refresh_token: Some("refresh".into()),
+        expires_at: Utc::now() + chrono::TimeDelta::hours(1),
+        scope: "openid".into(),
+        id_token: None,
+    };
+    let path = workspace.dir.path().join("credentials.json");
+    CredentialStore::new(&path).save(&SavedLogin { credentials, account: Some(account) }).unwrap();
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Desk tour", |video| video.publish.file = Some(file.clone()));
+    let job = |status: UploadStatus, session_url: Option<&str>| UploadJob {
+        id: UploadId::new(),
+        video_id,
+        file: file.clone(),
+        file_stamp: None,
+        status,
+        session_url: session_url.map(str::to_owned),
+        channel: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let stopped = job(UploadStatus::Uploading { sent: 10, total: 100 }, Some("http://127.0.0.1:1/upload/session"));
+    let done = job(UploadStatus::Done { video_id: "abc".into() }, None);
+    workspace.insert_jobs(cx, &[&stopped, &done]);
+
+    // The release kept one account, so the stopped upload went to it: it stays
+    // with it, whichever account becomes the default later.
+    let service = workspace.restart(cx);
+    cx.run_until_parked();
+    let channel = |id: UploadId, cx: &mut TestAppContext| {
+        service.read_with(cx, |s, _| s.job(id).and_then(|job| job.channel.clone()))
+    };
+    assert_eq!(channel(stopped.id, cx).as_deref(), Some("UC1"));
+    // Finished uploads are left alone: who knows which account they went to.
+    assert_eq!(channel(done.id, cx), None);
+    let stored = workspace.stored_jobs(cx);
+    assert_eq!(stored.iter().find(|job| job.id == stopped.id).and_then(|job| job.channel.as_deref()), Some("UC1"));
+}
+
+#[gpui_kit::test]
+fn disconnecting_an_account_that_signs_in_again_stops_the_sign_in(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let key = workspace.account_key(cx, "creator@example.com");
+    service.update(cx, |service, cx| service.reconnect(&key, cx));
+    let url =
+        wait_until(cx, "the consent page", |cx| service.read_with(cx, |s, _| s.sign_in_url().map(ToString::to_string)));
+
+    service.update(cx, |service, cx| service.disconnect(&key, cx));
+    assert!(!service.read_with(cx, |s, _| s.is_signing_in()));
+    // Finishing the consent now brings nothing back.
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(publish_support::try_consent_in_browser(&url, "creator@example.com").is_err());
+    cx.run_until_parked();
+    assert!(service.read_with(cx, |s, _| s.accounts().is_empty()));
+    assert!(workspace.saved_logins().is_empty());
+}
