@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui_kit::{App, AppContext as _, Context, Entity, Global, SharedString, Subscription, Task};
+use serde::{Deserialize, Serialize};
 use videocrm_core::input::expand_user_path;
 use videocrm_core::media::{self, MediaKind};
 use videocrm_core::settings::PipelineSettings;
@@ -38,6 +39,9 @@ const LEFTOVER_GRACE: Duration = Duration::from_secs(2);
 
 /// Separates the agent's error message from its stderr tail in [`PipelineRun::error`].
 const STDERR_SEPARATOR: &str = "\n\nAgent output:\n";
+
+/// Settings key of the brief forms kept across restarts.
+const DRAFTS_KEY: &str = "ai_edit.brief_drafts";
 
 /// How long quitting waits for agents to stop, beyond their kill grace period.
 const QUIT_MARGIN: Duration = Duration::from_secs(1);
@@ -167,9 +171,18 @@ pub struct PipelineService {
     agent_env: Vec<(String, String)>,
     /// A run another view asked to show; taken by the panel of its video.
     revealed: Option<RunId>,
-    /// Brief forms of videos whose panel is closed, until it opens again.
+    /// Brief forms by video, as their panels left them; the ones that differ from a
+    /// fresh form are also saved in the settings, so they survive a restart.
     drafts: HashMap<VideoId, BriefDraft>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A brief form as the settings keep it.
+#[derive(Serialize, Deserialize)]
+struct StoredDraft {
+    video_id: VideoId,
+    #[serde(flatten)]
+    draft: BriefDraft,
 }
 
 struct GlobalPipelineService(Entity<PipelineService>);
@@ -216,6 +229,7 @@ impl PipelineService {
                 Err(error) => service.report(error, cx),
             }
             service.reload_runs(cx);
+            service.load_drafts(cx);
             service.refresh_doctor(cx);
             service
         });
@@ -315,14 +329,55 @@ impl PipelineService {
         Some(id)
     }
 
-    /// The brief form a closed panel of `video_id` left behind.
+    /// The brief form a panel of `video_id` left behind, in this session or an earlier one.
     pub(crate) fn draft(&self, video_id: VideoId) -> Option<&BriefDraft> {
         self.drafts.get(&video_id)
     }
 
-    /// Keeps the brief form of a panel that closes, so navigating away loses nothing.
-    pub(crate) fn keep_draft(&mut self, video_id: VideoId, draft: BriefDraft) {
-        self.drafts.insert(video_id, draft);
+    /// Keeps the brief form of a video's panel, so neither navigating away nor
+    /// quitting loses what the creator wrote.
+    pub(crate) fn keep_draft(&mut self, video_id: VideoId, draft: BriefDraft, cx: &mut Context<Self>) {
+        if self.drafts.get(&video_id) != Some(&draft) {
+            self.drafts.insert(video_id, draft);
+            self.save_drafts(cx);
+        }
+    }
+
+    fn load_drafts(&mut self, cx: &mut Context<Self>) {
+        let stored = self.with_store(cx, |store| store.get_setting::<Vec<StoredDraft>>(DRAFTS_KEY));
+        match stored {
+            Ok(stored) => {
+                let state = self.state.read(cx);
+                self.drafts = stored
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|stored| state.video(stored.video_id).is_some())
+                    .map(|stored| (stored.video_id, stored.draft))
+                    .collect();
+            }
+            Err(error) => eprintln!("videocrm: couldn't read the saved edit briefs: {error}"),
+        }
+    }
+
+    /// Saves the forms a fresh panel would not show the same: an edited brief, or
+    /// preferences other than the defaults.
+    fn save_drafts(&mut self, cx: &mut Context<Self>) {
+        let settings = &self.state.read(cx).settings().pipeline;
+        let mut stored: Vec<StoredDraft> = self
+            .drafts
+            .iter()
+            .filter(|(_, draft)| {
+                draft.edited
+                    || draft.preferences != settings.default_preferences
+                    || draft.auto_approve != settings.auto_approve
+            })
+            .map(|(video_id, draft)| StoredDraft { video_id: *video_id, draft: draft.clone() })
+            .collect();
+        stored.sort_by_key(|stored| stored.video_id);
+        if let Err(error) = self.with_store(cx, |store| store.set_setting(DRAFTS_KEY, &stored)) {
+            eprintln!("videocrm: couldn't save the edit briefs: {error}");
+            self.report("Couldn’t save your edit brief. It’s kept until VideoCRM closes.", cx);
+        }
     }
 
     /// Extra environment for the agent and every tool it runs, such as a complete
@@ -885,9 +940,13 @@ impl PipelineService {
     /// stops their agents.
     fn forget_deleted_videos(&mut self, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
+        let drafts = self.drafts.len();
         self.drafts.retain(|video_id, _| state.video(*video_id).is_some());
         let deleted: Vec<RunId> =
             self.runs.iter().filter(|run| state.video(run.video_id).is_none()).map(|run| run.id).collect();
+        if self.drafts.len() != drafts {
+            self.save_drafts(cx);
+        }
         if deleted.is_empty() {
             return;
         }

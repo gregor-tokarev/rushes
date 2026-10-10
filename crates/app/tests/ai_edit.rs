@@ -1494,6 +1494,88 @@ fn the_brief_form_survives_leaving_the_video(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_preference_changes_only_its_own_line_of_the_brief(cx: &mut TestAppContext) {
+    let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
+    let video = fx.video;
+    let (window, host) = open_host(cx, move |window, cx| cx.new(|cx| AiEditPanel::new(video, window, cx)).into());
+    let panel: Entity<AiEditPanel> = cx.read(|cx| host.read(cx).view.clone().unwrap().downcast().unwrap());
+    let brief = |cx: &mut TestAppContext| cx.read(|cx| panel.read(cx).brief_text(cx));
+    wait_for_window(cx, window, "the composer", |window, _| shows(window, "brief"));
+    let sponsor = "- Mention the sponsor at the end.";
+
+    // The natural place for an instruction: one more bullet at the end of the list,
+    // on the line the brief ends with.
+    click(cx, window, "brief");
+    cx.update_window(window, |_, window, cx| {
+        window.press("ctrl-end", cx);
+        window.input(sponsor, cx);
+    })
+    .unwrap();
+    let typed = brief(cx);
+    assert!(typed.ends_with(&format!("- No colour grade: keep the original look.\n{sponsor}")), "{typed}");
+
+    click(cx, window, "brief-remove-fillers");
+    click(cx, window, "brief-subtitles");
+    let toggled = brief(cx);
+    assert!(toggled.contains(sponsor), "the creator's line stays: {toggled}");
+    assert!(toggled.contains("- Keep filler words and natural pauses.\n- Burn subtitles into the render.\n"));
+    assert_eq!(toggled.lines().count(), typed.lines().count(), "one line for one line");
+
+    // The brief's undo takes the changes back one at a time, the creator's typing last.
+    click(cx, window, "brief");
+    cx.update_window(window, |_, window, cx| window.press("ctrl-z", cx)).unwrap();
+    assert!(brief(cx).contains("- No subtitles.") && brief(cx).contains(sponsor), "{}", brief(cx));
+    cx.update_window(window, |_, window, cx| window.press("ctrl-z", cx)).unwrap();
+    assert!(brief(cx).contains("- Remove filler words") && brief(cx).contains(sponsor), "{}", brief(cx));
+    cx.update_window(window, |_, window, cx| window.press("ctrl-z", cx)).unwrap();
+    assert!(!brief(cx).contains(sponsor), "{}", brief(cx));
+}
+
+#[gpui_kit::test]
+fn an_edited_brief_survives_a_restart(cx: &mut TestAppContext) {
+    let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
+    let video = fx.video;
+    let panel =
+        move |window: &mut Window, cx: &mut App| -> AnyView { cx.new(|cx| AiEditPanel::new(video, window, cx)).into() };
+    let (window, host) = open_host(cx, panel);
+    let brief = |cx: &mut TestAppContext| {
+        let panel: Entity<AiEditPanel> = cx.read(|cx| host.read(cx).view.clone().unwrap().downcast().unwrap());
+        cx.read(|cx| panel.read(cx).brief_text(cx))
+    };
+    wait_for_window(cx, window, "the composer", |window, _| shows(window, "brief"));
+    click(cx, window, "brief");
+    cx.update_window(window, |_, window, cx| {
+        window.press("ctrl-end", cx);
+        window.input(" Keep it under ten minutes.", cx);
+    })
+    .unwrap();
+    click(cx, window, "brief-subtitles");
+    let edited = brief(cx);
+    // Saved once typing pauses, before the app could be quit or crash.
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+
+    // VideoCRM starts again on the same database.
+    close(cx, &host);
+    cx.update(|cx| PipelineService::init(fx.state.clone(), cx));
+    show(cx, window, &host, panel);
+    wait_for_window(cx, window, "the composer", |window, _| shows(window, "brief"));
+    assert_eq!(brief(cx), edited);
+    assert!(edited.contains("Keep it under ten minutes.") && edited.contains("- Burn subtitles into the render."));
+
+    // It is still the creator's: a script change only notes that it is out of date.
+    cx.update(|cx| {
+        fx.state.update(cx, |state, cx| {
+            let mut script = state.ensure_document(video, DocumentKind::Script, cx).expect("script");
+            script.blocks = vec![Block::paragraph("A new line.")];
+            state.save_document(script, cx);
+        })
+    });
+    wait_for_window(cx, window, "the notice", |window, _| shows(window, "brief-stale"));
+    assert_eq!(brief(cx), edited);
+}
+
+#[gpui_kit::test]
 fn the_brief_follows_the_video_until_the_creator_edits_it(cx: &mut TestAppContext) {
     if !tools_available() {
         return;

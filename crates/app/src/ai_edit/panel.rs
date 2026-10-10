@@ -1,5 +1,7 @@
 //! [`AiEditPanel`]: the "Footage & AI edit" tab of a video page.
 
+use std::time::Duration;
+
 use chrono::Local;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -11,12 +13,15 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Subscription, TestSupportExt as _, Window, div,
+    Render, SharedString, Styled as _, Subscription, Task, TestSupportExt as _, Window, div,
 };
 use videocrm_core::settings::EditPreferences;
 use videocrm_core::{Block, DocumentKind, PipelineRun, RunId, RunStatus, Video, VideoId};
 
-use super::brief::{BriefDraft, COLOR_GRADES, brief_source, color_grade_label, default_brief, with_preferences};
+use super::brief::{
+    BriefDraft, COLOR_GRADES, apply_edits, brief_source, color_grade_label, default_brief, preference_edits,
+    shift_offset,
+};
 use super::doctor::DoctorChecklist;
 use super::footage::{FootageCard, FootageChanged};
 use super::format;
@@ -27,6 +32,9 @@ use crate::database::colors::run_status_color;
 use crate::state::{AppEvent, AppState};
 use crate::ui::format_when;
 use crate::ui::{Card, SectionHeader};
+
+/// How long the brief form waits after a change before it is saved.
+const DRAFT_SAVE_DELAY: Duration = Duration::from_millis(500);
 
 /// The "Footage & AI edit" tab of a video page: the raw takes, the edit brief, and
 /// the video's AI edits with the selected one in detail.
@@ -45,6 +53,11 @@ pub struct AiEditPanel {
     brief_source: String,
     /// The video changed after the creator edited the brief.
     brief_stale: bool,
+    /// The brief as the panel's own last change left it: the change events that
+    /// change causes are not the creator typing.
+    applied_brief: Option<String>,
+    /// Saves the form shortly after it changes.
+    save_task: Option<Task<()>>,
     target_length: Entity<InputState>,
     preferences: EditPreferences,
     auto_approve: bool,
@@ -84,30 +97,30 @@ impl AiEditPanel {
                     this.follow_video(window, cx);
                 }
             }),
-            cx.subscribe(&brief, |this, _, event: &InputEvent, cx| {
-                // `set_value` emits nothing, so a change is the creator typing.
-                if matches!(event, InputEvent::Change) && !this.brief_edited {
+            cx.subscribe(&brief, |this, brief, event: &InputEvent, cx| {
+                if !matches!(event, InputEvent::Change) {
+                    return;
+                }
+                // `set_value` emits nothing, and the panel's own edits leave the brief as
+                // it noted; any other change is the creator typing.
+                if this.applied_brief.as_deref() != Some(brief.read(cx).value().as_ref()) {
+                    this.applied_brief = None;
                     this.brief_edited = true;
+                    this.schedule_save(cx);
                     cx.notify();
                 }
             }),
             cx.subscribe(&footage, |_, _, _: &FootageChanged, cx| cx.notify()),
             cx.subscribe_in(&target_length, window, |this, input, event, window, cx| {
                 if matches!(event, InputEvent::Change) {
-                    this.preferences.target_length = input.read(cx).value().to_string();
-                    this.apply_preferences(window, cx);
+                    let target_length = input.read(cx).value().to_string();
+                    this.set_preferences(window, cx, |preferences| preferences.target_length = target_length);
                 }
             }),
-            cx.on_release(|this, cx| {
-                let draft = BriefDraft {
-                    brief: this.brief.read(cx).value().to_string(),
-                    preferences: this.preferences.clone(),
-                    auto_approve: this.auto_approve,
-                    edited: this.brief_edited,
-                    source: this.brief_source.clone(),
-                };
-                let video_id = this.video_id;
-                this.service.update(cx, |service, _| service.keep_draft(video_id, draft));
+            cx.on_release(|this, cx| this.save_draft(cx)),
+            cx.on_app_quit(|this, cx| {
+                this.save_draft(cx);
+                async {}
             }),
         ];
 
@@ -123,6 +136,8 @@ impl AiEditPanel {
             brief_edited: false,
             brief_source: String::new(),
             brief_stale: false,
+            applied_brief: None,
+            save_task: None,
             target_length,
             preferences,
             auto_approve,
@@ -150,6 +165,11 @@ impl AiEditPanel {
         self.video_id
     }
 
+    /// The brief as the form shows it.
+    pub fn brief_text(&self, cx: &App) -> String {
+        self.brief.read(cx).value().to_string()
+    }
+
     /// The video, its script and the standing instructions a brief is drafted from.
     fn brief_inputs(&self, cx: &App) -> Option<(Video, Vec<Block>, String)> {
         let state = self.state.read(cx);
@@ -172,7 +192,33 @@ impl AiEditPanel {
         self.brief_source = brief_source(&video, &script, &extra);
         self.brief_edited = false;
         self.brief_stale = false;
+        self.schedule_save(cx);
         cx.notify();
+    }
+
+    /// The form as it is now.
+    fn draft(&self, cx: &App) -> BriefDraft {
+        BriefDraft {
+            brief: self.brief.read(cx).value().to_string(),
+            preferences: self.preferences.clone(),
+            auto_approve: self.auto_approve,
+            edited: self.brief_edited,
+            source: self.brief_source.clone(),
+        }
+    }
+
+    /// Saves the form once the creator pauses.
+    fn schedule_save(&mut self, cx: &mut Context<Self>) {
+        self.save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(DRAFT_SAVE_DELAY).await;
+            _ = this.update(cx, |this, cx| this.save_draft(cx));
+        }));
+    }
+
+    fn save_draft(&mut self, cx: &mut App) {
+        self.save_task = None;
+        let (video_id, draft) = (self.video_id, self.draft(cx));
+        self.service.update(cx, |service, cx| service.keep_draft(video_id, draft, cx));
     }
 
     /// Drafts the brief again when what it was drafted from changed, unless the creator
@@ -193,23 +239,33 @@ impl AiEditPanel {
         }
     }
 
-    /// Rewrites the preferences list of the brief, keeping the creator's other edits.
-    fn apply_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self.brief.read(cx).value().to_string();
-        if let Some(brief) = with_preferences(&current, &self.preferences) {
-            self.brief.update(cx, |input, cx| input.set_value(brief, window, cx));
-        }
-        cx.notify();
-    }
-
+    /// Changes the preferences and the brief's lines for the ones that changed. The
+    /// creator's own lines stay, and the change can be undone in the brief like typing.
     fn set_preferences(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         change: impl FnOnce(&mut EditPreferences),
     ) {
+        let before = self.preferences.clone();
         change(&mut self.preferences);
-        self.apply_preferences(window, cx);
+        let current = self.brief.read(cx).value().to_string();
+        let edits = preference_edits(&current, &before, &self.preferences);
+        if !edits.is_empty() {
+            self.applied_brief = Some(apply_edits(&current, &edits));
+            self.brief.update(cx, |input, cx| {
+                let selection = input.selected_range();
+                // From the end, so the earlier ranges stay where they are.
+                for (range, text) in edits.iter().rev() {
+                    input.set_selected_range(range.clone(), cx);
+                    input.replace(text.clone(), window, cx);
+                }
+                let (start, end) = (shift_offset(selection.start, &edits), shift_offset(selection.end, &edits));
+                input.set_selected_range(start..end, cx);
+            });
+        }
+        self.schedule_save(cx);
+        cx.notify();
     }
 
     fn runs<'a>(&self, cx: &'a App) -> Vec<&'a PipelineRun> {
@@ -437,6 +493,7 @@ impl AiEditPanel {
                             .checked(self.auto_approve)
                             .on_change(cx.listener(|this, checked: &bool, _, cx| {
                                 this.auto_approve = *checked;
+                                this.schedule_save(cx);
                                 cx.notify();
                             })),
                     )

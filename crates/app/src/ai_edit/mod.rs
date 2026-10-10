@@ -18,7 +18,7 @@ mod service;
 mod settings;
 mod timeline;
 
-pub use brief::{COLOR_GRADES, color_grade_label, default_brief, with_preferences};
+pub use brief::{COLOR_GRADES, color_grade_label, default_brief, preference_edits, with_preferences};
 pub use doctor::DoctorChecklist;
 pub use icons::{AiEditIcons, WithAiEditIcons};
 pub use panel::AiEditPanel;
