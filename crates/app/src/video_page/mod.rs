@@ -523,7 +523,8 @@ impl VideoPage {
         let selected = VideoTab::ALL.iter().position(|tab| *tab == self.tab).unwrap_or(0);
         // Without the rail, its content is one menu away next to the tabs.
         let script_menu = self.script.as_ref().filter(|_| !wide && self.tab == VideoTab::Script);
-        let unsaved = [&self.script, &self.notes].into_iter().flatten().any(|tab| tab.read(cx).is_save_failing(cx));
+        let unsaved = self.state.read(cx).is_save_failing(self.video_id)
+            || [&self.script, &self.notes].into_iter().flatten().any(|tab| tab.read(cx).is_save_failing(cx));
         TabBar::new("video-tabs")
             .underline()
             .w_full()
