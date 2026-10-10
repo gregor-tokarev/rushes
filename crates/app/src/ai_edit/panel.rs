@@ -161,6 +161,7 @@ impl AiEditPanel {
         match draft {
             // A brief the creator wrote stays; one they did not follows what changed meanwhile.
             Some(draft) if draft.edited => {
+                panel.follow_brief(&draft.brief, window, cx);
                 panel.brief.update(cx, |input, cx| input.set_value(draft.brief, window, cx));
                 panel.brief_edited = true;
                 panel.brief_source = draft.source;
