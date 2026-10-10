@@ -180,8 +180,16 @@ enum Request {
 
 enum UploadMessage {
     Started(String),
-    Progress { at: Instant, sent: u64, total: u64 },
-    Retrying(Retry),
+    Progress {
+        at: Instant,
+        sent: u64,
+        total: u64,
+    },
+    /// `confirmed` is what YouTube holds as the retry begins.
+    Retrying {
+        retry: Retry,
+        confirmed: u64,
+    },
     Finished(Result<UploadedVideo, YoutubeError>),
 }
 
@@ -491,10 +499,8 @@ impl YoutubeService {
                 }
                 cx.notify();
             }
-            UploadMessage::Retrying(retry) => {
+            UploadMessage::Retrying { retry, confirmed } => {
                 let Some(upload) = self.active.get_mut(&id) else { return };
-                // The worker reported what YouTube holds just before.
-                let confirmed = upload.transfer.sent();
                 let mark = upload.retry.map_or(upload.high_water, |retrying| retrying.mark);
                 upload.retry = Some(Retrying { retry, mark, confirmed });
                 cx.notify();
@@ -786,7 +792,9 @@ impl YoutubeService {
     }
 }
 
-/// Upload worker: sends the file and reports progress at most every [`PROGRESS_INTERVAL`].
+/// Upload worker: sends the file and reports progress at most every
+/// [`PROGRESS_INTERVAL`], except a step back to what YouTube holds after a
+/// failed request, which is always reported, as is the end.
 fn transfer_file(
     client: &YoutubeClient,
     file: &Path,
@@ -799,16 +807,21 @@ fn transfer_file(
         let _ = messages.unbounded_send(message);
     };
     let mut throttle = Throttle::new(PROGRESS_INTERVAL);
+    // The worker's latest count; before it reports a retry it steps back to
+    // what YouTube holds, which the bar must not stay ahead of.
+    let mut latest = 0;
     let mut progress = |event: UploadProgress| match event {
         UploadProgress::Started { session_url } => send(UploadMessage::Started(session_url)),
         UploadProgress::Bytes { sent, total } => {
             let at = Instant::now();
-            if sent == total || throttle.ready(at) {
+            let stepped_back = sent < latest;
+            latest = sent;
+            if sent == total || stepped_back || throttle.ready(at) {
                 send(UploadMessage::Progress { at, sent, total });
             }
         }
         UploadProgress::Retrying { attempt, max_retries, cause, .. } => {
-            send(UploadMessage::Retrying(Retry { attempt, max_retries, cause }))
+            send(UploadMessage::Retrying { retry: Retry { attempt, max_retries, cause }, confirmed: latest })
         }
         UploadProgress::Finished => {}
     };
