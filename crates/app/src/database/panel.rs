@@ -916,13 +916,26 @@ impl DatabasePanel {
         self.shown.iter().map(|&ix| &self.rows[ix])
     }
 
-    /// How many archived videos the active view's "Hide archived" keeps out.
-    pub(super) fn hidden_archived(&self) -> usize {
-        if self.active_view().is_some_and(|view| view.filter.hide_archived) {
-            self.rows.iter().filter(|row| row.video.status == VideoStatus::Archived).count()
-        } else {
-            0
+    /// How many archived videos the view's "Hide archived" keeps out of what
+    /// its other rules and the search would show.
+    pub(super) fn hidden_archived(&self, cx: &App) -> usize {
+        self.shown_filter(cx).map_or(0, |filter| query::hidden_archived(&self.rows, &filter))
+    }
+
+    /// Lets the view show its archived videos.
+    pub(crate) fn show_archived(&mut self, cx: &mut Context<Self>) {
+        self.update_view(|view| view.filter.hide_archived = false, cx);
+        self.refresh(cx);
+    }
+
+    /// The active view's filter with the typed search, which is not saved, applied.
+    fn shown_filter(&self, cx: &App) -> Option<FilterSpec> {
+        let mut filter = self.active_view()?.filter.clone();
+        let search = self.search_query(cx);
+        if !search.trim().is_empty() {
+            filter.search = search;
         }
+        Some(filter)
     }
 
     pub(super) fn empty_reason(&self, cx: &App) -> EmptyReason {
@@ -930,6 +943,10 @@ impl DatabasePanel {
             EmptyReason::NoVideos
         } else if !self.search_query(cx).trim().is_empty() {
             EmptyReason::Search
+        } else if self.active_view().is_none_or(|view| query::active_filter_count(&view.filter) == 0)
+            && self.hidden_archived(cx) > 0
+        {
+            EmptyReason::Archived
         } else {
             EmptyReason::Filter
         }
@@ -945,16 +962,12 @@ impl DatabasePanel {
 
     /// Re-runs the active view's query and redraws.
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.shown = match self.active_view() {
-            Some(view) => {
-                let mut view = view.clone();
-                let search = self.search_query(cx);
-                if !search.trim().is_empty() {
-                    view.filter.search = search;
-                }
+        self.shown = match (self.active_view(), self.shown_filter(cx)) {
+            (Some(view), Some(filter)) => {
+                let view = DatabaseView { filter, ..view.clone() };
                 view_rows(&self.rows, &view, &self.properties)
             }
-            None => Vec::new(),
+            _ => Vec::new(),
         };
         self.sync_table(cx);
         cx.notify();
@@ -1092,7 +1105,7 @@ impl DatabasePanel {
             rows => format!("{rows} videos"),
         };
         // The Filter badge doesn't count the view's default, so the footer says what it leaves out.
-        match self.hidden_archived() {
+        match self.hidden_archived(cx) {
             0 => {}
             1 => count.push_str(" · 1 archived hidden"),
             hidden => count.push_str(&format!(" · {hidden} archived hidden")),
