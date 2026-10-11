@@ -700,7 +700,6 @@ impl DatabasePanel {
                 view.filter.statuses.clear();
                 view.filter.formats.clear();
                 view.filter.search.clear();
-                view.filter.hide_archived = false;
             },
             cx,
         );
@@ -917,6 +916,15 @@ impl DatabasePanel {
         self.shown.iter().map(|&ix| &self.rows[ix])
     }
 
+    /// How many archived videos the active view's "Hide archived" keeps out.
+    pub(super) fn hidden_archived(&self) -> usize {
+        if self.active_view().is_some_and(|view| view.filter.hide_archived) {
+            self.rows.iter().filter(|row| row.video.status == VideoStatus::Archived).count()
+        } else {
+            0
+        }
+    }
+
     pub(super) fn empty_reason(&self, cx: &App) -> EmptyReason {
         if self.rows.is_empty() {
             EmptyReason::NoVideos
@@ -1079,10 +1087,16 @@ impl DatabasePanel {
     fn render_table(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let row_height = Size::Medium.table_row_height();
         let rows = self.shown.len();
-        let count = match rows {
+        let mut count = match rows {
             1 => "1 video".to_string(),
             rows => format!("{rows} videos"),
         };
+        // The Filter badge doesn't count the view's default, so the footer says what it leaves out.
+        match self.hidden_archived() {
+            0 => {}
+            1 => count.push_str(" · 1 archived hidden"),
+            hidden => count.push_str(&format!(" · {hidden} archived hidden")),
+        }
         let panel = cx.weak_entity();
 
         v_flex()

@@ -237,7 +237,7 @@ impl PropertyEditor {
                         Button::new(SharedString::from(format!("option-color-{id}")))
                             .ghost()
                             .small()
-                            .tooltip("Color")
+                            .tooltip("Colour")
                             .child(div().size_3().rounded_full().bg(dot))
                             .dropdown_menu(move |menu, _, _| {
                                 TagColor::ALL.into_iter().fold(menu, |menu, color| {

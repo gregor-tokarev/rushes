@@ -80,17 +80,21 @@ impl Workspace {
                     .pr_2()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .children(update::restart_button(cx))
-                    .child(
-                        Button::new("open-search")
-                            .ghost()
-                            .small()
-                            .icon(IconName::Search)
-                            .label("Search")
-                            .when_some(search_shortcut, |this, hint| this.child(hint))
-                            .on_click(move |_, window, cx| {
-                                _ = workspace.update(cx, |workspace, cx| workspace.open_command_palette(window, cx));
-                            }),
-                    )
+                    // The sidebar has Search; this one stands in while it is hidden.
+                    .when(collapsed, |this| {
+                        this.child(
+                            Button::new("open-search")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Search)
+                                .label("Search")
+                                .when_some(search_shortcut, |this, hint| this.child(hint))
+                                .on_click(move |_, window, cx| {
+                                    _ = workspace
+                                        .update(cx, |workspace, cx| workspace.open_command_palette(window, cx));
+                                }),
+                        )
+                    })
                     .child(
                         Button::new("toggle-theme")
                             .ghost()
@@ -168,7 +172,7 @@ fn breadcrumb(state: &gpui_kit::Entity<AppState>, cx: &App) -> impl IntoElement 
             ],
             None => vec![videos(), Crumb::new("Not found")],
         },
-        Route::Pipelines => vec![Crumb::new("Pipelines")],
+        Route::Pipelines => vec![Crumb::new("AI edits")],
         Route::Uploads => vec![Crumb::new("Uploads")],
         // The settings list picks sections on its own, so the route's section can be stale.
         Route::Settings { .. } => vec![Crumb::new("Settings")],

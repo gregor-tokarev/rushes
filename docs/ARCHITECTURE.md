@@ -106,7 +106,8 @@ database's write lock for seconds. The UI thread never waits for it:
 - `settings.rs` — typed `AppSettings` stored in the settings table: media root,
   YouTube backend (`Google { client_id, client_secret }` | `Emulator { google_url, youtube_url }`),
   pipeline config (agent command, video-use skill dir, extra instructions, auto-approve),
-  `onboarding_completed`.
+  `onboarding_completed`, theme, week start, updates, and whether video pages open with
+  their properties folded (`properties_collapsed`).
 
 ## youtube (`videocrm-youtube`)
 
@@ -150,7 +151,7 @@ GPUI Kit app. Main pieces:
 - `AppState` entity: owns the database connections (see "Database access"), the write
   queue, cached rows/properties/views, settings; all mutations go
   through it and emit events.
-- Shell: title bar, sidebar (Videos views, Pipelines, Uploads, recent pages, account,
+- Shell: title bar, sidebar (Videos views, AI edits, Uploads, recent pages, account,
   settings), routed main area.
 - `database/` — Notion-like videos database: table view (inline cell editing, column
   menu, add property, sort/filter/search) and board view (kanban by status, drag cards).

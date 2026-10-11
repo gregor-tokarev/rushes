@@ -106,9 +106,7 @@ pub fn visible_columns(view: &DatabaseView, properties: &[PropertyDef]) -> Vec<C
 /// Number of active filter rules, shown as a count on the Filter button.
 /// The search query is visible in its own field and is not counted.
 pub fn active_filter_count(filter: &FilterSpec) -> usize {
-    usize::from(!filter.statuses.is_empty())
-        + usize::from(!filter.formats.is_empty())
-        + usize::from(filter.hide_archived)
+    usize::from(!filter.statuses.is_empty()) + usize::from(!filter.formats.is_empty())
 }
 
 /// Whether a video with `status` can pass `filter`'s status rules.
@@ -752,7 +750,9 @@ mod tests {
         filter.search = "rust".into();
         assert_eq!(active_filter_count(&filter), 0);
         filter.statuses = vec![VideoStatus::Idea, VideoStatus::Ready];
+        assert_eq!(active_filter_count(&filter), 1);
+        // Hiding archived videos is how a view starts, not a rule the creator added.
         filter.hide_archived = true;
-        assert_eq!(active_filter_count(&filter), 2);
+        assert_eq!(active_filter_count(&filter), 1);
     }
 }

@@ -23,7 +23,7 @@ use crate::ui::{
     video_icon,
 };
 
-/// The Pipelines page: runs across all videos, newest first. A row opens the
+/// The AI edits page: runs across all videos, newest first. A row opens the
 /// video's "Footage & AI edit" tab with that run selected. Owns its scrolling.
 pub struct PipelinesPage {
     service: Entity<PipelineService>,
@@ -149,7 +149,7 @@ impl Render for PipelinesPage {
         if waiting > 0 {
             summary.push(format!("{waiting} waiting for approval"));
         }
-        let header = PageHeader::new("Pipelines").subtitle(if runs.is_empty() {
+        let header = PageHeader::new("AI edits").subtitle(if runs.is_empty() {
             "AI edits across all your videos, newest first.".to_owned()
         } else {
             summary.join(" · ")

@@ -52,6 +52,8 @@ pub struct AppSettings {
     pub theme: ThemeMode,
     pub week_start: WeekStart,
     pub updates: UpdateSettings,
+    /// Video pages open with their properties folded to a count.
+    pub properties_collapsed: bool,
 }
 
 impl AppSettings {
@@ -233,6 +235,7 @@ mod tests {
         assert_eq!(settings.week_start, WeekStart::Sunday);
         assert!(!settings.onboarding_completed);
         assert!(settings.updates.automatic);
+        assert!(!settings.properties_collapsed, "video pages open with their properties shown");
     }
 
     #[test]

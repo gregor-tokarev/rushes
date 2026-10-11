@@ -128,7 +128,7 @@ impl SettingsPage {
                                 },
                             ),
                         )
-                        .description("System follows your operating system’s light or dark appearance."),
+                        .description(theme_description(AppState::global(cx).read(cx).settings().theme)),
                         SettingItem::new(
                             "Week starts on",
                             SettingField::dropdown(
@@ -213,6 +213,14 @@ fn about_group() -> SettingGroup {
         })
         .keywords(["version"]),
     )
+}
+
+/// What the chosen theme does, and how to get the other behaviour.
+fn theme_description(mode: ThemeMode) -> &'static str {
+    match mode {
+        ThemeMode::System => "Follows your operating system’s light or dark appearance.",
+        ThemeMode::Light | ThemeMode::Dark => "Choose System to follow your operating system’s appearance.",
+    }
 }
 
 fn theme_key(mode: ThemeMode) -> SharedString {
