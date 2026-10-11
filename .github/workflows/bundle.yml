@@ -1,8 +1,10 @@
 # Builds the macOS and Linux bundles of VideoCRM, starts each once to check that it
-# opens a window, and publishes them:
+# opens a window, installs each over an older copy the way the app updates itself, and
+# publishes them:
 #   - a tag v<version> (matching the workspace version) creates a GitHub release with them,
 #     whether it was pushed or the Daily release workflow made it and calls this one;
-#   - a manual run, or a pull request that touches the bundling, keeps them as run artifacts.
+#   - a manual run, or a pull request that touches the bundling or the updater, keeps them
+#     as run artifacts.
 name: Bundle
 
 on:
@@ -13,6 +15,7 @@ on:
       - .github/workflows/bundle.yml
       - scripts/bundle-*.sh
       - assets/icon.svg
+      - crates/update/**
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -122,6 +125,12 @@ jobs:
           sleep 3
           hdiutil detach /tmp/videocrm-dmg || hdiutil detach -force /tmp/videocrm-dmg
 
+      - name: Updater test (installs the disk image over an older app)
+        env:
+          VIDEOCRM_UPDATE_TEST_BUNDLES: ${{ github.workspace }}/target/bundle
+          VIDEOCRM_UPDATE_TEST_VERSION: ${{ env.VERSION }}
+        run: cargo test --locked -p videocrm-update
+
       - uses: actions/upload-artifact@v7
         with:
           name: videocrm-macos
@@ -175,6 +184,12 @@ jobs:
           chmod +x "$RUNNER_TEMP/appimagetool"
           APPIMAGE_EXTRACT_AND_RUN=1 APPIMAGETOOL="$RUNNER_TEMP/appimagetool" \
             scripts/bundle-linux.sh "$VERSION" target/release/videocrm
+
+      - name: Updater test (installs the AppImage and the tarball over older copies)
+        env:
+          VIDEOCRM_UPDATE_TEST_BUNDLES: ${{ github.workspace }}/target/bundle
+          VIDEOCRM_UPDATE_TEST_VERSION: ${{ env.VERSION }}
+        run: cargo test --locked -p videocrm-update
 
       - uses: actions/upload-artifact@v7
         with:

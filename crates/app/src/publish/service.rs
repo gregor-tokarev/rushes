@@ -15,8 +15,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt as _;
 use futures::channel::mpsc;
-use gpui_kit::component::WindowExt as _;
-use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Subscription};
 use videocrm_core::settings::{self, YoutubeBackend};
 use videocrm_core::{PublishChannel, UploadId, UploadJob, UploadStatus, Video, VideoId, YoutubeLink};
@@ -1248,16 +1246,6 @@ fn download_avatar(url: &str, path: &Path) -> io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(path, bytes)
-}
-
-/// Shows a notification in the active window; nothing happens without a window.
-pub(super) fn push_notification(cx: &mut App, notification: impl FnOnce() -> Notification) {
-    let window = cx.active_window().or_else(|| cx.windows().into_iter().next());
-    if let Some(window) = window {
-        let notification = notification();
-        // The window may have closed since; then there is nobody to tell.
-        let _ = window.update(cx, |_, window, cx| window.push_notification(notification, cx));
-    }
 }
 
 /// A YouTube error as the creator should read it. The technical detail goes to stderr.

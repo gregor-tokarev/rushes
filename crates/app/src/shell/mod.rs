@@ -36,6 +36,7 @@ use crate::route::{Route, SettingsSection, VideoTab};
 use crate::settings_page::SettingsPage;
 use crate::state::{AppEvent, AppState, Problem, Remedy, Severity};
 use crate::ui::{PageHeader, page_frame};
+use crate::update::UpdateService;
 use crate::video_page::VideoPage;
 use crate::wizard;
 
@@ -148,7 +149,7 @@ impl Workspace {
         let palette = cx.new(|cx| CommandPalette::new(window, cx));
         let theme_mode = state.read(cx).settings().theme;
 
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
             cx.subscribe_in(&state, window, Self::on_app_event),
             cx.subscribe_in(&database, window, Self::on_database_event),
@@ -175,6 +176,11 @@ impl Workspace {
                 target.focus(window, cx);
             }),
         ];
+
+        // The title bar offers a restart once an update is installed.
+        if let Some(updates) = UpdateService::try_global(cx) {
+            subscriptions.push(cx.observe(&updates, |_, _, cx| cx.notify()));
+        }
 
         let mut workspace = Self {
             state,

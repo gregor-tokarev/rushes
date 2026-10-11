@@ -1,4 +1,4 @@
-//! The title bar: sidebar toggle, history, breadcrumb, search and theme.
+//! The title bar: sidebar toggle, history, breadcrumb, restart to update, search and theme.
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -16,6 +16,7 @@ use super::{GoBack, GoForward, OpenCommandPalette, ToggleSidebar, ToggleTheme, W
 use crate::route::{Route, VideoTab};
 use crate::state::AppState;
 use crate::ui::PageIcon;
+use crate::update;
 
 impl Workspace {
     pub(super) fn render_title_bar(
@@ -78,6 +79,7 @@ impl Workspace {
                     .gap_1()
                     .pr_2()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .children(update::restart_button(cx))
                     .child(
                         Button::new("open-search")
                             .ghost()

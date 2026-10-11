@@ -21,6 +21,7 @@ use crate::publish::YoutubeSettings;
 use crate::route::SettingsSection;
 use crate::state::{AppEvent, AppState};
 use crate::ui::settings::{FIELD_MAX_WIDTH, setting_group};
+use crate::update::{self, UpdateService};
 
 pub use media_folder::{Commit, MediaFolderEvent, MediaFolderField};
 
@@ -40,7 +41,7 @@ impl SettingsPage {
         let state = AppState::global(cx);
         let youtube = cx.new(|cx| YoutubeSettings::new(window, cx));
         let ai = cx.new(|cx| AiSettings::new(window, cx));
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.subscribe(&state, |_, _, event: &AppEvent, cx| {
                 if *event == AppEvent::SettingsChanged {
                     cx.notify();
@@ -50,6 +51,10 @@ impl SettingsPage {
             cx.observe(&youtube, |_, _, cx| cx.notify()),
             cx.observe(&ai, |_, _, cx| cx.notify()),
         ];
+        // About shows where updating stands.
+        if let Some(updates) = UpdateService::try_global(cx) {
+            subscriptions.push(cx.observe(&updates, |_, _, cx| cx.notify()));
+        }
         Self {
             section,
             opened: 0,
@@ -143,45 +148,51 @@ impl SettingsPage {
             SettingPage::new(SettingsSection::AiEditing.label())
                 .icon(Icon::new(IconName::WandSparkles))
                 .groups(ai_groups),
-            SettingPage::new(SettingsSection::About.label()).icon(Icon::new(IconName::Info)).group(
-                setting_group().item(
-                    SettingItem::render(|_, _, cx| {
-                        v_flex()
-                            .w_full()
-                            .gap_2()
-                            .child(
-                                h_flex()
-                                    .gap_3()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .size_10()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(cx.theme().radius_lg)
-                                            .bg(cx.theme().primary)
-                                            .text_color(cx.theme().primary_foreground)
-                                            .child(Icon::new(IconName::Clapperboard)),
-                                    )
-                                    .child(
-                                        v_flex().child(div().font_semibold().child("VideoCRM")).child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
-                                        ),
-                                    ),
-                            )
-                            .child(div().max_w(FIELD_MAX_WIDTH).text_sm().text_color(cx.theme().muted_foreground).child(
-                                "Plan videos in a Notion-like database, write scripts in rich documents, edit footage \
-                             with AI and upload to YouTube, all on your own computer.",
-                            ))
-                    })
-                    .keywords(["version"]),
-                ),
-            ),
+            SettingPage::new(SettingsSection::About.label())
+                .icon(Icon::new(IconName::Info))
+                .group(about_group())
+                .groups(update::settings_group(cx)),
         ]
     }
+}
+
+/// What VideoCRM is, and its version.
+fn about_group() -> SettingGroup {
+    setting_group().item(
+        SettingItem::render(|_, _, cx| {
+            v_flex()
+                .w_full()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .size_10()
+                                .items_center()
+                                .justify_center()
+                                .rounded(cx.theme().radius_lg)
+                                .bg(cx.theme().primary)
+                                .text_color(cx.theme().primary_foreground)
+                                .child(Icon::new(IconName::Clapperboard)),
+                        )
+                        .child(
+                            v_flex().child(div().font_semibold().child("VideoCRM")).child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
+                            ),
+                        ),
+                )
+                .child(div().max_w(FIELD_MAX_WIDTH).text_sm().text_color(cx.theme().muted_foreground).child(
+                    "Plan videos in a Notion-like database, write scripts in rich documents, edit footage \
+                 with AI and upload to YouTube, all on your own computer.",
+                ))
+        })
+        .keywords(["version"]),
+    )
 }
 
 fn theme_key(mode: ThemeMode) -> SharedString {

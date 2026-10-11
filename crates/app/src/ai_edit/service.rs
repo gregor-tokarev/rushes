@@ -279,6 +279,11 @@ impl PipelineService {
         self.live.get(&id).map(|live| live.phase)
     }
 
+    /// How many runs have their agent working now.
+    pub fn live_run_count(&self) -> usize {
+        self.live.len()
+    }
+
     /// The run of `video_id` whose agent is working, if any.
     pub fn live_run_of(&self, video_id: VideoId) -> Option<RunId> {
         self.live.iter().find(|(_, live)| live.video_id == video_id).map(|(id, _)| *id)

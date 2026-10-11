@@ -70,6 +70,10 @@ mod state_tooltip;
 mod table;
 mod time;
 
+use gpui_kit::App;
+use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::notification::Notification;
+
 pub use choice_card::ChoiceCard;
 pub use contrast::warning_text;
 pub use empty_state::EmptyState;
@@ -81,3 +85,14 @@ pub use section::{Card, SectionHeader};
 pub use state_tooltip::state_tooltip;
 pub use table::{CollectionTable, TableColumn, TableRowButton, table_header};
 pub use time::format_when;
+
+/// Shows a notification in the active window, for services that have no
+/// window of their own; nothing happens without a window.
+pub fn push_notification(cx: &mut App, notification: impl FnOnce() -> Notification) {
+    let window = cx.active_window().or_else(|| cx.windows().into_iter().next());
+    if let Some(window) = window {
+        let notification = notification();
+        // The window may have closed since; then there is nobody to tell.
+        let _ = window.update(cx, |_, window, cx| window.push_notification(notification, cx));
+    }
+}
