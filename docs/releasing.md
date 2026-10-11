@@ -49,6 +49,9 @@ git tag v0.2.0 && git push origin v0.2.0
 | `VideoCRM-<version>-x86_64.AppImage` | `scripts/bundle-linux.sh` on `ubuntu-22.04` | The binary, desktop entry and icons |
 | `videocrm-<version>-linux-x86_64.tar.gz` | same | `bin/`, `share/applications/`, `share/icons/` for `~/.local` or `/usr/local` |
 
+These are the files a released VideoCRM updates itself from ([updates.md](updates.md)): keep
+their names, and the Bundle workflow installs each over an older copy before publishing.
+
 The scripts also run locally (`scripts/bundle-macos.sh <version> <binary>...`,
 `scripts/bundle-linux.sh <version> <binary>`); see their headers for the tools they need.
 

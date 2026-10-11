@@ -33,6 +33,9 @@ Get the latest build from the repository's Releases page:
   `videocrm-…-linux-x86_64.tar.gz` into `~/.local` to get VideoCRM in your app menu:
   `tar -xzf videocrm-…-linux-x86_64.tar.gz -C ~/.local --strip-components=1`.
 
+VideoCRM keeps itself up to date: new versions download in the background and start the
+next time you open it, or right away with **Restart to update**.
+
 AI editing also needs [Claude Code](https://claude.com/claude-code), ffmpeg and the
 video-use skill; the app checks for them and says what's missing.
 

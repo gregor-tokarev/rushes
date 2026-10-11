@@ -11,14 +11,15 @@ crates/
   core/       videocrm-core      domain model, SQLite store, documents, templates, media folders
   youtube/    videocrm-youtube   Google OAuth (loopback + PKCE), YouTube Data API v3 client, resumable upload
   pipeline/   videocrm-pipeline  AI edit pipelines: drives a coding agent (Claude Code) with the video-use skill
+  update/     videocrm-update    self-update: newest GitHub release, verified download, install in place, relaunch
   app/        videocrm           GPUI Kit desktop app (the only crate that depends on gpui-kit)
 emulators/    local API emulation for dev/tests: vercel-labs/emulate (Google OAuth) + custom YouTube emulator
 scripts/      dev helpers (run emulators, fake agent for pipeline tests, Xvfb screenshots)
 docs/         technical docs (README.md stays product-only)
 ```
 
-Dependency direction: `app -> core, youtube, pipeline`. `youtube` and `pipeline` do NOT
-depend on `core`; they expose their own small types and the app maps between them. This
+Dependency direction: `app -> core, youtube, pipeline, update`. `youtube`, `pipeline` and
+`update` do NOT depend on `core`; they expose their own small types and the app maps between them. This
 keeps them independently testable and lets them be built in parallel.
 
 ## Threading model
@@ -81,6 +82,9 @@ database's write lock for seconds. The UI thread never waits for it:
 - OAuth credentials: one file per signed-in YouTube account in `youtube-accounts/`, file
   mode 0600. Never logged. A `credentials.json` left by a release that kept one account
   moves there at the next start.
+- Updates: `.videocrm-update/` appears beside the installation (the app bundle, the
+  AppImage, or the `~/.local` prefix) while an update is prepared, and goes once it's in
+  place. See [updates.md](updates.md).
 
 ## core (`videocrm-core`)
 
@@ -158,6 +162,16 @@ GPUI Kit app. Main pieces:
   default one), metadata form, upload with progress, resume.
 - AI edit: footage list, edit brief, run timeline (agent messages/tool calls), approve /
   feedback, output preview and "use for upload".
+- `update/` — `UpdateService`: automatic checks, background install, Settings › About ›
+  Updates and the title bar's "Restart to update" ([updates.md](updates.md)).
+
+## update (`videocrm-update`)
+
+`Updater::check` asks GitHub for the newest release and says whether this copy installs it
+(`Delivery::Install`) or the creator downloads it (`Delivery::Manual`); `Updater::install`
+downloads the release file for the detected `Installation` (macOS app, AppImage, `~/.local`
+prefix), checks its size and SHA-256, and puts it in place; `relaunch_after_exit` opens the
+new version once the app quits. Details in [updates.md](updates.md).
 
 ## Testing
 
@@ -165,5 +179,6 @@ GPUI Kit app. Main pieces:
 - `cargo test -p videocrm-youtube` — unit tests + integration tests against the emulators
   (`emulators/`; skipped with a message when Node is unavailable).
 - `cargo test -p videocrm-pipeline` — with `scripts/fake-agent`.
+- `cargo test -p videocrm-update` — against a local stand-in for GitHub.
 - `cargo test -p videocrm` — GPUI UI integration tests (`#[gpui_kit::test]`).
 - Visual checks: `scripts/screenshot.sh` runs the app under Xvfb and captures PNGs.
