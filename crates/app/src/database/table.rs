@@ -59,6 +59,8 @@ pub(crate) enum EmptyReason {
     Search,
     /// The view's filters leave nothing.
     Filter,
+    /// Only "Hide archived" leaves nothing: every video the view would show is archived.
+    Archived,
 }
 
 /// What the table shows, prepared by the panel.
@@ -903,6 +905,14 @@ pub(crate) fn render_empty_state(reason: EmptyReason, panel: &WeakEntity<Databas
                     _ = panel.update(cx, |panel, cx| panel.clear_filters(window, cx));
                 },
             ),
+        ),
+        EmptyReason::Archived => (
+            IconName::Archive,
+            "Only archived videos",
+            "This view hides archived videos, and every video here is archived.",
+            Button::new("empty-show-archived").outline().small().label("Show archived").on_click(move |_, _, cx| {
+                _ = panel.update(cx, |panel, cx| panel.show_archived(cx));
+            }),
         ),
     };
 

@@ -1,5 +1,5 @@
 //! The workspace sidebar: create and search, the saved database views,
-//! pipelines and uploads, recently opened videos, account and settings.
+//! AI edits and uploads, recently opened videos, account and settings.
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
@@ -126,7 +126,7 @@ fn count_badge(count: usize, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// The Pipelines row's counts: edits waiting for the creator's approval stand
+/// The AI edits row's counts: edits waiting for the creator's approval stand
 /// out from the ones still working on their own.
 fn pipeline_badges(running: usize, awaiting: usize, cx: &App) -> AnyElement {
     // Read against the selected row's fill, the stronger of the row's two
@@ -155,9 +155,9 @@ fn pipeline_badges(running: usize, awaiting: usize, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// The Pipelines row's name for assistive technology, with its counts.
+/// The AI edits row's name for assistive technology, with its counts.
 fn pipelines_label(running: usize, awaiting: usize) -> SharedString {
-    let mut parts = vec!["Pipelines".to_string()];
+    let mut parts = vec!["AI edits".to_string()];
     if running > 0 {
         parts.push(format!("{running} running"));
     }
@@ -240,7 +240,7 @@ impl Workspace {
                     }),
             )
             .child(
-                SidebarMenuItem::new("Pipelines")
+                SidebarMenuItem::new("AI edits")
                     .icon(Icon::new(IconName::WandSparkles))
                     .accessibility_label(pipelines_label(active_runs, awaiting_runs))
                     .active(route == Route::Pipelines)

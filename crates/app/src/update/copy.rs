@@ -33,15 +33,16 @@ pub(super) fn status(
             format!("Version {installed} is ready"),
             format!("Restart VideoCRM to use it. Until then you keep using version {current}."),
         ),
+        // The About header already names the current version.
         (UpdateStatus::Idle, None) => {
-            let description = if !updates_itself {
-                "This copy wasn’t installed from a release, so it doesn’t update itself."
+            let (title, description) = if !updates_itself {
+                ("Manual updates", "This copy wasn’t installed from a release, so it doesn’t update itself.")
             } else if automatic {
-                "VideoCRM checks for new versions every few hours."
+                ("Automatic updates", "VideoCRM checks for new versions every few hours.")
             } else {
-                "Automatic updates are off."
+                ("Automatic updates", "Automatic updates are off.")
             };
-            (format!("Version {current}"), description.into())
+            (title.into(), description.into())
         }
         (UpdateStatus::UpToDate { checked_at }, None) => (
             "VideoCRM is up to date".into(),

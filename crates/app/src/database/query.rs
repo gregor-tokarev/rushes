@@ -106,9 +106,21 @@ pub fn visible_columns(view: &DatabaseView, properties: &[PropertyDef]) -> Vec<C
 /// Number of active filter rules, shown as a count on the Filter button.
 /// The search query is visible in its own field and is not counted.
 pub fn active_filter_count(filter: &FilterSpec) -> usize {
-    usize::from(!filter.statuses.is_empty())
-        + usize::from(!filter.formats.is_empty())
-        + usize::from(filter.hide_archived)
+    usize::from(!filter.statuses.is_empty()) + usize::from(!filter.formats.is_empty())
+}
+
+/// How many archived videos `filter`'s "Hide archived" keeps out of `rows`:
+/// the ones its other rules would show. None when a status rule decides
+/// instead, as in [`status_visible`].
+pub fn hidden_archived(rows: &[VideoRow], filter: &FilterSpec) -> usize {
+    if !filter.hide_archived || !filter.statuses.is_empty() {
+        return 0;
+    }
+    let shown = FilterSpec { hide_archived: false, ..filter.clone() };
+    let terms = search_terms(&shown.search);
+    rows.iter()
+        .filter(|row| row.video.status == VideoStatus::Archived && matches_filter(row, &shown, &terms))
+        .count()
 }
 
 /// Whether a video with `status` can pass `filter`'s status rules.
@@ -746,13 +758,40 @@ mod tests {
     }
 
     #[test]
+    fn hidden_archived_counts_what_the_other_rules_would_show() {
+        let mut archived = row("Channel recap 2025", 0.0);
+        archived.video.status = VideoStatus::Archived;
+        archived.video.format = VideoFormat::LongForm;
+        let mut short = row("Old short", 1.0);
+        short.video.status = VideoStatus::Archived;
+        short.video.format = VideoFormat::Short;
+        let mut idea = row("Next idea", 2.0);
+        idea.video.status = VideoStatus::Idea;
+        let rows = vec![archived, short, idea];
+
+        let hide = FilterSpec { hide_archived: true, ..FilterSpec::default() };
+        assert_eq!(hidden_archived(&rows, &hide), 2);
+        assert_eq!(hidden_archived(&rows, &FilterSpec::default()), 0, "nothing is hidden when archived show");
+        // A format rule or a search narrows what counts as hidden.
+        let shorts = FilterSpec { formats: vec![VideoFormat::Short], ..hide.clone() };
+        assert_eq!(hidden_archived(&rows, &shorts), 1);
+        let searched = FilterSpec { search: "recap".into(), ..hide.clone() };
+        assert_eq!(hidden_archived(&rows, &searched), 1);
+        // An explicit status rule overrides "Hide archived", so it hides nothing.
+        let archived_only = FilterSpec { statuses: vec![VideoStatus::Archived], ..hide };
+        assert_eq!(hidden_archived(&rows, &archived_only), 0);
+    }
+
+    #[test]
     fn filter_count_counts_rules() {
         let mut filter = FilterSpec::default();
         assert_eq!(active_filter_count(&filter), 0);
         filter.search = "rust".into();
         assert_eq!(active_filter_count(&filter), 0);
         filter.statuses = vec![VideoStatus::Idea, VideoStatus::Ready];
+        assert_eq!(active_filter_count(&filter), 1);
+        // Hiding archived videos is how a view starts, not a rule the creator added.
         filter.hide_archived = true;
-        assert_eq!(active_filter_count(&filter), 2);
+        assert_eq!(active_filter_count(&filter), 1);
     }
 }

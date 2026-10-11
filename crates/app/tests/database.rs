@@ -610,6 +610,25 @@ fn row_keys_do_not_reach_through_an_open_cell_menu(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_view_of_only_archived_videos_offers_to_show_them(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+    db.set_data(cx, |rows| rows.into_iter().filter(|row| row.video.id == db.recap).collect(), |views| views);
+    assert!(db.shown_rows(cx).is_empty());
+    assert!(
+        db.with_window(cx, |window, _| window.try_find("empty-clear-filters").is_none()),
+        "there are no filters to clear"
+    );
+
+    db.step(cx, |window, cx| window.click("empty-show-archived", cx));
+    assert_eq!(db.shown_rows(cx), vec![db.recap]);
+    let saved = db.take_events();
+    let [DatabaseEvent::SaveView(view)] = saved.as_slice() else {
+        panic!("expected one SaveView, got {saved:?}");
+    };
+    assert!(!view.filter.hide_archived);
+}
+
+#[gpui_kit::test]
 fn clearing_a_search_without_matches_keeps_the_view(cx: &mut TestAppContext) {
     let db = Fixture::open(cx);
 

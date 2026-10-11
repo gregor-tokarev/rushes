@@ -222,7 +222,7 @@ impl CommandPalette {
             .collect();
         go_to.extend([
             Entry {
-                label: "Pipelines".into(),
+                label: "AI edits".into(),
                 detail: None,
                 icon: EntryIcon::Icon(IconName::WandSparkles),
                 command: PaletteCommand::Navigate(Route::Pipelines),

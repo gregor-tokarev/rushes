@@ -2,7 +2,6 @@
 //! with an editor for each kind, and the dialog that adds a property.
 
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use chrono::{NaiveDate, Utc};
 use gpui_kit::assets::IconName;
@@ -20,7 +19,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
     TestSupportExt as _, Window, div, rems,
 };
 use videocrm_core::input::{normalize_link, parse_number};
@@ -34,7 +33,6 @@ use crate::database::colors::{format_color, free_tag_color, tag_colors};
 use crate::database::{
     NO_OPTIONS_ON_PAGE, PropertyEditor, PropertyEditorMode, format, kind_icon, multi_select_list, query, select_menu,
 };
-use crate::publish::{ChannelChoices, ChooseChannel, YoutubeAccount, YoutubeEvent, YoutubeService};
 use crate::state::{AppEvent, AppState};
 
 /// Retained editors of one video's properties. Values are written through
@@ -48,9 +46,6 @@ pub struct PropertiesPanel {
     /// The date row whose calendar is open.
     date_open: Option<DateField>,
     tag_input: Entity<InputState>,
-    /// Whether the media folder exists, checked off the UI thread after each data change.
-    folder_exists: bool,
-    folder_check: Option<Task<()>>,
     /// Editors of text, number and URL properties.
     inputs: HashMap<PropertyId, PropertyField>,
     /// Text a field still holds after its number was refused, until the
@@ -81,7 +76,7 @@ impl PropertiesPanel {
         let state = AppState::global(cx);
         let calendar = cx.new(|cx| CalendarState::new(window, cx));
         let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("Add a tag…"));
-        let mut subscriptions = vec![
+        let subscriptions = vec![
             cx.subscribe_in(&state, window, |this, _, event: &AppEvent, window, cx| {
                 if *event == AppEvent::DataChanged {
                     this.sync(window, cx);
@@ -105,23 +100,14 @@ impl PropertiesPanel {
                 }
             }),
         ];
-        // The Channel row names accounts: it follows sign-ins, sign-outs and the default.
-        if let Some(service) = YoutubeService::try_global(cx) {
-            subscriptions.push(cx.subscribe(&service, |_, _, event: &YoutubeEvent, cx| {
-                if *event == YoutubeEvent::ConnectionChanged {
-                    cx.notify();
-                }
-            }));
-        }
+        let collapsed = state.read(cx).settings().properties_collapsed;
         let mut panel = Self {
             state,
             video_id,
-            collapsed: false,
+            collapsed,
             calendar,
             date_open: None,
             tag_input,
-            folder_exists: false,
-            folder_check: None,
             inputs: HashMap::new(),
             refused: HashMap::new(),
             _subscriptions: subscriptions,
@@ -130,8 +116,10 @@ impl PropertiesPanel {
         panel
     }
 
+    /// Folds or unfolds the properties, here and on every video page from now on.
     fn set_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
         self.collapsed = collapsed;
+        self.state.update(cx, |state, cx| state.update_settings(cx, |settings| settings.properties_collapsed = collapsed));
         cx.notify();
     }
 
@@ -300,20 +288,6 @@ impl PropertiesPanel {
             self.tag_input.update(cx, |input, cx| input.set_value("", window, cx));
         }
 
-        let folder = video.folder.clone();
-        self.folder_check = Some(cx.spawn(async move |this, cx| {
-            let exists = match folder {
-                Some(folder) => cx.background_spawn(async move { folder.is_dir() }).await,
-                None => false,
-            };
-            _ = this.update(cx, |this, cx| {
-                if this.folder_exists != exists {
-                    this.folder_exists = exists;
-                    cx.notify();
-                }
-            });
-        }));
-
         self.inputs
             .retain(|id, _| properties.iter().any(|property| property.id == *id && is_text_like(&property.kind)));
         self.refused.retain(|id, _| self.inputs.contains_key(id));
@@ -380,13 +354,6 @@ impl PropertiesPanel {
             }
         };
         self.set_value(id, value, cx);
-    }
-
-    fn open_media_folder(&mut self, cx: &mut Context<Self>) {
-        let id = self.video_id;
-        if let Some(folder) = self.state.update(cx, |state, cx| state.ensure_video_folder(id, cx)) {
-            cx.open_with_system(&folder);
-        }
     }
 
     fn render_row(
@@ -550,29 +517,6 @@ impl PropertiesPanel {
             .into_any_element()
     }
 
-    fn render_media_folder(&self, video: &Video, cx: &mut Context<Self>) -> impl IntoElement {
-        let folder = video.folder.clone().filter(|_| self.folder_exists);
-        h_flex()
-            .w_full()
-            .min_w_0()
-            .gap_2()
-            .pl_2()
-            .child(div().flex_1().min_w_0().truncate().text_sm().text_color(cx.theme().muted_foreground).child(
-                match &folder {
-                    Some(folder) => folder.display().to_string(),
-                    None => "Created when you open it".to_string(),
-                },
-            ))
-            .child(
-                Button::new("open-media-folder")
-                    .ghost()
-                    .small()
-                    .icon(IconName::FolderOpen)
-                    .label("Open folder")
-                    .on_click(cx.listener(|this, _, _, cx| this.open_media_folder(cx))),
-            )
-    }
-
     /// The video's link on YouTube, or why there is none: never uploaded, or
     /// gone from YouTube since, as the Publish tab says it.
     fn render_youtube(&self, video: &Video, cx: &App) -> AnyElement {
@@ -597,46 +541,6 @@ impl PropertiesPanel {
             .when(left, |this| this.tooltip(|window, cx| Tooltip::new(format::YOUTUBE_GONE_DETAIL).build(window, cx)))
             .child(label)
             .into_any_element()
-    }
-
-    /// The YouTube account the video uploads to, with the signed-in accounts to
-    /// choose from. Without a choice it is the default account, muted.
-    fn render_channel(&self, video: &Video, cx: &mut Context<Self>) -> AnyElement {
-        let choices = ChannelChoices::of(video, cx);
-        let label = choices.label(cx);
-        if !choices.is_choosable() {
-            let muted = cx.theme().muted_foreground;
-            return div()
-                .id("property-channel-value")
-                .test_support()
-                .px_2()
-                .text_sm()
-                .map(|this| match label {
-                    Some(label) => this.child(label),
-                    None => this.text_color(muted).child("No YouTube account"),
-                })
-                .into_any_element();
-        }
-        let panel = cx.weak_entity();
-        let choose: ChooseChannel = Rc::new(move |key, cx| {
-            _ = panel.update(cx, |panel, cx| panel.set_channel(key, cx));
-        });
-        Button::new("property-channel-value")
-            .ghost()
-            .small()
-            .accessibility_label("Channel")
-            .children(label)
-            .dropdown_menu(move |menu, _, _| choices.menu(menu.check_side(Side::Right), choose.clone()))
-            .into_any_element()
-    }
-
-    /// Lets the video upload to the signed-in YouTube account `key`.
-    fn set_channel(&mut self, key: &str, cx: &mut Context<Self>) {
-        let channel = YoutubeService::try_global(cx)
-            .and_then(|service| service.read(cx).find_account(key).map(YoutubeAccount::publish_channel));
-        if let Some(channel) = channel {
-            self.edit(cx, |video| video.publish.channel = Some(channel));
-        }
     }
 
     fn render_custom(&self, property: &PropertyDef, video: &Video, cx: &mut Context<Self>) -> AnyElement {
@@ -799,8 +703,9 @@ fn add_property_to_tables(property: PropertyDef, cx: &mut App) {
     });
 }
 
-/// Status, format, publish date, tags, media folder, YouTube and channel.
-const BUILT_IN_ROWS: usize = 7;
+/// Status, format, publish date, tags and YouTube. The media folder and the
+/// channel live on the Footage and Publish tabs, which act on them.
+const BUILT_IN_ROWS: usize = 5;
 
 /// Kinds edited in a text input.
 fn is_text_like(kind: &PropertyKind) -> bool {
@@ -870,9 +775,7 @@ impl Render for PropertiesPanel {
         let status = self.render_status(&video, cx).into_any_element();
         let format = self.render_format(&video, cx).into_any_element();
         let tags = self.render_tags(&video, cx).into_any_element();
-        let folder = self.render_media_folder(&video, cx).into_any_element();
         let youtube = self.render_youtube(&video, cx);
-        let channel = self.render_channel(&video, cx);
         let publish_date = self.render_date(DateField::Publish, cx);
 
         v_flex()
@@ -883,9 +786,7 @@ impl Render for PropertiesPanel {
             .child(self.render_row("format", IconName::CircleChevronDown, "Format", format, cx))
             .child(self.render_row("publish-date", IconName::Calendar, "Publish date", publish_date, cx))
             .child(self.render_row("tags", IconName::Tags, "Tags", tags, cx))
-            .child(self.render_row("media-folder", IconName::Folder, "Media folder", folder, cx))
             .child(self.render_row("youtube", IconName::CirclePlay, "YouTube", youtube, cx))
-            .child(self.render_row("channel", IconName::CircleUser, "Channel", channel, cx))
             .children(custom)
             .child(
                 h_flex()

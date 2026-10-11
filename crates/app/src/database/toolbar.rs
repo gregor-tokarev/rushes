@@ -83,7 +83,6 @@ impl DatabasePanel {
             )
             .child(
                 Button::new("new-video")
-                    .primary()
                     .small()
                     .icon(IconName::Plus)
                     .label("New video…")
