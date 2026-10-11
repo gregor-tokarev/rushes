@@ -7510,7 +7510,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "videocrm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-signal",
  "base64 0.22.1",
@@ -7531,7 +7531,7 @@ dependencies = [
 
 [[package]]
 name = "videocrm-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -7545,7 +7545,7 @@ dependencies = [
 
 [[package]]
 name = "videocrm-pipeline"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "serde",
@@ -7556,7 +7556,7 @@ dependencies = [
 
 [[package]]
 name = "videocrm-youtube"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "chrono",
