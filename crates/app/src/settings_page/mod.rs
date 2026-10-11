@@ -1,4 +1,4 @@
-//! Settings page: General (theme, folders), YouTube, AI editing and About.
+//! Settings page: General (theme, week start, folders), YouTube, AI editing and About.
 //! Embeds `publish::YoutubeSettings` and `ai_edit::AiSettings` as sections.
 
 mod media_folder;
@@ -14,7 +14,7 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
 };
 use videocrm_core::input::display_user_path;
-use videocrm_core::settings::{ThemeMode, data_dir};
+use videocrm_core::settings::{ThemeMode, WeekStart, data_dir};
 
 use crate::ai_edit::AiSettings;
 use crate::publish::YoutubeSettings;
@@ -108,7 +108,7 @@ impl SettingsPage {
                 .icon(Icon::new(IconName::Settings2))
                 .default_open(true)
                 .groups(vec![
-                    setting_group().title("Appearance").item(
+                    setting_group().title("Appearance").items(vec![
                         SettingItem::new(
                             "Theme",
                             SettingField::dropdown(
@@ -129,7 +129,27 @@ impl SettingsPage {
                             ),
                         )
                         .description("System follows your operating system’s light or dark appearance."),
-                    ),
+                        SettingItem::new(
+                            "Week starts on",
+                            SettingField::dropdown(
+                                WeekStart::ALL
+                                    .iter()
+                                    .map(|day| (week_start_key(*day), SharedString::from(day.label())))
+                                    .collect(),
+                                |cx: &App| week_start_key(AppState::global(cx).read(cx).settings().week_start),
+                                |key: SharedString, cx: &mut App| {
+                                    let Some(day) = WeekStart::ALL.into_iter().find(|day| week_start_key(*day) == key)
+                                    else {
+                                        return;
+                                    };
+                                    AppState::global(cx).update(cx, |state, cx| {
+                                        state.update_settings(cx, |settings| settings.week_start = day)
+                                    });
+                                },
+                            ),
+                        )
+                        .keywords(["calendar", "first day", "monday", "sunday"]),
+                    ]),
                     // Paths are long: their fields sit under the label at any width.
                     setting_group().title("Storage").items(vec![
                         SettingItem::new("Media folder", media_folder_field(media_folder))
@@ -197,6 +217,10 @@ fn about_group() -> SettingGroup {
 
 fn theme_key(mode: ThemeMode) -> SharedString {
     mode.label().to_lowercase().into()
+}
+
+fn week_start_key(day: WeekStart) -> SharedString {
+    day.label().to_lowercase().into()
 }
 
 fn media_folder_field(field: Entity<MediaFolderField>) -> SettingField<SharedString> {

@@ -33,6 +33,7 @@ use gpui_kit::{
 };
 use videocrm_core::document::DEFAULT_WPM;
 use videocrm_core::media::{self, MediaKind};
+use videocrm_core::settings::WeekStart;
 use videocrm_core::{
     DocumentKind, Privacy, PublishSettings, UploadJob, UploadStatus, Video, VideoFormat, VideoId, VideoStatus,
 };
@@ -214,6 +215,9 @@ pub struct PublishPanel {
     tag_input: Entity<InputState>,
     category: Entity<SelectState<Vec<CategoryItem>>>,
     schedule: Entity<DatePickerState>,
+    /// The day the schedule's weeks start on; the picker is replaced when the setting changes.
+    week_start: WeekStart,
+    _schedule_changes: Subscription,
     choices: Vec<FileChoice>,
     file: Option<FileDetails>,
     /// Size of the chosen thumbnail, `None` while unknown or missing.
@@ -247,15 +251,14 @@ impl PublishPanel {
         let items: Vec<CategoryItem> = CATEGORIES.into_iter().map(CategoryItem).collect();
         let category_ix = category_index(&draft.category_id);
         let category = cx.new(|cx| SelectState::new(items, Some(IndexPath::new(category_ix)), window, cx));
-        let today = Local::now().date_naive();
-        let schedule = cx.new(|cx| {
-            let mut picker = DatePickerState::new(window, cx)
-                .time_precision(TimePrecision::Minute)
-                .date_format("%a, %-d %b %Y, %H:%M")
-                .disabled_matcher(Matcher::interval(Some(today), None));
-            picker.set_date_time(local_time(draft.publish_at.unwrap_or_else(|| default_schedule(&video))), window, cx);
-            picker
-        });
+        let week_start = state.read(cx).settings().week_start;
+        let schedule = schedule_picker(
+            local_time(draft.publish_at.unwrap_or_else(|| default_schedule(&video))),
+            week_start,
+            window,
+            cx,
+        );
+        let schedule_changes = cx.subscribe(&schedule, Self::on_schedule_change);
 
         let subscriptions = vec![
             cx.subscribe_in(&state, window, Self::on_app_event),
@@ -282,15 +285,6 @@ impl PublishPanel {
                 let SelectEvent::Confirm(id) = event;
                 this.draft.category_id = id.map(str::to_owned).unwrap_or_default();
                 this.schedule_save(Field::Category, cx);
-            }),
-            cx.subscribe(&schedule, |this, _, event: &DatePickerEvent, cx| {
-                let DatePickerEvent::Change(value) = event;
-                if this.draft.publish_at.is_some()
-                    && let Some(at) = value.start().and_then(utc_time)
-                {
-                    this.draft.publish_at = Some(at);
-                    this.schedule_save(Field::Visibility, cx);
-                }
             }),
             // Coming back from the file manager or another app may bring new files,
             // or a re-exported one that a stopped upload can no longer continue;
@@ -326,6 +320,8 @@ impl PublishPanel {
             tag_input,
             category,
             schedule,
+            week_start,
+            _schedule_changes: schedule_changes,
             choices: Vec::new(),
             file: None,
             thumbnail_size: None,
@@ -450,6 +446,9 @@ impl PublishPanel {
         if *event == AppEvent::RouteChanged && self.is_shown(cx) {
             self.refresh_youtube_video(cx);
         }
+        if *event == AppEvent::SettingsChanged {
+            self.sync_week_start(window, cx);
+        }
         if *event != AppEvent::DataChanged {
             return;
         }
@@ -466,6 +465,30 @@ impl PublishPanel {
         }
         self.refresh_chapters(cx);
         self.refresh_choices(cx);
+    }
+
+    fn on_schedule_change(&mut self, _: Entity<DatePickerState>, event: &DatePickerEvent, cx: &mut Context<Self>) {
+        let DatePickerEvent::Change(value) = event;
+        if self.draft.publish_at.is_some()
+            && let Some(at) = value.start().and_then(utc_time)
+        {
+            self.draft.publish_at = Some(at);
+            self.schedule_save(Field::Visibility, cx);
+        }
+    }
+
+    /// The kit's date picker takes the first day of the week when it is made,
+    /// so a changed setting replaces the picker, keeping the time it shows.
+    fn sync_week_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let week_start = self.state.read(cx).settings().week_start;
+        if week_start == self.week_start {
+            return;
+        }
+        self.week_start = week_start;
+        let value = self.schedule.read(cx).date_time();
+        self.schedule = schedule_picker(value, week_start, window, cx);
+        self._schedule_changes = cx.subscribe(&self.schedule, Self::on_schedule_change);
+        cx.notify();
     }
 
     fn adopt(&mut self, publish: PublishSettings, window: &mut Window, cx: &mut Context<Self>) {
@@ -948,7 +971,13 @@ impl PublishPanel {
                             v_flex()
                                 .gap_1p5()
                                 .pl_10()
-                                .child(div().max_w(rems(20.)).child(DatePicker::new(&self.schedule).placeholder("Publish time")))
+                                .child(
+                                    div()
+                                        .id("publish-schedule-time")
+                                        .test_support()
+                                        .max_w(rems(20.))
+                                        .child(DatePicker::new(&self.schedule).placeholder("Publish time")),
+                                )
                                 .child(help_text(
                                     format!(
                                         "YouTube makes the video public at this time ({}). Until then it stays private.",
@@ -1862,6 +1891,25 @@ fn default_schedule(video: &Video) -> DateTime<Utc> {
     let tomorrow = Local::now().date_naive() + TimeDelta::days(1);
     let date = video.publish_date.filter(|date| *date >= tomorrow).unwrap_or(tomorrow);
     utc_time(date.and_time(NaiveTime::from_hms_opt(9, 0, 0).unwrap_or_default())).unwrap_or_else(Utc::now)
+}
+
+/// The scheduled publish time's picker: today onwards, to the minute.
+fn schedule_picker(
+    value: PickerValue,
+    week_start: WeekStart,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<DatePickerState> {
+    let today = Local::now().date_naive();
+    cx.new(|cx| {
+        let mut picker = DatePickerState::new(window, cx)
+            .time_precision(TimePrecision::Minute)
+            .date_format("%a, %-d %b %Y, %H:%M")
+            .disabled_matcher(Matcher::interval(Some(today), None))
+            .first_day_of_week(week_start.weekday());
+        picker.set_date_time(value, window, cx);
+        picker
+    })
 }
 
 fn local_time(at: DateTime<Utc>) -> PickerValue {

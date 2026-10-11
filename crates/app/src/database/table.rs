@@ -24,6 +24,7 @@ use gpui_kit::{
     TestSupportExt as _, WeakEntity, Window, div, px,
 };
 use videocrm_core::input::normalize_link;
+use videocrm_core::settings::WeekStart;
 use videocrm_core::{
     BuiltinField, Column, ColumnLayout, PropertyDef, PropertyKind, PropertyValue, RunStatus, SortDirection, SortSpec,
     UploadStatus, VideoFormat, VideoId, VideoRow, VideoStatus, YoutubeState,
@@ -74,6 +75,7 @@ pub(crate) struct TableModel {
     pub tags_target: Option<VideoId>,
     pub empty: EmptyReason,
     pub now: DateTime<Utc>,
+    pub week_start: WeekStart,
 }
 
 impl TableModel {
@@ -382,6 +384,7 @@ impl VideoTable {
             });
 
         let calendar = self.editors.calendar.clone();
+        let first_day = self.model.week_start.weekday();
         let clear = self.panel.clone();
         let on_open_change = {
             let panel = self.panel.clone();
@@ -397,7 +400,8 @@ impl VideoTable {
             .trigger(trigger)
             .content(move |_, _, _| {
                 let clear = clear.clone();
-                v_flex().gap_2().child(Calendar::new(&calendar).small()).when(value.is_some(), |this| {
+                let calendar = Calendar::new(&calendar).small().first_day_of_week(first_day);
+                v_flex().gap_2().child(calendar).when(value.is_some(), |this| {
                     this.child(
                         Button::new("clear-date").ghost().small().icon(IconName::X).label("Clear date").on_click(
                             move |_, window, cx| {

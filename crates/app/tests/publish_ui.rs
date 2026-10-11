@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{Local, NaiveDate, TimeZone as _, Utc};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
@@ -24,7 +24,7 @@ use videocrm::publish::{
 };
 use videocrm::route::{Route, SettingsSection, VideoTab};
 use videocrm::state::{AppEvent, Severity};
-use videocrm_core::settings::YoutubeBackend;
+use videocrm_core::settings::{WeekStart, YoutubeBackend};
 use videocrm_core::{
     Block, BlockKind, DocumentKind, PipelineRun, Privacy, PublishChannel, RunId, RunStatus, UploadId, UploadJob,
     UploadStatus, VideoId, YoutubeLink,
@@ -150,6 +150,55 @@ fn the_publish_form_saves_metadata_and_explains_what_blocks_the_upload(cx: &mut 
     settle(cx);
     let publish = workspace.video(cx, video_id).publish;
     assert_eq!((publish.privacy, publish.publish_at), (Privacy::Public, None));
+}
+
+#[gpui_kit::test]
+fn the_schedule_calendar_starts_weeks_on_the_day_settings_choose(cx: &mut TestAppContext) {
+    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    // June 2030 starts on a Saturday.
+    let planned = NaiveDate::from_ymd_opt(2030, 6, 12).unwrap();
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |video| video.publish_date = Some(planned));
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let at_nine =
+        |date: NaiveDate| Local.from_local_datetime(&date.and_hms_opt(9, 0, 0).unwrap()).unwrap().with_timezone(&Utc);
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("publish-schedule", cx);
+    });
+    cx.run_until_parked();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("publish-schedule-time", cx);
+    });
+    cx.run_until_parked();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("weekday-0-0").label(), Some("Su"));
+        window.press("escape", cx);
+        assert!(window.try_find("weekday-0-0").is_none(), "the calendar closes");
+    });
+    settle(cx);
+    assert_eq!(workspace.video(cx, video_id).publish.publish_at, Some(at_nine(planned)));
+
+    // Changed in Settings while the tab stays open.
+    workspace
+        .state
+        .update(cx, |state, cx| state.update_settings(cx, |settings| settings.week_start = WeekStart::Monday));
+    cx.run_until_parked();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("publish-schedule-time", cx);
+    });
+    cx.run_until_parked();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("weekday-0-0").label(), Some("Mo"));
+        // Friday the 14th is in the third Monday-first week; the time stays 09:00.
+        window.click("calendar-2030-06-14-0-2", cx);
+    });
+    settle(cx);
+    let picked = NaiveDate::from_ymd_opt(2030, 6, 14).unwrap();
+    assert_eq!(workspace.video(cx, video_id).publish.publish_at, Some(at_nine(picked)));
 }
 
 #[gpui_kit::test]

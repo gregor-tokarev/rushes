@@ -93,7 +93,9 @@ impl NewVideoForm {
     fn new(status: VideoStatus, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let title = cx.new(|cx| InputState::new(window, cx).placeholder("Video title"));
         let hook = cx.new(|cx| InputState::new(window, cx).placeholder("One-line hook — why would someone click?"));
-        let publish_date = cx.new(|cx| DatePickerState::new(window, cx).date_format("%b %-d, %Y"));
+        let first_day = AppState::global(cx).read(cx).settings().week_start.weekday();
+        let publish_date =
+            cx.new(|cx| DatePickerState::new(window, cx).first_day_of_week(first_day).date_format("%b %-d, %Y"));
         let subscriptions = vec![
             cx.subscribe(&publish_date, |this: &mut Self, _, event: &DatePickerEvent, cx| {
                 let DatePickerEvent::Change(DateTime::Single(date)) = event else { return };
@@ -308,10 +310,12 @@ impl Render for NewVideoForm {
                                         .gap_1()
                                         .child(div().text_sm().font_medium().child("Publish date"))
                                         .child(
-                                            DatePicker::new(&self.publish_date)
-                                                .small()
-                                                .cleanable(true)
-                                                .placeholder("No date"),
+                                            div().id("new-video-publish-date").test_support().child(
+                                                DatePicker::new(&self.publish_date)
+                                                    .small()
+                                                    .cleanable(true)
+                                                    .placeholder("No date"),
+                                            ),
                                         ),
                                 ),
                         ),
