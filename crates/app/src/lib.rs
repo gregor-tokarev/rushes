@@ -24,5 +24,6 @@ pub mod settings_page;
 pub mod shell;
 pub mod state;
 pub mod ui;
+pub mod update;
 pub mod video_page;
 pub mod wizard;

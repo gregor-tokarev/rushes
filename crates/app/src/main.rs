@@ -6,6 +6,7 @@ use videocrm::ai_edit::PipelineService;
 use videocrm::publish::YoutubeService;
 use videocrm::shell::{self, InstanceLock, StartupProblem, Workspace};
 use videocrm::state::AppState;
+use videocrm::update::UpdateService;
 use videocrm_core::Store;
 use videocrm_core::settings::{data_dir, database_path};
 
@@ -49,6 +50,7 @@ fn open_workspace(state: AppState, cx: &mut App) {
     AppState::set_global(state.clone(), cx);
     YoutubeService::init(state.clone(), cx);
     PipelineService::init(state.clone(), cx);
+    UpdateService::init(state.clone(), cx);
     shell::apply_theme(theme, None, cx);
     // The workspace's quit hook writes pending edits, as for Ctrl+Q.
     shell::on_termination_signal(cx, |cx| cx.quit());

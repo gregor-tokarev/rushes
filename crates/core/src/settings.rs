@@ -49,6 +49,7 @@ pub struct AppSettings {
     pub pipeline: PipelineSettings,
     pub onboarding_completed: bool,
     pub theme: ThemeMode,
+    pub updates: UpdateSettings,
 }
 
 impl AppSettings {
@@ -140,6 +141,21 @@ impl Default for EditPreferences {
     }
 }
 
+/// How VideoCRM keeps itself up to date.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateSettings {
+    /// Check for new releases every few hours and install them in the
+    /// background; they take effect the next time VideoCRM starts.
+    pub automatic: bool,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self { automatic: true }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeMode {
@@ -186,6 +202,7 @@ mod tests {
         assert!(settings.pipeline.default_preferences.remove_fillers);
         assert_eq!(settings.theme, ThemeMode::System);
         assert!(!settings.onboarding_completed);
+        assert!(settings.updates.automatic);
     }
 
     #[test]
@@ -196,6 +213,7 @@ mod tests {
         assert!(settings.pipeline.auto_approve);
         assert_eq!(settings.pipeline.agent_command, "claude");
         assert_eq!(settings.youtube, YoutubeBackend::default());
+        assert!(settings.updates.automatic, "settings saved before updates existed update automatically");
     }
 
     #[test]

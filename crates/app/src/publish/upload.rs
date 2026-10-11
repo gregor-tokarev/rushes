@@ -22,9 +22,10 @@ use videocrm_youtube::{
 };
 
 use super::rules::{self, AccountAccess, BlockingReason};
-use super::service::{YoutubeEvent, YoutubeService, describe_error, push_notification, report_problem};
+use super::service::{YoutubeEvent, YoutubeService, describe_error, report_problem};
 use super::transfer::{PROGRESS_INTERVAL, Throttle, Transfer};
 use crate::state::Problem;
+use crate::ui::push_notification;
 
 /// Status message of jobs a previous run left mid-transfer with a session to resume.
 pub const INTERRUPTED_RESUMABLE: &str = "Interrupted — you can resume";
