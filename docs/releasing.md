@@ -10,7 +10,7 @@ changed.
 | Run workflow on Daily release (Actions tab) | Same as the daily run, now |
 | Tag `v<version>` pushed | GitHub release `v<version>` with all bundles and generated notes |
 | Run workflow on Bundle (Actions tab) | Bundles kept as run artifacts for 7 days, versioned `<version>-dev.<sha>` |
-| Pull request touching the workflow, `scripts/bundle-*.sh` or `assets/icon.svg` | Same as a manual Bundle run |
+| Pull request touching the workflow, `scripts/bundle-*.sh` or `assets/icon.png` | Same as a manual Bundle run |
 
 The Bundle workflow refuses a tag that doesn't match the workspace version in the root
 `Cargo.toml` (the app shows it in Settings > About).

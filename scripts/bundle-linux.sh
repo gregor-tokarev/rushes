@@ -3,7 +3,7 @@
 #
 #   scripts/bundle-linux.sh <version> <binary>
 #
-# Needs rsvg-convert (librsvg2-bin) and, for the AppImage, appimagetool: $APPIMAGETOOL,
+# Needs ImageMagick (imagemagick) and, for the AppImage, appimagetool: $APPIMAGETOOL,
 # or `appimagetool` on PATH. Writes to $OUT_DIR (default target/bundle):
 #   videocrm-<version>-linux-<arch>.tar.gz  bin/, share/applications/, share/icons/
 #   VideoCRM-<version>-<arch>.AppImage
@@ -20,6 +20,8 @@ arch=$(uname -m)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$out"
+# ImageMagick 7 is `magick`; 6 (Ubuntu 22.04) only has `convert`.
+imagemagick=$(command -v magick || command -v convert) || { echo "ImageMagick is missing" >&2; exit 1; }
 
 # The install tree, shared by the tarball and the AppImage. app_id "videocrm" is the
 # window's Wayland app id / X11 class, which StartupWMClass matches.
@@ -40,11 +42,10 @@ Categories=AudioVideo;Video;Office;
 Keywords=YouTube;video;script;CRM;
 StartupWMClass=videocrm
 EOF
-  install -Dm644 "$root/assets/icon.svg" "$prefix/share/icons/hicolor/scalable/apps/videocrm.svg"
   for size in 16 24 32 48 64 128 256 512; do
     mkdir -p "$prefix/share/icons/hicolor/${size}x${size}/apps"
-    rsvg-convert -w $size -h $size "$root/assets/icon.svg" \
-      -o "$prefix/share/icons/hicolor/${size}x${size}/apps/videocrm.png"
+    "$imagemagick" "$root/assets/icon.png" -filter Lanczos -resize ${size}x${size} \
+      "PNG32:$prefix/share/icons/hicolor/${size}x${size}/apps/videocrm.png"
   done
 }
 

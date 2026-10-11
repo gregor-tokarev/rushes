@@ -14,7 +14,7 @@ on:
     paths:
       - .github/workflows/bundle.yml
       - scripts/bundle-*.sh
-      - assets/icon.svg
+      - assets/icon.png
       - crates/update/**
   workflow_dispatch:
   workflow_call:
@@ -103,7 +103,7 @@ jobs:
 
       - name: Bundle
         run: |
-          brew install librsvg
+          brew install imagemagick
           scripts/bundle-macos.sh "$VERSION" \
             target/aarch64-apple-darwin/release/videocrm \
             target/x86_64-apple-darwin/release/videocrm
@@ -166,7 +166,7 @@ jobs:
             build-essential clang cmake pkg-config \
             libfontconfig-dev libfreetype-dev libssl-dev \
             libwayland-dev libx11-xcb-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev \
-            librsvg2-bin desktop-file-utils
+            imagemagick desktop-file-utils
 
       - uses: dtolnay/rust-toolchain@stable
 

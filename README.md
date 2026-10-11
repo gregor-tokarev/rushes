@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icon.svg" width="96" alt="VideoCRM icon">
+  <img src="assets/icon.png" width="96" alt="VideoCRM icon">
 </p>
 
 <h1 align="center">VideoCRM</h1>

@@ -7,8 +7,8 @@
 # joined into one universal binary. The app is signed ad hoc (no Developer ID),
 # so Gatekeeper asks before the first start of a downloaded copy.
 #
-# Needs macOS (lipo, iconutil, codesign, hdiutil) and rsvg-convert
-# (`brew install librsvg`). Writes to $OUT_DIR (default target/bundle):
+# Needs macOS (lipo, iconutil, codesign, hdiutil) and ImageMagick
+# (`brew install imagemagick`). Writes to $OUT_DIR (default target/bundle):
 #   VideoCRM.app, VideoCRM-<version>-macos-universal.dmg (or -<arch> for one binary)
 set -euo pipefail
 
@@ -36,17 +36,14 @@ fi
 chmod 755 "$app/Contents/MacOS/videocrm"
 
 # Icon: macOS icons put the artwork on an 824 px square centred in 1024 px.
-artwork=$(sed -e 's#<svg[^>]*>##' -e 's#</svg>##' "$root/assets/icon.svg")
-cat > "$work/icon.svg" <<EOF
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <svg x="100" y="100" width="824" height="824" viewBox="0 0 64 64">$artwork</svg>
-</svg>
-EOF
+magick "$root/assets/icon.png" -filter Lanczos -resize 824x824 \
+  -background none -gravity center -extent 1024x1024 "PNG32:$work/icon.png"
 iconset=$work/VideoCRM.iconset
 mkdir -p "$iconset"
 for size in 16 32 128 256 512; do
-  rsvg-convert -w $size -h $size "$work/icon.svg" -o "$iconset/icon_${size}x${size}.png"
-  rsvg-convert -w $((size * 2)) -h $((size * 2)) "$work/icon.svg" -o "$iconset/icon_${size}x${size}@2x.png"
+  magick "$work/icon.png" -filter Lanczos -resize ${size}x${size} "PNG32:$iconset/icon_${size}x${size}.png"
+  magick "$work/icon.png" -filter Lanczos -resize $((size * 2))x$((size * 2)) \
+    "PNG32:$iconset/icon_${size}x${size}@2x.png"
 done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/VideoCRM.icns"
 
