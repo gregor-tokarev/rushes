@@ -23,6 +23,7 @@ use gpui_kit::{
     Subscription, Task, Window, actions, div,
 };
 use videocrm_core::input::{normalize_title, parse_number};
+use videocrm_core::settings::WeekStart;
 use videocrm_core::{
     BuiltinField, Column, DatabaseView, FilterSpec, PropertyDef, PropertyId, PropertyKind, PropertyValue,
     SortDirection, SortSpec, Video, VideoId, VideoRow, VideoStatus, ViewId, ViewKind,
@@ -121,6 +122,8 @@ pub struct DatabasePanel {
     editing: Option<CellRef>,
     date_target: Option<CellRef>,
     tags_target: Option<VideoId>,
+    /// The day the date cells' calendar starts its weeks on.
+    week_start: WeekStart,
     /// The view whose tab was right-clicked, for the tab context menu.
     pub(super) menu_view: Option<ViewId>,
     /// The sort rule whose column the Sort popover is choosing, if any.
@@ -238,6 +241,7 @@ impl DatabasePanel {
             editing: None,
             date_target: None,
             tags_target: None,
+            week_start: WeekStart::default(),
             menu_view: None,
             sort_picker: None,
             view_tabs_overflow: Rc::default(),
@@ -279,6 +283,13 @@ impl DatabasePanel {
         self.date_target = self.date_target.filter(|cell| self.has_video(cell.video));
         self.tags_target = self.tags_target.filter(|id| self.has_video(*id));
         self.refresh(cx);
+    }
+
+    pub fn set_week_start(&mut self, week_start: WeekStart, cx: &mut Context<Self>) {
+        if self.week_start != week_start {
+            self.week_start = week_start;
+            self.refresh(cx);
+        }
     }
 
     /// Shows `view` without reporting it back as [`DatabaseEvent::ActiveViewChanged`].
@@ -966,6 +977,7 @@ impl DatabasePanel {
             tags_target: self.tags_target,
             empty: self.empty_reason(cx),
             now: Utc::now(),
+            week_start: self.week_start,
         };
         let selected_ix = self.selected.and_then(|id| model.rows.iter().position(|row| row.video.id == id));
         self.table.update(cx, |table, cx| {

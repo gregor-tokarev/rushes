@@ -145,6 +145,7 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let database = cx.new(|cx| DatabasePanel::new(window, cx));
+        database.update(cx, |panel, cx| panel.set_week_start(state.read(cx).settings().week_start, cx));
         let account = cx.new(|cx| AccountBadge::new(window, cx));
         let palette = cx.new(|cx| CommandPalette::new(window, cx));
         let theme_mode = state.read(cx).settings().theme;
@@ -272,11 +273,13 @@ impl Workspace {
             AppEvent::DataChanged => self.sync_data(window, cx),
             AppEvent::RouteChanged => self.sync_route(window, cx),
             AppEvent::SettingsChanged => {
-                let mode = self.state.read(cx).settings().theme;
+                let settings = self.state.read(cx).settings();
+                let (mode, week_start) = (settings.theme, settings.week_start);
                 if mode != self.theme_mode {
                     self.theme_mode = mode;
                     apply_theme(mode, Some(window), cx);
                 }
+                self.database.update(cx, |panel, cx| panel.set_week_start(week_start, cx));
             }
             AppEvent::Error(message) => {
                 window.push_notification(Notification::error(message.clone()), cx);

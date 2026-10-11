@@ -15,6 +15,7 @@ use gpui_kit::{
     px, size,
 };
 use videocrm::database::{DatabaseEvent, DatabasePanel};
+use videocrm_core::settings::WeekStart;
 use videocrm_core::{
     BuiltinField, Column, DatabaseView, FilterSpec, Privacy, PropertyKind, RunStatus, SortDirection, SortSpec,
     UploadStatus, Video, VideoFormat, VideoId, VideoRow, VideoStatus, ViewId, ViewKind, YoutubeLink,
@@ -328,6 +329,14 @@ fn changing_a_status_emits_update_video(cx: &mut TestAppContext) {
     };
     assert_eq!((video.id, video.status), (db.desk, VideoStatus::Ready));
     assert_eq!(cx.read(|cx| db.panel.read(cx).video(db.desk).map(|video| video.status)), Some(VideoStatus::Ready));
+}
+
+#[gpui_kit::test]
+fn date_cells_open_a_calendar_that_starts_weeks_on_the_chosen_day(cx: &mut TestAppContext) {
+    let db = Fixture::open(cx);
+    db.step(cx, |_, cx| db.panel.update(cx, |panel, cx| panel.set_week_start(WeekStart::Monday, cx)));
+    db.press_and_release(cx, format!("date-publishdate-{}", db.desk));
+    assert_eq!(db.label(cx, "weekday-0-0".into()).as_deref(), Some("Mo"));
 }
 
 #[gpui_kit::test]

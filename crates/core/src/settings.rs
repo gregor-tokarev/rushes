@@ -9,6 +9,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
 
+use chrono::Weekday;
 use serde::{Deserialize, Serialize};
 
 use crate::media;
@@ -49,6 +50,7 @@ pub struct AppSettings {
     pub pipeline: PipelineSettings,
     pub onboarding_completed: bool,
     pub theme: ThemeMode,
+    pub week_start: WeekStart,
     pub updates: UpdateSettings,
 }
 
@@ -178,6 +180,33 @@ impl ThemeMode {
     }
 }
 
+/// The day every calendar starts its weeks on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WeekStart {
+    #[default]
+    Sunday,
+    Monday,
+}
+
+impl WeekStart {
+    pub const ALL: [WeekStart; 2] = [WeekStart::Sunday, WeekStart::Monday];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WeekStart::Sunday => "Sunday",
+            WeekStart::Monday => "Monday",
+        }
+    }
+
+    pub fn weekday(self) -> Weekday {
+        match self {
+            WeekStart::Sunday => Weekday::Sun,
+            WeekStart::Monday => Weekday::Mon,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +230,7 @@ mod tests {
         assert_eq!(settings.pipeline.agent_command, "claude");
         assert!(settings.pipeline.default_preferences.remove_fillers);
         assert_eq!(settings.theme, ThemeMode::System);
+        assert_eq!(settings.week_start, WeekStart::Sunday);
         assert!(!settings.onboarding_completed);
         assert!(settings.updates.automatic);
     }
@@ -214,6 +244,17 @@ mod tests {
         assert_eq!(settings.pipeline.agent_command, "claude");
         assert_eq!(settings.youtube, YoutubeBackend::default());
         assert!(settings.updates.automatic, "settings saved before updates existed update automatically");
+        assert_eq!(settings.week_start, WeekStart::Sunday, "weeks kept starting on Sunday");
+    }
+
+    #[test]
+    fn week_start_round_trips() {
+        let settings = AppSettings { week_start: WeekStart::Monday, ..AppSettings::default() };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""week_start":"monday""#), "{json}");
+        assert_eq!(serde_json::from_str::<AppSettings>(&json).unwrap(), settings);
+        assert_eq!(WeekStart::Monday.weekday(), Weekday::Mon);
+        assert_eq!(WeekStart::Sunday.weekday(), Weekday::Sun);
     }
 
     #[test]

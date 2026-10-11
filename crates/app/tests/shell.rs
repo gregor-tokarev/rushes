@@ -19,7 +19,7 @@ use videocrm::shell::{self, Page, Workspace};
 use videocrm::state::AppState;
 use videocrm::ui::path_prompt;
 use videocrm::video_page::{DocumentTab, PathPurpose, SAVE_DELAY};
-use videocrm_core::settings::{AppSettings, ThemeMode};
+use videocrm_core::settings::{AppSettings, ThemeMode, WeekStart};
 use videocrm_core::templates::TemplateKind;
 use videocrm_core::{
     BlockId, DatabaseView, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, Store,
@@ -984,7 +984,7 @@ fn settings_controls_end_on_one_edge(cx: &mut TestAppContext) {
             let child =
                 |parent: &'static str, name: &'static str| ElementId::NamedChild(Arc::new(parent.into()), name.into());
             // The theme select, then the media folder's and the data folder's buttons.
-            let select = window.within("group-0").find("btn").bounds();
+            let select = window.within("group-0").within("item-0").find("btn").bounds();
             let choose = window.find(child("settings-media-root", "choose")).bounds();
             let open = window.find("open-data-folder").bounds();
             (select.right(), choose.right(), open.right())
@@ -992,6 +992,38 @@ fn settings_controls_end_on_one_edge(cx: &mut TestAppContext) {
         .unwrap();
     assert_eq!(select, choose, "the select ends where the text field's button does");
     assert_eq!(open, choose);
+}
+
+#[gpui_kit::test]
+fn calendars_start_weeks_on_the_day_settings_choose(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let id = app.video_id(cx, "Desk setup tour");
+    let first_weekday = |app: &Fixture, cx: &mut TestAppContext| {
+        cx.update_window(app.window, |_, window, _| window.find("weekday-0-0").label().map(str::to_string))
+            .expect("window is open")
+    };
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
+    app.click(cx, "property-date-publish");
+    assert_eq!(first_weekday(&app, cx).as_deref(), Some("Su"));
+    app.press(cx, "escape");
+    assert!(!app.has(cx, "weekday-0-0"), "the calendar closes");
+
+    app.navigate(cx, Route::Settings { section: SettingsSection::General });
+    app.step(cx, |window, cx| window.within("group-0").within("item-1").click("btn", cx));
+    app.step(cx, |window, cx| window.within("popup-menu").click(1usize, cx));
+    assert_eq!(cx.read(|cx| app.state.read(cx).settings().week_start), WeekStart::Monday);
+
+    // The video page stayed open behind Settings.
+    app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
+    app.click(cx, "property-date-publish");
+    assert_eq!(first_weekday(&app, cx).as_deref(), Some("Mo"));
+    app.press(cx, "escape");
+    assert!(!app.has(cx, "weekday-0-0"), "the calendar closes");
+
+    app.press(cx, "ctrl-n");
+    assert!(app.has_dialog(cx));
+    app.click(cx, "new-video-publish-date");
+    assert_eq!(first_weekday(&app, cx).as_deref(), Some("Mo"));
 }
 
 #[gpui_kit::test]

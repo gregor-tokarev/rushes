@@ -522,6 +522,7 @@ impl PropertiesPanel {
                 None => this.child(empty_value(cx)),
             });
         let calendar = self.calendar.clone();
+        let first_day = self.state.read(cx).settings().week_start.weekday();
         let panel = cx.weak_entity();
         Popover::new(SharedString::from(format!("property-date-popover-{key}")))
             .open(self.date_open == Some(field))
@@ -531,7 +532,8 @@ impl PropertiesPanel {
             .trigger(trigger)
             .content(move |_, _, _| {
                 let panel = panel.clone();
-                v_flex().gap_2().child(Calendar::new(&calendar).small()).when(date.is_some(), |this| {
+                let calendar = Calendar::new(&calendar).small().first_day_of_week(first_day);
+                v_flex().gap_2().child(calendar).when(date.is_some(), |this| {
                     this.child(
                         Button::new("clear-date").ghost().small().icon(IconName::X).label("Clear date").on_click(
                             move |_, _, cx| {
