@@ -11,8 +11,8 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, Bounds, ElementId, Entity, InputEvent as _, Modifiers, MouseButton,
-    MouseDownEvent, MouseUpEvent, Pixels, Size, TestAppContext, VisualTestContext, WindowBounds, WindowOptions, point,
-    px, size,
+    MouseDownEvent, MouseUpEvent, Pixels, ScrollDelta, Size, TestAppContext, VisualTestContext, WindowBounds,
+    WindowOptions, point, px, size,
 };
 use videocrm::database::{DatabaseEvent, DatabasePanel};
 use videocrm_core::settings::WeekStart;
@@ -436,6 +436,27 @@ fn dragging_a_card_moves_it_between_columns(cx: &mut TestAppContext) {
         assert!(moved.top() < window.find(format!("card-{}", db.desk)).bounds().top());
         assert!(window.try_find("board-column-idea").is_some_and(|column| column.visible()));
     });
+}
+
+#[gpui_kit::test]
+fn the_board_scrolls_sideways_to_columns_past_the_window_edge(cx: &mut TestAppContext) {
+    let db = Fixture::open_sized(cx, size(px(900.), px(700.)));
+    db.step(cx, |window, cx| db.panel.update(cx, |panel, cx| panel.set_active_view(db.board, window, cx)));
+    let edge = db.with_window(cx, |window, _| window.viewport_size().width);
+    let published =
+        |cx: &mut TestAppContext| db.with_window(cx, |window, _| window.find("board-column-published").bounds());
+    let start = published(cx);
+    assert!(start.left() > edge, "the last column starts past the window's edge, at {:?}", start.left());
+
+    // The wheel alone scrolls the columns, not the board.
+    db.step(cx, |window, cx| window.scroll("board-column-idea", ScrollDelta::Lines(point(0., -5.)), cx));
+    assert_eq!(published(cx).left(), start.left());
+
+    // A sideways swipe, or the wheel with Shift held.
+    db.step(cx, |window, cx| window.scroll("board-column-idea", ScrollDelta::Pixels(point(px(-5000.), px(0.))), cx));
+    let end = published(cx);
+    assert!(end.right() <= edge, "the last column is in view, ending at {:?}", end.right());
+    assert!(end.left() > px(0.), "the board stops at its last column, which starts at {:?}", end.left());
 }
 
 #[gpui_kit::test]

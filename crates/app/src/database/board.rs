@@ -6,7 +6,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, InteractiveElementExt as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, AppContext as _, Context, DispatchPhase, FontWeight, InteractiveElement as _, IntoElement,
@@ -86,20 +86,30 @@ impl DatabasePanel {
         let statuses: Vec<VideoStatus> =
             VideoStatus::ALL.into_iter().filter(|status| status_visible(*status, &view.filter)).collect();
 
-        div()
+        // The columns' row keeps its full width, so the board knows how far it
+        // scrolls; a row sized to the board would leave nothing to scroll. The
+        // wheel alone scrolls a column, not the board under it.
+        let columns = h_flex()
             .id("board")
+            .size_full()
+            .overflow_x_scroll()
+            .lock_scroll_axis()
+            .track_scroll(&self.board_scroll)
+            .child(h_flex().flex_none().h_full().items_stretch().gap_3().px(PAGE_INSET).pb_4().children(
+                statuses.into_iter().map(|status| {
+                    let cards: Vec<&VideoRow> = self.shown_rows().filter(|row| row.video.status == status).collect();
+                    self.render_board_column(status, &cards, now, window, cx)
+                }),
+            ));
+
+        // The scrollbar sits outside the scrolled row, which would carry it away.
+        div()
+            .relative()
             .flex_1()
             .min_h_0()
             .w_full()
-            .overflow_x_scroll()
-            .track_scroll(&self.board_scroll)
+            .child(columns)
             .horizontal_scrollbar(&self.board_scroll)
-            .child(h_flex().h_full().items_stretch().gap_3().px(PAGE_INSET).pb_4().children(statuses.into_iter().map(
-                |status| {
-                    let cards: Vec<&VideoRow> = self.shown_rows().filter(|row| row.video.status == status).collect();
-                    self.render_board_column(status, &cards, now, window, cx)
-                },
-            )))
             .when(self.card_dropped, |this| this.child(redraw_on_next_move(cx)))
             .into_any_element()
     }
