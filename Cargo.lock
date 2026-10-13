@@ -5763,6 +5763,84 @@ dependencies = [
 ]
 
 [[package]]
+name = "rushes"
+version = "0.1.5"
+dependencies = [
+ "async-signal",
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "gpui-kit",
+ "rushes-core",
+ "rushes-pipeline",
+ "rushes-update",
+ "rushes-youtube",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "ureq",
+ "url",
+]
+
+[[package]]
+name = "rushes-core"
+version = "0.1.5"
+dependencies = [
+ "chrono",
+ "dirs 6.0.0",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "rushes-pipeline"
+version = "0.1.5"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "rushes-update"
+version = "0.1.5"
+dependencies = [
+ "flate2",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.21",
+ "ureq",
+]
+
+[[package]]
+name = "rushes-youtube"
+version = "0.1.5"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "ureq",
+ "url",
+]
+
+[[package]]
 name = "rusqlite"
 version = "0.40.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7528,84 +7606,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "rushes"
-version = "0.1.4"
-dependencies = [
- "async-signal",
- "base64 0.22.1",
- "chrono",
- "futures",
- "gpui-kit",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "ureq",
- "url",
- "rushes-core",
- "rushes-pipeline",
- "rushes-update",
- "rushes-youtube",
-]
-
-[[package]]
-name = "rushes-core"
-version = "0.1.4"
-dependencies = [
- "chrono",
- "dirs 6.0.0",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "uuid",
-]
-
-[[package]]
-name = "rushes-pipeline"
-version = "0.1.4"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "rushes-update"
-version = "0.1.4"
-dependencies = [
- "flate2",
- "libc",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tar",
- "tempfile",
- "thiserror 2.0.21",
- "ureq",
-]
-
-[[package]]
-name = "rushes-youtube"
-version = "0.1.4"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "getrandom 0.3.4",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.21",
- "ureq",
- "url",
-]
 
 [[package]]
 name = "vswhom"
