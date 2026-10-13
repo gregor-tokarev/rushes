@@ -75,11 +75,19 @@ VideoCRM's file names, holding VideoCRM's layout. So every release also carries 
 | AppImage | `VideoCRM-<version>-<arch>.AppImage` | The Rushes AppImage |
 | Tarball | `videocrm-<version>-linux-<arch>.tar.gz` | Rushes as `bin/videocrm`, `videocrm.desktop` (named Rushes) and `videocrm.png` icons |
 
-That Rushes, still under VideoCRM's file names, detects its installation like any other,
-and its next update puts Rushes's names in place: the swapped-in bundle is renamed to
-`Rushes.app` (unless a `Rushes.app` is there already), and in a prefix `bin/videocrm`,
+macOS calls an app by its bundle's name, so Rushes started from `VideoCRM.app` renames
+the bundle to `Rushes.app` (unless a `Rushes.app` is there already), quits, and opens
+again from there, before the data folder moves. A bundle it can't rename, such as one on
+a disk image, keeps running under the old name. The Dock keeps an app by its path and
+name, and shows a renamed one as a second icon: Rushes started from `Rushes.app` points
+a Dock icon for `VideoCRM.app` beside it at itself, under its name, and restarts the Dock
+to show that (`crates/update/src/dock.rs`).
+
+On Linux, Rushes under VideoCRM's file names detects its installation like any other, and
+its next update puts Rushes's names in place: in a prefix `bin/videocrm`,
 `videocrm.desktop` and the `videocrm.png` icons are removed once Rushes's files are in.
-Restart opens `Rushes.app` or `bin/rushes`.
+Restart opens `bin/rushes`. An update of a `VideoCRM.app` still there renames it like the
+first start does.
 
 The data folder moves at the first start of Rushes (see
 [ARCHITECTURE.md](ARCHITECTURE.md#data-locations)). Once no VideoCRM copies are left,

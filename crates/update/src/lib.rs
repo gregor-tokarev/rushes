@@ -11,6 +11,8 @@
 //! Synchronous and blocking: run calls on a background thread. Long
 //! operations take a cancel flag and a progress callback.
 
+#[cfg(target_os = "macos")]
+mod dock;
 mod download;
 mod error;
 mod install;
@@ -197,7 +199,7 @@ impl Updater {
         let Some(installation) = &self.installation else {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "this copy wasn’t installed from a release"));
         };
-        relaunch::run_after_exit(std::process::id(), &installation.launch_command())
+        installation.start_after_exit()
     }
 }
 

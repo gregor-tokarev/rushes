@@ -125,6 +125,41 @@ jobs:
           sleep 3
           hdiutil detach /tmp/rushes-dmg || hdiutil detach -force /tmp/rushes-dmg
 
+      - name: Rename test (VideoCRM.app opens again as Rushes.app)
+        run: |
+          hdiutil attach "target/bundle/VideoCRM-$VERSION-macos-universal.dmg" -nobrowse -mountpoint /tmp/videocrm-dmg
+          apps=$RUNNER_TEMP/Applications
+          mkdir -p "$apps"
+          ditto /tmp/videocrm-dmg/VideoCRM.app "$apps/VideoCRM.app"
+          hdiutil detach /tmp/videocrm-dmg || hdiutil detach -force /tmp/videocrm-dmg
+          # Kept in the Dock, as VideoCRM was.
+          tile="<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>file://$apps/VideoCRM.app/</string><key>_CFURLStringType</key><integer>15</integer></dict><key>file-label</key><string>VideoCRM</string></dict></dict>"
+          defaults write com.apple.dock persistent-apps -array-add "$tile"
+          killall Dock
+          sleep 5
+          open "$apps/VideoCRM.app"
+          sleep 20
+          ls "$apps"
+          lsappinfo info -only name -app work.tokarev.rushes || true
+          dock_names=$(osascript -e 'tell application "System Events" to get name of every UI element of list 1 of application process "Dock"' || true)
+          echo "Dock: $dock_names"
+          if [[ -e "$apps/VideoCRM.app" || ! -d "$apps/Rushes.app" ]]; then
+            echo "::error::VideoCRM.app wasn't renamed to Rushes.app."
+            exit 1
+          fi
+          if ! ps -o command= -p "$(pgrep -x rushes)" | grep -F "$apps/Rushes.app/Contents/MacOS/rushes"; then
+            echo "::error::Rushes didn't open again from Rushes.app."
+            exit 1
+          fi
+          dock=$(defaults read com.apple.dock persistent-apps)
+          if grep -F "$apps/VideoCRM.app" <<<"$dock" || ! grep -F "file://$apps/Rushes.app/" <<<"$dock" \
+            || grep -qw VideoCRM <<<"$dock_names"; then
+            echo "::error::The Dock's VideoCRM icon wasn't moved to Rushes.app."
+            exit 1
+          fi
+          osascript -e 'quit app "Rushes"' || pkill -x rushes
+          sleep 3
+
       - name: Updater test (installs the disk image over an older app)
         env:
           RUSHES_UPDATE_TEST_BUNDLES: ${{ github.workspace }}/target/bundle

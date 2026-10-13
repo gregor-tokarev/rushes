@@ -43,7 +43,9 @@ use crate::wizard;
 use palette::CommandPalette;
 pub use launch_path::extend_tool_path;
 pub use signals::on_termination_signal;
-pub use startup::{InstanceLock, StartupNotice, StartupProblem, adopt_legacy_data, open_startup_notice};
+pub use startup::{
+    InstanceLock, StartupNotice, StartupProblem, adopt_legacy_data, adopt_rushes_app_name, open_startup_notice,
+};
 pub use theme::{apply_theme, register_fonts};
 
 actions!(
