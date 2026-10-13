@@ -14,6 +14,9 @@ use rushes_core::settings::{data_dir, database_path, legacy_data_dir};
 fn main() {
     // Before anything else: it sets PATH, which is only safe while no other thread runs.
     shell::extend_tool_path();
+    if shell::adopt_rushes_app_name() {
+        return;
+    }
     let data_dir = data_dir();
     let started = start(&data_dir);
 

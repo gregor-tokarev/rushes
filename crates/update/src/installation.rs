@@ -15,6 +15,9 @@ const STAGING_DIR: &str = ".rushes-update";
 pub(crate) const EXECUTABLE: &str = "rushes";
 /// The app bundle's name on macOS.
 pub(crate) const BUNDLE: &str = "Rushes.app";
+/// The app bundle's identifier, as `scripts/bundle-macos.sh` sets it.
+#[cfg(target_os = "macos")]
+const BUNDLE_IDENTIFIER: &str = "work.tokarev.rushes";
 /// The executable and bundle names while Rushes was called VideoCRM. Releases
 /// also carry files under VideoCRM's names, which copies from before the
 /// rename update themselves with; they keep these names until their next
@@ -129,6 +132,42 @@ impl Installation {
         Ok(())
     }
 
+    /// Gives `VideoCRM.app` Rushes's name: macOS calls an app by its bundle's
+    /// name, and an update from a copy from before the rename installs Rushes
+    /// as `VideoCRM.app`. Returns the renamed installation; `None` for any
+    /// other installation, or when a `Rushes.app` is there already.
+    pub fn rename_legacy_bundle(&self) -> io::Result<Option<Installation>> {
+        let Installation::MacApp { bundle } = self else {
+            return Ok(None);
+        };
+        let renamed = bundle.with_file_name(BUNDLE);
+        if bundle.file_name() != Some(LEGACY_BUNDLE.as_ref()) || renamed.exists() {
+            return Ok(None);
+        }
+        fs::rename(bundle, &renamed)?;
+        Ok(Some(Installation::MacApp { bundle: renamed }))
+    }
+
+    /// Points the Dock's icon kept for `VideoCRM.app` at this `Rushes.app`,
+    /// once the bundle took Rushes's name; the Dock restarts to show it.
+    /// Returns whether there was one.
+    pub fn adopt_legacy_dock_icon(&self) -> io::Result<bool> {
+        #[cfg(target_os = "macos")]
+        if let Installation::MacApp { bundle } = self {
+            let legacy = bundle.with_file_name(LEGACY_BUNDLE);
+            if bundle.file_name() == Some(BUNDLE.as_ref()) && !legacy.exists() {
+                return crate::dock::replace(&legacy, bundle, BUNDLE_IDENTIFIER);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Starts this installation once the running process exits, from a
+    /// helper that outlives it.
+    pub fn start_after_exit(&self) -> io::Result<()> {
+        crate::relaunch::run_after_exit(std::process::id(), &self.launch_command())
+    }
+
     /// The command that starts this installation.
     pub(crate) fn launch_command(&self) -> Command {
         match self {
@@ -229,6 +268,32 @@ mod tests {
         assert_eq!(updated_bundle(&renamed), renamed);
         let elsewhere = dir.path().join("Rushes Beta.app");
         assert_eq!(updated_bundle(&elsewhere), elsewhere);
+    }
+
+    #[test]
+    fn renames_videocrm_app_to_rushes_app() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let legacy = dir.path().join("VideoCRM.app");
+        let renamed = dir.path().join("Rushes.app");
+        fs::create_dir_all(legacy.join("Contents")).expect("legacy bundle");
+        let installation = Installation::MacApp { bundle: legacy.clone() };
+
+        fs::create_dir_all(&renamed).expect("a copy downloaded by hand");
+        assert_eq!(installation.rename_legacy_bundle().expect("rename"), None, "Rushes.app is taken");
+        assert!(legacy.is_dir());
+
+        fs::remove_dir(&renamed).expect("the other copy goes");
+        assert_eq!(
+            installation.rename_legacy_bundle().expect("rename"),
+            Some(Installation::MacApp { bundle: renamed.clone() })
+        );
+        assert!(!legacy.exists());
+        assert!(renamed.join("Contents").is_dir());
+
+        let current = Installation::MacApp { bundle: renamed };
+        assert_eq!(current.rename_legacy_bundle().expect("rename"), None);
+        let tarball = Installation::Prefix { prefix: dir.path().to_path_buf() };
+        assert_eq!(tarball.rename_legacy_bundle().expect("rename"), None);
     }
 
     #[cfg(target_os = "macos")]

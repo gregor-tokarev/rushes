@@ -1,6 +1,6 @@
-//! Before the workspace opens: VideoCRM's data moved to Rushes, one copy of
-//! Rushes per data folder, and a small window that says why Rushes can't start
-//! when it can't.
+//! Before the workspace opens: VideoCRM's app and data renamed to Rushes, one
+//! copy of Rushes per data folder, and a small window that says why Rushes
+//! can't start when it can't.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
@@ -18,6 +18,7 @@ use gpui_kit::{
 use rushes_core::StoreError;
 use rushes_core::input::display_user_path;
 use rushes_core::settings::{DATABASE_FILE, LEGACY_DATABASE_FILE};
+use rushes_update::Installation;
 use rusqlite::ErrorCode;
 
 actions!(
@@ -34,6 +35,28 @@ const KEY_CONTEXT: &str = "StartupNotice";
 const LOCK_FILE: &str = "rushes.lock";
 /// The lock file of VideoCRM, as Rushes was called before the rename.
 const LEGACY_LOCK_FILE: &str = "videocrm.lock";
+
+/// Gives the app Rushes's name where macOS shows VideoCRM's, which an update
+/// from VideoCRM leaves: renames the `VideoCRM.app` this copy runs from to
+/// `Rushes.app` and starts that once this process exits (returns true: this
+/// process quits), and points the Dock's VideoCRM icon at `Rushes.app`.
+pub fn adopt_rushes_app_name() -> bool {
+    let Some(installation) = Installation::detect() else {
+        return false;
+    };
+    match installation.rename_legacy_bundle() {
+        Ok(Some(renamed)) => match renamed.start_after_exit() {
+            Ok(()) => return true,
+            Err(error) => log_line!("rushes: cannot open {}: {error}", renamed.path().display()),
+        },
+        Ok(None) => {}
+        Err(error) => log_line!("rushes: cannot rename VideoCRM.app to Rushes.app: {error}"),
+    }
+    if let Err(error) = installation.adopt_legacy_dock_icon() {
+        log_line!("rushes: cannot move VideoCRM's Dock icon to Rushes: {error}");
+    }
+    false
+}
 
 /// Moves the data of VideoCRM, as Rushes was called before the rename, from
 /// its folder `legacy` to `data_dir`, once: while `data_dir` doesn't exist yet.
