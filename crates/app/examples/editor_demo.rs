@@ -1,10 +1,10 @@
 //! Opens the block editor on a sample YouTube script for manual testing.
 //!
 //! ```sh
-//! cargo run -p videocrm --example editor_demo            # sample script
-//! cargo run -p videocrm --example editor_demo -- --dark  # dark theme
-//! cargo run -p videocrm --example editor_demo -- --blocks 300
-//! cargo run -p videocrm --example editor_demo -- --font Inter
+//! cargo run -p rushes --example editor_demo            # sample script
+//! cargo run -p rushes --example editor_demo -- --dark  # dark theme
+//! cargo run -p rushes --example editor_demo -- --blocks 300
+//! cargo run -p rushes --example editor_demo -- --font Inter
 //! ```
 
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -14,8 +14,8 @@ use gpui_kit::{
     ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, px, rems, size,
 };
-use videocrm::editor::{DocumentEditor, DocumentEditorEvent};
-use videocrm_core::{Block, BlockKind, Document, DocumentId, DocumentKind, VideoId};
+use rushes::editor::{DocumentEditor, DocumentEditorEvent};
+use rushes_core::{Block, BlockKind, Document, DocumentId, DocumentKind, VideoId};
 
 struct Demo {
     title: SharedString,
@@ -157,7 +157,7 @@ fn sample_script() -> Vec<Block> {
 fn long_document(count: usize) -> Vec<Block> {
     let script = sample_script();
     (0..count)
-        .map(|ix| Block { id: videocrm_core::BlockId::new(), ..script[ix % script.len()].clone() })
+        .map(|ix| Block { id: rushes_core::BlockId::new(), ..script[ix % script.len()].clone() })
         .collect()
 }
 
@@ -178,7 +178,7 @@ fn main() {
         updated_at: chrono::Utc::now(),
     };
 
-    gpui_kit::application().with_assets(videocrm::editor::Assets).run(move |cx| {
+    gpui_kit::application().with_assets(rushes::editor::Assets).run(move |cx| {
         gpui_kit::init(cx);
         if dark {
             Theme::change(ThemeMode::Dark, None, cx);

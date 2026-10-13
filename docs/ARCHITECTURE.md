@@ -1,4 +1,4 @@
-# VideoCRM architecture
+# Rushes architecture
 
 Desktop app (Rust, [GPUI Kit](https://gpui-kit.com) 0.7.1) for planning, scripting,
 AI-editing and uploading YouTube videos. Everything is local: one SQLite database plus
@@ -8,11 +8,11 @@ a media folder per video.
 
 ```text
 crates/
-  core/       videocrm-core      domain model, SQLite store, documents, templates, media folders
-  youtube/    videocrm-youtube   Google OAuth (loopback + PKCE), YouTube Data API v3 client, resumable upload
-  pipeline/   videocrm-pipeline  AI edit pipelines: drives a coding agent (Claude Code) with the video-use skill
-  update/     videocrm-update    self-update: newest GitHub release, verified download, install in place, relaunch
-  app/        videocrm           GPUI Kit desktop app (the only crate that depends on gpui-kit)
+  core/       rushes-core      domain model, SQLite store, documents, templates, media folders
+  youtube/    rushes-youtube   Google OAuth (loopback + PKCE), YouTube Data API v3 client, resumable upload
+  pipeline/   rushes-pipeline  AI edit pipelines: drives a coding agent (Claude Code) with the video-use skill
+  update/     rushes-update    self-update: newest GitHub release, verified download, install in place, relaunch
+  app/        rushes           GPUI Kit desktop app (the only crate that depends on gpui-kit)
 emulators/    local API emulation for dev/tests: vercel-labs/emulate (Google OAuth) + custom YouTube emulator
 scripts/      dev helpers (run emulators, fake agent for pipeline tests, Xvfb screenshots)
 docs/         technical docs (README.md stays product-only)
@@ -33,7 +33,7 @@ Long operations take a cancellation flag (`Arc<AtomicBool>`) and a progress call
 
 ### Database access
 
-Another program (a second VideoCRM, a backup or sync tool, `sqlite3`) may hold the
+Another program (a second copy of Rushes, a backup or sync tool, `sqlite3`) may hold the
 database's write lock for seconds. The UI thread never waits for it:
 
 - The database is in WAL mode and the app opens three connections to it: the UI
@@ -70,23 +70,31 @@ database's write lock for seconds. The UI thread never waits for it:
 
 ## Data locations
 
-- Database and settings: `dirs::data_dir()/videocrm/` (`videocrm.db`, `youtube-accounts/`).
-  Overridable with env `VIDEOCRM_DATA_DIR` (used by tests and screenshots).
-  The running app holds an exclusive lock on `videocrm.lock` there; a second copy on the
-  same data dir shows "VideoCRM is already open" and quits without opening the database.
+- Database and settings: `dirs::data_dir()/rushes/` (`rushes.db`, `youtube-accounts/`).
+  Overridable with env `RUSHES_DATA_DIR` (used by tests and screenshots).
+  The running app holds an exclusive lock on `rushes.lock` there; a second copy on the
+  same data dir shows "Rushes is already open" and quits without opening the database.
   `unsaved-changes.json` appears there only when the app quit while another program
   kept the database locked; the next start writes it to the database and removes it.
-- Media root (default `dirs::video_dir()/VideoCRM`, fallback `~/Videos/VideoCRM`):
+- Media root (default `dirs::video_dir()/Rushes`, fallback `~/Videos/Rushes`):
   one folder per video `<slug>-<short id>/` containing `footage/` (raw takes).
   video-use writes all outputs to `footage/edit/` (`final.mp4`, `project.md`, ...).
 - OAuth credentials: one file per signed-in YouTube account in `youtube-accounts/`, file
   mode 0600. Never logged. A `credentials.json` left by a release that kept one account
   moves there at the next start.
-- Updates: `.videocrm-update/` appears beside the installation (the app bundle, the
+- From VideoCRM (the app's name before the rename): the first start moves
+  `dirs::data_dir()/videocrm/` to `rushes/`, while `rushes/` doesn't exist yet and
+  `RUSHES_DATA_DIR` isn't set (`shell::adopt_legacy_data`). It holds VideoCRM's lock
+  (`videocrm.lock`) while it renames `videocrm.db` (`-wal` and `-shm` first) to
+  `rushes.db`, then the folder; a running VideoCRM gets "Quit VideoCRM to open Rushes".
+  Media isn't moved, since videos keep absolute folder paths: a creator who never chose a
+  media root gets VideoCRM's default, `dirs::video_dir()/VideoCRM`, pinned in settings
+  when it exists.
+- Updates: `.rushes-update/` appears beside the installation (the app bundle, the
   AppImage, or the `~/.local` prefix) while an update is prepared, and goes once it's in
   place. See [updates.md](updates.md).
 
-## core (`videocrm-core`)
+## core (`rushes-core`)
 
 - `model.rs` — the shared contract (already written; extend, do not break).
 - `store.rs` — `Store` over `rusqlite` (bundled). Schema migrations via `PRAGMA user_version`.
@@ -109,11 +117,11 @@ database's write lock for seconds. The UI thread never waits for it:
   `onboarding_completed`, theme, week start, updates, and whether video pages open with
   their properties folded (`properties_collapsed`).
 
-## youtube (`videocrm-youtube`)
+## youtube (`rushes-youtube`)
 
 - `YoutubeConfig` — endpoints + OAuth client. `YoutubeConfig::google(client_id, secret)`
   points at real Google; `YoutubeConfig::emulator(google_url, youtube_url)` points at the
-  local emulators. Env overrides: `VIDEOCRM_GOOGLE_URL`, `VIDEOCRM_YOUTUBE_URL`.
+  local emulators. Env overrides: `RUSHES_GOOGLE_URL`, `RUSHES_YOUTUBE_URL`.
 - OAuth: installed-app flow. `begin_authorization(&config) -> PendingAuthorization`
   binds `127.0.0.1:0`, builds the consent URL (scopes: `openid email profile
   https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly`,
@@ -128,7 +136,7 @@ database's write lock for seconds. The UI thread never waits for it:
   `resume_upload(session_url, path, ...)`, `set_thumbnail(video_id, path)`,
   `get_video(id)`, `list_my_uploads(max)`, `revoke()`.
 
-## pipeline (`videocrm-pipeline`)
+## pipeline (`rushes-pipeline`)
 
 Drives [video-use](https://github.com/browser-use/video-use) through a headless coding
 agent (`claude -p --output-format stream-json --verbose`). video-use is conversational:
@@ -144,7 +152,7 @@ it proposes a strategy and waits for approval, so a run has two phases:
 CLI, the video-use skill, ffmpeg/ffprobe and the ElevenLabs key are available.
 `scripts/fake-agent` imitates the agent's stream-json output for tests.
 
-## app (`videocrm`)
+## app (`rushes`)
 
 GPUI Kit app. Main pieces:
 
@@ -166,7 +174,7 @@ GPUI Kit app. Main pieces:
 - `update/` — `UpdateService`: automatic checks, background install, Settings › About ›
   Updates and the title bar's "Restart to update" ([updates.md](updates.md)).
 
-## update (`videocrm-update`)
+## update (`rushes-update`)
 
 `Updater::check` asks GitHub for the newest release and says whether this copy installs it
 (`Delivery::Install`) or the creator downloads it (`Delivery::Manual`); `Updater::install`
@@ -176,10 +184,10 @@ new version once the app quits. Details in [updates.md](updates.md).
 
 ## Testing
 
-- `cargo test -p videocrm-core` — store, documents, templates.
-- `cargo test -p videocrm-youtube` — unit tests + integration tests against the emulators
+- `cargo test -p rushes-core` — store, documents, templates.
+- `cargo test -p rushes-youtube` — unit tests + integration tests against the emulators
   (`emulators/`; skipped with a message when Node is unavailable).
-- `cargo test -p videocrm-pipeline` — with `scripts/fake-agent`.
-- `cargo test -p videocrm-update` — against a local stand-in for GitHub.
-- `cargo test -p videocrm` — GPUI UI integration tests (`#[gpui_kit::test]`).
+- `cargo test -p rushes-pipeline` — with `scripts/fake-agent`.
+- `cargo test -p rushes-update` — against a local stand-in for GitHub.
+- `cargo test -p rushes` — GPUI UI integration tests (`#[gpui_kit::test]`).
 - Visual checks: `scripts/screenshot.sh` runs the app under Xvfb and captures PNGs.

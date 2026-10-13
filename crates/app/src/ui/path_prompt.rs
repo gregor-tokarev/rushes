@@ -19,7 +19,7 @@ use gpui_kit::{
     App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render, Role,
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, TestSupportExt as _, Window, div,
 };
-use videocrm_core::input::{PathInputError, display_user_path, expand_user_path};
+use rushes_core::input::{PathInputError, display_user_path, expand_user_path};
 
 use super::dialog::form_footer_with;
 
@@ -325,7 +325,7 @@ impl PathForm {
             PathInputError::Empty => "Enter the path of a file.".into(),
             PathInputError::Relative => format!("Use a full path, like {}.", self.example).into(),
             PathInputError::NoHome => {
-                "VideoCRM couldn’t find your home folder. Type the full path instead of ~.".into()
+                "Rushes couldn’t find your home folder. Type the full path instead of ~.".into()
             }
         }
     }
@@ -420,20 +420,20 @@ fn verdict(kind: PathKind, path: &Path, found: io::Result<Found>) -> Verdict {
     let found = match found {
         Ok(found) => found,
         Err(error) => {
-            log_line!("videocrm: can't look up {}: {error}", path.display());
+            log_line!("rushes: can't look up {}: {error}", path.display());
             // A path to write to is refused for the folder it would go in.
             let folder = || path.parent().map_or_else(|| shown.clone(), display_user_path);
             return Verdict::Refuse(
                 match (error.kind(), kind) {
                     (io::ErrorKind::PermissionDenied, PathKind::NewFile) => {
-                        format!("VideoCRM isn’t allowed to save files in {}.", folder())
+                        format!("Rushes isn’t allowed to save files in {}.", folder())
                     }
                     (io::ErrorKind::PermissionDenied, PathKind::NewFolder) => {
-                        format!("VideoCRM isn’t allowed to create folders in {}.", folder())
+                        format!("Rushes isn’t allowed to create folders in {}.", folder())
                     }
-                    (io::ErrorKind::PermissionDenied, _) => format!("VideoCRM isn’t allowed to open {shown}."),
+                    (io::ErrorKind::PermissionDenied, _) => format!("Rushes isn’t allowed to open {shown}."),
                     (io::ErrorKind::NotADirectory, _) => format!("Part of {shown} is a file, not a folder."),
-                    _ => format!("VideoCRM couldn’t open {shown}. Check that its drive is connected."),
+                    _ => format!("Rushes couldn’t open {shown}. Check that its drive is connected."),
                 }
                 .into(),
             );
@@ -454,32 +454,32 @@ fn verdict(kind: PathKind, path: &Path, found: io::Result<Found>) -> Verdict {
 
 /// One sentence on why the file at `path` couldn't be read. Logs the error.
 pub fn read_error_reason(path: &Path, error: &io::Error) -> SharedString {
-    log_line!("videocrm: can't read {}: {error}", path.display());
+    log_line!("rushes: can't read {}: {error}", path.display());
     let shown = display_user_path(path);
     match error.kind() {
         io::ErrorKind::NotFound => format!("There’s no file at {shown}."),
-        io::ErrorKind::PermissionDenied => format!("VideoCRM isn’t allowed to read {shown}."),
+        io::ErrorKind::PermissionDenied => format!("Rushes isn’t allowed to read {shown}."),
         io::ErrorKind::IsADirectory => format!("{shown} is a folder, not a file."),
         io::ErrorKind::InvalidData => format!("“{}” isn’t a text file.", file_name(path)),
-        _ => format!("VideoCRM couldn’t read {shown}. Check that its drive is connected."),
+        _ => format!("Rushes couldn’t read {shown}. Check that its drive is connected."),
     }
     .into()
 }
 
 /// One sentence on why the file at `path` couldn't be written. Logs the error.
 pub fn write_error_reason(path: &Path, error: &io::Error) -> SharedString {
-    log_line!("videocrm: can't write {}: {error}", path.display());
+    log_line!("rushes: can't write {}: {error}", path.display());
     let shown = display_user_path(path);
     let folder = path.parent().map_or_else(|| shown.clone(), display_user_path);
     match error.kind() {
-        io::ErrorKind::PermissionDenied => format!("VideoCRM isn’t allowed to save files in {folder}."),
+        io::ErrorKind::PermissionDenied => format!("Rushes isn’t allowed to save files in {folder}."),
         io::ErrorKind::ReadOnlyFilesystem => format!("{folder} is on a read-only drive."),
         io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => format!("The drive with {folder} is full."),
         io::ErrorKind::IsADirectory => format!("{shown} is a folder, not a file."),
         io::ErrorKind::NotADirectory | io::ErrorKind::AlreadyExists => {
             format!("Part of {folder} is a file, not a folder.")
         }
-        _ => format!("VideoCRM couldn’t save {shown}. Check that its drive is connected."),
+        _ => format!("Rushes couldn’t save {shown}. Check that its drive is connected."),
     }
     .into()
 }
@@ -518,16 +518,16 @@ mod tests {
         assert_eq!(verdict(PathKind::NewFile, path, Ok(Found::File)), Verdict::AskReplace);
         assert_eq!(
             verdict(PathKind::File, path, Err(io::ErrorKind::PermissionDenied.into())),
-            Verdict::Refuse("VideoCRM isn’t allowed to open /srv/media/notes.md.".into())
+            Verdict::Refuse("Rushes isn’t allowed to open /srv/media/notes.md.".into())
         );
-        // Saving into a folder VideoCRM can't enter says so, not that it can't open the file.
+        // Saving into a folder Rushes can't enter says so, not that it can't open the file.
         assert_eq!(
             verdict(PathKind::NewFile, path, Err(io::ErrorKind::PermissionDenied.into())),
-            Verdict::Refuse("VideoCRM isn’t allowed to save files in /srv/media.".into())
+            Verdict::Refuse("Rushes isn’t allowed to save files in /srv/media.".into())
         );
         assert_eq!(
             verdict(PathKind::NewFolder, Path::new("/root/media"), Err(io::ErrorKind::PermissionDenied.into())),
-            Verdict::Refuse("VideoCRM isn’t allowed to create folders in /root.".into())
+            Verdict::Refuse("Rushes isn’t allowed to create folders in /root.".into())
         );
     }
 
@@ -537,7 +537,7 @@ mod tests {
         assert_eq!(read_error_reason(path, &io::ErrorKind::NotFound.into()), "There’s no file at /srv/media/notes.md.");
         assert_eq!(
             write_error_reason(path, &io::ErrorKind::PermissionDenied.into()),
-            "VideoCRM isn’t allowed to save files in /srv/media."
+            "Rushes isn’t allowed to save files in /srv/media."
         );
         let raw = io::Error::from_raw_os_error(2);
         assert!(!read_error_reason(path, &raw).contains("os error"));
@@ -652,7 +652,7 @@ mod tests {
                     .commit("Export");
             open(request, window, cx, move |path, _, _| {
                 if fail_once.replace(false) {
-                    return Task::ready(Err("VideoCRM isn’t allowed to save files in ~.".into()));
+                    return Task::ready(Err("Rushes isn’t allowed to save files in ~.".into()));
                 }
                 Task::ready(match std::fs::write(&path, "## Hook") {
                     Ok(()) => Ok(Box::new(|_: &mut Window, _: &mut App| {}) as Finish),
@@ -669,7 +669,7 @@ mod tests {
         // A failure to write stays in the dialog; asking again goes through.
         step(cx, window, |window, cx| window.press("enter", cx));
         assert!(has_dialog(cx, window));
-        assert_eq!(shows(cx, window, ERROR_ID).as_deref(), Some("VideoCRM isn’t allowed to save files in ~."));
+        assert_eq!(shows(cx, window, ERROR_ID).as_deref(), Some("Rushes isn’t allowed to save files in ~."));
         step(cx, window, |window, cx| window.press("enter", cx));
         assert!(shows(cx, window, REPLACE_ID).is_some(), "asks again");
         step(cx, window, |window, cx| window.click(COMMIT_ID, cx));

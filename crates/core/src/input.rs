@@ -10,7 +10,7 @@ const ALLOWED_SCHEMES: [&str; 3] = ["http", "https", "mailto"];
 pub enum PathInputError {
     #[error("Enter a folder path.")]
     Empty,
-    #[error("Use a full path, like ~/Videos/VideoCRM or /home/you/Videos.")]
+    #[error("Use a full path, like ~/Videos/Rushes or /home/you/Videos.")]
     Relative,
     #[error("Couldn’t find your home folder to expand “~”. Type the full path instead.")]
     NoHome,
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn expands_home_and_rejects_relative_paths() {
-        assert_eq!(expand_with_home("~/Videos/VideoCRM", home()), Ok(PathBuf::from("/home/creator/Videos/VideoCRM")));
+        assert_eq!(expand_with_home("~/Videos/Rushes", home()), Ok(PathBuf::from("/home/creator/Videos/Rushes")));
         assert_eq!(expand_with_home("  ~  ", home()), Ok(PathBuf::from("/home/creator")));
         assert_eq!(expand_with_home("/srv/media", home()), Ok(PathBuf::from("/srv/media")));
         assert_eq!(expand_with_home("Videos", home()), Err(PathInputError::Relative));

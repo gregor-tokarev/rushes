@@ -7,7 +7,7 @@
 use std::cmp::Ordering;
 
 use chrono::{DateTime, NaiveDate, Utc};
-use videocrm_core::{
+use rushes_core::{
     BuiltinField, Column, ColumnLayout, DatabaseView, FilterSpec, PropertyDef, PropertyKind, PropertyValue, RunStatus,
     SortDirection, SortSpec, UploadStatus, VideoFormat, VideoRow, VideoStatus, YoutubeState,
 };
@@ -361,7 +361,7 @@ fn upload_rank(status: &UploadStatus) -> usize {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone as _;
-    use videocrm_core::{PropertyId, PublishChannel, SelectOption, Video, ViewId, ViewKind};
+    use rushes_core::{PropertyId, PublishChannel, SelectOption, Video, ViewId, ViewKind};
 
     use super::*;
 

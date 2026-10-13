@@ -1,5 +1,5 @@
 [package]
-name = "videocrm-pipeline"
+name = "rushes-pipeline"
 description = "AI video-editing pipelines: drives a headless coding agent with the video-use skill"
 version.workspace = true
 edition.workspace = true

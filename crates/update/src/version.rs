@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::str::FromStr;
 
-/// A VideoCRM version: `<major>.<minor>.<patch>`, optionally with a pre-release
+/// A Rushes version: `<major>.<minor>.<patch>`, optionally with a pre-release
 /// suffix (`0.2.0-dev.abc1234`, a bundle built outside a release), which sorts
 /// before the release it leads up to. Build metadata (`+…`) is ignored.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

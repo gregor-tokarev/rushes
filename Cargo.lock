@@ -7530,7 +7530,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
-name = "videocrm"
+name = "rushes"
 version = "0.1.4"
 dependencies = [
  "async-signal",
@@ -7545,14 +7545,14 @@ dependencies = [
  "tempfile",
  "ureq",
  "url",
- "videocrm-core",
- "videocrm-pipeline",
- "videocrm-update",
- "videocrm-youtube",
+ "rushes-core",
+ "rushes-pipeline",
+ "rushes-update",
+ "rushes-youtube",
 ]
 
 [[package]]
-name = "videocrm-core"
+name = "rushes-core"
 version = "0.1.4"
 dependencies = [
  "chrono",
@@ -7566,7 +7566,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "videocrm-pipeline"
+name = "rushes-pipeline"
 version = "0.1.4"
 dependencies = [
  "libc",
@@ -7577,7 +7577,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "videocrm-update"
+name = "rushes-update"
 version = "0.1.4"
 dependencies = [
  "flate2",
@@ -7592,7 +7592,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "videocrm-youtube"
+name = "rushes-youtube"
 version = "0.1.4"
 dependencies = [
  "base64 0.22.1",

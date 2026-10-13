@@ -213,7 +213,7 @@ mod tests {
     #[test]
     fn offered_emoji_have_images() {
         let offered = crate::video_page::ICON_CHOICES.iter().copied();
-        let templates = videocrm_core::templates::TemplateKind::ALL.iter().filter_map(|kind| kind.icon());
+        let templates = rushes_core::templates::TemplateKind::ALL.iter().filter_map(|kind| kind.icon());
         for emoji in offered.chain(templates) {
             assert!(has_page_icon_image(emoji), "{emoji} has no bundled image");
         }

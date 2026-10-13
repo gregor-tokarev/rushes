@@ -6,7 +6,7 @@
 
 use gpui_kit::component::{ActiveTheme as _, ColorName};
 use gpui_kit::{App, Hsla};
-use videocrm_core::{Privacy, RunStatus, TagColor, UploadStatus, VideoFormat, VideoStatus, YoutubeState};
+use rushes_core::{Privacy, RunStatus, TagColor, UploadStatus, VideoFormat, VideoStatus, YoutubeState};
 
 /// Resolved colors of one [`TagColor`] for the active theme.
 #[derive(Clone, Copy, Debug, PartialEq)]

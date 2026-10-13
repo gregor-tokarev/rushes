@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
-use videocrm_pipeline::{AgentConfig, doctor};
+use rushes_pipeline::{AgentConfig, doctor};
 
 const SECRET: &str = "sk_test_do_not_leak_123";
 

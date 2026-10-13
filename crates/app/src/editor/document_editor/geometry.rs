@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use gpui_kit::{Bounds, Pixels, ScrollHandle, Window};
-use videocrm_core::{Block, BlockId};
+use rushes_core::{Block, BlockId};
 
 #[derive(Default)]
 pub(super) struct Geometry {

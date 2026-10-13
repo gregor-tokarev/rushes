@@ -1,4 +1,4 @@
-//! Keeps an installed VideoCRM up to date with its releases on GitHub.
+//! Keeps an installed copy of Rushes up to date with its releases on GitHub.
 //!
 //! [`Updater::check`] asks GitHub for the newest release and says how this
 //! copy gets it: it replaces itself ([`Delivery::Install`]) when it was
@@ -32,10 +32,10 @@ pub use installation::Installation;
 pub use release::{Asset, Release};
 pub use version::Version;
 
-/// GitHub's answer for VideoCRM's newest release (drafts and pre-releases excluded).
-pub const RELEASES_URL: &str = "https://api.github.com/repos/gregor-tokarev/videocrm/releases/latest";
+/// GitHub's answer for the newest Rushes release (drafts and pre-releases excluded).
+pub const RELEASES_URL: &str = "https://api.github.com/repos/gregor-tokarev/rushes/releases/latest";
 /// Environment variable that replaces [`RELEASES_URL`] (tests, a local mirror).
-pub const RELEASES_URL_ENV: &str = "VIDEOCRM_UPDATE_URL";
+pub const RELEASES_URL_ENV: &str = "RUSHES_UPDATE_URL";
 
 /// A release newer than the running copy, and how this copy gets it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,7 +92,7 @@ impl Updater {
             .timeout_recv_response(Some(Duration::from_secs(60)))
             // The whole download; slow connections need a while for the disk image.
             .timeout_recv_body(Some(Duration::from_secs(30 * 60)))
-            .user_agent(concat!("videocrm/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("rushes/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
         Self { releases_url: releases_url.into(), current, installation, agent }
@@ -169,7 +169,7 @@ impl Updater {
     /// The running copy keeps working; the next start is the new version.
     pub fn install(&self, asset: &Asset, progress: &mut dyn FnMut(Progress), cancel: &AtomicBool) -> Result<()> {
         let Some(installation) = &self.installation else {
-            return Err(Error::Tool("this copy of VideoCRM wasn’t installed from a release".into()));
+            return Err(Error::Tool("this copy of Rushes wasn’t installed from a release".into()));
         };
         let staging = installation.staging_dir();
         // Leftovers of an update that didn't finish.

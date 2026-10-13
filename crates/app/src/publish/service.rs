@@ -16,9 +16,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Subscription};
-use videocrm_core::settings::{self, YoutubeBackend};
-use videocrm_core::{PublishChannel, UploadId, UploadJob, UploadStatus, Video, VideoId, YoutubeLink};
-use videocrm_youtube::{
+use rushes_core::settings::{self, YoutubeBackend};
+use rushes_core::{PublishChannel, UploadId, UploadJob, UploadStatus, Video, VideoId, YoutubeLink};
+use rushes_youtube::{
     Account, CredentialStore, Credentials, Error as YoutubeError, SavedLogin, VideoInfo, YoutubeClient, YoutubeConfig,
     begin_authorization, check_client,
 };
@@ -30,7 +30,7 @@ use crate::state::{AppEvent, AppState, Problem, Severity};
 
 /// One credentials file per account, in this folder of the data directory.
 const ACCOUNTS_DIR: &str = "youtube-accounts";
-/// Where the one sign-in lived before VideoCRM kept several; it moves to [`ACCOUNTS_DIR`].
+/// Where the one sign-in lived before Rushes kept several; it moves to [`ACCOUNTS_DIR`].
 const LEGACY_CREDENTIALS_FILE: &str = "credentials.json";
 const AVATAR_DIR: &str = "avatars";
 /// A browser sign-in left open longer than this is abandoned.
@@ -84,7 +84,7 @@ pub enum YoutubeEvent {
     UploadsChanged,
 }
 
-/// A YouTube account VideoCRM signed in to.
+/// A YouTube account Rushes signed in to.
 pub struct YoutubeAccount {
     account: Account,
     /// `None` once YouTube rejected the saved sign-in: the account needs a new one.
@@ -135,7 +135,7 @@ pub struct YoutubeService {
     pub(super) state: Entity<AppState>,
     data_dir: PathBuf,
     config: Result<YoutubeConfig, SharedString>,
-    /// The config comes from `VIDEOCRM_GOOGLE_URL` / `VIDEOCRM_YOUTUBE_URL`, not settings.
+    /// The config comes from `RUSHES_GOOGLE_URL` / `RUSHES_YOUTUBE_URL`, not settings.
     env_override: bool,
     /// The signed-in accounts, by name.
     accounts: Vec<YoutubeAccount>,
@@ -453,7 +453,7 @@ impl YoutubeService {
         self.config.as_ref()
     }
 
-    /// Whether `VIDEOCRM_GOOGLE_URL` / `VIDEOCRM_YOUTUBE_URL` override the settings.
+    /// Whether `RUSHES_GOOGLE_URL` / `RUSHES_YOUTUBE_URL` override the settings.
     pub fn is_env_override(&self) -> bool {
         self.env_override
     }
@@ -516,9 +516,9 @@ impl YoutubeService {
             .name("youtube-sign-in".into())
             .spawn(move || sign_in(config, tokens, &cancel, &sender));
         if let Err(error) = spawned {
-            log_line!("videocrm: couldn't start the sign-in thread: {error}");
+            log_line!("rushes: couldn't start the sign-in thread: {error}");
             self.sign_in = None;
-            let message = "Couldn’t start the sign-in. Quit VideoCRM and open it again, then connect.";
+            let message = "Couldn’t start the sign-in. Quit Rushes and open it again, then connect.";
             self.sign_in_problem = Some(message.into());
             self.connection_changed(cx);
             return;
@@ -605,7 +605,7 @@ impl YoutubeService {
         let stored = match self.state.read(cx).read_setting::<Option<String>>(DEFAULT_ACCOUNT_KEY) {
             Ok(stored) => stored.flatten(),
             Err(error) => {
-                log_line!("videocrm: couldn't read the default YouTube account: {error}");
+                log_line!("rushes: couldn't read the default YouTube account: {error}");
                 None
             }
         };
@@ -655,9 +655,9 @@ impl YoutubeService {
                     match signed_in.tokens.sign_in(&login) {
                         Ok(()) => Ok(signed_in),
                         Err(error) => {
-                            log_line!("videocrm: couldn't save the YouTube sign-in: {error}");
+                            log_line!("rushes: couldn't save the YouTube sign-in: {error}");
                             Err(SignInError::Failed(
-                                "Couldn’t save the YouTube sign-in: VideoCRM can’t write to its data folder. Check \
+                                "Couldn’t save the YouTube sign-in: Rushes can’t write to its data folder. Check \
                                  that the folder is writable, then connect again."
                                     .to_owned(),
                             ))
@@ -719,7 +719,7 @@ impl YoutubeService {
             // grant stays: it is the same account and app.
             let earlier = self.accounts.remove(ix);
             if let Err(error) = earlier.tokens.sign_out() {
-                log_line!("videocrm: couldn't remove the earlier YouTube sign-in: {error}");
+                log_line!("rushes: couldn't remove the earlier YouTube sign-in: {error}");
             }
             earlier_key = Some(earlier.key().to_owned());
         }
@@ -777,7 +777,7 @@ impl YoutubeService {
                 .collect(),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => {
-                log_line!("videocrm: couldn't read {}: {error}", dir.display());
+                log_line!("rushes: couldn't read {}: {error}", dir.display());
                 self.sign_in_problem =
                     Some("Couldn’t read the saved YouTube sign-ins. Connect your accounts again.".into());
                 Vec::new()
@@ -797,7 +797,7 @@ impl YoutubeService {
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    log_line!("videocrm: couldn't read the saved YouTube sign-in: {error}");
+                    log_line!("rushes: couldn't read the saved YouTube sign-in: {error}");
                     self.sign_in_problem =
                         Some("Couldn’t read a saved YouTube sign-in. Connect the account again.".into());
                 }
@@ -823,7 +823,7 @@ impl YoutubeService {
         let key = match CredentialStore::new(&legacy).load() {
             Ok(login) => login.and_then(|login| login.account).map(|account| account.key().to_owned()),
             Err(error) => {
-                log_line!("videocrm: couldn't read {}: {error}", legacy.display());
+                log_line!("rushes: couldn't read {}: {error}", legacy.display());
                 None
             }
         };
@@ -832,7 +832,7 @@ impl YoutubeService {
         match moved {
             Ok(()) => key,
             Err(error) => {
-                log_line!("videocrm: couldn't move {} to {}: {error}", legacy.display(), target.display());
+                log_line!("rushes: couldn't move {} to {}: {error}", legacy.display(), target.display());
                 None
             }
         }
@@ -1037,7 +1037,7 @@ impl YoutubeService {
     fn load_gone(&mut self, cx: &mut Context<Self>) {
         match self.state.read(cx).read_setting::<Vec<String>>(GONE_KEY) {
             Ok(gone) => self.gone = gone.unwrap_or_default().into_iter().collect(),
-            Err(error) => log_line!("videocrm: couldn't read which uploads left YouTube: {error}"),
+            Err(error) => log_line!("rushes: couldn't read which uploads left YouTube: {error}"),
         }
     }
 
@@ -1199,7 +1199,7 @@ fn new_client(config: YoutubeConfig, credentials: Credentials, tokens: TokenSink
 }
 
 /// The YouTube backend for `backend`, or why it is incomplete. The environment
-/// overrides (`VIDEOCRM_GOOGLE_URL`, `VIDEOCRM_YOUTUBE_URL`) win over settings; the
+/// overrides (`RUSHES_GOOGLE_URL`, `RUSHES_YOUTUBE_URL`) win over settings; the
 /// flag says whether they did.
 pub fn backend_config(backend: &YoutubeBackend) -> (Result<YoutubeConfig, SharedString>, bool) {
     if let Some(config) = YoutubeConfig::emulator_from_env() {
@@ -1250,7 +1250,7 @@ fn download_avatar(url: &str, path: &Path) -> io::Result<()> {
 
 /// A YouTube error as the creator should read it. The technical detail goes to stderr.
 pub(super) fn describe_error(error: &YoutubeError) -> String {
-    log_line!("videocrm: youtube: {error}");
+    log_line!("rushes: youtube: {error}");
     let message = match error {
         error if error.is_network() => "Can’t reach YouTube. Check your internet connection and try again.",
         // Quota, upload limit, missing permission, rate limits, outages.
@@ -1271,7 +1271,7 @@ pub(super) fn describe_error(error: &YoutubeError) -> String {
         }
         YoutubeError::Io { .. } => "Couldn’t read the file. Check that it’s still there and readable, then try again.",
         YoutubeError::Protocol(_) | YoutubeError::Json(_) => {
-            "YouTube answered in a way VideoCRM didn’t expect. Try again in a few minutes."
+            "YouTube answered in a way Rushes didn’t expect. Try again in a few minutes."
         }
         YoutubeError::NoChannel => {
             "This Google account has no YouTube channel yet. Create one on youtube.com, then connect again."
@@ -1280,7 +1280,7 @@ pub(super) fn describe_error(error: &YoutubeError) -> String {
         YoutubeError::AccessDenied => "The sign-in was cancelled in the browser. Connect again and allow access.",
         YoutubeError::Timeout => "The sign-in took too long. Connect again to start over.",
         YoutubeError::Cancelled { .. } => "The upload was cancelled.",
-        // VideoCRM's own checks, written as sentences already.
+        // The app's own checks, written as sentences already.
         YoutubeError::InvalidInput(text) => return sentence(text),
         error => return sentence(&error.to_string()),
     };
@@ -1289,10 +1289,10 @@ pub(super) fn describe_error(error: &YoutubeError) -> String {
 
 /// A failed write to the credentials file, as the creator should read it.
 fn credentials_problem(title: &str, error: &YoutubeError) -> Problem {
-    log_line!("videocrm: {title}: {error}");
+    log_line!("rushes: {title}: {error}");
     Problem::new(
         title.to_owned(),
-        "VideoCRM can’t write to its data folder. Check that the folder is writable, then try again.",
+        "Rushes can’t write to its data folder. Check that the folder is writable, then try again.",
     )
 }
 

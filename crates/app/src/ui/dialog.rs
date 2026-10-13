@@ -9,7 +9,7 @@ use gpui_kit::{
     Action, AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
     SharedString, Styled as _, Window, div,
 };
-use videocrm_core::VideoId;
+use rushes_core::VideoId;
 
 /// The footer of a form dialog: Cancel and the commit at their natural width on
 /// the trailing edge, like the kit's alert dialogs.

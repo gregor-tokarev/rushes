@@ -11,15 +11,15 @@ use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, ElementId, Entity, Focusable as _, TestAppContext,
     VisualTestContext, Window, WindowBounds, WindowOptions, px, size,
 };
-use videocrm::ai_edit::PipelineService;
-use videocrm::publish::YoutubeService;
-use videocrm::route::{Route, VideoTab};
-use videocrm::shell::{self, Workspace};
-use videocrm::state::AppState;
-use videocrm::video_page::{PathPurpose, VideoPage};
-use videocrm_core::settings::AppSettings;
-use videocrm_core::templates::TemplateKind;
-use videocrm_core::{
+use rushes::ai_edit::PipelineService;
+use rushes::publish::YoutubeService;
+use rushes::route::{Route, VideoTab};
+use rushes::shell::{self, Workspace};
+use rushes::state::AppState;
+use rushes::video_page::{PathPurpose, VideoPage};
+use rushes_core::settings::AppSettings;
+use rushes_core::templates::TemplateKind;
+use rushes_core::{
     BlockId, Column, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, Store,
     TagColor, UploadId, UploadJob, UploadStatus, VideoFormat, VideoId, ViewKind,
 };
@@ -745,7 +745,7 @@ fn create_video(app: &Fixture, cx: &mut TestAppContext, title: &str, template: T
 
 /// Replaces a video's script with `markdown`, saved.
 fn set_script(app: &Fixture, cx: &mut TestAppContext, id: VideoId, markdown: &str) {
-    let blocks = videocrm_core::document::from_markdown(markdown);
+    let blocks = rushes_core::document::from_markdown(markdown);
     let state = app.state.clone();
     cx.update(|cx| {
         let store = state.read(cx).store();
@@ -852,7 +852,7 @@ fn a_tab_opened_at_its_top_shows_its_first_section(cx: &mut TestAppContext) {
     set_scroll_top(&app, cx, 1500.);
 
     // "Go to Publish" from deep in another tab.
-    app.step(cx, move |_, cx| videocrm::video_page::open_tab_at_top(id, VideoTab::Publish, cx));
+    app.step(cx, move |_, cx| rushes::video_page::open_tab_at_top(id, VideoTab::Publish, cx));
     assert_eq!(app.route(cx), Route::Video { id, tab: VideoTab::Publish });
     let page = app.page(cx);
     let strip = cx.read(|cx| page.read(cx).tab_strip_top());
@@ -1043,22 +1043,22 @@ fn a_failed_script_save_is_retried_and_written_on_quit(cx: &mut TestAppContext) 
     store.lock().expect("store lock").delete_video(id).expect("delete video");
 
     app.type_text(cx, "Drone shot over the city");
-    app.wait(cx, videocrm::video_page::SAVE_DELAY);
+    app.wait(cx, rushes::video_page::SAVE_DELAY);
     assert!(app.has(cx, "not-saved"), "the page shows the edit isn't saved");
     assert_eq!(app.notifications(cx), 1, "the failure is reported once");
-    app.wait(cx, videocrm::video_page::SAVE_RETRY_DELAY);
+    app.wait(cx, rushes::video_page::SAVE_RETRY_DELAY);
     assert_eq!(app.notifications(cx), 1, "retries stay quiet");
 
     // The database accepts writes again: the next retry saves the edit.
     store.lock().expect("store lock").insert_video(&video).expect("restore video");
-    app.wait(cx, videocrm::video_page::SAVE_RETRY_DELAY);
+    app.wait(cx, rushes::video_page::SAVE_RETRY_DELAY);
     assert!(!app.has(cx, "not-saved"));
     assert_eq!(app.stored_blocks(cx, id, DocumentKind::Script)[0], "Drone shot over the city");
 
     // A failure right before quitting is written by the quit itself.
     store.lock().expect("store lock").delete_video(id).expect("delete video");
     app.type_text(cx, " at dusk");
-    app.wait(cx, videocrm::video_page::SAVE_DELAY);
+    app.wait(cx, rushes::video_page::SAVE_DELAY);
     assert!(app.has(cx, "not-saved"));
     store.lock().expect("store lock").insert_video(&video).expect("restore video");
     cx.update(|cx| cx.shutdown());

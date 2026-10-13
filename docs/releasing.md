@@ -45,12 +45,17 @@ git tag v0.2.0 && git push origin v0.2.0
 
 | File | Built by | Contents |
 | --- | --- | --- |
-| `VideoCRM-<version>-macos-universal.dmg` | `scripts/bundle-macos.sh` on `macos-15` | `VideoCRM.app` (arm64 + x86_64, macOS 10.15.7+), link to Applications |
-| `VideoCRM-<version>-x86_64.AppImage` | `scripts/bundle-linux.sh` on `ubuntu-22.04` | The binary, desktop entry and icons |
-| `videocrm-<version>-linux-x86_64.tar.gz` | same | `bin/`, `share/applications/`, `share/icons/` for `~/.local` or `/usr/local` |
+| `Rushes-<version>-macos-universal.dmg` | `scripts/bundle-macos.sh` on `macos-15` | `Rushes.app` (arm64 + x86_64, macOS 10.15.7+), link to Applications |
+| `Rushes-<version>-x86_64.AppImage` | `scripts/bundle-linux.sh` on `ubuntu-22.04` | The binary, desktop entry and icons |
+| `rushes-<version>-linux-x86_64.tar.gz` | same | `bin/`, `share/applications/`, `share/icons/` for `~/.local` or `/usr/local` |
+| `VideoCRM-<version>-macos-universal.dmg` | `scripts/bundle-macos.sh` | The same app as `VideoCRM.app` |
+| `VideoCRM-<version>-x86_64.AppImage` | `scripts/bundle-linux.sh` | A copy of the Rushes AppImage |
+| `videocrm-<version>-linux-x86_64.tar.gz` | same | The tarball's tree under VideoCRM's names: `bin/videocrm`, `videocrm.desktop`, `videocrm.png` |
 
-These are the files a released VideoCRM updates itself from ([updates.md](updates.md)): keep
-their names, and the Bundle workflow installs each over an older copy before publishing.
+These are the files an installed copy of Rushes updates itself from ([updates.md](updates.md)):
+keep their names, and the Bundle workflow installs each over an older copy before
+publishing. The `VideoCRM` / `videocrm` files are for copies from before the rename, whose
+updater looks for those names ([updates.md](updates.md#from-videocrm)).
 
 The scripts also run locally (`scripts/bundle-macos.sh <version> <binary>...`,
 `scripts/bundle-linux.sh <version> <binary>`); see their headers for the tools they need.
@@ -61,7 +66,7 @@ The scripts also run locally (`scripts/bundle-macos.sh <version> <binary>...`,
   `xcrun notarytool submit --wait` and `xcrun stapler staple` on the `.dmg`.
 - **Linux**: the binary links only glibc, xcb and xkbcommon and loads Wayland, X11 and
   Vulkan (or GL) at run time, so building on Ubuntu 22.04 sets the glibc floor (2.35).
-  The window's app id `videocrm` matches the desktop entry's `StartupWMClass`.
+  The window's app id `rushes` matches the desktop entry's `StartupWMClass`.
 - Bundled apps start with a launcher's bare `PATH`; the app adds the usual tool folders
   itself (see `docs/pipeline.md`, Requirements).
 

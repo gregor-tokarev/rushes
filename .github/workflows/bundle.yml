@@ -1,4 +1,4 @@
-# Builds the macOS and Linux bundles of VideoCRM, starts each once to check that it
+# Builds the macOS and Linux bundles of Rushes, starts each once to check that it
 # opens a window, installs each over an older copy the way the app updates itself, and
 # publishes them:
 #   - a tag v<version> (matching the workspace version) creates a GitHub release with them,
@@ -98,42 +98,42 @@ jobs:
 
       - name: Build
         run: |
-          cargo build --release --locked -p videocrm --target aarch64-apple-darwin
-          cargo build --release --locked -p videocrm --target x86_64-apple-darwin
+          cargo build --release --locked -p rushes --target aarch64-apple-darwin
+          cargo build --release --locked -p rushes --target x86_64-apple-darwin
 
       - name: Bundle
         run: |
           brew install imagemagick
           scripts/bundle-macos.sh "$VERSION" \
-            target/aarch64-apple-darwin/release/videocrm \
-            target/x86_64-apple-darwin/release/videocrm
-          lipo -info target/bundle/VideoCRM.app/Contents/MacOS/videocrm
+            target/aarch64-apple-darwin/release/rushes \
+            target/x86_64-apple-darwin/release/rushes
+          lipo -info target/bundle/Rushes.app/Contents/MacOS/rushes
 
       - name: Smoke test (opens the app from the disk image)
         run: |
-          dmg=$(ls target/bundle/*.dmg)
-          hdiutil attach "$dmg" -nobrowse -mountpoint /tmp/videocrm-dmg
-          open -n /tmp/videocrm-dmg/VideoCRM.app
+          dmg=target/bundle/Rushes-$VERSION-macos-universal.dmg
+          hdiutil attach "$dmg" -nobrowse -mountpoint /tmp/rushes-dmg
+          open -n /tmp/rushes-dmg/Rushes.app
           sleep 20
           mkdir -p smoke
           screencapture -x smoke/macos.png || echo "::warning::screencapture failed"
-          if ! pgrep -x videocrm; then
-            echo "::error::VideoCRM quit within 20 s of starting."
+          if ! pgrep -x rushes; then
+            echo "::error::Rushes quit within 20 s of starting."
             exit 1
           fi
-          osascript -e 'quit app "VideoCRM"' || pkill -x videocrm
+          osascript -e 'quit app "Rushes"' || pkill -x rushes
           sleep 3
-          hdiutil detach /tmp/videocrm-dmg || hdiutil detach -force /tmp/videocrm-dmg
+          hdiutil detach /tmp/rushes-dmg || hdiutil detach -force /tmp/rushes-dmg
 
       - name: Updater test (installs the disk image over an older app)
         env:
-          VIDEOCRM_UPDATE_TEST_BUNDLES: ${{ github.workspace }}/target/bundle
-          VIDEOCRM_UPDATE_TEST_VERSION: ${{ env.VERSION }}
-        run: cargo test --locked -p videocrm-update
+          RUSHES_UPDATE_TEST_BUNDLES: ${{ github.workspace }}/target/bundle
+          RUSHES_UPDATE_TEST_VERSION: ${{ env.VERSION }}
+        run: cargo test --locked -p rushes-update
 
       - uses: actions/upload-artifact@v7
         with:
-          name: videocrm-macos
+          name: rushes-macos
           path: target/bundle/*.dmg
           if-no-files-found: error
           # A release keeps its own copy; the Actions storage quota is small.
@@ -175,7 +175,7 @@ jobs:
           key: bundle
 
       - name: Build
-        run: cargo build --release --locked -p videocrm
+        run: cargo build --release --locked -p rushes
 
       - name: Bundle
         run: |
@@ -183,17 +183,17 @@ jobs:
             https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
           chmod +x "$RUNNER_TEMP/appimagetool"
           APPIMAGE_EXTRACT_AND_RUN=1 APPIMAGETOOL="$RUNNER_TEMP/appimagetool" \
-            scripts/bundle-linux.sh "$VERSION" target/release/videocrm
+            scripts/bundle-linux.sh "$VERSION" target/release/rushes
 
       - name: Updater test (installs the AppImage and the tarball over older copies)
         env:
-          VIDEOCRM_UPDATE_TEST_BUNDLES: ${{ github.workspace }}/target/bundle
-          VIDEOCRM_UPDATE_TEST_VERSION: ${{ env.VERSION }}
-        run: cargo test --locked -p videocrm-update
+          RUSHES_UPDATE_TEST_BUNDLES: ${{ github.workspace }}/target/bundle
+          RUSHES_UPDATE_TEST_VERSION: ${{ env.VERSION }}
+        run: cargo test --locked -p rushes-update
 
       - uses: actions/upload-artifact@v7
         with:
-          name: videocrm-linux
+          name: rushes-linux
           path: |
             target/bundle/*.tar.gz
             target/bundle/*.AppImage
@@ -213,7 +213,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: videocrm-linux
+          name: rushes-linux
           path: dist
 
       - name: System packages
@@ -228,24 +228,24 @@ jobs:
           Xvfb :99 -screen 0 1440x900x24 &
           sleep 2
           mkdir -p smoke
-          appimage=$PWD/dist/VideoCRM-$VERSION-x86_64.AppImage
+          appimage=$PWD/dist/Rushes-$VERSION-x86_64.AppImage
           chmod +x "$appimage"
           # No FUSE on the runner: run the AppImage's own contents.
           (cd "$RUNNER_TEMP" && "$appimage" --appimage-extract >/dev/null)
-          VIDEOCRM_DATA_DIR="$RUNNER_TEMP/data" "$RUNNER_TEMP/squashfs-root/AppRun" > smoke/linux.log 2>&1 &
+          RUSHES_DATA_DIR="$RUNNER_TEMP/data" "$RUNNER_TEMP/squashfs-root/AppRun" > smoke/linux.log 2>&1 &
           app=$!
           sleep 20
           import -window root smoke/linux.png
           fail() { echo "::error::$1"; cat smoke/linux.log; exit 1; }
-          kill -0 "$app" || fail "VideoCRM quit within 20 s of starting."
-          xwininfo -root -tree | grep -q '"VideoCRM"' || fail "VideoCRM is running but has no window."
+          kill -0 "$app" || fail "Rushes quit within 20 s of starting."
+          xwininfo -root -tree | grep -q '"Rushes"' || fail "Rushes is running but has no window."
           # The onboarding screen is mostly light; a blank (black) screen means nothing rendered.
           brightness=$(convert smoke/linux.png -format '%[fx:mean]' info:)
           echo "Mean brightness: $brightness"
-          awk -v b="$brightness" 'BEGIN { exit !(b > 0.2) }' || fail "VideoCRM's window is blank."
+          awk -v b="$brightness" 'BEGIN { exit !(b > 0.2) }' || fail "The Rushes window is blank."
           kill -TERM "$app"
           wait "$app"
-          tar -tzf dist/videocrm-"$VERSION"-linux-x86_64.tar.gz > /dev/null
+          tar -tzf dist/rushes-"$VERSION"-linux-x86_64.tar.gz > /dev/null
 
       - uses: actions/upload-artifact@v7
         if: always()
@@ -264,7 +264,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: videocrm-*
+          pattern: rushes-*
           path: dist
           merge-multiple: true
 
@@ -276,5 +276,5 @@ jobs:
           gh release create "$TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
-            --title "VideoCRM ${{ needs.version.outputs.version }}" \
+            --title "Rushes ${{ needs.version.outputs.version }}" \
             --generate-notes

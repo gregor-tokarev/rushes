@@ -17,7 +17,7 @@ use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div,
 };
-use videocrm_core::settings::{DEFAULT_EMULATOR_GOOGLE_URL, DEFAULT_EMULATOR_YOUTUBE_URL, YoutubeBackend};
+use rushes_core::settings::{DEFAULT_EMULATOR_GOOGLE_URL, DEFAULT_EMULATOR_YOUTUBE_URL, YoutubeBackend};
 
 use super::service::{EmulatorCheck, YoutubeAccount, YoutubeService, probe_emulators};
 use super::ui::{
@@ -39,7 +39,7 @@ struct SetupStep {
 /// Google's current flow for a personal Desktop app client (docs/youtube.md has the long form).
 const GOOGLE_STEPS: [SetupStep; 6] = [
     SetupStep {
-        text: "Create a project in Google Cloud, named for example VideoCRM.",
+        text: "Create a project in Google Cloud, named for example Rushes.",
         link: Some(("New project", "https://console.cloud.google.com/projectcreate")),
     },
     SetupStep {
@@ -47,7 +47,7 @@ const GOOGLE_STEPS: [SetupStep; 6] = [
         link: Some(("YouTube Data API v3", "https://console.cloud.google.com/apis/library/youtube.googleapis.com")),
     },
     SetupStep {
-        text: "In Google Auth Platform, click Get started: app name VideoCRM, your email, audience External.",
+        text: "In Google Auth Platform, click Get started: app name Rushes, your email, audience External.",
         link: Some(("Google Auth Platform", "https://console.cloud.google.com/auth/overview")),
     },
     SetupStep {
@@ -65,7 +65,7 @@ const GOOGLE_STEPS: [SetupStep; 6] = [
 const GOOGLE_EXPECTATIONS: [&str; 4] = [
     "Google warns that it hasn’t verified the app. That’s expected for your own client: click Continue.",
     "Leave every permission box ticked, especially “Manage your YouTube videos”.",
-    "While the app is in Testing, Google ends the sign-in after 7 days. Reconnect here when VideoCRM asks.",
+    "While the app is in Testing, Google ends the sign-in after 7 days. Reconnect here when Rushes asks.",
     "Until Google audits your project, YouTube keeps the videos it uploads private.",
 ];
 
@@ -397,7 +397,7 @@ impl YoutubeSettings {
             .child(h_flex().child(add))
             .child(help_text(
                 "Videos upload to the default account unless their Publish tab chooses another. Disconnect every \
-                 account to change the OAuth client or how VideoCRM connects to YouTube.",
+                 account to change the OAuth client or how Rushes connects to YouTube.",
                 cx,
             ))
     }
@@ -460,7 +460,7 @@ impl YoutubeSettings {
                     .title("OAuth client")
                     .keywords(["google", "cloud", "credentials"])
                     .description(
-                        "VideoCRM uploads through an OAuth client in your own Google Cloud project. Creating one is \
+                        "Rushes uploads through an OAuth client in your own Google Cloud project. Creating one is \
                          free.",
                     )
                     .element(|this: &mut Self, _, cx| this.render_setup_steps(cx))
@@ -524,7 +524,7 @@ impl YoutubeSettings {
                 developer = developer.element(move |_: &mut Self, _, cx| {
                     help_text(
                         format!(
-                            "VIDEOCRM_GOOGLE_URL or VIDEOCRM_YOUTUBE_URL is set, so VideoCRM connects to {target} \
+                            "RUSHES_GOOGLE_URL or RUSHES_YOUTUBE_URL is set, so Rushes connects to {target} \
                              whatever this says."
                         ),
                         cx,

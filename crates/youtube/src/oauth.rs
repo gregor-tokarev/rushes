@@ -162,7 +162,7 @@ impl PendingAuthorization {
             respond(
                 &mut stream,
                 "404 Not Found",
-                &page("Not found", "This address only completes the VideoCRM sign-in.", false),
+                &page("Not found", "This address only completes the Rushes sign-in.", false),
             );
             return None;
         }
@@ -174,7 +174,7 @@ impl PendingAuthorization {
                 "400 Bad Request",
                 &page(
                     "Sign-in link expired",
-                    "This is not the sign-in VideoCRM is waiting for. Start again from VideoCRM.",
+                    "This is not the sign-in Rushes is waiting for. Start again from Rushes.",
                     false,
                 ),
             );
@@ -192,8 +192,8 @@ impl PendingAuthorization {
         };
 
         let body = match &outcome {
-            Ok(_) => page("You’re signed in", "Return to VideoCRM — you can close this tab.", true),
-            Err(error) => page("Sign-in didn’t finish", &format!("{error}. Return to VideoCRM and try again."), false),
+            Ok(_) => page("You’re signed in", "Return to Rushes — you can close this tab.", true),
+            Err(error) => page("Sign-in didn’t finish", &format!("{error}. Return to Rushes and try again."), false),
         };
         respond(&mut stream, "200 OK", &body);
         Some(outcome)
@@ -293,7 +293,7 @@ fn page(title: &str, message: &str, success: bool) -> String {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title} · VideoCRM</title>
+<title>{title} · Rushes</title>
 <style>
   body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f6f6f4;
          font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; color: #2f2f2f; }}
@@ -353,10 +353,10 @@ fn exchange_code(
 pub fn check_client(config: &YoutubeConfig) -> Result<()> {
     let mut form = vec![
         ("grant_type", "authorization_code"),
-        ("code", "videocrm-client-check"),
+        ("code", "rushes-client-check"),
         ("redirect_uri", "http://127.0.0.1"),
         ("client_id", config.client_id.as_str()),
-        ("code_verifier", "videocrm-client-check-videocrm-client-check-videocrm"),
+        ("code_verifier", "rushes-client-check-rushes-client-check-rushes"),
     ];
     if let Some(secret) = &config.client_secret {
         form.push(("client_secret", secret));

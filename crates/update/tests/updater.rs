@@ -2,8 +2,8 @@
 //! verifying and installing release files into installations in temp folders.
 //!
 //! `installs_the_bundles_built_here` also installs real bundles: the Bundle
-//! workflow points `VIDEOCRM_UPDATE_TEST_BUNDLES` at the folder it built them
-//! in and `VIDEOCRM_UPDATE_TEST_VERSION` at their version.
+//! workflow points `RUSHES_UPDATE_TEST_BUNDLES` at the folder it built them
+//! in and `RUSHES_UPDATE_TEST_VERSION` at their version.
 
 use std::collections::HashMap;
 use std::fs;
@@ -14,8 +14,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use rushes_update::{Delivery, Error, Installation, ManualReason, Progress, Updater, Version};
 use sha2::{Digest as _, Sha256};
-use videocrm_update::{Delivery, Error, Installation, ManualReason, Progress, Updater, Version};
 
 /// Status and body by request path.
 type Routes = Arc<Mutex<HashMap<String, (u16, Vec<u8>)>>>;
@@ -86,7 +86,7 @@ impl FakeGithub {
             .collect();
         let release = serde_json::json!({
             "tag_name": format!("v{version}"),
-            "html_url": format!("https://github.com/gregor-tokarev/videocrm/releases/tag/v{version}"),
+            "html_url": format!("https://github.com/gregor-tokarev/rushes/releases/tag/v{version}"),
             "body": "Notes",
             "assets": assets,
         });
@@ -114,12 +114,12 @@ fn appimage(payload: &[u8]) -> Vec<u8> {
 
 /// A tarball shaped like `scripts/bundle-linux.sh` makes them.
 fn tarball(version: &str, binary: &[u8]) -> Vec<u8> {
-    let root = format!("videocrm-{version}-linux-{}", std::env::consts::ARCH);
+    let root = format!("rushes-{version}-linux-{}", std::env::consts::ARCH);
     let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
     let files: [(&str, &[u8], u32); 3] = [
-        ("bin/videocrm", binary, 0o755),
-        ("share/applications/videocrm.desktop", b"[Desktop Entry]\nName=VideoCRM\n", 0o644),
-        ("share/icons/hicolor/scalable/apps/videocrm.svg", b"<svg/>", 0o644),
+        ("bin/rushes", binary, 0o755),
+        ("share/applications/rushes.desktop", b"[Desktop Entry]\nName=Rushes\n", 0o644),
+        ("share/icons/hicolor/scalable/apps/rushes.svg", b"<svg/>", 0o644),
     ];
     for (path, bytes, mode) in files {
         let mut header = tar::Header::new_gnu();
@@ -132,11 +132,11 @@ fn tarball(version: &str, binary: &[u8]) -> Vec<u8> {
 }
 
 fn appimage_name(version: &str) -> String {
-    format!("VideoCRM-{version}-{}.AppImage", std::env::consts::ARCH)
+    format!("Rushes-{version}-{}.AppImage", std::env::consts::ARCH)
 }
 
 fn tarball_name(version: &str) -> String {
-    format!("videocrm-{version}-linux-{}.tar.gz", std::env::consts::ARCH)
+    format!("rushes-{version}-linux-{}.tar.gz", std::env::consts::ARCH)
 }
 
 /// Runs the whole update as the app does; returns what progress reported.
@@ -149,7 +149,7 @@ fn update(updater: &Updater) -> Result<Vec<Progress>, Error> {
 }
 
 fn old_appimage(dir: &Path) -> PathBuf {
-    let file = dir.join("VideoCRM.AppImage");
+    let file = dir.join("Rushes.AppImage");
     fs::write(&file, appimage(b"old")).expect("old AppImage");
     file
 }
@@ -204,22 +204,54 @@ fn replaces_the_tarball_in_its_prefix() {
     let prefix = tempfile::tempdir().expect("temp dir");
     fs::create_dir_all(prefix.path().join("bin")).expect("bin");
     fs::create_dir_all(prefix.path().join("share/applications")).expect("applications");
-    fs::write(prefix.path().join("bin/videocrm"), b"old binary").expect("old binary");
+    fs::write(prefix.path().join("bin/rushes"), b"old binary").expect("old binary");
     fs::write(prefix.path().join("bin/other-tool"), b"someone else's").expect("other");
-    fs::write(prefix.path().join("share/applications/videocrm.desktop"), b"old").expect("old entry");
-    let detected = Installation::detect_from(&prefix.path().join("bin/videocrm"), None, None);
+    fs::write(prefix.path().join("share/applications/rushes.desktop"), b"old").expect("old entry");
+    let detected = Installation::detect_from(&prefix.path().join("bin/rushes"), None, None);
     assert_eq!(detected, Some(Installation::Prefix { prefix: prefix.path().to_path_buf() }));
     let updater = Updater::new(github.latest_url(), version("0.1.1"), detected);
 
     update(&updater).expect("update");
 
     let read = |path: &str| fs::read(prefix.path().join(path)).expect(path);
-    assert_eq!(read("bin/videocrm"), b"new binary");
-    assert_eq!(mode(&prefix.path().join("bin/videocrm")), 0o755);
-    assert_eq!(read("share/applications/videocrm.desktop"), b"[Desktop Entry]\nName=VideoCRM\n");
-    assert_eq!(read("share/icons/hicolor/scalable/apps/videocrm.svg"), b"<svg/>");
+    assert_eq!(read("bin/rushes"), b"new binary");
+    assert_eq!(mode(&prefix.path().join("bin/rushes")), 0o755);
+    assert_eq!(read("share/applications/rushes.desktop"), b"[Desktop Entry]\nName=Rushes\n");
+    assert_eq!(read("share/icons/hicolor/scalable/apps/rushes.svg"), b"<svg/>");
     assert_eq!(read("bin/other-tool"), b"someone else's");
-    assert!(!prefix.path().join(".videocrm-update").exists(), "the staging folder is gone");
+    assert!(!prefix.path().join(".rushes-update").exists(), "the staging folder is gone");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_tarball_from_before_the_rename_takes_rushess_names() {
+    let github = FakeGithub::start();
+    github.publish("0.2.0", &[(&tarball_name("0.2.0"), tarball("0.2.0", b"new binary"))], &HashMap::new());
+    let prefix = tempfile::tempdir().expect("temp dir");
+    let legacy_files = [
+        "bin/videocrm",
+        "share/applications/videocrm.desktop",
+        "share/icons/hicolor/48x48/apps/videocrm.png",
+        "share/icons/hicolor/256x256/apps/videocrm.png",
+    ];
+    for file in legacy_files {
+        let path = prefix.path().join(file);
+        fs::create_dir_all(path.parent().expect("folder")).expect("folder");
+        fs::write(path, b"VideoCRM").expect(file);
+    }
+    fs::write(prefix.path().join("share/icons/hicolor/48x48/apps/other.png"), b"someone else's").expect("other");
+    let detected = Installation::detect_from(&prefix.path().join("bin/videocrm"), None, None);
+    assert_eq!(detected, Some(Installation::Prefix { prefix: prefix.path().to_path_buf() }));
+    let updater = Updater::new(github.latest_url(), version("0.1.3"), detected);
+
+    update(&updater).expect("update");
+
+    assert_eq!(fs::read(prefix.path().join("bin/rushes")).expect("Rushes"), b"new binary");
+    assert!(prefix.path().join("share/applications/rushes.desktop").is_file());
+    for file in legacy_files {
+        assert!(!prefix.path().join(file).exists(), "{file} is gone");
+    }
+    assert!(prefix.path().join("share/icons/hicolor/48x48/apps/other.png").is_file());
 }
 
 #[cfg(target_os = "linux")]
@@ -254,10 +286,10 @@ fn copies_that_cant_replace_themselves_download_by_hand() {
     let built = Updater::new(github.latest_url(), version("0.1.1"), None);
     let found = built.check(built.current()).expect("check").expect("newer");
     assert_eq!(found.delivery, Delivery::Manual(ManualReason::NotInstalled));
-    assert_eq!(found.release.page_url, "https://github.com/gregor-tokarev/videocrm/releases/tag/v0.2.0");
+    assert_eq!(found.release.page_url, "https://github.com/gregor-tokarev/rushes/releases/tag/v0.2.0");
 
     let dir = tempfile::tempdir().expect("temp dir");
-    let mac = Installation::MacApp { bundle: dir.path().join("VideoCRM.app") };
+    let mac = Installation::MacApp { bundle: dir.path().join("Rushes.app") };
     let without_file = Updater::new(github.latest_url(), version("0.1.1"), Some(mac));
     let found = without_file.check(without_file.current()).expect("check").expect("newer");
     assert_eq!(found.delivery, Delivery::Manual(ManualReason::NoFile));
@@ -300,33 +332,40 @@ fn says_when_github_limits_checks() {
     assert!(unreachable.check(unreachable.current()).expect_err("no server").is_network());
 }
 
-/// Installs the bundles in `$VIDEOCRM_UPDATE_TEST_BUNDLES` over an older
-/// installation of each kind this system has.
+/// The bundles the Bundle workflow built, in `$RUSHES_UPDATE_TEST_BUNDLES`,
+/// and their version; `None` outside it.
+fn built_bundles() -> Option<(PathBuf, Version)> {
+    let dir = std::env::var_os("RUSHES_UPDATE_TEST_BUNDLES")?;
+    let built = std::env::var("RUSHES_UPDATE_TEST_VERSION").ok()?;
+    Some((PathBuf::from(dir), version(&built)))
+}
+
+/// Installs the bundles in `$RUSHES_UPDATE_TEST_BUNDLES` over an older
+/// installation of each kind this system has, including those from before
+/// the rename to Rushes.
 #[test]
 fn installs_the_bundles_built_here() {
-    let (Some(dir), Some(built)) =
-        (std::env::var_os("VIDEOCRM_UPDATE_TEST_BUNDLES"), std::env::var("VIDEOCRM_UPDATE_TEST_VERSION").ok())
-    else {
-        return;
-    };
-    let dir = PathBuf::from(dir);
-    let built = version(&built);
+    let Some((dir, built)) = built_bundles() else { return };
     let home = tempfile::tempdir().expect("temp dir");
     let mut installations = Vec::new();
     if cfg!(target_os = "macos") {
-        let bundle = home.path().join("Applications/VideoCRM.app");
-        fs::create_dir_all(bundle.join("Contents/MacOS")).expect("old bundle");
-        fs::write(bundle.join("Contents/MacOS/videocrm"), b"#!/bin/sh\n").expect("old executable");
-        installations.push(Installation::MacApp { bundle });
+        for bundle in ["Applications/Rushes.app", "Old/VideoCRM.app"] {
+            let bundle = home.path().join(bundle);
+            fs::create_dir_all(bundle.join("Contents/MacOS")).expect("old bundle");
+            fs::write(bundle.join("Contents/MacOS/old"), b"#!/bin/sh\n").expect("old executable");
+            installations.push(Installation::MacApp { bundle });
+        }
     } else {
         fs::create_dir_all(home.path().join("Apps")).expect("apps");
         installations.push(Installation::AppImage { file: old_appimage(&home.path().join("Apps")) });
-        let prefix = home.path().join(".local");
-        fs::create_dir_all(prefix.join("bin")).expect("bin");
-        fs::create_dir_all(prefix.join("share/applications")).expect("applications");
-        fs::write(prefix.join("bin/videocrm"), b"old").expect("old binary");
-        fs::write(prefix.join("share/applications/videocrm.desktop"), b"old").expect("old entry");
-        installations.push(Installation::Prefix { prefix });
+        for (folder, name) in [(".local", "rushes"), ("old", "videocrm")] {
+            let prefix = home.path().join(folder);
+            fs::create_dir_all(prefix.join("bin")).expect("bin");
+            fs::create_dir_all(prefix.join("share/applications")).expect("applications");
+            fs::write(prefix.join("bin").join(name), b"old").expect("old binary");
+            fs::write(prefix.join(format!("share/applications/{name}.desktop")), b"old").expect("old entry");
+            installations.push(Installation::Prefix { prefix });
+        }
     }
 
     for installation in installations {
@@ -339,25 +378,75 @@ fn installs_the_bundles_built_here() {
         update(&updater).unwrap_or_else(|error| panic!("installing {name}: {error}"));
 
         match &installation {
-            Installation::MacApp { bundle } => {
-                let plist = fs::read_to_string(bundle.join("Contents/Info.plist")).expect("Info.plist");
-                assert!(plist.contains(&format!("<string>{built}</string>")), "{plist}");
-                let verified = std::process::Command::new("codesign")
-                    .args(["--verify", "--strict"])
-                    .arg(bundle)
-                    .status()
-                    .expect("codesign");
-                assert!(verified.success(), "the installed bundle keeps its signature");
+            Installation::MacApp { bundle: old } => {
+                let bundle = old.with_file_name("Rushes.app");
+                assert!(*old == bundle || !old.exists(), "VideoCRM.app takes Rushes's name");
+                assert_app_bundle(&bundle, &built);
             }
             Installation::AppImage { file } => {
                 assert_eq!(fs::read(file).expect("AppImage"), fs::read(dir.join(&name)).expect("bundle"));
             }
             Installation::Prefix { prefix } => {
-                assert_eq!(mode(&prefix.join("bin/videocrm")), 0o755);
-                let entry = fs::read_to_string(prefix.join("share/applications/videocrm.desktop")).expect("entry");
-                assert!(entry.contains("StartupWMClass=videocrm"), "{entry}");
+                assert_eq!(mode(&prefix.join("bin/rushes")), 0o755);
+                let entry = fs::read_to_string(prefix.join("share/applications/rushes.desktop")).expect("entry");
+                assert!(entry.contains("StartupWMClass=rushes"), "{entry}");
+                assert!(
+                    !prefix.join("bin/videocrm").exists()
+                        && !prefix.join("share/applications/videocrm.desktop").exists()
+                );
             }
         }
-        assert!(!home.path().join("Applications/.videocrm-update").exists());
+        assert!(!home.path().join("Applications/.rushes-update").exists());
     }
+}
+
+/// Checks the files the Bundle workflow built under VideoCRM's names, which
+/// copies from before the rename update themselves with: their updater
+/// looks for VideoCRM's file names and, inside them, VideoCRM's layout.
+#[test]
+fn builds_the_files_copies_from_before_the_rename_update_with() {
+    let Some((dir, built)) = built_bundles() else { return };
+    let arch = std::env::consts::ARCH;
+    if cfg!(target_os = "macos") {
+        let image = dir.join(format!("VideoCRM-{built}-macos-universal.dmg"));
+        let mount = tempfile::tempdir().expect("mount point");
+        let attached = std::process::Command::new("/usr/bin/hdiutil")
+            .args(["attach", "-nobrowse", "-readonly", "-noautoopen", "-quiet", "-mountpoint"])
+            .arg(mount.path())
+            .arg(&image)
+            .status()
+            .expect("hdiutil");
+        assert!(attached.success(), "{} mounts", image.display());
+        let checked = std::panic::catch_unwind(|| assert_app_bundle(&mount.path().join("VideoCRM.app"), &built));
+        _ = std::process::Command::new("/usr/bin/hdiutil")
+            .args(["detach", "-quiet", "-force"])
+            .arg(mount.path())
+            .status();
+        checked.expect("VideoCRM.app holds Rushes");
+    } else {
+        let appimage = fs::read(dir.join(format!("VideoCRM-{built}-{arch}.AppImage"))).expect("AppImage");
+        assert_eq!(appimage, fs::read(dir.join(appimage_name(&built.to_string()))).expect("Rushes's AppImage"));
+
+        // Unpacked as VideoCRM's updater does: one folder, bin/videocrm in it.
+        let archive = fs::File::open(dir.join(format!("videocrm-{built}-linux-{arch}.tar.gz"))).expect("tarball");
+        let unpacked = tempfile::tempdir().expect("temp dir");
+        tar::Archive::new(flate2::read::GzDecoder::new(archive)).unpack(unpacked.path()).expect("unpacks");
+        let folders: Vec<PathBuf> =
+            fs::read_dir(unpacked.path()).expect("unpacked").map(|entry| entry.expect("entry").path()).collect();
+        let [tree] = folders.as_slice() else { panic!("one folder, got {folders:?}") };
+        assert_eq!(mode(&tree.join("bin/videocrm")), 0o755);
+        let entry = fs::read_to_string(tree.join("share/applications/videocrm.desktop")).expect("entry");
+        assert!(entry.contains("Name=Rushes") && entry.contains("Exec=videocrm"), "{entry}");
+        assert!(tree.join("share/icons/hicolor/256x256/apps/videocrm.png").is_file());
+    }
+}
+
+/// `bundle` holds Rushes `built`, signed.
+fn assert_app_bundle(bundle: &Path, built: &Version) {
+    let plist = fs::read_to_string(bundle.join("Contents/Info.plist")).expect("Info.plist");
+    assert!(plist.contains(&format!("<string>{built}</string>")), "{plist}");
+    assert!(plist.contains("<string>Rushes</string>"), "{plist}");
+    let verified =
+        std::process::Command::new("codesign").args(["--verify", "--strict"]).arg(bundle).status().expect("codesign");
+    assert!(verified.success(), "{} keeps its signature", bundle.display());
 }

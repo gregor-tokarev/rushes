@@ -14,9 +14,9 @@ use gpui_kit::{
     MouseDownEvent, MouseUpEvent, Pixels, ScrollDelta, Size, TestAppContext, VisualTestContext, WindowBounds,
     WindowOptions, point, px, size,
 };
-use videocrm::database::{DatabaseEvent, DatabasePanel};
-use videocrm_core::settings::WeekStart;
-use videocrm_core::{
+use rushes::database::{DatabaseEvent, DatabasePanel};
+use rushes_core::settings::WeekStart;
+use rushes_core::{
     BuiltinField, Column, DatabaseView, FilterSpec, Privacy, PropertyKind, RunStatus, SortDirection, SortSpec,
     UploadStatus, Video, VideoFormat, VideoId, VideoRow, VideoStatus, ViewId, ViewKind, YoutubeLink,
 };
@@ -731,7 +731,7 @@ fn number_cells_read_a_decimal_comma_and_say_what_they_refuse(cx: &mut TestAppCo
     let [DatabaseEvent::UpdateVideo(video)] = events.as_slice() else {
         panic!("expected the new value, got {events:?}");
     };
-    assert_eq!(video.properties.get(&budget.id), Some(&videocrm_core::PropertyValue::Number(3.5)));
+    assert_eq!(video.properties.get(&budget.id), Some(&rushes_core::PropertyValue::Number(3.5)));
 
     assert!(edit("1,2,3").is_empty(), "nothing is saved");
     let notifications = db.with_window(cx, |window, cx| window.notifications(cx).len());

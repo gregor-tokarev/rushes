@@ -36,12 +36,19 @@ pub enum MediaError {
     ReadDir { path: PathBuf, source: io::Error },
 }
 
-/// `<Videos>/VideoCRM`, falling back to `~/Videos/VideoCRM`, then to the data dir.
+/// `<Videos>/Rushes`, falling back to `~/Videos/Rushes`, then to the data dir.
 pub fn default_media_root() -> PathBuf {
-    dirs::video_dir()
-        .or_else(|| dirs::home_dir().map(|home| home.join("Videos")))
-        .map(|videos| videos.join("VideoCRM"))
-        .unwrap_or_else(|| crate::settings::data_dir().join("media"))
+    videos_dir().map(|videos| videos.join("Rushes")).unwrap_or_else(|| crate::settings::data_dir().join("media"))
+}
+
+/// `<Videos>/VideoCRM`, the default media root while the app was called
+/// VideoCRM, before the rename to Rushes. `None` without a videos or home folder.
+pub fn legacy_default_media_root() -> Option<PathBuf> {
+    videos_dir().map(|videos| videos.join("VideoCRM"))
+}
+
+fn videos_dir() -> Option<PathBuf> {
+    dirs::video_dir().or_else(|| dirs::home_dir().map(|home| home.join("Videos")))
 }
 
 /// Folder name for a video: ASCII slug of the title plus the short id, e.g.

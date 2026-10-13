@@ -7,7 +7,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::installation::Installation;
+use crate::installation::{EXECUTABLE, Installation, LEGACY_EXECUTABLE};
 
 /// Replaces `installation` with the release file `download`, which sits in
 /// the installation's staging folder.
@@ -42,24 +42,24 @@ fn install_tarball(download: &Path, prefix: &Path) -> Result<()> {
         .unpack(&unpacked)
         .map_err(|error| Error::Corrupt(format!("cannot unpack the archive: {error}")))?;
 
-    // One top-level folder, videocrm-<version>-linux-<arch>/, holding the prefix's tree.
+    // One top-level folder, rushes-<version>-linux-<arch>/, holding the prefix's tree.
     let mut entries = fs::read_dir(&unpacked)
         .map_err(|error| Error::io("cannot read the unpacked update", error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| Error::io("cannot read the unpacked update", error))?;
     let tree = match entries.as_mut_slice() {
         [only] if only.path().is_dir() => only.path(),
-        _ => return Err(Error::Corrupt("the archive doesn't hold one VideoCRM folder".into())),
+        _ => return Err(Error::Corrupt("the archive doesn't hold one folder".into())),
     };
-    let executable = Path::new("bin/videocrm");
-    if !tree.join(executable).is_file() {
-        return Err(Error::Corrupt("the archive has no bin/videocrm".into()));
+    let executable = Path::new("bin").join(EXECUTABLE);
+    if !tree.join(&executable).is_file() {
+        return Err(Error::Corrupt(format!("the archive has no {}", executable.display())));
     }
     let mut files = Vec::new();
     collect_files(&tree, Path::new(""), &mut files)?;
 
-    // The executable last: if anything before it fails, the old VideoCRM still starts.
-    files.sort_by_key(|file| file == executable);
+    // The executable last: if anything before it fails, the old version still starts.
+    files.sort_by_key(|file| *file == executable);
     for file in files {
         let target = prefix.join(&file);
         if let Some(parent) = target.parent() {
@@ -69,7 +69,26 @@ fn install_tarball(download: &Path, prefix: &Path) -> Result<()> {
         fs::rename(tree.join(&file), &target)
             .map_err(|error| Error::io(format!("cannot replace {}", target.display()), error))?;
     }
+    remove_legacy_files(prefix);
     Ok(())
+}
+
+/// Removes the executable, desktop entry and icons that VideoCRM, as Rushes
+/// was called before the rename, kept in `prefix`: Rushes's own replace them.
+fn remove_legacy_files(prefix: &Path) {
+    let entry = prefix.join(format!("share/applications/{LEGACY_EXECUTABLE}.desktop"));
+    if !entry.is_file() {
+        return;
+    }
+    _ = fs::remove_file(prefix.join("bin").join(LEGACY_EXECUTABLE));
+    if let Ok(sizes) = fs::read_dir(prefix.join("share/icons/hicolor")) {
+        for size in sizes.flatten() {
+            _ = fs::remove_file(size.path().join(format!("apps/{LEGACY_EXECUTABLE}.png")));
+        }
+    }
+    // The entry last: until it's gone, the prefix counts as VideoCRM's and the
+    // next update tries again.
+    _ = fs::remove_file(entry);
 }
 
 /// The files under `dir`, relative to the root it started from.
@@ -104,9 +123,11 @@ fn set_executable(_: &Path) -> Result<()> {
 fn install_disk_image(download: &Path, bundle: &Path) -> Result<()> {
     use std::process::Command;
 
+    use crate::installation::{BUNDLE, LEGACY_BUNDLE};
+
     let staging = download.parent().expect("the download is in the staging folder");
     let mount = staging.join("mount");
-    let staged = staging.join("VideoCRM.app");
+    let staged = staging.join(BUNDLE);
     fs::create_dir_all(&mount).map_err(|error| Error::io("cannot prepare the update", error))?;
 
     run(Command::new("/usr/bin/hdiutil")
@@ -114,14 +135,20 @@ fn install_disk_image(download: &Path, bundle: &Path) -> Result<()> {
         .arg(&mount)
         .arg(download))?;
     // ditto keeps the signature, extended attributes and symlinks.
-    let copied = run(Command::new("/usr/bin/ditto").arg(mount.join("VideoCRM.app")).arg(&staged));
+    let copied = run(Command::new("/usr/bin/ditto").arg(mount.join(BUNDLE)).arg(&staged));
     // A disk image still attached goes away when the Mac restarts; the update is fine without detaching.
     _ = run(Command::new("/usr/bin/hdiutil").args(["detach", "-quiet"]).arg(&mount))
         .or_else(|_| run(Command::new("/usr/bin/hdiutil").args(["detach", "-quiet", "-force"]).arg(&mount)));
     copied?;
     run(Command::new("/usr/bin/codesign").args(["--verify", "--strict"]).arg(&staged))?;
 
-    swap(&staged, bundle)
+    swap(&staged, bundle)?;
+    // VideoCRM.app, from before the rename, takes Rushes's name unless a copy has it.
+    let renamed = bundle.with_file_name(BUNDLE);
+    if bundle.file_name() == Some(LEGACY_BUNDLE.as_ref()) && !renamed.exists() {
+        _ = fs::rename(bundle, &renamed);
+    }
+    Ok(())
 }
 
 /// Exchanges the staged bundle with the installed one in one step, so the

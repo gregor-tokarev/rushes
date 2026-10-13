@@ -1,7 +1,7 @@
 //! Domain model shared by every layer of the application.
 //!
 //! These types are plain data. Persistence lives in `store`, presentation lives
-//! in the `videocrm` app crate. Ids are UUID v7 so they sort by creation time.
+//! in the `rushes` app crate. Ids are UUID v7 so they sort by creation time.
 
 use std::collections::BTreeMap;
 use std::fmt;

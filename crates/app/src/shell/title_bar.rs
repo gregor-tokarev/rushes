@@ -27,7 +27,7 @@ impl Workspace {
     ) -> impl IntoElement {
         if onboarding {
             return TitleBar::new()
-                .child(div().text_sm().font_medium().text_color(cx.theme().muted_foreground).child("VideoCRM"))
+                .child(div().text_sm().font_medium().text_color(cx.theme().muted_foreground).child("Rushes"))
                 .into_any_element();
         }
 

@@ -15,17 +15,17 @@ done
 exec "$@""#;
 
 /// Starts `command` once the process `pid` has exited, from a helper that
-/// outlives it. VideoCRM holds its data folder until it exits, so a copy
-/// started earlier would only say that VideoCRM is already open.
+/// outlives it. Rushes holds its data folder until it exits, so a copy
+/// started earlier would only say that Rushes is already open.
 pub(crate) fn run_after_exit(pid: u32, command: &Command) -> io::Result<()> {
     let mut helper = Command::new("/bin/sh");
-    helper.arg("-c").arg(WAIT_THEN_RUN).arg("videocrm-relaunch").arg(pid.to_string());
+    helper.arg("-c").arg(WAIT_THEN_RUN).arg("rushes-relaunch").arg(pid.to_string());
     helper.arg(command.get_program()).args(command.get_args());
     helper.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     #[cfg(unix)]
     {
         // Out of the terminal's process group: closing it or Ctrl+C there
-        // ends VideoCRM, not the helper that starts it again.
+        // ends Rushes, not the helper that starts it again.
         use std::os::unix::process::CommandExt as _;
         helper.process_group(0);
     }

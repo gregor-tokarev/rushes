@@ -46,7 +46,7 @@ pub enum StoreError {
     CreateDir { path: PathBuf, source: std::io::Error },
     #[error("could not create database file {path}: {source}")]
     CreateFile { path: PathBuf, source: std::io::Error },
-    #[error("database schema version {found} is newer than this version of VideoCRM supports ({supported})")]
+    #[error("database schema version {found} is newer than this version of Rushes supports ({supported})")]
     UnsupportedSchema { found: i64, supported: i64 },
     #[error("{entity} {id} not found")]
     NotFound { entity: &'static str, id: String },

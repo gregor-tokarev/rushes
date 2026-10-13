@@ -20,7 +20,7 @@ pub(crate) fn agent() -> Agent {
         .timeout_send_body(Some(Duration::from_secs(60)))
         .timeout_recv_response(Some(Duration::from_secs(120)))
         .timeout_recv_body(Some(Duration::from_secs(120)))
-        .user_agent(concat!("videocrm/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("rushes/", env!("CARGO_PKG_VERSION")))
         .build()
         .into()
 }

@@ -13,8 +13,8 @@ use gpui_kit::{
     App, AppContext as _, Axis, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
 };
-use videocrm_core::input::display_user_path;
-use videocrm_core::settings::{ThemeMode, WeekStart, data_dir};
+use rushes_core::input::display_user_path;
+use rushes_core::settings::{ThemeMode, WeekStart, data_dir};
 
 use crate::ai_edit::AiSettings;
 use crate::publish::YoutubeSettings;
@@ -158,7 +158,7 @@ impl SettingsPage {
                             .keywords(["footage", "path"]),
                         SettingItem::new("Data folder", data_folder_field())
                             .layout(Axis::Vertical)
-                            .description("Where VideoCRM keeps its database and your YouTube sign-in.")
+                            .description("Where Rushes keeps its database and your YouTube sign-in.")
                             .keywords(["database", "path"]),
                     ]),
                 ]),
@@ -176,7 +176,7 @@ impl SettingsPage {
     }
 }
 
-/// What VideoCRM is, and its version.
+/// What Rushes is, and its version.
 fn about_group() -> SettingGroup {
     setting_group().item(
         SettingItem::render(|_, _, cx| {
@@ -198,7 +198,7 @@ fn about_group() -> SettingGroup {
                                 .child(Icon::new(IconName::Clapperboard)),
                         )
                         .child(
-                            v_flex().child(div().font_semibold().child("VideoCRM")).child(
+                            v_flex().child(div().font_semibold().child("Rushes")).child(
                                 div()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)

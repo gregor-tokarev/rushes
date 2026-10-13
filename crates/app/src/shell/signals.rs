@@ -14,7 +14,7 @@ pub fn on_termination_signal(cx: &mut App, quit: impl FnOnce(&mut App) + 'static
     let mut signals = match Signals::new([Signal::Term, Signal::Int, Signal::Hup]) {
         Ok(signals) => signals,
         Err(error) => {
-            log_line!("videocrm: cannot listen for termination signals: {error}");
+            log_line!("rushes: cannot listen for termination signals: {error}");
             return;
         }
     };
@@ -25,9 +25,9 @@ pub fn on_termination_signal(cx: &mut App, quit: impl FnOnce(&mut App) + 'static
             let Some(Ok(signal)) = signals.next().await else { return };
             // Quit first: logging can't fail any more, but the quit must not depend on it.
             _ = received.send(());
-            log_line!("videocrm: {signal:?} received, saving and quitting");
+            log_line!("rushes: {signal:?} received, saving and quitting");
             if let Some(Ok(signal)) = signals.next().await {
-                log_line!("videocrm: {signal:?} received again, quitting now");
+                log_line!("rushes: {signal:?} received again, quitting now");
                 std::process::exit(128 + signal as i32);
             }
         })

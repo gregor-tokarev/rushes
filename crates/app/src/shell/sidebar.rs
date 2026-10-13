@@ -13,7 +13,7 @@ use gpui_kit::{
     AnyElement, App, Context, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Role, SharedString,
     StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
 };
-use videocrm_core::{RunStatus, UploadStatus, VideoId, ViewKind};
+use rushes_core::{RunStatus, UploadStatus, VideoId, ViewKind};
 
 use super::elements::shortcut_hint;
 use super::{NewVideo, OpenCommandPalette, Workspace};
@@ -291,7 +291,7 @@ impl Workspace {
                             .text_color(cx.theme().primary_foreground)
                             .child(Icon::new(IconName::Clapperboard).xsmall()),
                     )
-                    .child(div().text_sm().font_semibold().child("VideoCRM")),
+                    .child(div().text_sm().font_semibold().child("Rushes")),
             )
             .child(
                 Button::new("sidebar-new-video")

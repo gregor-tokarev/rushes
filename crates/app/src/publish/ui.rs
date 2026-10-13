@@ -17,8 +17,8 @@ use gpui_kit::{
     AnyElement, App, ClipboardItem, Div, ElementId, Entity, FontWeight, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, RenderOnce, SharedString, Styled as _, TestSupportExt as _, Window, div, relative,
 };
-use videocrm_core::{TagColor, UploadStatus};
-use videocrm_youtube::Account;
+use rushes_core::{TagColor, UploadStatus};
+use rushes_youtube::Account;
 
 use super::rules::group_thousands;
 use super::service::{Connection, YoutubeService};
@@ -449,7 +449,7 @@ pub(super) fn confirm_disconnect(service: Entity<YoutubeService>, key: String, w
         .then(|| youtube.accounts().iter().find(|other| other.key() != key))
         .flatten()
         .map(|other| display_name(other.account()));
-    let mut consequence = "VideoCRM forgets the sign-in and Google revokes it.".to_owned();
+    let mut consequence = "Rushes forgets the sign-in and Google revokes it.".to_owned();
     if uploading {
         consequence.push_str(" Its uploads in progress stop; you can resume them after connecting it again.");
     }

@@ -23,9 +23,9 @@ use gpui_kit::{
     IntoElement, ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
     TestSupportExt as _, WeakEntity, Window, div, px,
 };
-use videocrm_core::input::normalize_link;
-use videocrm_core::settings::WeekStart;
-use videocrm_core::{
+use rushes_core::input::normalize_link;
+use rushes_core::settings::WeekStart;
+use rushes_core::{
     BuiltinField, Column, ColumnLayout, PropertyDef, PropertyKind, PropertyValue, RunStatus, SortDirection, SortSpec,
     UploadStatus, VideoFormat, VideoId, VideoRow, VideoStatus, YoutubeState,
 };

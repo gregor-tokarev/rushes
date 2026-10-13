@@ -31,13 +31,13 @@ use gpui_kit::{
     IntoElement, ObjectFit, ParentElement as _, PathPromptOptions, Pixels, Rems, Render, SharedString, Styled as _,
     StyledImage as _, Subscription, Task, Window, canvas, div, img, rems,
 };
-use videocrm_core::document::DEFAULT_WPM;
-use videocrm_core::media::{self, MediaKind};
-use videocrm_core::settings::WeekStart;
-use videocrm_core::{
+use rushes_core::document::DEFAULT_WPM;
+use rushes_core::media::{self, MediaKind};
+use rushes_core::settings::WeekStart;
+use rushes_core::{
     DocumentKind, Privacy, PublishSettings, UploadJob, UploadStatus, Video, VideoFormat, VideoId, VideoStatus,
 };
-use videocrm_pipeline::{MediaInfo, kept_cuts};
+use rushes_pipeline::{MediaInfo, kept_cuts};
 
 use super::channel::{ChannelChoices, ChooseChannel};
 use super::chapters::{MIN_CHAPTERS, chapters, chapters_text, insert_chapters, timestamp};
@@ -108,7 +108,7 @@ enum FileTarget {
 impl FileTarget {
     fn placeholder(self) -> &'static str {
         match self {
-            FileTarget::Video => "~/Videos/VideoCRM/final.mp4",
+            FileTarget::Video => "~/Videos/Rushes/final.mp4",
             FileTarget::Thumbnail => "~/Pictures/thumbnail.png",
         }
     }
@@ -575,7 +575,7 @@ impl PublishPanel {
             let details = cx
                 .background_spawn(async move {
                     let size = std::fs::metadata(&path).ok().filter(|meta| meta.is_file()).map(|meta| meta.len());
-                    let media = size.and_then(|_| videocrm_pipeline::probe_media(&path));
+                    let media = size.and_then(|_| rushes_pipeline::probe_media(&path));
                     FileDetails { path, size, media }
                 })
                 .await;
@@ -642,7 +642,7 @@ impl PublishPanel {
                 // Linux needs the desktop portal for file dialogs; without it the path
                 // can still be typed or the file dropped on the card.
                 Ok(Err(error)) => {
-                    log_line!("videocrm: file chooser failed: {error}");
+                    log_line!("rushes: file chooser failed: {error}");
                     this.update_in(cx, |this, window, cx| {
                         let target = if thumbnail { FileTarget::Thumbnail } else { FileTarget::Video };
                         this.prompt_for_path(target, window, cx);

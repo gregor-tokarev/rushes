@@ -1,11 +1,11 @@
 //! Appearance: the embedded UI font, the light / dark / system theme mode and
-//! the few colours VideoCRM sets on top of the kit's theme.
+//! the few colours Rushes sets on top of the kit's theme.
 
 use std::borrow::Cow;
 
 use gpui_kit::component::{Colorize as _, Theme, ThemeMode as KitThemeMode};
 use gpui_kit::{App, Window};
-use videocrm_core::settings::ThemeMode;
+use rushes_core::settings::ThemeMode;
 
 use crate::ui::contrast::readable_on;
 
@@ -28,7 +28,7 @@ const UI_FONT_FILES: [&[u8]; 5] = [
 pub fn register_fonts(cx: &mut App) {
     let fonts = UI_FONT_FILES.iter().map(|bytes| Cow::Borrowed(*bytes)).collect();
     if let Err(error) = cx.text_system().add_fonts(fonts) {
-        log_line!("videocrm: cannot load the embedded UI font: {error}");
+        log_line!("rushes: cannot load the embedded UI font: {error}");
     }
 }
 
@@ -74,7 +74,7 @@ fn readable_danger_text(theme: &mut Theme) {
 
 /// Danger buttons commit destructive confirmations (Delete, Delete property…).
 /// The kit draws them as a pale tint with danger-coloured text, which reads as
-/// disabled in the light theme (about 2.9:1); VideoCRM draws them solid, with
+/// disabled in the light theme (about 2.9:1); Rushes draws them solid, with
 /// light text on a danger fill dark enough to read.
 fn solid_danger_buttons(theme: &mut Theme) {
     // Light text in both themes: the background of a light theme, the text of a dark one.

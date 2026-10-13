@@ -21,9 +21,9 @@ use gpui_kit::{
     ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Subscription, Task, TestSupportExt as _,
     Window, div,
 };
-use videocrm_core::VideoId;
-use videocrm_core::media::{self, MediaFile, MediaKind};
-use videocrm_pipeline::{MediaInfo, probe_media};
+use rushes_core::VideoId;
+use rushes_core::media::{self, MediaFile, MediaKind};
+use rushes_pipeline::{MediaInfo, probe_media};
 
 use super::format;
 use super::icons::media_icon;
@@ -142,7 +142,7 @@ impl FootageImports {
                 });
                 report(ImportMessage::Copied(pending));
                 copied.map(drop).map_err(|error| {
-                    log_line!("videocrm: couldn't copy {} into {}: {error}", source.display(), dir.display());
+                    log_line!("rushes: couldn't copy {} into {}: {error}", source.display(), dir.display());
                     format!(
                         "Couldn’t copy {}. Check that the disk has room and the file can be read, then add it again.",
                         file_name(source)
@@ -381,7 +381,7 @@ impl FootageCard {
             Ok(Some(paths)) => self.import(paths, cx),
             Ok(None) => {}
             Err(error) => {
-                log_line!("videocrm: file chooser failed: {error}");
+                log_line!("rushes: file chooser failed: {error}");
                 let card = cx.weak_entity();
                 let request = PathRequest::new(
                     PathKind::File,
@@ -716,7 +716,7 @@ mod tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{Bounds, TestAppContext, WindowBounds, WindowOptions, px, size};
-    use videocrm_core::{NewVideo, Store};
+    use rushes_core::{NewVideo, Store};
 
     use super::*;
 
@@ -780,7 +780,7 @@ mod tests {
     #[test]
     fn the_agent_is_told_about_every_take_the_card_lists() {
         let listed: HashSet<&str> = media::VIDEO_EXTENSIONS.iter().chain(media::AUDIO_EXTENSIONS).copied().collect();
-        let prompted: HashSet<&str> = videocrm_pipeline::FOOTAGE_EXTENSIONS.into_iter().collect();
+        let prompted: HashSet<&str> = rushes_pipeline::FOOTAGE_EXTENSIONS.into_iter().collect();
         assert_eq!(listed, prompted);
     }
 

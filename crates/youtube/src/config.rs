@@ -16,7 +16,7 @@ pub const DEFAULT_GOOGLE_EMULATOR_URL: &str = "http://127.0.0.1:4002";
 pub const DEFAULT_YOUTUBE_EMULATOR_URL: &str = "http://127.0.0.1:4020";
 
 /// OAuth client id used against the emulators, which accept any client.
-pub const EMULATOR_CLIENT_ID: &str = "videocrm-desktop.apps.googleusercontent.com";
+pub const EMULATOR_CLIENT_ID: &str = "rushes-desktop.apps.googleusercontent.com";
 
 /// Endpoints and OAuth client for one YouTube backend: real Google or the local emulators.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,13 +65,13 @@ impl YoutubeConfig {
         }
     }
 
-    /// Emulator config when `VIDEOCRM_GOOGLE_URL` or `VIDEOCRM_YOUTUBE_URL` is set; the
+    /// Emulator config when `RUSHES_GOOGLE_URL` or `RUSHES_YOUTUBE_URL` is set; the
     /// other one falls back to its default port.
     pub fn emulator_from_env() -> Option<Self> {
-        let google = std::env::var("VIDEOCRM_GOOGLE_URL")
+        let google = std::env::var("RUSHES_GOOGLE_URL")
             .ok()
             .filter(|v| !v.is_empty());
-        let youtube = std::env::var("VIDEOCRM_YOUTUBE_URL")
+        let youtube = std::env::var("RUSHES_YOUTUBE_URL")
             .ok()
             .filter(|v| !v.is_empty());
         if google.is_none() && youtube.is_none() {

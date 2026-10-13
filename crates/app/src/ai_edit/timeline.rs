@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use videocrm_core::RunEvent;
-use videocrm_pipeline::AgentEvent;
+use rushes_core::RunEvent;
+use rushes_pipeline::AgentEvent;
 
 /// Which kind of agent phase the app started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -58,7 +58,7 @@ pub struct PhaseStarted {
 pub enum MarkerKind {
     /// The creator stopped the agent.
     Cancelled,
-    /// VideoCRM closed while the agent worked.
+    /// Rushes closed while the agent worked.
     Interrupted,
     /// The creator discarded the proposed strategy.
     Discarded,
@@ -263,7 +263,7 @@ pub fn fold_timeline(entries: &[TimelineEntry]) -> Vec<TimelineItem> {
 
 /// How long the agent worked on a run: the sum of its phases, each as long as the
 /// agent reported (or from its start to its last event when it reported nothing), so
-/// the time the run waited for the creator, or VideoCRM was closed, does not count.
+/// the time the run waited for the creator, or Rushes was closed, does not count.
 /// A phase still running counts until `now`.
 pub fn agent_time(entries: &[TimelineEntry], now: Option<DateTime<Utc>>) -> Duration {
     let mut total = Duration::ZERO;
@@ -286,7 +286,7 @@ pub fn agent_time(entries: &[TimelineEntry], now: Option<DateTime<Utc>>) -> Dura
                 continue;
             }
             (_, true) => now,
-            // The interruption marker is written when VideoCRM starts again.
+            // The interruption marker is written when Rushes starts again.
             (None, false) => phase
                 .iter()
                 .rev()
@@ -543,7 +543,7 @@ mod tests {
         ];
         for (seq, event) in (1..).zip(events) {
             let payload = event.to_payload();
-            let stored = RunEvent { run_id: videocrm_core::RunId::new(), seq, at: Utc::now(), payload };
+            let stored = RunEvent { run_id: rushes_core::RunId::new(), seq, at: Utc::now(), payload };
             assert_eq!(TimelineEntry::from(stored).event, event);
         }
         let marker = LogEvent::Phase(PhaseStarted { phase: PhaseKind::Approve, text: None, retry: false }).to_payload();
@@ -554,7 +554,7 @@ mod tests {
         assert_eq!(marker, serde_json::json!({ "type": "run_marker", "kind": "cut_kept", "cut": "/cuts/final-1.mp4" }));
 
         let garbage = RunEvent {
-            run_id: videocrm_core::RunId::new(),
+            run_id: rushes_core::RunId::new(),
             seq: 9,
             at: Utc::now(),
             payload: serde_json::json!({ "type": "from_the_future" }),

@@ -10,7 +10,7 @@ use gpui_kit::{
     Context, ElementId, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Rems, Render,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
 };
-use videocrm_core::{PipelineRun, RunStatus};
+use rushes_core::{PipelineRun, RunStatus};
 
 use super::format;
 use super::service::PipelineService;

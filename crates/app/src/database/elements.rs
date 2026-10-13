@@ -12,7 +12,7 @@ use gpui_kit::{
     SharedString, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, TestSupportExt as _, Window, div,
     rems,
 };
-use videocrm_core::{SelectOption, TagColor};
+use rushes_core::{SelectOption, TagColor};
 
 use super::colors::tag_colors;
 use super::format;

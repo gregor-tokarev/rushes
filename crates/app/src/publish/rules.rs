@@ -3,8 +3,8 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use videocrm_core::{Privacy, Video};
-use videocrm_youtube::VideoMetadata;
+use rushes_core::{Privacy, Video};
+use rushes_youtube::VideoMetadata;
 
 pub const TITLE_MAX_CHARS: usize = 100;
 pub const DESCRIPTION_MAX_BYTES: usize = 5000;
@@ -189,19 +189,19 @@ pub fn metadata(video: &Video) -> VideoMetadata {
     }
 }
 
-pub fn youtube_privacy(privacy: Privacy) -> videocrm_youtube::Privacy {
+pub fn youtube_privacy(privacy: Privacy) -> rushes_youtube::Privacy {
     match privacy {
-        Privacy::Private => videocrm_youtube::Privacy::Private,
-        Privacy::Unlisted => videocrm_youtube::Privacy::Unlisted,
-        Privacy::Public => videocrm_youtube::Privacy::Public,
+        Privacy::Private => rushes_youtube::Privacy::Private,
+        Privacy::Unlisted => rushes_youtube::Privacy::Unlisted,
+        Privacy::Public => rushes_youtube::Privacy::Public,
     }
 }
 
-pub fn core_privacy(privacy: videocrm_youtube::Privacy) -> Privacy {
+pub fn core_privacy(privacy: rushes_youtube::Privacy) -> Privacy {
     match privacy {
-        videocrm_youtube::Privacy::Private => Privacy::Private,
-        videocrm_youtube::Privacy::Unlisted => Privacy::Unlisted,
-        videocrm_youtube::Privacy::Public => Privacy::Public,
+        rushes_youtube::Privacy::Private => Privacy::Private,
+        rushes_youtube::Privacy::Unlisted => Privacy::Unlisted,
+        rushes_youtube::Privacy::Public => Privacy::Public,
     }
 }
 
@@ -221,7 +221,7 @@ pub fn group_thousands(value: usize) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::TimeDelta;
-    use videocrm_core::PublishChannel;
+    use rushes_core::PublishChannel;
 
     use super::*;
 
@@ -367,7 +367,7 @@ mod tests {
         let metadata = metadata(&video);
         assert_eq!(metadata.title, "Rust in 100 seconds");
         assert_eq!(metadata.category_id, DEFAULT_CATEGORY);
-        assert_eq!(metadata.privacy, videocrm_youtube::Privacy::Unlisted);
+        assert_eq!(metadata.privacy, rushes_youtube::Privacy::Unlisted);
         assert!(metadata.made_for_kids);
         assert!(metadata.validate().is_ok());
 

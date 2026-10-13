@@ -12,7 +12,7 @@ use gpui_kit::{
     App, AppContext as _, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, SharedString, Styled as _, Subscription, Window, div,
 };
-use videocrm_core::{PropertyDef, PropertyId, PropertyKind, SelectOption, TagColor};
+use rushes_core::{PropertyDef, PropertyId, PropertyKind, SelectOption, TagColor};
 
 use super::colors::tag_colors;
 use super::elements::Chip;

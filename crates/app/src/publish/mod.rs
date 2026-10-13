@@ -34,7 +34,7 @@ pub use upload::{
 pub use uploads_page::UploadsPage;
 
 use gpui_kit::App;
-use videocrm_core::VideoId;
+use rushes_core::VideoId;
 
 /// A sentence for delete confirmations when one of `video_ids` is uploading: deleting
 /// a video cancels its upload. `None` when none is.

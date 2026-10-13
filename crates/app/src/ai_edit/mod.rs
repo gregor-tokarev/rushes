@@ -30,7 +30,7 @@ pub use timeline::{
 };
 
 use gpui_kit::App;
-use videocrm_core::VideoId;
+use rushes_core::VideoId;
 
 /// A sentence for delete confirmations when an AI edit of one of `video_ids` is
 /// running: deleting a video stops its agent. `None` when none is.

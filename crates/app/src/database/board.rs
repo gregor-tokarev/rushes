@@ -13,7 +13,7 @@ use gpui_kit::{
     MouseMoveEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
     TestSupportExt as _, Window, canvas, div,
 };
-use videocrm_core::{VideoId, VideoRow, VideoStatus};
+use rushes_core::{VideoId, VideoRow, VideoStatus};
 
 use super::colors::{format_color, free_tag_color, run_status_color, tag_colors, youtube_color};
 use super::elements::{Chip, muted_icon, youtube_gone};

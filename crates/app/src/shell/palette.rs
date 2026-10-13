@@ -14,7 +14,7 @@ use gpui_kit::{
     Action, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, Styled as _, WeakEntity, Window, div,
 };
-use videocrm_core::{VideoId, ViewKind};
+use rushes_core::{VideoId, ViewKind};
 
 use super::sidebar::display_title;
 use super::{NewVideo, OpenSettings, ToggleSidebar, ToggleTheme, Workspace};

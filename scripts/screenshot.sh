@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run a VideoCRM binary/example under a virtual display and capture screenshots.
+# Run a Rushes binary/example under a virtual display and capture screenshots.
 #
 #   scripts/screenshot.sh [-d :99] [-w 8] [-o /tmp/shot.png] -- <command...>
 #
@@ -9,7 +9,7 @@ set -euo pipefail
 
 display=":99"
 wait_secs=8
-out="/tmp/videocrm-shot.png"
+out="/tmp/rushes-shot.png"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -d) display="$2"; shift 2 ;;
@@ -27,11 +27,11 @@ if ! xdpyinfo -display "$display" >/dev/null 2>&1; then
 fi
 
 export DISPLAY="$display"
-"$@" >"/tmp/videocrm-app-${display#:}.log" 2>&1 &
+"$@" >"/tmp/rushes-app-${display#:}.log" 2>&1 &
 app_pid=$!
 sleep "$wait_secs"
 import -window root "$out"
-echo "screenshot: $out (app pid $app_pid, log /tmp/videocrm-app-${display#:}.log)"
+echo "screenshot: $out (app pid $app_pid, log /tmp/rushes-app-${display#:}.log)"
 if [[ "${KEEP:-0}" != "1" ]]; then
   kill "$app_pid" 2>/dev/null || true
 fi

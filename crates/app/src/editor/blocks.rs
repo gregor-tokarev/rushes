@@ -5,7 +5,7 @@
 
 use std::ops::Range;
 
-use videocrm_core::{Block, BlockId, BlockKind};
+use rushes_core::{Block, BlockId, BlockKind};
 
 use super::markdown::is_list;
 

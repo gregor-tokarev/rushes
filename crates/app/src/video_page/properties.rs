@@ -22,8 +22,8 @@ use gpui_kit::{
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
     TestSupportExt as _, Window, div, rems,
 };
-use videocrm_core::input::{normalize_link, parse_number};
-use videocrm_core::{
+use rushes_core::input::{normalize_link, parse_number};
+use rushes_core::{
     Column, PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, Video, VideoFormat, VideoId, VideoRow,
     VideoStatus, ViewKind,
 };

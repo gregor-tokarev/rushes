@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 use gpui_kit::assets::{IconName, icon_assets};
 use gpui_kit::{AssetSource, Result, SharedString};
-use videocrm_core::media::MediaKind;
+use rushes_core::media::MediaKind;
 
 icon_assets!(
     pub AiEditIcons,

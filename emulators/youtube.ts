@@ -1,4 +1,4 @@
-// YouTube Data API v3 emulator: the subset VideoCRM uses (channels, resumable video
+// YouTube Data API v3 emulator: the subset Rushes uses (channels, resumable video
 // uploads, videos, thumbnails, uploads playlist) with Google-style error bodies.
 //
 // Bearer tokens are validated against the Google emulator's userinfo endpoint. Video
@@ -517,7 +517,7 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
       const authCacheMs = options.authCacheMs ?? 5000;
 
       // Upload spool and custom thumbnails; state only records sizes and hashes.
-      const spool = mkdtempSync(join(tmpdir(), "videocrm-youtube-emulator-"));
+      const spool = mkdtempSync(join(tmpdir(), "rushes-youtube-emulator-"));
       onDispose(() => rmSync(spool, { recursive: true, force: true }));
       const sessionFile = (id: string) => join(spool, `upload-${id}.bin`);
       const thumbnailFile = (id: string) => join(spool, `thumbnail-${id}`);
@@ -1218,12 +1218,12 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
 }
 
 function encodePageToken(offset: number): string {
-  return Buffer.from(`videocrm:${offset}`).toString("base64url");
+  return Buffer.from(`rushes:${offset}`).toString("base64url");
 }
 
 function decodePageToken(token: string | undefined): number {
   if (!token) return 0;
-  const match = /^videocrm:(\d+)$/.exec(Buffer.from(token, "base64url").toString());
+  const match = /^rushes:(\d+)$/.exec(Buffer.from(token, "base64url").toString());
   if (!match) throw badRequest("invalidPageToken", "The request specifies an invalid page token.", { location: "pageToken" });
   return Number(match[1]);
 }

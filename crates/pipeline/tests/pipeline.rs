@@ -10,7 +10,7 @@ use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
 use tempfile::TempDir;
-use videocrm_pipeline::{
+use rushes_pipeline::{
     AgentConfig, AgentEvent, Phase, PhaseOutcome, PipelineError, RunContext, list_footage, probe_media, run_phase,
 };
 
@@ -153,7 +153,7 @@ fn plan_then_approve_then_feedback() {
 
     let argv = ws.argv();
     assert_eq!(argv[0], "-p");
-    assert!(argv[1].starts_with("VideoCRM edit request (planning phase)."));
+    assert!(argv[1].starts_with("Rushes edit request (planning phase)."));
     assert!(argv[1].contains("- take1.mp4 (0:03, 320x240)"));
     assert!(argv[1].contains(&format!("{skill_dir}/SKILL.md")), "symlink resolved");
     for expected in [
@@ -393,7 +393,7 @@ mod cancel {
     /// starts a phase with an agent waiting in a child of its own, like ffmpeg.
     #[test]
     fn the_agent_dies_with_a_killed_app() {
-        const APP_DIR: &str = "VIDEOCRM_TEST_KILLED_APP_DIR";
+        const APP_DIR: &str = "RUSHES_TEST_KILLED_APP_DIR";
         if let Some(dir) = std::env::var_os(APP_DIR) {
             let dir = PathBuf::from(dir);
             let ctx =

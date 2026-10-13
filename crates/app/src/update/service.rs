@@ -1,4 +1,4 @@
-//! [`UpdateService`]: keeps the running VideoCRM up to date with its releases.
+//! [`UpdateService`]: keeps Rushes up to date with its releases.
 //!
 //! A copy installed from a release asks GitHub for a newer one a minute after
 //! it starts and every few hours after, while automatic updates are on. A
@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui_kit::{App, AppContext as _, Context, Entity, Global, SharedString, Subscription, Task};
-use videocrm_update::{Asset, Delivery, Error as UpdateError, ManualReason, Progress, Update, Updater, Version};
+use rushes_update::{Asset, Delivery, Error as UpdateError, ManualReason, Progress, Update, Updater, Version};
 
 use super::copy;
 use crate::state::{AppEvent, AppState};
@@ -183,12 +183,12 @@ impl UpdateService {
     }
 
     /// Starts the installed version: once this process exits, a helper opens
-    /// VideoCRM again, then the app quits (saving pending edits as Quit does).
+    /// Rushes again, then the app quits (saving pending edits as Quit does).
     pub fn restart(&mut self, cx: &mut Context<Self>) {
         match self.updater.relaunch_after_exit() {
             Ok(()) => cx.quit(),
             Err(error) => {
-                log_line!("videocrm: cannot restart: {error}");
+                log_line!("rushes: cannot restart: {error}");
                 let version = self.installed.clone();
                 crate::ui::push_notification(cx, move || copy::restart_failed(version.as_ref()));
             }
@@ -237,7 +237,7 @@ impl UpdateService {
             Ok(Some(update)) => update,
             Ok(None) => return self.set_status(UpdateStatus::UpToDate { checked_at: Utc::now() }, cx),
             Err(error) => {
-                log_line!("videocrm: update check: {error}");
+                log_line!("rushes: update check: {error}");
                 return self.set_status(UpdateStatus::Failed(copy::check_failed(&error)), cx);
             }
         };
@@ -310,7 +310,7 @@ impl UpdateService {
         self.work = None;
         match result {
             Ok(()) => {
-                log_line!("videocrm: installed version {version}; it starts with the next launch");
+                log_line!("rushes: installed version {version}; it starts with the next launch");
                 self.installed = Some(version.clone());
                 if self.first_notice(&version, Notice::Ready) {
                     crate::ui::push_notification(cx, move || copy::ready_notification(&version));
@@ -319,7 +319,7 @@ impl UpdateService {
             }
             Err(UpdateError::Cancelled) => self.set_status(UpdateStatus::Idle, cx),
             Err(error) => {
-                log_line!("videocrm: installing version {version}: {error}");
+                log_line!("rushes: installing version {version}: {error}");
                 let failure = copy::install_failed(&version, &error, page_url);
                 if trigger == Trigger::Automatic && self.first_notice(&version, Notice::Failed) {
                     let failure = failure.clone();

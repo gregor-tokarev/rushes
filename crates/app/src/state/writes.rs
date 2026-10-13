@@ -26,10 +26,10 @@ use std::time::{Duration, Instant};
 use gpui_kit::{AppContext as _, Context, Subscription, Task};
 use rusqlite::ErrorCode;
 use serde::{Deserialize, Serialize};
-use videocrm_core::document::{DEFAULT_WPM, runtime_secs_for_words, spoken_word_count};
-use videocrm_core::settings::AppSettings;
-use videocrm_core::store::{forget_property, reconcile_property_value};
-use videocrm_core::{
+use rushes_core::document::{DEFAULT_WPM, runtime_secs_for_words, spoken_word_count};
+use rushes_core::settings::AppSettings;
+use rushes_core::store::{forget_property, reconcile_property_value};
+use rushes_core::{
     DatabaseView, Document, DocumentId, DocumentKind, PipelineRun, PropertyDef, PropertyId, RunEvent, RunId, Store,
     StoreError, UploadId, UploadJob, Video, VideoId, VideoRow, ViewId,
 };
@@ -686,7 +686,7 @@ impl Writes {
     /// the app last quit are queued again and tried once; the problem says so.
     pub(super) fn new(store: SharedStore, database: Option<&Path>) -> (Self, Option<Problem>) {
         if let Err(error) = lock(&store).set_busy_timeout(WRITE_BUSY_TIMEOUT) {
-            log_line!("videocrm: can't set the writer's busy timeout: {error}");
+            log_line!("rushes: can't set the writer's busy timeout: {error}");
         }
         let unsaved_file = database.and_then(Path::parent).map(|folder| folder.join(UNSAVED_FILE));
         let queue = Mutex::new(Queue::default());
@@ -762,7 +762,7 @@ impl Writes {
         let log = std::mem::replace(&mut self.logged_kept, writes.len()) != writes.len();
         let Some(file) = &self.unsaved_file else {
             if log && !writes.is_empty() {
-                log_line!("videocrm: {changes} couldn’t be saved before quitting");
+                log_line!("rushes: {changes} couldn’t be saved before quitting");
             }
             return;
         };
@@ -771,7 +771,7 @@ impl Writes {
                 match fs::remove_file(file) {
                     Ok(()) => self.unsaved_kept = false,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => self.unsaved_kept = false,
-                    Err(error) => log_line!("videocrm: can't remove {}: {error}", file.display()),
+                    Err(error) => log_line!("rushes: can't remove {}: {error}", file.display()),
                 }
             }
             return;
@@ -781,12 +781,12 @@ impl Writes {
                 self.unsaved_kept = true;
                 if log {
                     log_line!(
-                        "videocrm: {changes} couldn’t be saved before quitting; kept in {} for the next start",
+                        "rushes: {changes} couldn’t be saved before quitting; kept in {} for the next start",
                         file.display()
                     );
                 }
             }
-            Err(error) => log_line!("videocrm: {changes} are lost, can't write {}: {error}", file.display()),
+            Err(error) => log_line!("rushes: {changes} are lost, can't write {}: {error}", file.display()),
         }
     }
 }
@@ -809,7 +809,7 @@ impl AppState {
                     if write.reports_refusal(&error) {
                         self.report_problem(Problem::store(write.failure_title(), &error), cx);
                     } else {
-                        log_line!("videocrm: {}: {error}", write.failure_title());
+                        log_line!("rushes: {}: {error}", write.failure_title());
                     }
                     return false;
                 }
@@ -868,7 +868,7 @@ impl AppState {
             if write.reports_refusal(error) {
                 self.report_problem(Problem::store(write.failure_title(), error), cx);
             } else {
-                log_line!("videocrm: {}: {error}", write.failure_title());
+                log_line!("rushes: {}: {error}", write.failure_title());
             }
         }
         let known: Vec<VideoId> = self.rows.iter().map(|row| row.video.id).collect();
@@ -906,7 +906,7 @@ impl AppState {
         if std::mem::replace(&mut self.writes.reported, true) {
             return;
         }
-        log_line!("videocrm: couldn’t save, retrying: {error}");
+        log_line!("rushes: couldn’t save, retrying: {error}");
         let subject = lock(&self.writes.queue).failing_subject();
         let (what, it) = (subject.name(), if matches!(subject, Subject::Changes) { "them" } else { "it" });
         let code = match error {
@@ -915,20 +915,20 @@ impl AppState {
         };
         let message = if error.is_busy() {
             format!(
-                "Couldn’t save {what}: another program is using the database. VideoCRM keeps trying and saves {it} when the database is free."
+                "Couldn’t save {what}: another program is using the database. Rushes keeps trying and saves {it} when the database is free."
             )
         } else if code == Some(ErrorCode::DiskFull) {
             format!(
-                "Couldn’t save {what}: the disk is full. Free up some space; VideoCRM keeps trying and saves {it} then."
+                "Couldn’t save {what}: the disk is full. Free up some space; Rushes keeps trying and saves {it} then."
             )
         } else if matches!(code, Some(ErrorCode::ReadOnly | ErrorCode::PermissionDenied | ErrorCode::CannotOpen)) {
             format!(
-                "Couldn’t save {what}: VideoCRM can’t write to its data folder. Check that the folder is yours and not read-only; VideoCRM keeps trying."
+                "Couldn’t save {what}: Rushes can’t write to its data folder. Check that the folder is yours and not read-only; Rushes keeps trying."
             )
         } else if matches!(subject, Subject::Changes) {
-            format!("Couldn’t save {what}. VideoCRM keeps trying; keep the app open until they’re saved.")
+            format!("Couldn’t save {what}. Rushes keeps trying; keep the app open until they’re saved.")
         } else {
-            format!("Couldn’t save {what}. VideoCRM keeps trying; keep the app open until it shows as saved.")
+            format!("Couldn’t save {what}. Rushes keeps trying; keep the app open until it shows as saved.")
         };
         self.report_error(message, cx);
     }
@@ -946,7 +946,7 @@ impl AppState {
             // Taking the connection waits for a pass in flight, within the deadline.
             let store = lock(&self.writes.store);
             if let Err(error) = store.set_busy_timeout(deadline.saturating_duration_since(Instant::now())) {
-                log_line!("videocrm: can't set the writer's busy timeout: {error}");
+                log_line!("rushes: can't set the writer's busy timeout: {error}");
             }
             drop(store);
             let pass = write_queue(&self.writes.store, &self.writes.queue);
@@ -962,12 +962,12 @@ impl AppState {
             }
         }
         if let Err(error) = lock(&self.writes.store).set_busy_timeout(WRITE_BUSY_TIMEOUT) {
-            log_line!("videocrm: can't set the writer's busy timeout: {error}");
+            log_line!("rushes: can't set the writer's busy timeout: {error}");
         }
         if let Some(error) = failure
             && lock(&self.writes.queue).len() != self.writes.logged_kept
         {
-            log_line!("videocrm: couldn’t save before quitting: {error}");
+            log_line!("rushes: couldn’t save before quitting: {error}");
         }
         self.writes.keep_unsaved();
     }
@@ -975,7 +975,7 @@ impl AppState {
 
 fn log_refused(pass: &Pass) {
     for (write, error) in &pass.refused {
-        log_line!("videocrm: {}: {error}", write.failure_title());
+        log_line!("rushes: {}: {error}", write.failure_title());
     }
 }
 
@@ -984,12 +984,12 @@ fn log_refused(pass: &Pass) {
 fn recovered_problem(saved: bool) -> Problem {
     let (message, severity) = if saved {
         (
-            "VideoCRM couldn’t save some changes before it last quit. It kept them, and they’re saved now.",
+            "Rushes couldn’t save some changes before it last quit. It kept them, and they’re saved now.",
             Severity::Success,
         )
     } else {
         (
-            "VideoCRM couldn’t save some changes before it last quit. It kept them and saves them as soon as the database is free.",
+            "Rushes couldn’t save some changes before it last quit. It kept them and saves them as soon as the database is free.",
             Severity::Info,
         )
     };
@@ -1002,7 +1002,7 @@ fn read_unsaved(file: &Path) -> Option<Result<Vec<Write>, Problem>> {
         Problem::new(
             "Some changes from last time couldn’t be restored",
             format!(
-                "VideoCRM kept changes it couldn’t save before it last quit, but can’t read them. They’re in {} in the data folder.",
+                "Rushes kept changes it couldn’t save before it last quit, but can’t read them. They’re in {} in the data folder.",
                 UNSAVED_FILE.replace(".json", ".unreadable.json")
             ),
         )
@@ -1011,17 +1011,17 @@ fn read_unsaved(file: &Path) -> Option<Result<Vec<Write>, Problem>> {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
         Err(error) => {
-            log_line!("videocrm: can't read {}: {error}", file.display());
+            log_line!("rushes: can't read {}: {error}", file.display());
             return Some(Err(lost()));
         }
     };
     match serde_json::from_slice(&bytes) {
         Ok(writes) => Some(Ok(writes)),
         Err(error) => {
-            log_line!("videocrm: can't read the unsaved changes in {}: {error}", file.display());
+            log_line!("rushes: can't read the unsaved changes in {}: {error}", file.display());
             // Set aside, so it isn't read again at every start.
             if let Err(error) = fs::rename(file, file.with_extension("unreadable.json")) {
-                log_line!("videocrm: can't set aside {}: {error}", file.display());
+                log_line!("rushes: can't set aside {}: {error}", file.display());
             }
             Some(Err(lost()))
         }
@@ -1045,8 +1045,8 @@ fn write_private_json(file: &Path, value: &impl Serialize) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use videocrm_core::store::blank_document;
-    use videocrm_core::{Block, PropertyKind, PropertyValue, SelectOption, TagColor};
+    use rushes_core::store::blank_document;
+    use rushes_core::{Block, PropertyKind, PropertyValue, SelectOption, TagColor};
 
     use super::*;
 
@@ -1127,7 +1127,7 @@ mod tests {
 
     #[test]
     fn queued_documents_and_videos_show_before_they_are_written() {
-        let (video, documents) = videocrm_core::NewVideo { title: "New".into(), ..Default::default() }.build(3.0);
+        let (video, documents) = rushes_core::NewVideo { title: "New".into(), ..Default::default() }.build(3.0);
         let mut queue = Queue::default();
         queue.push(Write::CreateVideo { video: video.clone(), documents: documents.clone() });
         let mut script = documents[0].clone();
@@ -1151,9 +1151,9 @@ mod tests {
     #[test]
     fn a_busy_database_keeps_the_queue_in_order_until_it_is_free() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("videocrm.db");
+        let path = dir.path().join("rushes.db");
         let mut setup = Store::open(&path).unwrap();
-        let (video, documents) = videocrm_core::NewVideo { title: "Desk".into(), ..Default::default() }.build(0.0);
+        let (video, documents) = rushes_core::NewVideo { title: "Desk".into(), ..Default::default() }.build(0.0);
         setup.insert_video_with_documents(&video, &documents).unwrap();
         let writer = Store::open(&path).unwrap();
         writer.set_busy_timeout(Duration::from_millis(50)).unwrap();
@@ -1196,7 +1196,7 @@ mod tests {
         queue.push(event(1));
         queue.push(Write::Run(run.clone()));
         queue.push(event(2));
-        run.status = videocrm_core::RunStatus::AwaitingApproval;
+        run.status = rushes_core::RunStatus::AwaitingApproval;
         queue.push(Write::Run(run.clone()));
         queue.push(Write::Video(video.clone()));
         queue.push(Write::Video(Video { title: "Desk setup".into(), ..video.clone() }));
@@ -1245,7 +1245,7 @@ mod tests {
         PipelineRun {
             id: RunId::new(),
             video_id,
-            status: videocrm_core::RunStatus::Planning,
+            status: rushes_core::RunStatus::Planning,
             brief: "Cut it tight.".into(),
             footage_dir: "/media/desk/footage".into(),
             session_id: None,
@@ -1261,7 +1261,7 @@ mod tests {
     #[test]
     fn a_failing_create_holds_back_the_later_writes_of_its_video_only() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("videocrm.db");
+        let path = dir.path().join("rushes.db");
         let mut setup = Store::open(&path).unwrap();
         let other = Video::new("Studio tour");
         setup.insert_video(&other).unwrap();
@@ -1269,7 +1269,7 @@ mod tests {
         let disk = no_room(&path, "videos");
 
         let (video, documents) =
-            videocrm_core::NewVideo { title: "Full disk test".into(), ..Default::default() }.build(1.0);
+            rushes_core::NewVideo { title: "Full disk test".into(), ..Default::default() }.build(1.0);
         let mut script = documents[0].clone();
         script.blocks = vec![Block::paragraph("Typed on a full disk")];
         let queue = Mutex::new(Queue::default());
@@ -1299,7 +1299,7 @@ mod tests {
     #[test]
     fn a_failing_run_or_upload_insert_holds_back_its_later_states() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("videocrm.db");
+        let path = dir.path().join("rushes.db");
         let mut setup = Store::open(&path).unwrap();
         let video = Video::new("Desk setup tour");
         setup.insert_video(&video).unwrap();
@@ -1317,7 +1317,7 @@ mod tests {
             video_id: video.id,
             file: "/media/desk/footage/edit/final.mp4".into(),
             file_stamp: None,
-            status: videocrm_core::UploadStatus::Pending,
+            status: rushes_core::UploadStatus::Pending,
             session_url: None,
             channel: None,
             created_at: now,
@@ -1326,9 +1326,9 @@ mod tests {
         let queue = Mutex::new(Queue::default());
         lock(&queue).push(Write::InsertRun(run.clone()));
         lock(&queue).push(Write::InsertUpload(job.clone()));
-        run.status = videocrm_core::RunStatus::AwaitingApproval;
+        run.status = rushes_core::RunStatus::AwaitingApproval;
         lock(&queue).push(Write::Run(run.clone()));
-        job.status = videocrm_core::UploadStatus::Done { video_id: "7iSYEubHWqU".into() };
+        job.status = rushes_core::UploadStatus::Done { video_id: "7iSYEubHWqU".into() };
         lock(&queue).push(Write::Upload(job.clone()));
         lock(&queue).push(Write::Video(Video { title: "Desk setup".into(), ..video.clone() }));
 
@@ -1348,7 +1348,7 @@ mod tests {
     #[test]
     fn a_failing_property_definition_holds_back_every_later_write() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("videocrm.db");
+        let path = dir.path().join("rushes.db");
         let mut setup = Store::open(&path).unwrap();
         let property = select(&["high", "low"]);
         let mut video = Video::new("Desk setup tour");

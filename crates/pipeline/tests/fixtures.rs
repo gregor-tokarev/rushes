@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use videocrm_pipeline::{AgentEvent, parse_line};
+use rushes_pipeline::{AgentEvent, parse_line};
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -64,7 +64,7 @@ fn text_reply() {
         AgentEvent::Init { session_id, model, cwd, tools }
             if session_id == "8d866463-5779-4c0b-9025-12efe651c243"
                 && model == "claude-haiku-4-5-20251001"
-                && cwd == &PathBuf::from("/tmp/videocrm-capture")
+                && cwd == &PathBuf::from("/tmp/rushes-capture")
                 && tools.iter().any(|tool| tool == "Skill")
     ));
     // Redacted thinking blocks, thinking-token counters and rate-limit notices yield nothing.
@@ -90,9 +90,9 @@ fn tool_calls_are_summarised() {
     let AgentEvent::Init { cwd, tools, .. } = &events[0] else {
         panic!("init first");
     };
-    assert_eq!(cwd, &PathBuf::from("/tmp/videocrm-capture/footage"));
+    assert_eq!(cwd, &PathBuf::from("/tmp/rushes-capture/footage"));
     assert!(tools.iter().any(|tool| tool == "Bash"));
-    assert_eq!(tool_use_names(&events), [("Bash", "ls"), ("Read", "/tmp/videocrm-capture/skilldir/SKILL.md")]);
+    assert_eq!(tool_use_names(&events), [("Bash", "ls"), ("Read", "/tmp/rushes-capture/skilldir/SKILL.md")]);
     let results: Vec<_> = events
         .iter()
         .filter_map(|event| match event {

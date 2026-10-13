@@ -39,6 +39,6 @@ if git rev-parse -q --verify "refs/tags/v$version" > /dev/null; then
   echo "Tag v$version exists already, on another commit." >&2
   exit 1
 fi
-git tag -a "v$version" -m "VideoCRM $version"
+git tag -a "v$version" -m "Rushes $version"
 echo "Tagged v$version." >&2
 echo "v$version"

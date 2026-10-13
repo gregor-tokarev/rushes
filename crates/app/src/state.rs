@@ -15,10 +15,10 @@ mod writes;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use gpui_kit::*;
-use videocrm_core::media;
-use videocrm_core::settings::AppSettings;
-use videocrm_core::store::{blank_document, copy_of};
-use videocrm_core::{
+use rushes_core::media;
+use rushes_core::settings::AppSettings;
+use rushes_core::store::{blank_document, copy_of};
+use rushes_core::{
     DatabaseView, Document, DocumentKind, NewVideo, PropertyDef, PropertyId, Store, StoreError, Video, VideoId,
     VideoRow, ViewId,
 };
@@ -581,7 +581,7 @@ fn shown_route(route: &Route, views: &[DatabaseView]) -> Route {
 }
 
 /// The stored settings. Values this version can't read (an unknown theme from a
-/// newer VideoCRM, a field of the wrong type) fall back to their defaults one
+/// newer version of Rushes, a field of the wrong type) fall back to their defaults one
 /// by one instead of keeping the creator from their videos; the stored JSON is
 /// left alone until a setting is changed.
 fn load_settings(store: &Store) -> Result<(AppSettings, Option<Problem>), StoreError> {
@@ -590,7 +590,7 @@ fn load_settings(store: &Store) -> Result<(AppSettings, Option<Problem>), StoreE
         Err(error @ StoreError::Sqlite(rusqlite::Error::FromSqlConversionFailure(..))) => error,
         Err(error) => return Err(error),
     };
-    log_line!("videocrm: some settings can't be read, using their defaults: {error}");
+    log_line!("rushes: some settings can't be read, using their defaults: {error}");
     let stored = match store.get_setting::<serde_json::Value>(APP_SETTINGS_KEY) {
         Ok(stored) => stored.unwrap_or_default(),
         Err(StoreError::Sqlite(rusqlite::Error::FromSqlConversionFailure(..))) => serde_json::Value::Null,
@@ -598,7 +598,7 @@ fn load_settings(store: &Store) -> Result<(AppSettings, Option<Problem>), StoreE
     };
     let problem = Problem::new(
         "Some settings couldn’t be read",
-        "Another version of VideoCRM saved them, so they use their defaults for now. Your videos aren’t affected.",
+        "Another version of Rushes saved them, so they use their defaults for now. Your videos aren’t affected.",
     )
     .with_remedy(Remedy::OpenSettings(SettingsSection::General));
     Ok((readable_settings(stored), Some(problem)))
@@ -637,9 +637,9 @@ fn readable_settings(stored: serde_json::Value) -> AppSettings {
 
 #[cfg(test)]
 mod tests {
+    use rushes_core::Store;
+    use rushes_core::settings::ThemeMode;
     use serde_json::json;
-    use videocrm_core::Store;
-    use videocrm_core::settings::ThemeMode;
 
     // Not a glob: the parent's `gpui_kit::*` would bring GPUI's `test` macro.
     use super::{APP_SETTINGS_KEY, load_settings, readable_settings};

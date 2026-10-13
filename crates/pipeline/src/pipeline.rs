@@ -25,7 +25,7 @@ const CUTS_DIR: &str = "cuts";
 /// Where [`set_aside_final_cut`] moves renders nobody can use, inside the edit folder.
 const LEFTOVERS_DIR: &str = "leftovers";
 
-const HEADLESS_NOTE: &str = "You are running headless inside the VideoCRM app: nobody can \
+const HEADLESS_NOTE: &str = "You are running headless inside the Rushes app: nobody can \
 answer questions mid-run. Where something is ambiguous, make the most sensible choice and \
 say which choice you made.\n\n";
 
@@ -201,7 +201,7 @@ pub fn build_prompt(phase: &Phase, skill_md: &Path, footage: &[FootageFile]) -> 
     let skill = skill_md.display();
     match phase {
         Phase::Plan { brief } => format!(
-            "VideoCRM edit request (planning phase).\n\n\
+            "Rushes edit request (planning phase).\n\n\
              {intro}{brief}\
              This phase is planning only:\n\
              1. Inventory and transcribe the footage as the skill describes (transcripts are \
@@ -211,7 +211,7 @@ pub fn build_prompt(phase: &Phase, skill_md: &Path, footage: &[FootageFile]) -> 
              cut direction, grade, subtitles, animations and estimated length. Append it to \
              ./edit/project.md as a new session.\n\
              4. Then STOP. Do not cut or render anything. The creator reviews the strategy in \
-             VideoCRM and approves it or sends feedback in a follow-up message.\n\n\
+             Rushes and approves it or sends feedback in a follow-up message.\n\n\
              {HEADLESS_NOTE}\
              End with the strategy only: your final message must be the strategy in Markdown, \
              without preamble, with any open questions for the creator at the end.",
@@ -219,7 +219,7 @@ pub fn build_prompt(phase: &Phase, skill_md: &Path, footage: &[FootageFile]) -> 
             brief = brief_section(brief),
         ),
         Phase::Approve { notes } => format!(
-            "VideoCRM edit: strategy approved (render phase).\n\n\
+            "Rushes edit: strategy approved (render phase).\n\n\
              The creator approved the edit strategy you proposed (recorded in \
              ./edit/project.md).{notes}\n\n\
              Continue with the video-use skill ({skill}) in the current directory:\n\
@@ -239,7 +239,7 @@ pub fn build_prompt(phase: &Phase, skill_md: &Path, footage: &[FootageFile]) -> 
             },
         ),
         Phase::Feedback { message } => format!(
-            "VideoCRM edit: feedback from the creator (revision phase).\n\n\
+            "Rushes edit: feedback from the creator (revision phase).\n\n\
              The creator reviewed your work and asks for these changes:\n\n\
              {message}\n\n\
              Continue with the video-use skill ({skill}) in the current directory; the \
@@ -255,7 +255,7 @@ pub fn build_prompt(phase: &Phase, skill_md: &Path, footage: &[FootageFile]) -> 
             message = message.trim(),
         ),
         Phase::Auto { brief } => format!(
-            "VideoCRM edit request (single pass, pre-approved).\n\n\
+            "Rushes edit request (single pass, pre-approved).\n\n\
              {intro}{brief}\
              The creator pre-approved this edit, so do not stop to confirm the strategy:\n\
              1. Inventory and transcribe the footage, decide the strategy and append it to \

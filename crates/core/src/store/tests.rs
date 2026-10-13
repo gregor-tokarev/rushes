@@ -96,7 +96,7 @@ fn fresh_database_is_migrated_and_has_default_views() {
 #[test]
 fn file_database_uses_wal_and_persists_without_reseeding() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("nested/data/videocrm.db");
+    let path = dir.path().join("nested/data/rushes.db");
     let video = {
         let mut store = Store::open(&path).unwrap();
         let mode: String = store.conn.pragma_query_value(None, "journal_mode", |row| row.get(0)).unwrap();
@@ -116,7 +116,7 @@ fn file_database_uses_wal_and_persists_without_reseeding() {
 fn concurrent_first_opens_migrate_once() {
     for _ in 0..5 {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("videocrm.db");
+        let path = dir.path().join("rushes.db");
         let barrier = std::sync::Barrier::new(4);
         std::thread::scope(|scope| {
             let opens: Vec<_> = (0..4)
@@ -138,7 +138,7 @@ fn concurrent_first_opens_migrate_once() {
 #[test]
 fn a_second_connection_reads_during_another_programs_lock_and_fails_fast_on_writes() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("videocrm.db");
+    let path = dir.path().join("rushes.db");
     let mut store = Store::open(&path).unwrap();
     let mut video = insert(&mut store, "Locked out", 0.0);
     assert_eq!(store.path(), Some(path.clone()));
@@ -200,10 +200,10 @@ fn cached_values_follow_property_changes_like_stored_ones() {
 fn new_database_files_are_private() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("videocrm.db");
+    let path = dir.path().join("rushes.db");
     let mut store = Store::open(&path).unwrap();
     insert(&mut store, "Secret plans", 0.0);
-    for file in ["videocrm.db", "videocrm.db-wal", "videocrm.db-shm"] {
+    for file in ["rushes.db", "rushes.db-wal", "rushes.db-shm"] {
         let mode = std::fs::metadata(dir.path().join(file)).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "{file}");
     }
@@ -212,7 +212,7 @@ fn new_database_files_are_private() {
 #[test]
 fn rejects_databases_from_newer_versions() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("videocrm.db");
+    let path = dir.path().join("rushes.db");
     drop(Store::open(&path).unwrap());
     Connection::open(&path).unwrap().pragma_update(None, "user_version", 99).unwrap();
 
@@ -225,7 +225,7 @@ fn rejects_databases_from_newer_versions() {
 #[test]
 fn uploads_stored_before_file_stamps_still_load() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("videocrm.db");
+    let path = dir.path().join("rushes.db");
     let job = upload(VideoId::new(), UploadStatus::Cancelled, 1);
     {
         // A database of the first release, with one upload in it.
@@ -830,7 +830,7 @@ fn settings_round_trip() {
     let mut settings = AppSettings {
         onboarding_completed: true,
         theme: ThemeMode::Dark,
-        media_root: Some("/home/me/Videos/VideoCRM".into()),
+        media_root: Some("/home/me/Videos/Rushes".into()),
         youtube: YoutubeBackend::Google {
             client_id: "id.apps.googleusercontent.com".into(),
             client_secret: "s".into(),

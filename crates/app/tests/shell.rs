@@ -11,17 +11,17 @@ use gpui_kit::{
     MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Size, TestAppContext, Window, WindowBounds, WindowOptions,
     point, px, size,
 };
-use videocrm::ai_edit::PipelineService;
-use videocrm::onboarding::{StartChoice, Step};
-use videocrm::publish::YoutubeService;
-use videocrm::route::{Route, SettingsSection, VideoTab};
-use videocrm::shell::{self, Page, Workspace};
-use videocrm::state::AppState;
-use videocrm::ui::path_prompt;
-use videocrm::video_page::{DocumentTab, PathPurpose, SAVE_DELAY};
-use videocrm_core::settings::{AppSettings, ThemeMode, WeekStart};
-use videocrm_core::templates::TemplateKind;
-use videocrm_core::{
+use rushes::ai_edit::PipelineService;
+use rushes::onboarding::{StartChoice, Step};
+use rushes::publish::YoutubeService;
+use rushes::route::{Route, SettingsSection, VideoTab};
+use rushes::shell::{self, Page, Workspace};
+use rushes::state::AppState;
+use rushes::ui::path_prompt;
+use rushes::video_page::{DocumentTab, PathPurpose, SAVE_DELAY};
+use rushes_core::settings::{AppSettings, ThemeMode, WeekStart};
+use rushes_core::templates::TemplateKind;
+use rushes_core::{
     BlockId, DatabaseView, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, Store,
     VideoId, VideoStatus, ViewId,
 };
@@ -748,7 +748,7 @@ fn importing_markdown_can_replace_the_script(cx: &mut TestAppContext) {
         app.workspace.read(cx).video_page().expect("video page").read(cx).script().cloned().expect("script tab")
     });
 
-    let blocks = videocrm_core::document::from_markdown("## Cold open\n\nEverything on this desk earned its spot.\n");
+    let blocks = rushes_core::document::from_markdown("## Cold open\n\nEverything on this desk earned its spot.\n");
     let tab = script.clone();
     app.step(cx, move |window, cx| {
         tab.update(cx, |tab, cx| tab.confirm_import(std::path::Path::new("desk.md"), blocks, window, cx))
@@ -856,7 +856,7 @@ fn without_a_folder_chooser_the_media_folder_is_typed_in_a_dialog(cx: &mut TestA
 
     let file = app._media.path().join("notes.txt");
     std::fs::write(&file, "").expect("write file");
-    app.submit_text(cx, &file.join("VideoCRM").display().to_string());
+    app.submit_text(cx, &file.join("Rushes").display().to_string());
     assert!(app.has_dialog(cx));
     let reason = app.label_of(cx, path_prompt::ERROR_ID.into()).unwrap_or_default();
     assert!(reason.ends_with("is a file, not a folder."), "{reason}");
@@ -906,7 +906,7 @@ fn app_keys_leave_component_keys_alone(cx: &mut TestAppContext) {
         let mut conflicts = Vec::new();
         // A binding without a context outranks every scoped binding of the same keys.
         for global in keymap.bindings().filter(|binding| binding.predicate().is_none()) {
-            if !global.action().name().starts_with("videocrm::") {
+            if !global.action().name().starts_with("rushes::") {
                 continue;
             }
             for scoped in keymap.bindings().filter(|binding| binding.predicate().is_some()) {
@@ -1033,7 +1033,7 @@ fn the_data_folder_can_be_copied_and_opened(cx: &mut TestAppContext) {
     assert!(app.has(cx, "open-data-folder"));
     app.click(cx, "copy-data-folder");
     let copied = cx.read_from_clipboard().and_then(|item| item.text());
-    assert_eq!(copied, Some(videocrm_core::settings::data_dir().display().to_string()));
+    assert_eq!(copied, Some(rushes_core::settings::data_dir().display().to_string()));
 }
 
 #[gpui_kit::test]
@@ -1070,7 +1070,7 @@ fn folder_errors_explain_themselves_and_lead_to_the_settings(cx: &mut TestAppCon
     let file = app._media.path().join("notes.txt");
     std::fs::write(&file, "").expect("write file");
     let state = app.state.clone();
-    let media_root = file.join("VideoCRM");
+    let media_root = file.join("Rushes");
     app.step(cx, move |_, cx| {
         state.update(cx, |state, cx| state.update_settings(cx, |settings| settings.media_root = Some(media_root)))
     });
@@ -1135,12 +1135,12 @@ fn the_media_folder_saves_only_folders_it_can_use(cx: &mut TestAppContext) {
     app.press(cx, "enter");
     assert_eq!(app.media_root(cx), before);
     let error = app.label_of(cx, media_folder_error("settings-media-root"));
-    assert_eq!(error.as_deref(), Some("Use a full path, like ~/Videos/VideoCRM or /home/you/Videos."));
+    assert_eq!(error.as_deref(), Some("Use a full path, like ~/Videos/Rushes or /home/you/Videos."));
 
     // A folder that can't be created is turned down before it is saved.
     let file = app._media.path().join("notes.txt");
     std::fs::write(&file, "").expect("write file");
-    app.replace_text(cx, "settings-media-root", &file.join("VideoCRM").display().to_string());
+    app.replace_text(cx, "settings-media-root", &file.join("Rushes").display().to_string());
     app.press(cx, "enter");
     assert_eq!(app.media_root(cx), before);
     let error = app.label_of(cx, media_folder_error("settings-media-root")).unwrap_or_default();
@@ -1313,10 +1313,10 @@ fn an_edit_waiting_for_approval_stands_out(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, true, &["Desk setup tour"]);
     let id = app.video_id(cx, "Desk setup tour");
     let now = chrono::Utc::now();
-    let mut run = videocrm_core::PipelineRun {
-        id: videocrm_core::RunId::new(),
+    let mut run = rushes_core::PipelineRun {
+        id: rushes_core::RunId::new(),
         video_id: id,
-        status: videocrm_core::RunStatus::Planning,
+        status: rushes_core::RunStatus::Planning,
         brief: String::new(),
         footage_dir: app._media.path().to_path_buf(),
         session_id: None,
@@ -1327,7 +1327,7 @@ fn an_edit_waiting_for_approval_stands_out(cx: &mut TestAppContext) {
         created_at: now,
         updated_at: now,
     };
-    let set_run = |app: &Fixture, cx: &mut TestAppContext, run: &videocrm_core::PipelineRun, insert: bool| {
+    let set_run = |app: &Fixture, cx: &mut TestAppContext, run: &rushes_core::PipelineRun, insert: bool| {
         let (state, mut run) = (app.state.clone(), run.clone());
         app.step(cx, move |_, cx| {
             state.update(cx, |state, cx| {
@@ -1347,7 +1347,7 @@ fn an_edit_waiting_for_approval_stands_out(cx: &mut TestAppContext) {
     };
     assert_eq!(notifications(cx), 0);
 
-    run.status = videocrm_core::RunStatus::AwaitingApproval;
+    run.status = rushes_core::RunStatus::AwaitingApproval;
     set_run(&app, cx, &run, false);
     assert!(app.has(cx, "pipelines-awaiting"));
     assert_eq!(app.label_of(cx, "pipelines-awaiting".into()).as_deref(), Some("1 waiting for approval"));

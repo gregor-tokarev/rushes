@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Stand-in for `claude -p --output-format stream-json` in VideoCRM pipeline tests.
+"""Stand-in for `claude -p --output-format stream-json` in Rushes pipeline tests.
 
-Accepts the flags videocrm-pipeline passes to the real agent and prints stream-json
+Accepts the flags rushes-pipeline passes to the real agent and prints stream-json
 events shaped like real Claude Code output (crates/pipeline/tests/fixtures). It does
 not call any model; it imitates a video-use session:
 
