@@ -12,7 +12,7 @@ use gpui_kit::{
     AnyElement, App, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
 };
-use videocrm_core::{TagColor, UploadJob, UploadStatus};
+use rushes_core::{TagColor, UploadJob, UploadStatus};
 
 use super::rules::AccountAccess;
 use super::service::YoutubeService;
@@ -342,7 +342,7 @@ fn action_label(action: RowAction) -> &'static str {
 fn watch_url(job: &UploadJob) -> Option<String> {
     match &job.status {
         UploadStatus::Processing { video_id } | UploadStatus::Done { video_id } => {
-            Some(videocrm_youtube::watch_url(video_id))
+            Some(rushes_youtube::watch_url(video_id))
         }
         _ => None,
     }

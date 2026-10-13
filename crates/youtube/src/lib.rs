@@ -1,4 +1,4 @@
-//! Google sign-in and YouTube Data API v3 client for VideoCRM.
+//! Google sign-in and YouTube Data API v3 client for Rushes.
 //!
 //! Synchronous and blocking: run calls on a background thread. Long operations take
 //! a cancel flag and a progress callback. Works against real Google

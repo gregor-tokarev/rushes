@@ -1,6 +1,6 @@
 [package]
-name = "videocrm-update"
-description = "Updates an installed VideoCRM to its newest release on GitHub"
+name = "rushes-update"
+description = "Updates an installed copy of Rushes to its newest release on GitHub"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

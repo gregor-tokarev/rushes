@@ -17,15 +17,15 @@ use gpui_kit::{
     WindowOptions, px, size,
 };
 use sha2::{Digest as _, Sha256};
-use videocrm::ai_edit::PipelineService;
-use videocrm::publish::YoutubeService;
-use videocrm::route::{Route, SettingsSection};
-use videocrm::shell::{self, Workspace};
-use videocrm::state::AppState;
-use videocrm::update::{UpdateService, UpdateStatus};
-use videocrm_core::Store;
-use videocrm_core::settings::AppSettings;
-use videocrm_update::{Installation, ManualReason, Updater, Version};
+use rushes::ai_edit::PipelineService;
+use rushes::publish::YoutubeService;
+use rushes::route::{Route, SettingsSection};
+use rushes::shell::{self, Workspace};
+use rushes::state::AppState;
+use rushes::update::{UpdateService, UpdateStatus};
+use rushes_core::Store;
+use rushes_core::settings::AppSettings;
+use rushes_update::{Installation, ManualReason, Updater, Version};
 
 /// Status and body by request path.
 type Routes = Arc<Mutex<HashMap<String, (u16, Vec<u8>)>>>;
@@ -73,7 +73,7 @@ impl FakeGithub {
         let digest: String = Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect();
         let release = serde_json::json!({
             "tag_name": format!("v{version}"),
-            "html_url": format!("https://github.com/gregor-tokarev/videocrm/releases/tag/v{version}"),
+            "html_url": format!("https://github.com/gregor-tokarev/rushes/releases/tag/v{version}"),
             "body": "Notes",
             "assets": [{
                 "name": name,
@@ -121,7 +121,7 @@ impl Fixture {
         });
         let dir = tempfile::tempdir().expect("temp dir");
         let appimage = installed.then(|| {
-            let file = dir.path().join("VideoCRM.AppImage");
+            let file = dir.path().join("Rushes.AppImage");
             std::fs::write(&file, appimage(b"0.1.1")).expect("old AppImage");
             file
         });
@@ -211,7 +211,7 @@ impl Fixture {
 }
 
 fn appimage_name(version: &str) -> String {
-    format!("VideoCRM-{version}-{}.AppImage", std::env::consts::ARCH)
+    format!("Rushes-{version}-{}.AppImage", std::env::consts::ARCH)
 }
 
 fn read(path: &Path) -> Vec<u8> {
@@ -253,7 +253,7 @@ fn automatic_updates_start_a_minute_after_launch(cx: &mut TestAppContext) {
 
     cx.executor().advance_clock(Duration::from_secs(50));
     app.settle(cx);
-    assert_eq!(app.status(cx), UpdateStatus::Idle, "not while VideoCRM starts");
+    assert_eq!(app.status(cx), UpdateStatus::Idle, "not while Rushes starts");
 
     cx.executor().advance_clock(Duration::from_secs(15));
     app.wait_until(cx, "the automatic update", |cx| app.installed(cx).is_some());
@@ -294,7 +294,7 @@ fn a_copy_built_from_source_checks_only_when_asked_and_links_to_the_release(cx: 
         app.status(cx),
         UpdateStatus::Available {
             version: version("0.2.0"),
-            page_url: "https://github.com/gregor-tokarev/videocrm/releases/tag/v0.2.0".into(),
+            page_url: "https://github.com/gregor-tokarev/rushes/releases/tag/v0.2.0".into(),
             reason: ManualReason::NotInstalled,
         }
     );

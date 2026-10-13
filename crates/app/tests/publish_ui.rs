@@ -18,18 +18,18 @@ use gpui_kit::{
 };
 use publish_support::{Emulators, Workspace, wait_until};
 use serde_json::json;
-use videocrm::ai_edit::{AiEditPanel, PipelineService};
-use videocrm::publish::{
+use rushes::ai_edit::{AiEditPanel, PipelineService};
+use rushes::publish::{
     AccountBadge, BlockingReason, CHAPTERS_HEADING, Connection, PublishPanel, UploadsPage, YoutubeSettings,
 };
-use videocrm::route::{Route, SettingsSection, VideoTab};
-use videocrm::state::{AppEvent, Severity};
-use videocrm_core::settings::{WeekStart, YoutubeBackend};
-use videocrm_core::{
+use rushes::route::{Route, SettingsSection, VideoTab};
+use rushes::state::{AppEvent, Severity};
+use rushes_core::settings::{WeekStart, YoutubeBackend};
+use rushes_core::{
     Block, BlockKind, DocumentKind, PipelineRun, Privacy, PublishChannel, RunId, RunStatus, UploadId, UploadJob,
     UploadStatus, VideoId, YoutubeLink,
 };
-use videocrm_youtube::{CredentialStore, RetryCause};
+use rushes_youtube::{CredentialStore, RetryCause};
 
 /// Longer than the views' save delay.
 const SAVED: Duration = Duration::from_secs(1);
@@ -411,7 +411,7 @@ fn only_chapters_youtube_shows_are_offered(cx: &mut TestAppContext) {
     let workspace = Workspace::open(cx, YoutubeBackend::default());
     let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
     let video_id = workspace.create_video(cx, "Stop Using print() to Debug Python", |video| {
-        video.format = videocrm_core::VideoFormat::Short;
+        video.format = rushes_core::VideoFormat::Short;
         video.publish.file = Some(file.clone());
     });
     let script = |sections: usize, cx: &mut TestAppContext| {
@@ -447,7 +447,7 @@ fn only_chapters_youtube_shows_are_offered(cx: &mut TestAppContext) {
 
     workspace.state.update(cx, |state, cx| {
         let mut video = state.video(video_id).unwrap().clone();
-        video.format = videocrm_core::VideoFormat::LongForm;
+        video.format = rushes_core::VideoFormat::LongForm;
         state.update_video(video, cx);
     });
     script(2, cx);
@@ -458,7 +458,7 @@ fn only_chapters_youtube_shows_are_offered(cx: &mut TestAppContext) {
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         // Three 20 s sections end at 0:40; the one-second test clip is far shorter.
-        if videocrm_pipeline::probe_media(&file).is_some() {
+        if rushes_pipeline::probe_media(&file).is_some() {
             assert!(window.find("chapters-past-the-end").visible());
         }
         window.click("insert-chapters", cx);
@@ -540,7 +540,7 @@ fn the_uploads_page_offers_what_each_job_allows(cx: &mut TestAppContext) {
     assert!(!service.read_with(cx, |service, _| service.is_active(interrupted.id)));
     assert_eq!(
         service.read_with(cx, |service, _| service.job(interrupted.id).map(|job| job.status.clone())),
-        Some(UploadStatus::Failed { error: videocrm::publish::INTERRUPTED_RESUMABLE.into() })
+        Some(UploadStatus::Failed { error: rushes::publish::INTERRUPTED_RESUMABLE.into() })
     );
     assert_eq!(cx.opened_url().as_deref(), Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ"));
 
@@ -1220,7 +1220,7 @@ fn the_done_card_shows_what_youtube_has_and_what_did_not_work(cx: &mut TestAppCo
     let info = wait_until(cx, "YouTube’s view of the video", |cx| {
         service.read_with(cx, |s, _| s.youtube_video(&youtube_id).cloned())
     });
-    assert_eq!(info.privacy, videocrm_youtube::Privacy::Private);
+    assert_eq!(info.privacy, rushes_youtube::Privacy::Private);
     assert!(info.publish_at.is_some(), "scheduled on YouTube");
     window(cx, handle, |window, cx| {
         window.clear_notifications(cx);
@@ -1345,7 +1345,7 @@ fn the_publish_tab_asks_youtube_again_when_it_is_shown_again(cx: &mut TestAppCon
     wait_until(cx, "the dropped link", |cx| (!linked(cx)).then_some(()));
 
     // Uploaded again and deleted again, while the creator is in the browser:
-    // coming back to VideoCRM asks YouTube.
+    // coming back to Rushes asks YouTube.
     let second = upload(cx);
     assert!(linked(cx));
     emulators.delete_video(&token(cx), &second);

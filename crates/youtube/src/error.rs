@@ -172,7 +172,7 @@ fn api_message(status: u16, reason: &str) -> Option<&'static str> {
         }
         "uploadLimitExceeded" => "This channel reached YouTube’s upload limit. Try again in about 24 hours.",
         "insufficientPermissions" => {
-            "VideoCRM is missing permission to manage your YouTube videos. Connect the account \
+            "Rushes is missing permission to manage your YouTube videos. Connect the account \
              again and leave every permission box ticked."
         }
         _ if is_rate_limit(status, reason) => "YouTube is limiting requests right now. Try again in a few minutes.",

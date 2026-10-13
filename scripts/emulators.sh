@@ -4,7 +4,7 @@
 #   scripts/emulators.sh
 #
 # Ports: GOOGLE_EMULATOR_PORT (default 4002), YOUTUBE_EMULATOR_PORT (default 4020).
-# Point VideoCRM at them with VIDEOCRM_GOOGLE_URL / VIDEOCRM_YOUTUBE_URL or the
+# Point Rushes at them with RUSHES_GOOGLE_URL / RUSHES_YOUTUBE_URL or the
 # "Local emulator" backend in settings. Ctrl-C stops both.
 set -euo pipefail
 
@@ -21,7 +21,7 @@ Google (OAuth, userinfo):  http://127.0.0.1:$google_port
 YouTube Data API v3:       http://127.0.0.1:$youtube_port
 Uploads (inspection):      http://127.0.0.1:$youtube_port/_emulator/uploads
 
-  VIDEOCRM_GOOGLE_URL=http://127.0.0.1:$google_port VIDEOCRM_YOUTUBE_URL=http://127.0.0.1:$youtube_port
+  RUSHES_GOOGLE_URL=http://127.0.0.1:$google_port RUSHES_YOUTUBE_URL=http://127.0.0.1:$youtube_port
 INFO
 
 cd "$dir"

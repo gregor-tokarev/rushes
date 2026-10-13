@@ -22,9 +22,9 @@ use gpui_kit::{
     IntoElement, KeyBinding, NoAction, ParentElement as _, Pixels, Render, ScrollHandle, SharedString, Styled as _,
     Subscription, Task, Window, actions, div,
 };
-use videocrm_core::input::{normalize_title, parse_number};
-use videocrm_core::settings::WeekStart;
-use videocrm_core::{
+use rushes_core::input::{normalize_title, parse_number};
+use rushes_core::settings::WeekStart;
+use rushes_core::{
     BuiltinField, Column, DatabaseView, FilterSpec, PropertyDef, PropertyId, PropertyKind, PropertyValue,
     SortDirection, SortSpec, Video, VideoId, VideoRow, VideoStatus, ViewId, ViewKind,
 };

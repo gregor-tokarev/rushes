@@ -15,30 +15,49 @@ use serde::{Deserialize, Serialize};
 use crate::media;
 
 /// Environment variable that relocates the database and credentials (tests, screenshots).
-pub const DATA_DIR_ENV: &str = "VIDEOCRM_DATA_DIR";
+pub const DATA_DIR_ENV: &str = "RUSHES_DATA_DIR";
 /// File name of the SQLite database inside [`data_dir`].
-pub const DATABASE_FILE: &str = "videocrm.db";
+pub const DATABASE_FILE: &str = "rushes.db";
+/// The database's name while the app was called VideoCRM, before the rename to Rushes.
+pub const LEGACY_DATABASE_FILE: &str = "videocrm.db";
 
 pub const DEFAULT_EMULATOR_GOOGLE_URL: &str = "http://127.0.0.1:4002";
 pub const DEFAULT_EMULATOR_YOUTUBE_URL: &str = "http://127.0.0.1:4020";
 pub const DEFAULT_AGENT_COMMAND: &str = "claude";
 
-/// Directory holding the database and credentials: `$VIDEOCRM_DATA_DIR` when set,
-/// otherwise `<platform data dir>/videocrm`.
+/// Directory holding the database and credentials: `$RUSHES_DATA_DIR` when set,
+/// otherwise `<platform data dir>/rushes`.
 pub fn data_dir() -> PathBuf {
     data_dir_from(std::env::var_os(DATA_DIR_ENV))
 }
 
-/// Path of the SQLite database: `<data_dir>/videocrm.db`.
+/// Path of the SQLite database: `<data_dir>/rushes.db`.
 pub fn database_path() -> PathBuf {
     data_dir().join(DATABASE_FILE)
+}
+
+/// Where VideoCRM, as the app was called before the rename, kept its data:
+/// `<platform data dir>/videocrm`. `None` while `$RUSHES_DATA_DIR` picks the folder.
+pub fn legacy_data_dir() -> Option<PathBuf> {
+    legacy_data_dir_from(std::env::var_os(DATA_DIR_ENV))
 }
 
 fn data_dir_from(env_value: Option<OsString>) -> PathBuf {
     match env_value {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("videocrm"),
+        _ => platform_data_dir().join("rushes"),
     }
+}
+
+fn legacy_data_dir_from(env_value: Option<OsString>) -> Option<PathBuf> {
+    match env_value {
+        Some(dir) if !dir.is_empty() => None,
+        _ => Some(platform_data_dir().join("videocrm")),
+    }
+}
+
+fn platform_data_dir() -> PathBuf {
+    dirs::data_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
@@ -88,7 +107,7 @@ impl fmt::Debug for YoutubeBackend {
 }
 
 /// The creator's own YouTube account, once they add their OAuth client. The emulators
-/// are a developer option (`VIDEOCRM_GOOGLE_URL` / `VIDEOCRM_YOUTUBE_URL` override this).
+/// are a developer option (`RUSHES_GOOGLE_URL` / `RUSHES_YOUTUBE_URL` override this).
 impl Default for YoutubeBackend {
     fn default() -> Self {
         YoutubeBackend::Google { client_id: String::new(), client_secret: String::new() }
@@ -145,12 +164,12 @@ impl Default for EditPreferences {
     }
 }
 
-/// How VideoCRM keeps itself up to date.
+/// How Rushes keeps itself up to date.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UpdateSettings {
     /// Check for new releases every few hours and install them in the
-    /// background; they take effect the next time VideoCRM starts.
+    /// background; they take effect the next time Rushes starts.
     pub automatic: bool,
 }
 
@@ -221,8 +240,17 @@ mod tests {
     #[test]
     fn data_dir_ignores_empty_env_value() {
         let dir = data_dir_from(Some(OsString::new()));
-        assert!(dir.ends_with("videocrm"), "{dir:?}");
+        assert!(dir.ends_with("rushes"), "{dir:?}");
         assert_eq!(dir, data_dir_from(None));
+    }
+
+    #[test]
+    fn legacy_data_dir_is_videocrms_beside_the_default() {
+        let legacy = legacy_data_dir_from(None).expect("the default location has one");
+        assert_eq!(legacy.parent(), data_dir_from(None).parent());
+        assert!(legacy.ends_with("videocrm"), "{legacy:?}");
+        assert_eq!(legacy_data_dir_from(Some(OsString::new())), Some(legacy));
+        assert_eq!(legacy_data_dir_from(Some("/tmp/vcrm".into())), None, "a chosen folder has none");
     }
 
     #[test]

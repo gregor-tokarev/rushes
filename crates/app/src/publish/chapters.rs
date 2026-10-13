@@ -2,8 +2,8 @@
 //! spoken words before it. The estimate is explained next to the button that
 //! inserts them; the description itself gets a plain list viewers can use.
 
-use videocrm_core::document::{runtime_secs_for_words, spoken_word_count, strip_inline_markdown};
-use videocrm_core::{Block, BlockKind};
+use rushes_core::document::{runtime_secs_for_words, spoken_word_count, strip_inline_markdown};
+use rushes_core::{Block, BlockKind};
 
 /// First line of the chapter list. Also how a later insert finds the list to replace.
 pub const CHAPTERS_HEADING: &str = "Chapters:";
@@ -79,7 +79,7 @@ pub fn timestamp(secs: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use videocrm_core::document::DEFAULT_WPM;
+    use rushes_core::document::DEFAULT_WPM;
 
     use super::*;
 

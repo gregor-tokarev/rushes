@@ -1,4 +1,4 @@
-//! Updates: [`UpdateService`] keeps VideoCRM up to date with its releases;
+//! Updates: [`UpdateService`] keeps Rushes up to date with its releases;
 //! Settings › About shows where it is ([`settings_group`]), and the title bar
 //! offers a restart once a new version is installed ([`restart_button`]).
 
@@ -35,7 +35,7 @@ pub fn restart(window: &mut Window, cx: &mut App) {
     };
     window.open_alert_dialog(cx, move |alert, _, _| {
         let service = service.clone();
-        alert.title("Restart VideoCRM now?").description(running.clone()).confirm().ok_text("Restart").on_ok(
+        alert.title("Restart Rushes now?").description(running.clone()).confirm().ok_text("Restart").on_ok(
             move |_, _, cx| {
                 service.update(cx, |service, cx| service.restart(cx));
                 true
@@ -108,7 +108,7 @@ pub fn settings_group(cx: &App) -> Option<SettingGroup> {
                     },
                 ),
             )
-            .description("Download new versions in the background. They start the next time VideoCRM opens.")
+            .description("Download new versions in the background. They start the next time Rushes opens.")
             .keywords(["update", "upgrade", "automatic"]),
         );
     }

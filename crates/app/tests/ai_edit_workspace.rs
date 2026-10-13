@@ -10,14 +10,14 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, Bounds, ElementId, Entity, Focusable as _, Pixels, ScrollDelta, Size,
     TestAppContext, WindowBounds, WindowOptions, point, px, size,
 };
-use videocrm::ai_edit::PipelineService;
-use videocrm::publish::YoutubeService;
-use videocrm::route::{Route, SettingsSection, VideoTab};
-use videocrm::shell::{self, Workspace};
-use videocrm::state::AppState;
-use videocrm_core::settings::AppSettings;
-use videocrm_core::templates::TemplateKind;
-use videocrm_core::{NewVideo, PipelineRun, RunId, RunStatus, Store, VideoId, media};
+use rushes::ai_edit::PipelineService;
+use rushes::publish::YoutubeService;
+use rushes::route::{Route, SettingsSection, VideoTab};
+use rushes::shell::{self, Workspace};
+use rushes::state::AppState;
+use rushes_core::settings::AppSettings;
+use rushes_core::templates::TemplateKind;
+use rushes_core::{NewVideo, PipelineRun, RunId, RunStatus, Store, VideoId, media};
 
 struct Fixture {
     window: AnyWindowHandle,

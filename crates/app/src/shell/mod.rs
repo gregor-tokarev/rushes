@@ -25,8 +25,8 @@ use gpui_kit::{
     KeyBinding, ParentElement as _, Render, SharedString, Styled as _, Subscription, TestSupportExt as _, Window,
     actions,
 };
-use videocrm_core::settings::ThemeMode;
-use videocrm_core::{RunStatus, VideoId, VideoRow, VideoStatus, ViewId};
+use rushes_core::settings::ThemeMode;
+use rushes_core::{RunStatus, VideoId, VideoRow, VideoStatus, ViewId};
 
 use crate::ai_edit::PipelinesPage;
 use crate::database::{DatabaseEvent, DatabasePanel};
@@ -43,11 +43,11 @@ use crate::wizard;
 use palette::CommandPalette;
 pub use launch_path::extend_tool_path;
 pub use signals::on_termination_signal;
-pub use startup::{InstanceLock, StartupNotice, StartupProblem, open_startup_notice};
+pub use startup::{InstanceLock, StartupNotice, StartupProblem, adopt_legacy_data, open_startup_notice};
 pub use theme::{apply_theme, register_fonts};
 
 actions!(
-    videocrm,
+    rushes,
     [
         /// Open the New video dialog.
         NewVideo,

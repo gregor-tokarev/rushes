@@ -17,8 +17,8 @@ use gpui_kit::{
     IntoElement, ParentElement as _, PathPromptOptions, Render, Role, SharedString, StatefulInteractiveElement as _,
     Styled as _, Subscription, Task, TestSupportExt as _, Window, div,
 };
-use videocrm_core::input::{display_user_path, expand_user_path};
-use videocrm_core::media::default_media_root;
+use rushes_core::input::{display_user_path, expand_user_path};
+use rushes_core::media::default_media_root;
 
 use crate::route::SettingsSection;
 use crate::state::{AppEvent, AppState, Problem, Remedy, folder_error_reason};
@@ -153,7 +153,7 @@ impl MediaFolderField {
                         true
                     }
                     Err(error) => {
-                        log_line!("videocrm: media folder {} can't be used: {error}", folder.display());
+                        log_line!("rushes: media folder {} can't be used: {error}", folder.display());
                         let reason = folder_error_reason(&folder, &error);
                         this.reject(format!("{reason} Choose another folder.").into(), on_error, window, cx);
                         false
@@ -176,7 +176,7 @@ impl MediaFolderField {
             Ok(()) => {
                 self.state.update(cx, |state, cx| state.update_settings(cx, |settings| settings.media_root = root))
             }
-            Err(error) => log_line!("videocrm: media folder {} not saved: {error}", folder.display()),
+            Err(error) => log_line!("rushes: media folder {} not saved: {error}", folder.display()),
         }
     }
 
@@ -217,7 +217,7 @@ impl MediaFolderField {
                 Ok(Ok(Some(paths))) => paths.into_iter().next(),
                 Ok(Ok(None)) | Err(_) => None,
                 Ok(Err(error)) => {
-                    log_line!("videocrm: folder chooser failed: {error}");
+                    log_line!("rushes: folder chooser failed: {error}");
                     _ = this.update_in(cx, |this, window, cx| this.prompt_for_folder(window, cx));
                     None
                 }
@@ -247,7 +247,7 @@ impl MediaFolderField {
             });
             cx.foreground_executor().spawn(async move {
                 check.await.map_err(|error| {
-                    log_line!("videocrm: media folder {} can't be used: {error}", folder.display());
+                    log_line!("rushes: media folder {} can't be used: {error}", folder.display());
                     SharedString::from(folder_error_reason(&folder, &error))
                 })?;
                 Ok(Box::new(move |window: &mut Window, cx: &mut App| {
@@ -303,7 +303,7 @@ impl Render for MediaFolderField {
 /// Creates `folder` (and its parents) and checks that files can be written in it.
 fn prepare_media_folder(folder: &Path) -> io::Result<()> {
     fs::create_dir_all(folder)?;
-    let probe = folder.join(format!(".videocrm-write-check-{}", std::process::id()));
+    let probe = folder.join(format!(".rushes-write-check-{}", std::process::id()));
     File::create_new(&probe)?;
     // Leaving the probe behind is harmless; failing to write it is what matters.
     _ = fs::remove_file(&probe);
@@ -317,13 +317,13 @@ mod tests {
     #[test]
     fn a_media_folder_is_created_and_checked() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let folder = dir.path().join("Videos/VideoCRM");
+        let folder = dir.path().join("Videos/Rushes");
         prepare_media_folder(&folder).expect("folder is usable");
         assert!(folder.is_dir());
         assert_eq!(std::fs::read_dir(&folder).expect("read folder").count(), 0, "the probe is removed");
 
         let file = dir.path().join("notes.txt");
         std::fs::write(&file, "").expect("write file");
-        assert!(prepare_media_folder(&file.join("VideoCRM")).is_err());
+        assert!(prepare_media_folder(&file.join("Rushes")).is_err());
     }
 }

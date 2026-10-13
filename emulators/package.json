@@ -1,8 +1,8 @@
 {
-  "name": "videocrm-emulators",
+  "name": "rushes-emulators",
   "version": "0.1.0",
   "private": true,
-  "description": "Local Google OAuth and YouTube Data API v3 emulators for VideoCRM development and tests",
+  "description": "Local Google OAuth and YouTube Data API v3 emulators for Rushes development and tests",
   "type": "module",
   "engines": {
     "node": ">=24"

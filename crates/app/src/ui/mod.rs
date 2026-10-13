@@ -1,5 +1,5 @@
 //! The application's own presentation layer: the pieces every page shares so
-//! VideoCRM reads as one product.
+//! Rushes reads as one product.
 //!
 //! # Grammar
 //!

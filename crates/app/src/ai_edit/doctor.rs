@@ -12,7 +12,7 @@ use gpui_kit::{
     App, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     SharedString, Stateful, Styled as _, Subscription, Window, div,
 };
-use videocrm_pipeline::{Check, Doctor, default_skill_dir};
+use rushes_pipeline::{Check, Doctor, default_skill_dir};
 
 use super::service::PipelineService;
 
@@ -198,7 +198,7 @@ fn requirements<'a>(doctor: &'a Doctor, cx: &App) -> Vec<Requirement<'a>> {
             check: &doctor.elevenlabs,
             fix: format!(
                 "video-use transcribes the footage with ElevenLabs. Add a line `ELEVENLABS_API_KEY=<your key>` to \
-                 `{skill}/.env`, or set `ELEVENLABS_API_KEY` in the environment VideoCRM starts from."
+                 `{skill}/.env`, or set `ELEVENLABS_API_KEY` in the environment Rushes starts from."
             ),
         },
         Requirement {

@@ -18,7 +18,7 @@ use base64::engine::general_purpose::STANDARD;
 use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use videocrm_youtube::{
+use rushes_youtube::{
     Account, CredentialStore, Credentials, Error, Privacy, ProcessingStatus, RetryCause, SavedLogin,
     UPLOAD_GRANULARITY, UploadOptions, UploadProgress, UploadStatus, VideoMetadata, YoutubeClient, YoutubeConfig,
     begin_authorization, check_client, refresh,
@@ -223,7 +223,7 @@ fn hex(bytes: &[u8]) -> String {
 fn metadata(title: &str) -> VideoMetadata {
     VideoMetadata {
         title: title.to_owned(),
-        description: "Made with VideoCRM".to_owned(),
+        description: "Made with Rushes".to_owned(),
         tags: vec!["rust".to_owned(), "desktop app".to_owned()],
         category_id: "28".to_owned(),
         privacy: Privacy::Unlisted,

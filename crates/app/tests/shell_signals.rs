@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::TestAppContext;
-use videocrm::shell;
+use rushes::shell;
 
 #[gpui_kit::test]
 fn sigterm_quits_like_ctrl_q(cx: &mut TestAppContext) {

@@ -27,8 +27,8 @@ use gpui_kit::{
     ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _,
     Window, div, point, px, rems,
 };
-use videocrm_core::input::normalize_title;
-use videocrm_core::{DocumentKind, Video, VideoId};
+use rushes_core::input::normalize_title;
+use rushes_core::{DocumentKind, Video, VideoId};
 
 use crate::ai_edit::AiEditPanel;
 use crate::publish::PublishPanel;

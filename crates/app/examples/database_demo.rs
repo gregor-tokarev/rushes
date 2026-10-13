@@ -2,7 +2,7 @@
 //! for screenshots. Events are applied to an in-memory copy the way the app
 //! shell applies them to the store.
 //!
-//! `cargo run -p videocrm --example database_demo [-- --board] [--dark]`
+//! `cargo run -p rushes --example database_demo [-- --board] [--dark]`
 
 use std::collections::BTreeMap;
 
@@ -12,8 +12,8 @@ use gpui_kit::{
     AppContext as _, Bounds, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render, Styled as _,
     Subscription, Window, WindowBounds, WindowOptions, div, point, px, size,
 };
-use videocrm::database::{DatabaseEvent, DatabasePanel, WithDatabaseIcons};
-use videocrm_core::{
+use rushes::database::{DatabaseEvent, DatabasePanel, WithDatabaseIcons};
+use rushes_core::{
     BuiltinField, Column, ColumnLayout, DatabaseView, FilterSpec, PropertyDef, PropertyId, PropertyKind, PropertyValue,
     RunStatus, SelectOption, TagColor, UploadStatus, Video, VideoFormat, VideoId, VideoRow, VideoStatus, ViewId,
     ViewKind,

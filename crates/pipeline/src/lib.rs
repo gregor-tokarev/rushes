@@ -1,4 +1,4 @@
-//! AI video-editing pipelines for VideoCRM.
+//! AI video-editing pipelines for Rushes.
 //!
 //! Drives the [video-use](https://github.com/browser-use/video-use) skill through a
 //! headless coding agent (Claude Code: `claude -p --output-format stream-json`).

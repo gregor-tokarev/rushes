@@ -1,6 +1,6 @@
 # Page icon images
 
-Colour emoji images for the page icons VideoCRM offers (the icon picker, the
+Colour emoji images for the page icons Rushes offers (the icon picker, the
 script templates and the sample videos), so they render the same in every
 place and on every platform.
 

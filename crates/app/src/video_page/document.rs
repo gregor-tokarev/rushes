@@ -17,12 +17,12 @@ use gpui_kit::{
     IntoElement, ParentElement as _, PathPromptOptions, Rems, Render, ScrollHandle, SharedString, Styled as _,
     Subscription, Task, TestSupportExt as _, Window, div,
 };
-use videocrm_core::document::{
+use rushes_core::document::{
     DEFAULT_WPM, OutlineItem, estimated_runtime_secs, from_markdown, outline, spoken_word_count, teleprompter_text,
     to_markdown,
 };
-use videocrm_core::input::display_user_path;
-use videocrm_core::{Block, BlockId, BlockKind, DocumentId, DocumentKind, VideoId, media};
+use rushes_core::input::display_user_path;
+use rushes_core::{Block, BlockId, BlockKind, DocumentId, DocumentKind, VideoId, media};
 
 use super::saves::DocumentSaves;
 use crate::database::format;
@@ -268,7 +268,7 @@ impl DocumentTab {
                 Ok(Ok(Some(path))) => path,
                 Ok(Ok(None)) | Err(_) => return,
                 Ok(Err(error)) => {
-                    log_line!("videocrm: save dialog failed: {error}");
+                    log_line!("rushes: save dialog failed: {error}");
                     _ = this.update_in(cx, |this, window, cx| this.prompt_for_path(PathPurpose::Export, window, cx));
                     return;
                 }
@@ -293,7 +293,7 @@ impl DocumentTab {
                 },
                 Ok(Ok(None)) | Err(_) => return,
                 Ok(Err(error)) => {
-                    log_line!("videocrm: file dialog failed: {error}");
+                    log_line!("rushes: file dialog failed: {error}");
                     _ = this.update_in(cx, |this, window, cx| this.prompt_for_path(PathPurpose::Import, window, cx));
                     return;
                 }
@@ -342,7 +342,7 @@ impl DocumentTab {
                 let request = PathRequest::new(
                     PathKind::NewFile,
                     "Type where to save the Markdown file instead.",
-                    "~/Videos/VideoCRM/script.md",
+                    "~/Videos/Rushes/script.md",
                 )
                 .commit("Export")
                 .value(display_user_path(&self.fallback_export_path(cx)));
@@ -359,7 +359,7 @@ impl DocumentTab {
                 let request = PathRequest::new(
                     PathKind::File,
                     "Type the path of the Markdown file instead.",
-                    "~/Videos/VideoCRM/script.md",
+                    "~/Videos/Rushes/script.md",
                 )
                 .commit("Import");
                 path_prompt::open(request, window, cx, move |path, _, cx| {
@@ -537,7 +537,7 @@ impl Render for DocumentTab {
                         "document-unavailable",
                         IconName::FileExclamationPoint,
                         "This document couldn’t be opened",
-                        "The database didn’t return it. Try again, or restart VideoCRM if it keeps happening.",
+                        "The database didn’t return it. Try again, or restart Rushes if it keeps happening.",
                     )
                     .action(
                         Button::new("document-retry")

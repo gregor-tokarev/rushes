@@ -17,7 +17,7 @@ use gpui_kit::{
     App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Point,
     ScrollHandle, SharedString, Subscription, Window, point,
 };
-use videocrm_core::{Block, BlockId, BlockKind, Document};
+use rushes_core::{Block, BlockId, BlockKind, Document};
 
 use self::geometry::Geometry;
 use super::blocks::{self, Merge};

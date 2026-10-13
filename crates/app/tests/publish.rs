@@ -14,15 +14,15 @@ use chrono::{Local, Utc};
 use gpui_kit::{Entity, TestAppContext};
 use publish_support::{Emulators, Workspace, wait_until};
 use serde_json::json;
-use videocrm::publish::BlockingReason;
-use videocrm::publish::{
+use rushes::publish::BlockingReason;
+use rushes::publish::{
     Connection, INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, Retired, UploadError, YoutubeEvent,
     YoutubeService, delete_upload_notice,
 };
-use videocrm::state::{AppEvent, SAVE_RETRY_DELAY};
-use videocrm_core::settings::YoutubeBackend;
-use videocrm_core::{Privacy, PublishChannel, UploadId, UploadJob, UploadStatus, VideoId, VideoStatus};
-use videocrm_youtube::{Account, CredentialStore, Credentials, SavedLogin};
+use rushes::state::{AppEvent, SAVE_RETRY_DELAY};
+use rushes_core::settings::YoutubeBackend;
+use rushes_core::{Privacy, PublishChannel, UploadId, UploadJob, UploadStatus, VideoId, VideoStatus};
+use rushes_youtube::{Account, CredentialStore, Credentials, SavedLogin};
 
 #[gpui_kit::test]
 fn connects_through_the_browser_and_keeps_the_account(cx: &mut TestAppContext) {
@@ -264,7 +264,7 @@ fn an_upload_goes_on_while_another_program_locks_the_database(cx: &mut TestAppCo
     });
 
     // Another program holds the write lock, as a backup or sync tool does.
-    let database = workspace.dir.path().join("videocrm.db");
+    let database = workspace.dir.path().join("rushes.db");
     let lock = rusqlite::Connection::open(&database).unwrap();
     lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
     let started = Instant::now();
@@ -471,7 +471,7 @@ fn a_session_the_connection_cannot_use_is_not_offered_again(cx: &mut TestAppCont
     let video_id = workspace.create_video(cx, "Keychron Q1 Max review", |video| {
         video.publish.file = Some(file.clone());
     });
-    // Cancelled while VideoCRM talked to another YouTube server, before a backend switch.
+    // Cancelled while Rushes talked to another YouTube server, before a backend switch.
     let job = UploadJob {
         id: UploadId::new(),
         video_id,

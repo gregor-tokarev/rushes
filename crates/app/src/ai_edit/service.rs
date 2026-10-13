@@ -13,11 +13,11 @@ use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui_kit::{App, AppContext as _, Context, Entity, Global, SharedString, Subscription, Task};
 use serde::{Deserialize, Serialize};
-use videocrm_core::input::expand_user_path;
-use videocrm_core::media::{self, MediaKind};
-use videocrm_core::settings::PipelineSettings;
-use videocrm_core::{PipelineRun, RunEvent, RunId, RunStatus, StoreError, VideoId, VideoStatus};
-use videocrm_pipeline::{
+use rushes_core::input::expand_user_path;
+use rushes_core::media::{self, MediaKind};
+use rushes_core::settings::PipelineSettings;
+use rushes_core::{PipelineRun, RunEvent, RunId, RunStatus, StoreError, VideoId, VideoStatus};
+use rushes_pipeline::{
     AgentConfig, AgentEvent, AgentProcess, Doctor, Phase, PhaseOutcome, PipelineError, RunContext, default_skill_dir,
     doctor, keep_final_cut, run_phase, set_aside_final_cut, stop_leftover_agent,
 };
@@ -28,7 +28,7 @@ use super::timeline::{LogEvent, MarkerKind, PhaseKind, PhaseStarted, RunMarker, 
 use crate::state::{AppEvent, AppState};
 
 /// Error of runs a previous session left running.
-pub const INTERRUPTED: &str = "Interrupted when VideoCRM closed";
+pub const INTERRUPTED: &str = "Interrupted when Rushes closed";
 
 /// Starts the error of a render phase that wrote its cut and then reported an error:
 /// the cut is kept, but the agent may not have checked it.
@@ -96,7 +96,7 @@ impl fmt::Display for RunError {
             ),
             // The library errors themselves are logged where they occur.
             RunError::Store(_) => {
-                write!(f, "Couldn’t save the edit. Try again; if it keeps failing, restart VideoCRM.")
+                write!(f, "Couldn’t save the edit. Try again; if it keeps failing, restart Rushes.")
             }
             RunError::Spawn(_) => write!(f, "Couldn’t start the agent. Try again."),
         }
@@ -107,7 +107,7 @@ impl std::error::Error for RunError {}
 
 impl From<StoreError> for RunError {
     fn from(error: StoreError) -> Self {
-        log_line!("videocrm: saving an AI edit failed: {error}");
+        log_line!("rushes: saving an AI edit failed: {error}");
         RunError::Store(error.to_string())
     }
 }
@@ -127,7 +127,7 @@ pub struct LivePhase {
 pub enum Setback<'a> {
     /// The creator cancelled it.
     Stopped,
-    /// It failed, or VideoCRM closed while it ran ([`INTERRUPTED`]): the run's error.
+    /// It failed, or Rushes closed while it ran ([`INTERRUPTED`]): the run's error.
     Failed(&'a str),
 }
 
@@ -311,7 +311,7 @@ impl PipelineService {
     }
 
     /// How long the agent worked on the run, without the time it waited for the
-    /// creator or VideoCRM was closed; see [`agent_time`]. A running phase counts up to now.
+    /// creator or Rushes was closed; see [`agent_time`]. A running phase counts up to now.
     pub fn agent_time(&self, id: RunId, cx: &App) -> Duration {
         if let Some(timeline) = self.timelines.get(&id) {
             return agent_time(timeline, self.live.contains_key(&id).then(Utc::now));
@@ -322,7 +322,7 @@ impl PipelineService {
         let time = match self.state.read(cx).read_run_events(id) {
             Ok(events) => agent_time(&events.into_iter().map(TimelineEntry::from).collect::<Vec<_>>(), None),
             Err(error) => {
-                log_line!("videocrm: couldn't read the log of run {id}: {error}");
+                log_line!("rushes: couldn't read the log of run {id}: {error}");
                 Duration::ZERO
             }
         };
@@ -348,7 +348,7 @@ impl PipelineService {
                     kept_cuts_in(&entries).collect()
                 }
                 Err(error) => {
-                    log_line!("videocrm: couldn't read the log of run {}: {error}", run.id);
+                    log_line!("rushes: couldn't read the log of run {}: {error}", run.id);
                     Vec::new()
                 }
             });
@@ -403,7 +403,7 @@ impl PipelineService {
                     .map(|stored| (stored.video_id, stored.draft))
                     .collect();
             }
-            Err(error) => log_line!("videocrm: couldn't read the saved edit briefs: {error}"),
+            Err(error) => log_line!("rushes: couldn't read the saved edit briefs: {error}"),
         }
     }
 
@@ -422,7 +422,7 @@ impl PipelineService {
             .map(|(video_id, draft)| StoredDraft { video_id: *video_id, draft: draft.clone() })
             .collect();
         stored.sort_by_key(|stored| stored.video_id);
-        // A refusal is reported by the state; the forms stay until VideoCRM closes.
+        // A refusal is reported by the state; the forms stay until Rushes closes.
         self.state.update(cx, |state, cx| state.save_setting(DRAFTS_KEY, &stored, cx));
     }
 
@@ -676,9 +676,9 @@ impl PipelineService {
                 (renders && rendered).then(|| keep_final_cut(&context.footage_dir).unwrap_or(shared_cut.clone()));
             if renders && kept.is_none() && shared_cut.is_file() {
                 match set_aside_final_cut(&context.footage_dir) {
-                    Ok(path) => log_line!("videocrm: an unfinished render was set aside in {}", path.display()),
+                    Ok(path) => log_line!("rushes: an unfinished render was set aside in {}", path.display()),
                     // The next render tries again before it starts.
-                    Err(error) => log_line!("videocrm: couldn't set aside the unfinished render: {error}"),
+                    Err(error) => log_line!("rushes: couldn't set aside the unfinished render: {error}"),
                 }
             }
             send(&events, AgentMessage::Finished { result, kept });
@@ -686,7 +686,7 @@ impl PipelineService {
             _ = stopped_tx.send(());
         });
         if let Err(error) = spawned {
-            log_line!("videocrm: couldn't start the agent thread: {error}");
+            log_line!("rushes: couldn't start the agent thread: {error}");
             let error = RunError::Spawn(error.to_string());
             self.settle_unfinished(id, Some(phase), Some(error.to_string()), cx);
             return Err(error);
@@ -763,7 +763,7 @@ impl PipelineService {
                 };
             }
             Err(error) => {
-                log_line!("videocrm: AI edit phase failed: {error}");
+                log_line!("rushes: AI edit phase failed: {error}");
                 return self.settle_unfinished(id, Some(phase), Some(pipeline_problem(&error)), cx);
             }
         };
@@ -858,7 +858,7 @@ impl PipelineService {
     /// A file left at the shared `edit/final.mp4` is moved before a render can
     /// overwrite it. A cut a run or the upload form refers to (an earlier version kept
     /// cuts there, keeping one may have failed) moves to `edit/cuts/`, and they follow
-    /// it. Anything else (an unfinished render, a file made outside VideoCRM) is set
+    /// it. Anything else (an unfinished render, a file made outside Rushes) is set
     /// aside in `edit/leftovers/`, where no list of cuts offers it.
     fn keep_shared_cut(
         &mut self,
@@ -872,14 +872,14 @@ impl PipelineService {
             self.state.read(cx).video(video_id).is_some_and(|video| video.publish.file.as_ref() == Some(&shared));
         if owner.is_none() && !uploads {
             let set_aside = set_aside_final_cut(footage_dir).map_err(|error| {
-                log_line!("videocrm: couldn't set aside {}: {error}", shared.display());
+                log_line!("rushes: couldn't set aside {}: {error}", shared.display());
                 RunError::CutNotKept
             })?;
-            log_line!("videocrm: {} was set aside in {}", shared.display(), set_aside.display());
+            log_line!("rushes: {} was set aside in {}", shared.display(), set_aside.display());
             return Ok(());
         }
         let kept = keep_final_cut(footage_dir).map_err(|error| {
-            log_line!("videocrm: couldn't keep the earlier cut {}: {error}", shared.display());
+            log_line!("rushes: couldn't keep the earlier cut {}: {error}", shared.display());
             RunError::CutNotKept
         })?;
         if let Some(owner) = owner {

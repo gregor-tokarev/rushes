@@ -1,8 +1,8 @@
 # YouTube integration
 
-VideoCRM signs in with Google (installed-app OAuth: loopback redirect + PKCE) and uploads
+Rushes signs in with Google (installed-app OAuth: loopback redirect + PKCE) and uploads
 through the YouTube Data API v3 resumable upload protocol. The code lives in
-`crates/youtube` (`videocrm-youtube`); local emulators for both services live in
+`crates/youtube` (`rushes-youtube`); local emulators for both services live in
 `emulators/`.
 
 ## Developing against the emulators
@@ -27,7 +27,7 @@ default; a fresh install connects to Google), or with environment variables, whi
 the settings:
 
 ```bash
-VIDEOCRM_GOOGLE_URL=http://127.0.0.1:4002 VIDEOCRM_YOUTUBE_URL=http://127.0.0.1:4020 cargo run
+RUSHES_GOOGLE_URL=http://127.0.0.1:4002 RUSHES_YOUTUBE_URL=http://127.0.0.1:4020 cargo run
 ```
 
 Signing in opens the emulator's account picker in the browser. Seeded accounts:
@@ -86,8 +86,8 @@ Known differences from real Google:
 ### Tests
 
 ```bash
-cargo test -p videocrm-youtube          # unit tests + end-to-end tests that start the emulators
-cargo clippy -p videocrm-youtube --all-targets
+cargo test -p rushes-youtube          # unit tests + end-to-end tests that start the emulators
+cargo clippy -p rushes-youtube --all-targets
 cd emulators && npm test                # node:test suite for the YouTube emulator
 cd emulators && npm run typecheck
 ```
@@ -161,8 +161,8 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
 - The backend comes from `AppSettings.youtube` through `publish::backend_config`. The
   default is Google with empty client fields; Google needs both fields and a client ID
   ending in `.apps.googleusercontent.com` (otherwise Connect stays disabled and says why);
-  the emulator falls back to the default URLs for empty fields; `VIDEOCRM_GOOGLE_URL` /
-  `VIDEOCRM_YOUTUBE_URL` override both (the settings section says so).
+  the emulator falls back to the default URLs for empty fields; `RUSHES_GOOGLE_URL` /
+  `RUSHES_YOUTUBE_URL` override both (the settings section says so).
 - The settings section (Settings → YouTube and onboarding step 3) reads top to bottom: the
   OAuth client (setup steps with console links, folded; client ID and secret), the
   connection with Connect, and what Google will show once Connect is usable (unverified-app
@@ -290,7 +290,7 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   shows no YouTube state. The YouTube ids of the uploads that are gone are kept in the
   settings table (`youtube.gone_videos`), so an earlier upload of a video uploaded again
   still reads "Not on YouTube" after a restart. A failed lookup (offline) keeps the stored link. There is no "update on YouTube": `videos.update` needs the broader `youtube`
-  scope, which VideoCRM does not ask for.
+  scope, which Rushes does not ask for.
 - While the worker retries a passing failure, the Upload card and the Uploads page say so
   ("YouTube isn’t responding · Retrying (2 of 5)…", or "Can’t reach YouTube" when offline)
   and the sidebar badge reads "Retrying the upload…", until the upload gets further than
@@ -329,7 +329,7 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   show up in the form at once, except in fields with edits of its own waiting.
 - **Insert chapters from script** turns the Script document's Heading 2 blocks into a
   `Chapters:` list with timestamps from the spoken words before each heading
-  (`videocrm_core::document`, 150 wpm). YouTube wants the first chapter at 0:00 and none
+  (`rushes_core::document`, 150 wpm). YouTube wants the first chapter at 0:00 and none
   shorter than 10 s, so spoken words before the first heading become "Intro" and shorter
   sections give their slot to the next heading. Inserting again replaces the earlier list.
   The timestamps are estimates; the button says so. YouTube ignores lists of fewer than
@@ -350,14 +350,14 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   desktop portal). When no file chooser opens, "Couldn't open the file chooser" asks for
   the path instead (`~` expands; the file must exist, and be a JPG, PNG, GIF or BMP for the
   thumbnail). Files can also be dropped on the Video file and Thumbnail cards. The list refreshes when the window is
-  activated again. Size, duration and resolution come from `videocrm_pipeline::probe_media`
+  activated again. Size, duration and resolution come from `rushes_pipeline::probe_media`
   on the background executor.
 
 ### Trying it
 
 ```bash
 scripts/emulators.sh &        # Google on :4002, YouTube on :4020
-VIDEOCRM_DATA_DIR=$(mktemp -d) cargo run -p videocrm --example publish_demo [-- --dark] [--video <title>]
+RUSHES_DATA_DIR=$(mktemp -d) cargo run -p rushes --example publish_demo [-- --dark] [--video <title>]
 ```
 
 `publish_demo` mounts the Publish tab, the Uploads page, the YouTube settings and the badge
@@ -368,9 +368,9 @@ the link, submit the account's form (`email` field) and follow the redirect to `
 ### App tests
 
 ```bash
-cargo test -p videocrm --lib publish        # validation, chapters, progress and formatting
-cargo test -p videocrm --test publish       # YoutubeService against the emulators
-cargo test -p videocrm --test publish_ui    # the views in headless windows, clicks and typing
+cargo test -p rushes --lib publish        # validation, chapters, progress and formatting
+cargo test -p rushes --test publish       # YoutubeService against the emulators
+cargo test -p rushes --test publish_ui    # the views in headless windows, clicks and typing
 ```
 
 `tests/publish.rs` covers sign-in (consent posted like a browser), restart, disconnect,
@@ -386,18 +386,18 @@ a notice without Node.
 
 ## Connecting a real YouTube account
 
-VideoCRM does not ship shared Google credentials: every user creates their own OAuth
-client in Google Cloud (free) and pastes it into VideoCRM. It takes about ten minutes.
+Rushes does not ship shared Google credentials: every user creates their own OAuth
+client in Google Cloud (free) and pastes it into Rushes. It takes about ten minutes.
 
 1. **Create a project.** Open <https://console.cloud.google.com/>, use the project picker
-   at the top, choose **New project**, name it (for example "VideoCRM") and create it.
+   at the top, choose **New project**, name it (for example "Rushes") and create it.
    Make sure it is selected.
 2. **Enable the YouTube Data API v3.** Go to **APIs & Services → Library**, search for
    "YouTube Data API v3", open it and click **Enable**
    (<https://console.cloud.google.com/apis/library/youtube.googleapis.com>).
 3. **Configure the consent screen.** Open **Google Auth Platform**
    (<https://console.cloud.google.com/auth/overview>) and click **Get started**:
-   - App name "VideoCRM", your email as user support email.
+   - App name "Rushes", your email as user support email.
    - Audience: **External**.
    - Contact information: your email. Accept the policy and click **Create**.
 4. **Add the scopes** (recommended). In **Data Access → Add or remove scopes**, add
@@ -408,11 +408,11 @@ client in Google Cloud (free) and pastes it into VideoCRM. It takes about ten mi
    Google account that owns your YouTube channel. Leave the publishing status on
    **Testing**: only test users can sign in, which is all you need.
 6. **Create the OAuth client.** In **Clients → Create client**, choose application type
-   **Desktop app**, name it "VideoCRM desktop" and click **Create**. Copy the **Client ID**
+   **Desktop app**, name it "Rushes desktop" and click **Create**. Copy the **Client ID**
    and **Client secret** (or download the JSON) right away: the console may not show the
    secret again.
-7. **Connect in VideoCRM.** Open **Settings → YouTube**, paste the client ID and client
-   secret, and click **Connect**. VideoCRM first checks the client with Google: a typo in
+7. **Connect in Rushes.** Open **Settings → YouTube**, paste the client ID and client
+   secret, and click **Connect**. Rushes first checks the client with Google: a typo in
    either value is reported right away. Your browser
    opens Google's sign-in page (if it does not, for example on a remote machine, use
    **Copy link** and open the link in a browser on the same computer):
@@ -420,7 +420,7 @@ client in Google Cloud (free) and pastes it into VideoCRM. It takes about ten mi
    - Google warns "Google hasn't verified this app". Click **Continue**. This is expected
      for a personal OAuth client.
    - Leave all permission boxes ticked, especially "Manage your YouTube videos".
-   - When the page says "You’re signed in", return to VideoCRM.
+   - When the page says "You’re signed in", return to Rushes.
 
 ### Limits to know about
 
@@ -433,10 +433,10 @@ client in Google Cloud (free) and pastes it into VideoCRM. It takes about ten mi
   private, whatever privacy you choose, and the lock cannot be lifted in YouTube Studio
   or appealed. Only uploads made after the project passes the audit
   (<https://support.google.com/youtube/contact/yt_api_form>) keep their privacy setting.
-  Until then, treat VideoCRM uploads as private drafts and upload the public version
+  Until then, treat Rushes uploads as private drafts and upload the public version
   through YouTube Studio.
 - **Weekly reconnect while in Testing.** Google expires refresh tokens of "Testing"
-  projects with an external audience after 7 days. VideoCRM then asks you to connect again.
+  projects with an external audience after 7 days. Rushes then asks you to connect again.
   Publishing the app (Audience → **Publish app**) removes the 7-day limit; the unverified
   warning stays.
 - **Custom thumbnails** require a verified YouTube channel (phone verification at

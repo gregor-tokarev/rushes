@@ -1,7 +1,7 @@
 //! The block catalog behind the slash menu and the block menu's "Turn into".
 
 use gpui_kit::assets::IconName;
-use videocrm_core::BlockKind;
+use rushes_core::BlockKind;
 
 /// One block kind the user can insert or convert to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

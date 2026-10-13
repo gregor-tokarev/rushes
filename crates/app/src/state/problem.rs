@@ -10,9 +10,9 @@ use std::path::Path;
 
 use gpui_kit::SharedString;
 use rusqlite::ErrorCode;
-use videocrm_core::StoreError;
-use videocrm_core::input::display_user_path;
-use videocrm_core::media::MediaError;
+use rushes_core::StoreError;
+use rushes_core::input::display_user_path;
+use rushes_core::media::MediaError;
 
 use crate::route::SettingsSection;
 
@@ -100,16 +100,16 @@ impl Problem {
                     ("The database is busy. Try again in a moment.", None)
                 }
                 Some(ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase) => (
-                    "The database file is damaged. Quit VideoCRM and restore videocrm.db in the data folder from a backup.",
+                    "The database file is damaged. Quit Rushes and restore rushes.db in the data folder from a backup.",
                     Some(data_folder()),
                 ),
-                _ => ("Try again. If it keeps happening, restart VideoCRM.", None),
+                _ => ("Try again. If it keeps happening, restart Rushes.", None),
             },
             StoreError::CreateDir { .. } | StoreError::CreateFile { .. } => {
                 (DATA_FOLDER_UNWRITABLE, Some(data_folder()))
             }
             StoreError::UnsupportedSchema { .. } => {
-                ("A newer version of VideoCRM changed the database. Update VideoCRM to keep using it.", None)
+                ("A newer version of Rushes changed the database. Update Rushes to keep using it.", None)
             }
             StoreError::NotFound { .. } => ("It was deleted in the meantime.", None),
         };
@@ -135,25 +135,25 @@ impl Problem {
 }
 
 const DATA_FOLDER_UNWRITABLE: &str =
-    "VideoCRM can’t write to its data folder. Check that the folder is yours and not read-only.";
+    "Rushes can’t write to its data folder. Check that the folder is yours and not read-only.";
 
 /// One sentence on why a folder at or under `path` can't be created or used.
 pub(crate) fn folder_error_reason(path: &Path, error: &io::Error) -> String {
     let path = display_user_path(path);
     match error.kind() {
-        io::ErrorKind::PermissionDenied => format!("VideoCRM isn’t allowed to create folders in {path}."),
+        io::ErrorKind::PermissionDenied => format!("Rushes isn’t allowed to create folders in {path}."),
         io::ErrorKind::ReadOnlyFilesystem => format!("{path} is on a read-only drive."),
         io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => format!("The drive with {path} is full."),
         io::ErrorKind::NotADirectory | io::ErrorKind::AlreadyExists => {
             format!("{path} or a folder in it is a file, not a folder.")
         }
-        _ => format!("VideoCRM can’t create folders in {path}. Check that its drive is connected."),
+        _ => format!("Rushes can’t create folders in {path}. Check that its drive is connected."),
     }
 }
 
 /// Keeps the technical detail out of the UI but in the log.
 fn log(context: &str, error: &dyn std::error::Error) {
-    log_line!("videocrm: {context}: {error}");
+    log_line!("rushes: {context}: {error}");
 }
 
 #[cfg(test)]
@@ -171,7 +171,7 @@ mod tests {
         assert_eq!(problem.title(), "Couldn’t create the video’s folder");
         assert_eq!(
             problem.message(),
-            "VideoCRM isn’t allowed to create folders in /srv/forbidden-media. Choose another media folder in Settings."
+            "Rushes isn’t allowed to create folders in /srv/forbidden-media. Choose another media folder in Settings."
         );
         assert_eq!(problem.remedy(), Some(Remedy::OpenSettings(SettingsSection::General)));
     }

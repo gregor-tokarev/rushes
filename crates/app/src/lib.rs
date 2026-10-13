@@ -1,4 +1,4 @@
-//! VideoCRM desktop application.
+//! Rushes desktop application.
 // Log through `log_line!`: `eprintln!` panics once the launching terminal is closed.
 #![warn(clippy::print_stderr, clippy::print_stdout)]
 

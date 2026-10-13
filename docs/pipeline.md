@@ -1,4 +1,4 @@
-# AI edit pipelines (`videocrm-pipeline`)
+# AI edit pipelines (`rushes-pipeline`)
 
 A pipeline turns a folder of raw takes into `edit/final.mp4` by running the
 [video-use](https://github.com/browser-use/video-use) skill inside a headless coding agent
@@ -20,7 +20,7 @@ over.
 | `Feedback { message }` | apply the feedback (to the strategy if nothing was rendered yet), re-render, summarise | `Rendering -> Succeeded` |
 | `Auto { brief }` | everything in one pass; the creator pre-approved the strategy | `Rendering -> Succeeded` |
 
-A phase that fails, is cancelled or is interrupted (VideoCRM closed) leaves what an
+A phase that fails, is cancelled or is interrupted (Rushes closed) leaves what an
 earlier phase made on offer: a revised strategy that does not finish leaves the
 strategy before it awaiting approval, and a change to a rendered edit leaves the run
 `Succeeded` with its cut. The failure is kept as the run's error and shown next to the
@@ -39,7 +39,7 @@ and put open questions at the end of the strategy. All outputs go to `<footage>/
 
 ```rust
 use std::sync::atomic::AtomicBool;
-use videocrm_pipeline::{AgentConfig, Phase, RunContext, run_phase};
+use rushes_pipeline::{AgentConfig, Phase, RunContext, run_phase};
 
 let config = AgentConfig::default();
 let cancel = AtomicBool::new(false);
@@ -166,7 +166,7 @@ the agent's `PATH` (`config.env` first).
 - **Python**: the skill's `.venv`, else `uv`, else `python3` (dependencies unverified).
 
 An app started from a desktop launcher (Finder, a `.desktop` file) often gets a minimal
-`PATH` without `~/.local/bin` or `/opt/homebrew/bin`. The VideoCRM app appends the usual
+`PATH` without `~/.local/bin` or `/opt/homebrew/bin`. The Rushes app appends the usual
 install folders that exist (Homebrew, `/usr/local/bin`, `~/.local/bin`, `~/.claude/local`,
 `~/.npm-global/bin`, `~/.cargo/bin`, `~/bin`) to its own `PATH` at startup
 (`shell::extend_tool_path`), and the agent's shell inherits it. Tools elsewhere need
@@ -184,8 +184,8 @@ choice between `Plan` and `Auto`.
 ## Testing
 
 ```sh
-cargo test -p videocrm-pipeline
-cargo clippy -p videocrm-pipeline --all-targets
+cargo test -p rushes-pipeline
+cargo clippy -p rushes-pipeline --all-targets
 ```
 
 - `tests/fixtures/*.jsonl` are real Claude Code 2.1 `stream-json` captures (plain reply,

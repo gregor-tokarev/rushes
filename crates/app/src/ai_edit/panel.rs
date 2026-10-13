@@ -18,8 +18,8 @@ use gpui_kit::{
     Render, ScrollHandle, SharedString, Styled as _, Subscription, Task, TestSupportExt as _, Window, canvas, div,
     point, px,
 };
-use videocrm_core::settings::EditPreferences;
-use videocrm_core::{Block, DocumentKind, PipelineRun, RunId, RunStatus, Video, VideoId};
+use rushes_core::settings::EditPreferences;
+use rushes_core::{Block, DocumentKind, PipelineRun, RunId, RunStatus, Video, VideoId};
 
 use super::brief::{
     BriefDraft, COLOR_GRADES, apply_edits, brief_source, color_grade_label, default_brief, preference_edits,

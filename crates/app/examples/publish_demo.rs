@@ -2,9 +2,9 @@
 //! screenshots: a minimal stand-in for the app shell with the Publish tab, the
 //! Uploads page, the YouTube settings and the sidebar account badge.
 //!
-//! Data (database, credentials, media) lives in `$VIDEOCRM_DATA_DIR`, which must be set.
+//! Data (database, credentials, media) lives in `$RUSHES_DATA_DIR`, which must be set.
 //!
-//! `VIDEOCRM_DATA_DIR=/tmp/vcrm cargo run -p videocrm --example publish_demo [-- --dark] [--video <title>]`
+//! `RUSHES_DATA_DIR=/tmp/vcrm cargo run -p rushes --example publish_demo [-- --dark] [--video <title>]`
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -16,11 +16,11 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, WindowBounds, WindowOptions, div,
     point, px, rems, size,
 };
-use videocrm::publish::{AccountBadge, PublishPanel, UploadsPage, YoutubeService, YoutubeSettings};
-use videocrm::route::{Route, SettingsSection, VideoTab};
-use videocrm::state::AppState;
-use videocrm_core::Store;
-use videocrm_core::settings::{DATA_DIR_ENV, YoutubeBackend, data_dir, database_path};
+use rushes::publish::{AccountBadge, PublishPanel, UploadsPage, YoutubeService, YoutubeSettings};
+use rushes::route::{Route, SettingsSection, VideoTab};
+use rushes::state::AppState;
+use rushes_core::Store;
+use rushes_core::settings::{DATA_DIR_ENV, YoutubeBackend, data_dir, database_path};
 
 struct Demo {
     state: Entity<AppState>,

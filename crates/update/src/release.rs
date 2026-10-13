@@ -3,7 +3,7 @@ use serde::Deserialize;
 use crate::error::{Error, Result};
 use crate::version::Version;
 
-/// A published VideoCRM release, as GitHub lists it.
+/// A published Rushes release, as GitHub lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Release {
     pub version: Version,
@@ -85,22 +85,22 @@ mod tests {
 
     const LATEST: &str = r###"{
         "tag_name": "v0.1.1",
-        "html_url": "https://github.com/gregor-tokarev/videocrm/releases/tag/v0.1.1",
+        "html_url": "https://github.com/gregor-tokarev/rushes/releases/tag/v0.1.1",
         "draft": false,
         "prerelease": false,
         "body": "## What's Changed\n* Several YouTube accounts",
         "assets": [
             {
-                "name": "VideoCRM-0.1.1-x86_64.AppImage",
+                "name": "Rushes-0.1.1-x86_64.AppImage",
                 "size": 24074744,
                 "digest": "sha256:34a94cfe62144a560ec868b43232d4fed6e4158971a715fc66574023bff836c4",
-                "browser_download_url": "https://github.com/gregor-tokarev/videocrm/releases/download/v0.1.1/VideoCRM-0.1.1-x86_64.AppImage"
+                "browser_download_url": "https://github.com/gregor-tokarev/rushes/releases/download/v0.1.1/Rushes-0.1.1-x86_64.AppImage"
             },
             {
-                "name": "videocrm-0.1.1-linux-x86_64.tar.gz",
+                "name": "rushes-0.1.1-linux-x86_64.tar.gz",
                 "size": 25665743,
                 "digest": null,
-                "browser_download_url": "https://github.com/gregor-tokarev/videocrm/releases/download/v0.1.1/videocrm-0.1.1-linux-x86_64.tar.gz"
+                "browser_download_url": "https://github.com/gregor-tokarev/rushes/releases/download/v0.1.1/rushes-0.1.1-linux-x86_64.tar.gz"
             }
         ]
     }"###;
@@ -109,16 +109,16 @@ mod tests {
     fn reads_githubs_latest_release() {
         let release = Release::from_github_json(LATEST).expect("release");
         assert_eq!(release.version, Version::new(0, 1, 1));
-        assert_eq!(release.page_url, "https://github.com/gregor-tokarev/videocrm/releases/tag/v0.1.1");
+        assert_eq!(release.page_url, "https://github.com/gregor-tokarev/rushes/releases/tag/v0.1.1");
         assert!(release.notes.starts_with("## What's Changed"));
 
-        let appimage = release.asset("VideoCRM-0.1.1-x86_64.AppImage").expect("AppImage");
+        let appimage = release.asset("Rushes-0.1.1-x86_64.AppImage").expect("AppImage");
         assert_eq!(appimage.size, 24074744);
         let sha256 = appimage.sha256.expect("digest");
         assert_eq!(&sha256[..4], &[0x34, 0xa9, 0x4c, 0xfe]);
         assert_eq!(sha256[31], 0xc4);
-        assert_eq!(release.asset("videocrm-0.1.1-linux-x86_64.tar.gz").expect("tarball").sha256, None);
-        assert_eq!(release.asset("VideoCRM-0.1.1-macos-universal.dmg"), None);
+        assert_eq!(release.asset("rushes-0.1.1-linux-x86_64.tar.gz").expect("tarball").sha256, None);
+        assert_eq!(release.asset("Rushes-0.1.1-macos-universal.dmg"), None);
     }
 
     #[test]

@@ -22,14 +22,14 @@ use gpui_kit::{
     size,
 };
 use tempfile::TempDir;
-use videocrm::ai_edit::{
+use rushes::ai_edit::{
     AiEditPanel, AiSettings, INTERRUPTED, LogEvent, PhaseKind, PhaseStarted, PipelineService, PipelinesPage,
     RENDERED_WITH_ERROR, RunError, RunMarker, TimelineEntry, delete_run_notice, split_failure,
 };
-use videocrm::route::{Route, VideoTab};
-use videocrm::state::{AppEvent, AppState, SAVE_RETRY_DELAY};
-use videocrm_core::{Block, DocumentKind, NewVideo, PipelineRun, RunId, RunStatus, Store, VideoId, VideoStatus};
-use videocrm_pipeline::{AgentEvent, AgentProcess};
+use rushes::route::{Route, VideoTab};
+use rushes::state::{AppEvent, AppState, SAVE_RETRY_DELAY};
+use rushes_core::{Block, DocumentKind, NewVideo, PipelineRun, RunId, RunStatus, Store, VideoId, VideoStatus};
+use rushes_pipeline::{AgentEvent, AgentProcess};
 
 const TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -634,7 +634,7 @@ fn startup_marks_interrupted_runs_failed_and_they_can_continue(cx: &mut TestAppC
     }
     // A store as a previous session left it: one video, runs in every state.
     let mut store = Store::open_in_memory().unwrap();
-    let video = videocrm_core::Video::new("Old session");
+    let video = rushes_core::Video::new("Old session");
     store.insert_video(&video).unwrap();
     let run = |status: RunStatus, session: Option<&str>| PipelineRun {
         id: RunId::new(),
@@ -696,7 +696,7 @@ fn startup_marks_interrupted_runs_failed_and_they_can_continue(cx: &mut TestAppC
 #[gpui_kit::test]
 fn video_rows_show_interrupted_runs_as_failed_from_the_start(cx: &mut TestAppContext) {
     let mut store = Store::open_in_memory().unwrap();
-    let video = videocrm_core::Video::new("Quit while planning");
+    let video = rushes_core::Video::new("Quit while planning");
     store.insert_video(&video).unwrap();
     let now = Utc::now();
     let run = PipelineRun {
@@ -757,7 +757,7 @@ fn an_edit_runs_on_while_another_program_locks_the_database(cx: &mut TestAppCont
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
-    let database = dir.path().join("videocrm.db");
+    let database = dir.path().join("rushes.db");
     let fx = Fixture::with_store(cx, Store::open(&database).expect("database file"), &[], true);
     let stored = |database: &Path, id: RunId| {
         let store = Store::open(database).expect("open the database");
@@ -847,7 +847,7 @@ fn a_render_that_leaves_an_old_final_cut_fails(cx: &mut TestAppContext) {
     let set_aside = fx.footage.join("edit/leftovers/final-1.mp4");
     assert_eq!(fs::read(set_aside).unwrap(), fs::read(fx.footage.join("take1.mp4")).unwrap());
     assert!(!fx.final_cut().exists());
-    assert_eq!(videocrm_pipeline::kept_cuts(&fx.footage), Vec::<PathBuf>::new());
+    assert_eq!(rushes_pipeline::kept_cuts(&fx.footage), Vec::<PathBuf>::new());
 }
 
 #[gpui_kit::test]
@@ -883,7 +883,7 @@ fn a_cancelled_render_is_set_aside_and_never_offered_as_a_cut(cx: &mut TestAppCo
     let leftover = fx.footage.join("edit/leftovers/final-1.mp4");
     assert_eq!(fs::metadata(&leftover).map(|meta| meta.len()).ok(), Some(40_000));
     assert!(!fx.final_cut().exists());
-    assert_eq!(videocrm_pipeline::kept_cuts(&fx.footage), [fx.cut(1)]);
+    assert_eq!(rushes_pipeline::kept_cuts(&fx.footage), [fx.cut(1)]);
     assert_eq!(rendered(cx), [fx.cut(1)]);
 
     // The next render is kept under the next number; the earlier render of the
@@ -893,7 +893,7 @@ fn a_cancelled_render_is_set_aside_and_never_offered_as_a_cut(cx: &mut TestAppCo
         .expect("feedback sent");
     let done = fx.wait_for_status(cx, id, RunStatus::Succeeded);
     assert_eq!(done.output, Some(fx.cut(2)));
-    assert_eq!(videocrm_pipeline::kept_cuts(&fx.footage), [fx.cut(2), fx.cut(1)]);
+    assert_eq!(rushes_pipeline::kept_cuts(&fx.footage), [fx.cut(2), fx.cut(1)]);
     assert_eq!(rendered(cx), [fx.cut(1), fx.cut(2)]);
     assert_eq!(markers(&fx.stored_events(cx, id)), ["Auto", "CutKept", "Feedback", "Cancelled", "Feedback", "CutKept"]);
     let kept: Vec<PathBuf> = fx
@@ -1048,7 +1048,7 @@ fn startup_stops_an_agent_a_crashed_session_left_running(cx: &mut TestAppContext
     let (leftover_exit, stranger_exit) = (reap(leftover), reap(stranger));
 
     let mut store = Store::open_in_memory().unwrap();
-    let video = videocrm_core::Video::new("Crashed while rendering");
+    let video = rushes_core::Video::new("Crashed while rendering");
     store.insert_video(&video).unwrap();
     let run = |status: RunStatus, output: Option<PathBuf>| PipelineRun {
         id: RunId::new(),
@@ -1697,7 +1697,7 @@ fn an_edited_brief_survives_a_restart(cx: &mut TestAppContext) {
     cx.executor().advance_clock(Duration::from_secs(1));
     cx.run_until_parked();
 
-    // VideoCRM starts again on the same database.
+    // Rushes starts again on the same database.
     close(cx, &host);
     cx.update(|cx| PipelineService::init(fx.state.clone(), cx));
     show(cx, window, &host, panel);
@@ -1720,7 +1720,7 @@ fn an_edited_brief_survives_a_restart(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_brief_written_while_another_program_locks_the_database_survives_a_quit(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let database = dir.path().join("videocrm.db");
+    let database = dir.path().join("rushes.db");
     let fx = Fixture::with_store(cx, Store::open(&database).expect("database file"), &[], false);
     let errors = Rc::new(RefCell::new(Vec::new()));
     let sink = errors.clone();

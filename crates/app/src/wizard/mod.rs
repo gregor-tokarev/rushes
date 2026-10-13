@@ -15,9 +15,9 @@ use gpui_kit::{
     ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
     TestSupportExt as _, Window, actions, div,
 };
-use videocrm_core::input::normalize_title;
-use videocrm_core::templates::TemplateKind;
-use videocrm_core::{NewVideo, VideoFormat, VideoStatus};
+use rushes_core::input::normalize_title;
+use rushes_core::templates::TemplateKind;
+use rushes_core::{NewVideo, VideoFormat, VideoStatus};
 
 use crate::database::Chip;
 use crate::state::AppState;

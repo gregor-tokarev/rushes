@@ -18,11 +18,11 @@ use base64::engine::general_purpose::STANDARD;
 use gpui_kit::{AppContext as _, Entity, TestAppContext};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use videocrm::publish::YoutubeService;
-use videocrm::state::AppState;
-use videocrm_core::settings::{AppSettings, YoutubeBackend};
-use videocrm_core::{NewVideo, Store, UploadJob, Video, VideoId};
-use videocrm_youtube::{CredentialStore, SavedLogin};
+use rushes::publish::YoutubeService;
+use rushes::state::AppState;
+use rushes_core::settings::{AppSettings, YoutubeBackend};
+use rushes_core::{NewVideo, Store, UploadJob, Video, VideoId};
+use rushes_youtube::{CredentialStore, SavedLogin};
 
 /// YouTube marks uploads processed this long after they finish.
 const PROCESSING_MS: u64 = 300;
@@ -277,7 +277,7 @@ impl Workspace {
         // Sign-in and upload workers are real threads that wake app tasks.
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(dir.path().join("videocrm.db")).unwrap();
+        let mut store = Store::open(dir.path().join("rushes.db")).unwrap();
         let settings = AppSettings {
             youtube: backend,
             media_root: Some(dir.path().join("media")),

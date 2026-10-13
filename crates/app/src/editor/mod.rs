@@ -1,6 +1,6 @@
 //! Block-based rich document editor (Notion-style).
 //!
-//! [`DocumentEditor`] edits the blocks of a [`videocrm_core::Document`]: text
+//! [`DocumentEditor`] edits the blocks of a [`rushes_core::Document`]: text
 //! blocks, lists, to-dos, quotes, callouts, code, dividers and the script cues
 //! (B-roll, on-screen text). The focused block is edited as raw text with
 //! inline Markdown; every other block renders it formatted. Register

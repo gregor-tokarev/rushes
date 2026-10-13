@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use videocrm_core::document::strip_inline_markdown;
-use videocrm_pipeline::MediaInfo;
+use rushes_core::document::strip_inline_markdown;
+use rushes_pipeline::MediaInfo;
 
 /// File size in decimal units: "820 KB", "1.4 GB".
 pub fn bytes(size: u64) -> String {

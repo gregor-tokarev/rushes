@@ -1,13 +1,13 @@
 # Updates
 
-A VideoCRM installed from a release keeps itself up to date with the newest
-[GitHub release](releasing.md). `crates/update` (`videocrm-update`) checks, downloads,
+A copy of Rushes installed from a release keeps itself up to date with the newest
+[GitHub release](releasing.md). `crates/update` (`rushes-update`) checks, downloads,
 verifies and installs; the app's `update` module (`UpdateService`) decides when, and
 shows where it stands.
 
 ## What the creator sees
 
-- A minute after VideoCRM starts, and every four hours after, it asks GitHub for the newest
+- A minute after Rushes starts, and every four hours after, it asks GitHub for the newest
   release, while **Settings › About › Update automatically** is on (the default).
 - A newer release this copy can install downloads and replaces it in the background. The
   running app keeps working; a notification and a **Restart to update** button in the
@@ -29,9 +29,9 @@ fails is announced once per version, with the download page.
 
 | Installation | Detected by | Release file | Replaced by |
 | --- | --- | --- | --- |
-| `MacApp` | `<bundle>.app/Contents/MacOS/<exe>` | `VideoCRM-<version>-macos-universal.dmg` | Mounting it, `ditto`-copying `VideoCRM.app` beside the bundle, `codesign --verify`, then swapping the two with `renamex_np(RENAME_SWAP)` |
-| `AppImage` | `$APPIMAGE`, when the executable is inside `$APPDIR` | `VideoCRM-<version>-<arch>.AppImage` | Renaming the download over the AppImage file |
-| `Prefix` | `<prefix>/bin/videocrm` with `<prefix>/share/applications/videocrm.desktop` | `videocrm-<version>-linux-<arch>.tar.gz` | Unpacking it and renaming each file into the prefix, `bin/videocrm` last |
+| `MacApp` | `<bundle>.app/Contents/MacOS/<exe>` | `Rushes-<version>-macos-universal.dmg` | Mounting it, `ditto`-copying `Rushes.app` beside the bundle, `codesign --verify`, then swapping the two with `renamex_np(RENAME_SWAP)` |
+| `AppImage` | `$APPIMAGE`, when the executable is inside `$APPDIR` | `Rushes-<version>-<arch>.AppImage` | Renaming the download over the AppImage file |
+| `Prefix` | `<prefix>/bin/rushes` with `<prefix>/share/applications/rushes.desktop`, or VideoCRM's `bin/videocrm` with `videocrm.desktop` | `rushes-<version>-linux-<arch>.tar.gz` | Unpacking it and renaming each file into the prefix, `bin/rushes` last |
 
 Anything else (a `cargo` build, `cargo install`) has no installation: it never checks on
 its own, and a check by hand links to the release page. The release file names are the
@@ -44,11 +44,11 @@ Applications.
 
 ## Installing
 
-1. `GET https://api.github.com/repos/gregor-tokarev/videocrm/releases/latest` (drafts and
-   pre-releases excluded; `VIDEOCRM_UPDATE_URL` replaces the URL for tests or a mirror).
+1. `GET https://api.github.com/repos/gregor-tokarev/rushes/releases/latest` (drafts and
+   pre-releases excluded; `RUSHES_UPDATE_URL` replaces the URL for tests or a mirror).
    A tag newer than the running version (or than the version this session installed) is
    an update.
-2. The release file for the installation downloads into `.videocrm-update/` beside what it
+2. The release file for the installation downloads into `.rushes-update/` beside what it
    replaces (same volume, so the last step is a rename). Its size and the SHA-256 GitHub
    lists for it (`digest`) must match; an AppImage must also carry the AppImage magic bytes.
 3. It's put in place as the table above says. Every step before the last works in the
@@ -56,21 +56,46 @@ Applications.
    removed afterwards, and before the next update if the app quit midway.
 4. **Restart** starts a detached `/bin/sh` helper that waits for this process to exit (or
    60 s), then opens the installation (`open <bundle>` on macOS, the AppImage or
-   `bin/videocrm` on Linux). Waiting matters: the running app holds the data folder's lock
+   `bin/rushes` on Linux). Waiting matters: the running app holds the data folder's lock
    until it exits.
 
 Updates trust GitHub over HTTPS: the release files are checked against GitHub's own digest,
 not against a separate signing key.
 
+## From VideoCRM
+
+Rushes used to be called VideoCRM. A VideoCRM copy's updater still asks
+`gregor-tokarev/videocrm` (GitHub redirects the renamed repository) and looks for
+VideoCRM's file names, holding VideoCRM's layout. So every release also carries them
+([releasing.md](releasing.md#bundles)), with Rushes inside:
+
+| VideoCRM copy | Release file | What it installs |
+| --- | --- | --- |
+| `VideoCRM.app` | `VideoCRM-<version>-macos-universal.dmg` | Rushes, as `VideoCRM.app` |
+| AppImage | `VideoCRM-<version>-<arch>.AppImage` | The Rushes AppImage |
+| Tarball | `videocrm-<version>-linux-<arch>.tar.gz` | Rushes as `bin/videocrm`, `videocrm.desktop` (named Rushes) and `videocrm.png` icons |
+
+That Rushes, still under VideoCRM's file names, detects its installation like any other,
+and its next update puts Rushes's names in place: the swapped-in bundle is renamed to
+`Rushes.app` (unless a `Rushes.app` is there already), and in a prefix `bin/videocrm`,
+`videocrm.desktop` and the `videocrm.png` icons are removed once Rushes's files are in.
+Restart opens `Rushes.app` or `bin/rushes`.
+
+The data folder moves at the first start of Rushes (see
+[ARCHITECTURE.md](ARCHITECTURE.md#data-locations)). Once no VideoCRM copies are left,
+drop the VideoCRM files from `scripts/bundle-*.sh`, their checks in
+`crates/update/tests/updater.rs`, and the `LEGACY_*` names.
+
 ## Tests
 
-- `cargo test -p videocrm-update`: version order, release parsing, installation
+- `cargo test -p rushes-update`: version order, release parsing, installation
   detection, and the whole update against a local stand-in for GitHub (AppImage and
-  tarball installs, damaged downloads, read-only folders, rate limits), plus the relaunch
-  helper.
-- `cargo test -p videocrm --test update`: the service and its UI (Settings, title bar,
+  tarball installs, damaged downloads, read-only folders, rate limits, a VideoCRM
+  tarball's names replaced), plus the relaunch helper.
+- `cargo test -p rushes --test update`: the service and its UI (Settings, title bar,
   notifications, automatic schedule) in a real `Workspace`.
 - The Bundle workflow runs the crate's tests on macOS and Linux with
-  `VIDEOCRM_UPDATE_TEST_BUNDLES` and `VIDEOCRM_UPDATE_TEST_VERSION` set, which installs the
-  bundles it just built over older copies, so a release whose files the updater can't
-  install fails before it's published.
+  `RUSHES_UPDATE_TEST_BUNDLES` and `RUSHES_UPDATE_TEST_VERSION` set, which installs the
+  bundles it just built over older copies (VideoCRM's names among them) and checks the
+  VideoCRM files' layout, so a release whose files the updater can't install fails before
+  it's published.

@@ -2,13 +2,14 @@
 #![warn(clippy::print_stderr, clippy::print_stdout)]
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
-use videocrm::ai_edit::PipelineService;
-use videocrm::publish::YoutubeService;
-use videocrm::shell::{self, InstanceLock, StartupProblem, Workspace};
-use videocrm::state::AppState;
-use videocrm::update::UpdateService;
-use videocrm_core::Store;
-use videocrm_core::settings::{data_dir, database_path};
+use rushes::ai_edit::PipelineService;
+use rushes::publish::YoutubeService;
+use rushes::shell::{self, InstanceLock, StartupProblem, Workspace};
+use rushes::state::AppState;
+use rushes::update::UpdateService;
+use rushes_core::Store;
+use rushes_core::media::legacy_default_media_root;
+use rushes_core::settings::{data_dir, database_path, legacy_data_dir};
 
 fn main() {
     // Before anything else: it sets PATH, which is only safe while no other thread runs.
@@ -18,14 +19,14 @@ fn main() {
 
     // The page icon images and the complete Lucide catalog, which covers the
     // icons of every feature module (editor, database, publish, AI edit).
-    gpui_kit::application().with_assets(videocrm::ui::Assets).run(move |cx| {
+    gpui_kit::application().with_assets(rushes::ui::Assets).run(move |cx| {
         gpui_kit::init(cx);
         shell::register_fonts(cx);
         shell::init(cx);
         match started {
-            Ok((lock, state)) => {
+            Ok((lock, state, adopted)) => {
                 cx.set_global(lock);
-                open_workspace(state, cx);
+                open_workspace(state, adopted, cx);
             }
             Err(problem) => {
                 shell::apply_theme(Default::default(), None, cx);
@@ -35,18 +36,28 @@ fn main() {
     });
 }
 
-/// Takes the data folder for this process and loads the workspace from it.
-fn start(data_dir: &std::path::Path) -> Result<(InstanceLock, AppState), StartupProblem> {
-    // Before the database opens: a second VideoCRM must not touch it at all.
+/// Takes the data folder for this process and loads the workspace from it;
+/// also says whether the data moved there from VideoCRM just now.
+fn start(data_dir: &std::path::Path) -> Result<(InstanceLock, AppState, bool), StartupProblem> {
+    let adopted = shell::adopt_legacy_data(legacy_data_dir().as_deref(), data_dir)?;
+    // Before the database opens: a second copy of Rushes must not touch it at all.
     let lock = InstanceLock::acquire(data_dir)?;
     let store = Store::open(database_path()).map_err(StartupProblem::Database)?;
     let state = AppState::new(store).map_err(StartupProblem::Database)?;
-    Ok((lock, state))
+    Ok((lock, state, adopted))
 }
 
-fn open_workspace(state: AppState, cx: &mut App) {
+fn open_workspace(state: AppState, adopted_legacy_data: bool, cx: &mut App) {
     let theme = state.settings().theme;
     let state = cx.new(|_| state);
+    // VideoCRM's videos point into its default media folder: new ones join them there.
+    if let Some(legacy) = legacy_default_media_root().filter(|root| adopted_legacy_data && root.is_dir()) {
+        state.update(cx, |state, cx| {
+            state.update_settings(cx, |settings| {
+                settings.media_root.get_or_insert(legacy);
+            })
+        });
+    }
     AppState::set_global(state.clone(), cx);
     YoutubeService::init(state.clone(), cx);
     PipelineService::init(state.clone(), cx);
@@ -58,14 +69,14 @@ fn open_workspace(state: AppState, cx: &mut App) {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1440.), px(900.)), cx))),
         window_min_size: Some(size(px(960.), px(600.))),
-        titlebar: Some(TitlebarOptions { title: Some("VideoCRM".into()), ..TitleBar::title_bar_options() }),
-        app_id: Some("videocrm".into()),
+        titlebar: Some(TitlebarOptions { title: Some("Rushes".into()), ..TitleBar::title_bar_options() }),
+        app_id: Some("rushes".into()),
         #[cfg(target_os = "linux")]
         window_decorations: Some(WindowDecorations::Client),
         ..TitleBar::window_options()
     };
     let opened = gpui_kit::open_window(options, cx, |window, cx| {
-        window.set_window_title("VideoCRM");
+        window.set_window_title("Rushes");
         // System mode follows this window's appearance.
         shell::apply_theme(theme, Some(window), cx);
         let workspace = cx.new(|cx| Workspace::new(state, window, cx));
@@ -86,7 +97,7 @@ fn open_workspace(state: AppState, cx: &mut App) {
         workspace
     });
     if let Err(error) = opened {
-        videocrm::log_line!("videocrm: cannot open the main window: {error}");
+        rushes::log_line!("rushes: cannot open the main window: {error}");
         cx.quit();
     }
 }

@@ -8,7 +8,7 @@
 use gpui_kit::Context;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use videocrm_core::{PipelineRun, RunEvent, RunId, Store, StoreError, UploadJob, VideoId};
+use rushes_core::{PipelineRun, RunEvent, RunId, Store, StoreError, UploadJob, VideoId};
 
 use super::AppState;
 use super::writes::{Queue, Write};
@@ -45,7 +45,7 @@ impl AppState {
         match serde_json::to_value(value) {
             Ok(value) => self.save(Write::Setting { key: key.to_owned(), value }, cx),
             Err(error) => {
-                log_line!("videocrm: can't save the setting {key}: {error}");
+                log_line!("rushes: can't save the setting {key}: {error}");
                 false
             }
         }
@@ -75,7 +75,7 @@ impl AppState {
         if let Some(value) = queued {
             match serde_json::from_value(value) {
                 Ok(value) => return Ok(Some(value)),
-                Err(error) => log_line!("videocrm: can't read the queued setting {key}: {error}"),
+                Err(error) => log_line!("rushes: can't read the queued setting {key}: {error}"),
             }
         }
         self.lock().get_setting(key)

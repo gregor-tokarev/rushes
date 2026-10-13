@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use videocrm_pipeline::{FootageFile, MediaInfo, Phase, build_prompt};
+use rushes_pipeline::{FootageFile, MediaInfo, Phase, build_prompt};
 
 const SKILL_MD: &str = "/opt/video-use/SKILL.md";
 
@@ -34,7 +34,7 @@ const BRIEF: &str =
 #[test]
 fn plan_prompt_asks_for_a_strategy_and_a_stop() {
     let prompt = prompt_for(Phase::Plan { brief: BRIEF.to_owned() });
-    assert!(prompt.starts_with("VideoCRM edit request (planning phase)."));
+    assert!(prompt.starts_with("Rushes edit request (planning phase)."));
     for expected in [
         "video-use skill",
         SKILL_MD,
@@ -68,7 +68,7 @@ fn plan_prompt_without_brief_or_footage() {
 #[test]
 fn approve_prompt_renders_and_summarises() {
     let prompt = prompt_for(Phase::Approve { notes: None });
-    assert!(prompt.starts_with("VideoCRM edit: strategy approved (render phase)."));
+    assert!(prompt.starts_with("Rushes edit: strategy approved (render phase)."));
     for expected in [
         "approved the edit strategy",
         SKILL_MD,
@@ -94,7 +94,7 @@ fn approve_prompt_renders_and_summarises() {
 #[test]
 fn feedback_prompt_applies_changes_and_re_renders() {
     let prompt = prompt_for(Phase::Feedback { message: "  Cut the intro to 5 seconds.\n".to_owned() });
-    assert!(prompt.starts_with("VideoCRM edit: feedback from the creator (revision phase)."));
+    assert!(prompt.starts_with("Rushes edit: feedback from the creator (revision phase)."));
     for expected in [
         "asks for these changes:\n\nCut the intro to 5 seconds.\n\n",
         SKILL_MD,
@@ -110,7 +110,7 @@ fn feedback_prompt_applies_changes_and_re_renders() {
 #[test]
 fn auto_prompt_plans_and_renders_without_waiting() {
     let prompt = prompt_for(Phase::Auto { brief: BRIEF.to_owned() });
-    assert!(prompt.starts_with("VideoCRM edit request (single pass, pre-approved)."));
+    assert!(prompt.starts_with("Rushes edit request (single pass, pre-approved)."));
     for expected in [
         SKILL_MD,
         "- take1.mp4 (1:02, 1920x1080)",

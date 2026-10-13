@@ -5,12 +5,12 @@
 //! and forgets about it. The snapshot joins the app's write queue (see
 //! [`AppState`]), which keeps the newest snapshot per document, so a slow write
 //! never overwrites a later edit, and survives the page that made it: a write
-//! that fails while the database is locked (another VideoCRM, a backup or sync
+//! that fails while the database is locked (another copy of Rushes, a backup or sync
 //! tool) is retried, and whatever is still queued when the app quits is written
 //! before it exits.
 
 use gpui_kit::{App, AppContext as _, Context, Entity, Global, Subscription};
-use videocrm_core::{Document, DocumentId};
+use rushes_core::{Document, DocumentId};
 
 pub use crate::state::SAVE_RETRY_DELAY;
 use crate::state::{AppState, QueuedWrites};

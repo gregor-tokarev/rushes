@@ -17,7 +17,7 @@ use gpui_kit::{
     Anchor, AnyElement, App, Context, Div, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div, px, rems,
 };
-use videocrm_core::{
+use rushes_core::{
     BuiltinField, Column, DatabaseView, FilterSpec, PropertyDef, SortDirection, SortSpec, VideoFormat, VideoStatus,
     ViewId, ViewKind,
 };

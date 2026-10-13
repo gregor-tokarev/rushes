@@ -16,15 +16,15 @@ use gpui_kit::{
     WindowBounds, WindowOptions, px, size,
 };
 use rusqlite::Connection;
-use videocrm::ai_edit::{LogEvent, PipelineService, RunMarker, TimelineEntry};
-use videocrm::publish::{Retired, YoutubeEvent, YoutubeService};
-use videocrm::route::VideoTab;
-use videocrm::shell::{self, Workspace};
-use videocrm::state::{AppEvent, AppState, QUIT_SAVE_TIMEOUT, SAVE_RETRY_DELAY, Severity};
-use videocrm::video_page::SAVE_DELAY;
-use videocrm_core::settings::{AppSettings, ThemeMode};
-use videocrm_core::templates::TemplateKind;
-use videocrm_core::{
+use rushes::ai_edit::{LogEvent, PipelineService, RunMarker, TimelineEntry};
+use rushes::publish::{Retired, YoutubeEvent, YoutubeService};
+use rushes::route::VideoTab;
+use rushes::shell::{self, Workspace};
+use rushes::state::{AppEvent, AppState, QUIT_SAVE_TIMEOUT, SAVE_RETRY_DELAY, Severity};
+use rushes::video_page::SAVE_DELAY;
+use rushes_core::settings::{AppSettings, ThemeMode};
+use rushes_core::templates::TemplateKind;
+use rushes_core::{
     BlockId, DocumentKind, NewVideo, PipelineRun, PropertyDef, PropertyId, PropertyKind, PropertyValue, RunId,
     RunStatus, SelectOption, Store, TagColor, UploadId, UploadJob, UploadStatus, VideoId,
 };
@@ -53,7 +53,7 @@ impl Fixture {
             cx.set_reduce_motion(true);
         });
         let dir = tempfile::tempdir().expect("temp data folder");
-        let database = dir.path().join("videocrm.db");
+        let database = dir.path().join("rushes.db");
         let mut store = Store::open(&database).expect("database file");
         let settings = AppSettings {
             media_root: Some(dir.path().join("media")),
@@ -293,7 +293,7 @@ fn edits_during_another_programs_lock_wait_for_nothing_and_land_after_it(cx: &mu
     assert_eq!(app.notifications(cx), 1);
     assert_eq!(
         *errors.borrow(),
-        ["Couldn’t save your changes: another program is using the database. VideoCRM keeps trying and saves them \
+        ["Couldn’t save your changes: another program is using the database. Rushes keeps trying and saves them \
           when the database is free."]
     );
     assert_eq!(stored_property(&app.database, desk, priority), Some(PropertyValue::Select(Some("high".into()))));
@@ -429,7 +429,7 @@ fn ai_edits_and_uploads_change_during_a_lock_without_waiting_and_land_after_it(c
     assert_eq!(stored(&app.database, |store| store.get_upload(job_id).expect("read upload")), Some(shown_job));
     assert_eq!(
         *errors.borrow(),
-        ["Couldn’t save your changes: another program is using the database. VideoCRM keeps trying and saves them \
+        ["Couldn’t save your changes: another program is using the database. Rushes keeps trying and saves them \
           when the database is free."]
     );
 }
@@ -608,7 +608,7 @@ fn a_video_created_while_the_disk_is_full_keeps_its_edits_until_it_lands(cx: &mu
     assert!(cx.read(|cx| app.state.read(cx).is_save_failing(video)));
     assert_eq!(
         *errors.borrow(),
-        ["Couldn’t save your changes. VideoCRM keeps trying; keep the app open until they’re saved."]
+        ["Couldn’t save your changes. Rushes keeps trying; keep the app open until they’re saved."]
     );
 
     // The disk has room again: the video lands as the creator left it.

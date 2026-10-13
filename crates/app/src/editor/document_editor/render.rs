@@ -19,8 +19,8 @@ use gpui_kit::{
     Styled as _, StyledText, TestSupportExt as _, UnderlineStyle, WeakEntity, Window, anchored, deferred, div,
     prelude::FluentBuilder as _, px, rems,
 };
-use videocrm_core::input::normalize_link;
-use videocrm_core::{Block, BlockId, BlockKind};
+use rushes_core::input::normalize_link;
+use rushes_core::{Block, BlockId, BlockKind};
 
 use super::geometry::{self, RenderedRow};
 use super::{BlockMenu, DocumentEditor, DraggedBlock, DropTarget, SlashMenu};

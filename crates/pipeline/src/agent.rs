@@ -328,7 +328,7 @@ fn die_with_parent(app: u32) -> std::io::Result<()> {
     }
     // The app may have died before the signal was asked for.
     if unsafe { libc::getppid() } as u32 != app {
-        return Err(std::io::Error::other("VideoCRM exited while starting the agent"));
+        return Err(std::io::Error::other("Rushes exited while starting the agent"));
     }
     Ok(())
 }
@@ -464,13 +464,13 @@ mod tests {
     fn env_overrides_win_over_the_process_environment() {
         let config = AgentConfig {
             env: vec![
-                ("VIDEOCRM_TEST_VAR".to_owned(), "first".to_owned()),
-                ("VIDEOCRM_TEST_VAR".to_owned(), "second".to_owned()),
+                ("RUSHES_TEST_VAR".to_owned(), "first".to_owned()),
+                ("RUSHES_TEST_VAR".to_owned(), "second".to_owned()),
             ],
             ..AgentConfig::default()
         };
-        assert_eq!(config.env_var("VIDEOCRM_TEST_VAR"), Some("second".into()));
-        assert_eq!(AgentConfig::default().env_var("VIDEOCRM_TEST_VAR"), None);
+        assert_eq!(config.env_var("RUSHES_TEST_VAR"), Some("second".into()));
+        assert_eq!(AgentConfig::default().env_var("RUSHES_TEST_VAR"), None);
     }
 
     #[test]

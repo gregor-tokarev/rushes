@@ -9,7 +9,7 @@ use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{App, Div, ParentElement as _, Styled as _, div};
-use videocrm_core::Video;
+use rushes_core::Video;
 
 use super::service::YoutubeService;
 

@@ -1,15 +1,15 @@
-//! UI integration tests for starting up: the notice shown when VideoCRM can't
+//! UI integration tests for starting up: the notice shown when Rushes can't
 //! open its data, and a workspace whose settings were written by another version.
 
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AppContext as _, Bounds, TestAppContext, WindowBounds, WindowOptions, px, size};
-use videocrm::ai_edit::PipelineService;
-use videocrm::publish::YoutubeService;
-use videocrm::route::Route;
-use videocrm::shell::{self, StartupNotice, StartupProblem, Workspace};
-use videocrm::state::AppState;
-use videocrm_core::{Store, StoreError};
+use rushes::ai_edit::PipelineService;
+use rushes::publish::YoutubeService;
+use rushes::route::Route;
+use rushes::shell::{self, StartupNotice, StartupProblem, Workspace};
+use rushes::state::AppState;
+use rushes_core::{Store, StoreError};
 
 fn options() -> WindowOptions {
     WindowOptions {
@@ -19,7 +19,7 @@ fn options() -> WindowOptions {
 }
 
 #[gpui_kit::test]
-fn a_second_copy_says_videocrm_is_already_open(cx: &mut TestAppContext) {
+fn a_second_copy_says_rushes_is_already_open(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let dir = tempfile::tempdir().expect("temp dir");
     let data_dir = dir.path().to_path_buf();
@@ -30,7 +30,7 @@ fn a_second_copy_says_videocrm_is_already_open(cx: &mut TestAppContext) {
         .expect("open window")
     });
     let title = cx.read(|cx| notice.read(cx).title().clone());
-    assert_eq!(title, "VideoCRM is already open");
+    assert_eq!(title, "Rushes is already open");
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         // Nothing in the data folder to act on: only the acknowledgement.
@@ -44,7 +44,7 @@ fn a_second_copy_says_videocrm_is_already_open(cx: &mut TestAppContext) {
 fn a_damaged_database_offers_its_folder(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let dir = tempfile::tempdir().expect("temp dir");
-    let file = dir.path().join("videocrm.db");
+    let file = dir.path().join("rushes.db");
     std::fs::write(&file, vec![7u8; 8192]).expect("write garbage");
     let error = Store::open(&file).expect_err("garbage is not a database");
     assert!(matches!(error, StoreError::Sqlite(_)));
@@ -57,8 +57,8 @@ fn a_damaged_database_offers_its_folder(cx: &mut TestAppContext) {
         .expect("open window")
     });
     let (title, message) = cx.read(|cx| (notice.read(cx).title().clone(), notice.read(cx).message().clone()));
-    assert_eq!(title, "VideoCRM can’t read its database");
-    assert!(message.contains("is damaged or isn’t a VideoCRM database"), "{message}");
+    assert_eq!(title, "Rushes can’t read its database");
+    assert!(message.contains("is damaged or isn’t a Rushes database"), "{message}");
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         assert!(window.try_find("startup-open-data-folder").is_some());

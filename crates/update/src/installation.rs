@@ -9,18 +9,30 @@ use crate::version::Version;
 
 /// Folder next to the installation where an update is downloaded and unpacked:
 /// on the same volume, so putting it in place is a rename.
-const STAGING_DIR: &str = ".videocrm-update";
+const STAGING_DIR: &str = ".rushes-update";
 
-/// How this copy of VideoCRM was installed, which decides the release file
+/// The executable's name, which the desktop entry and window class share.
+pub(crate) const EXECUTABLE: &str = "rushes";
+/// The app bundle's name on macOS.
+pub(crate) const BUNDLE: &str = "Rushes.app";
+/// The executable and bundle names while Rushes was called VideoCRM. Releases
+/// also carry files under VideoCRM's names, which copies from before the
+/// rename update themselves with; they keep these names until their next
+/// update puts Rushes's in place.
+pub(crate) const LEGACY_EXECUTABLE: &str = "videocrm";
+pub(crate) const LEGACY_BUNDLE: &str = "VideoCRM.app";
+
+/// How this copy of Rushes was installed, which decides the release file
 /// that updates it and how it's replaced. A copy built from source has none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Installation {
-    /// `VideoCRM.app` on macOS, copied from the disk image.
+    /// `Rushes.app` on macOS, copied from the disk image.
     MacApp { bundle: PathBuf },
     /// The AppImage file on Linux.
     AppImage { file: PathBuf },
     /// The Linux tarball unpacked into a prefix such as `~/.local`:
-    /// `bin/videocrm` and its desktop entry and icons under `share/`.
+    /// `bin/rushes` and its desktop entry and icons under `share/` (or
+    /// VideoCRM's names, for a copy from before the rename).
     Prefix { prefix: PathBuf },
 }
 
@@ -56,9 +68,11 @@ impl Installation {
             }
             let bin = exe.parent()?;
             let prefix = bin.parent()?;
-            let from_tarball = exe.file_name()? == "videocrm"
-                && bin.file_name()? == "bin"
-                && prefix.join("share/applications/videocrm.desktop").is_file();
+            let from_tarball = bin.file_name()? == "bin"
+                && [EXECUTABLE, LEGACY_EXECUTABLE].into_iter().any(|name| {
+                    exe.file_name() == Some(name.as_ref())
+                        && prefix.join(format!("share/applications/{name}.desktop")).is_file()
+                });
             return from_tarball.then(|| Installation::Prefix { prefix: prefix.to_path_buf() });
         }
         None
@@ -78,9 +92,9 @@ impl Installation {
     pub fn asset_name(&self, version: &Version) -> String {
         let arch = env::consts::ARCH;
         match self {
-            Installation::MacApp { .. } => format!("VideoCRM-{version}-macos-universal.dmg"),
-            Installation::AppImage { .. } => format!("VideoCRM-{version}-{arch}.AppImage"),
-            Installation::Prefix { .. } => format!("videocrm-{version}-linux-{arch}.tar.gz"),
+            Installation::MacApp { .. } => format!("Rushes-{version}-macos-universal.dmg"),
+            Installation::AppImage { .. } => format!("Rushes-{version}-{arch}.AppImage"),
+            Installation::Prefix { .. } => format!("rushes-{version}-linux-{arch}.tar.gz"),
         }
     }
 
@@ -121,18 +135,29 @@ impl Installation {
             Installation::MacApp { bundle } => {
                 // Through Launch Services, as a click in the Finder does.
                 let mut command = Command::new("/usr/bin/open");
-                command.arg(bundle);
+                command.arg(updated_bundle(bundle));
                 command
             }
             Installation::AppImage { file } => Command::new(file),
-            Installation::Prefix { prefix } => Command::new(prefix.join("bin/videocrm")),
+            Installation::Prefix { prefix } => Command::new(prefix.join("bin").join(EXECUTABLE)),
         }
+    }
+}
+
+/// The bundle that holds the app after an update of `bundle`: the update
+/// renames `VideoCRM.app` to `Rushes.app` beside it, unless that name is taken.
+pub(crate) fn updated_bundle(bundle: &Path) -> PathBuf {
+    let renamed = bundle.with_file_name(BUNDLE);
+    if bundle.file_name() == Some(LEGACY_BUNDLE.as_ref()) && !bundle.exists() && renamed.exists() {
+        renamed
+    } else {
+        bundle.to_path_buf()
     }
 }
 
 /// A file name in `dir` no other process uses.
 fn tempfile_in(dir: &Path) -> PathBuf {
-    dir.join(format!(".videocrm-probe-{}", std::process::id()))
+    dir.join(format!(".rushes-probe-{}", std::process::id()))
 }
 
 #[cfg(test)]
@@ -142,17 +167,17 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn finds_the_appimage_only_for_its_own_executable() {
-        let exe = Path::new("/tmp/.mount_VideoCRM/usr/bin/videocrm");
+        let exe = Path::new("/tmp/.mount_Rushes/usr/bin/rushes");
         let detected = Installation::detect_from(
             exe,
-            Some("/home/me/Apps/VideoCRM.AppImage".into()),
-            Some("/tmp/.mount_VideoCRM".into()),
+            Some("/home/me/Apps/Rushes.AppImage".into()),
+            Some("/tmp/.mount_Rushes".into()),
         );
-        assert_eq!(detected, Some(Installation::AppImage { file: "/home/me/Apps/VideoCRM.AppImage".into() }));
+        assert_eq!(detected, Some(Installation::AppImage { file: "/home/me/Apps/Rushes.AppImage".into() }));
 
         // Started by another AppImage, which left its variables behind.
         let other = Installation::detect_from(
-            Path::new("/opt/videocrm-build/videocrm"),
+            Path::new("/opt/rushes-build/rushes"),
             Some("/home/me/Apps/Other.AppImage".into()),
             Some("/tmp/.mount_Other".into()),
         );
@@ -163,11 +188,11 @@ mod tests {
     #[test]
     fn finds_the_tarball_by_its_desktop_entry() {
         let prefix = tempfile::tempdir().expect("temp dir");
-        let exe = prefix.path().join("bin/videocrm");
+        let exe = prefix.path().join("bin/rushes");
         assert_eq!(Installation::detect_from(&exe, None, None), None, "a bare binary, as cargo builds it");
 
         fs::create_dir_all(prefix.path().join("share/applications")).expect("share dir");
-        fs::write(prefix.path().join("share/applications/videocrm.desktop"), "[Desktop Entry]\n").expect("entry");
+        fs::write(prefix.path().join("share/applications/rushes.desktop"), "[Desktop Entry]\n").expect("entry");
         assert_eq!(
             Installation::detect_from(&exe, None, None),
             Some(Installation::Prefix { prefix: prefix.path().to_path_buf() })
@@ -175,18 +200,46 @@ mod tests {
         assert_eq!(Installation::detect_from(&prefix.path().join("bin/other"), None, None), None);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finds_a_tarball_from_before_the_rename() {
+        let prefix = tempfile::tempdir().expect("temp dir");
+        fs::create_dir_all(prefix.path().join("share/applications")).expect("share dir");
+        fs::write(prefix.path().join("share/applications/videocrm.desktop"), "[Desktop Entry]\n").expect("entry");
+        let installation = Installation::detect_from(&prefix.path().join("bin/videocrm"), None, None);
+        assert_eq!(installation, Some(Installation::Prefix { prefix: prefix.path().to_path_buf() }));
+        // VideoCRM's executable needs VideoCRM's entry.
+        assert_eq!(Installation::detect_from(&prefix.path().join("bin/rushes"), None, None), None);
+
+        let launch = installation.expect("installation").launch_command();
+        assert_eq!(launch.get_program(), prefix.path().join("bin/rushes"), "its update installs Rushes's names");
+    }
+
+    #[test]
+    fn opens_videocrm_app_as_rushes_app_once_renamed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let legacy = dir.path().join("VideoCRM.app");
+        let renamed = dir.path().join("Rushes.app");
+        fs::create_dir_all(&legacy).expect("legacy bundle");
+        fs::create_dir_all(&renamed).expect("a copy downloaded by hand");
+        assert_eq!(updated_bundle(&legacy), legacy, "the update kept the name: Rushes.app was taken");
+
+        fs::remove_dir(&legacy).expect("renamed by the update");
+        assert_eq!(updated_bundle(&legacy), renamed);
+        assert_eq!(updated_bundle(&renamed), renamed);
+        let elsewhere = dir.path().join("Rushes Beta.app");
+        assert_eq!(updated_bundle(&elsewhere), elsewhere);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn finds_the_app_bundle() {
-        let exe = Path::new("/Applications/VideoCRM.app/Contents/MacOS/videocrm");
+        let exe = Path::new("/Applications/Rushes.app/Contents/MacOS/rushes");
         assert_eq!(
             Installation::detect_from(exe, None, None),
-            Some(Installation::MacApp { bundle: "/Applications/VideoCRM.app".into() })
+            Some(Installation::MacApp { bundle: "/Applications/Rushes.app".into() })
         );
-        assert_eq!(
-            Installation::detect_from(Path::new("/Users/me/videocrm/target/release/videocrm"), None, None),
-            None
-        );
+        assert_eq!(Installation::detect_from(Path::new("/Users/me/rushes/target/release/rushes"), None, None), None);
     }
 
     #[test]
@@ -194,32 +247,32 @@ mod tests {
         let version = Version::new(0, 2, 0);
         let arch = env::consts::ARCH;
         assert_eq!(
-            Installation::MacApp { bundle: "/Applications/VideoCRM.app".into() }.asset_name(&version),
-            "VideoCRM-0.2.0-macos-universal.dmg"
+            Installation::MacApp { bundle: "/Applications/Rushes.app".into() }.asset_name(&version),
+            "Rushes-0.2.0-macos-universal.dmg"
         );
         assert_eq!(
-            Installation::AppImage { file: "/a/VideoCRM.AppImage".into() }.asset_name(&version),
-            format!("VideoCRM-0.2.0-{arch}.AppImage")
+            Installation::AppImage { file: "/a/Rushes.AppImage".into() }.asset_name(&version),
+            format!("Rushes-0.2.0-{arch}.AppImage")
         );
         assert_eq!(
             Installation::Prefix { prefix: "/home/me/.local".into() }.asset_name(&version),
-            format!("videocrm-0.2.0-linux-{arch}.tar.gz")
+            format!("rushes-0.2.0-linux-{arch}.tar.gz")
         );
     }
 
     #[test]
     fn stages_beside_what_it_replaces() {
         assert_eq!(
-            Installation::MacApp { bundle: "/Applications/VideoCRM.app".into() }.staging_dir(),
-            Path::new("/Applications/.videocrm-update")
+            Installation::MacApp { bundle: "/Applications/Rushes.app".into() }.staging_dir(),
+            Path::new("/Applications/.rushes-update")
         );
         assert_eq!(
-            Installation::AppImage { file: "/home/me/Apps/VideoCRM.AppImage".into() }.staging_dir(),
-            Path::new("/home/me/Apps/.videocrm-update")
+            Installation::AppImage { file: "/home/me/Apps/Rushes.AppImage".into() }.staging_dir(),
+            Path::new("/home/me/Apps/.rushes-update")
         );
         assert_eq!(
             Installation::Prefix { prefix: "/home/me/.local".into() }.staging_dir(),
-            Path::new("/home/me/.local/.videocrm-update")
+            Path::new("/home/me/.local/.rushes-update")
         );
     }
 
@@ -229,7 +282,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let dir = tempfile::tempdir().expect("temp dir");
-        let file = dir.path().join("VideoCRM.AppImage");
+        let file = dir.path().join("Rushes.AppImage");
         fs::write(&file, b"old").expect("appimage");
         let installation = Installation::AppImage { file };
         installation.check_writable().expect("own folder");

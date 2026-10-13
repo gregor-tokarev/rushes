@@ -3,9 +3,9 @@
 use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
-use videocrm_core::document::teleprompter_text;
-use videocrm_core::settings::EditPreferences;
-use videocrm_core::{Block, Video, VideoFormat};
+use rushes_core::document::teleprompter_text;
+use rushes_core::settings::EditPreferences;
+use rushes_core::{Block, Video, VideoFormat};
 
 /// The state of a video's brief form, kept while its tab is closed and across restarts.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -293,7 +293,7 @@ fn cap(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use videocrm_core::BlockKind;
+    use rushes_core::BlockKind;
 
     use super::*;
 

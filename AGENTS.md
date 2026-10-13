@@ -1,4 +1,4 @@
-# VideoCRM — agent notes
+# Rushes — agent notes
 
 Read `docs/ARCHITECTURE.md` first: crate boundaries, threading model, data locations and
 test commands live there.

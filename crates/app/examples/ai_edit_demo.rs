@@ -1,13 +1,13 @@
 //! The AI edit views on a sample video, driven by `scripts/fake-agent`, for trying
 //! them by hand and for screenshots. Nothing calls a model.
 //!
-//! `cargo run -p videocrm --example ai_edit_demo -- [--page footage|pipelines|settings]
+//! `cargo run -p rushes --example ai_edit_demo -- [--page footage|pipelines|settings]
 //!  [--dark] [--empty] [--fail] [--missing] [--delay <ms>] [--font Inter]`
 //!
 //! `--missing` points the skill folder at an empty directory, so the requirement
 //! checklist reports the skill and the ElevenLabs key as missing.
 //!
-//! Data lives in `$VIDEOCRM_DATA_DIR` (a fresh temporary folder when unset): the
+//! Data lives in `$RUSHES_DATA_DIR` (a fresh temporary folder when unset): the
 //! database, the media folder with generated takes and a stand-in video-use skill.
 
 use std::fs;
@@ -20,11 +20,11 @@ use gpui_kit::{
     AppContext as _, Bounds, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, StatefulInteractiveElement as _, Styled as _, Window, WindowBounds, WindowOptions, div, point, px, size,
 };
-use videocrm::ai_edit::{AiEditPanel, AiSettings, PipelineService, PipelinesPage, WithAiEditIcons};
-use videocrm::state::AppState;
-use videocrm_core::settings::DATA_DIR_ENV;
-use videocrm_core::templates::TemplateKind;
-use videocrm_core::{NewVideo, Store, VideoFormat, VideoId};
+use rushes::ai_edit::{AiEditPanel, AiSettings, PipelineService, PipelinesPage, WithAiEditIcons};
+use rushes::state::AppState;
+use rushes_core::settings::DATA_DIR_ENV;
+use rushes_core::templates::TemplateKind;
+use rushes_core::{NewVideo, Store, VideoFormat, VideoId};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -128,7 +128,7 @@ fn main() {
     let missing = flag("--missing");
 
     let data = std::env::var_os(DATA_DIR_ENV).map(PathBuf::from).unwrap_or_else(|| {
-        let dir = std::env::temp_dir().join(format!("videocrm-ai-edit-demo-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rushes-ai-edit-demo-{}", std::process::id()));
         eprintln!("ai_edit_demo: data in {}", dir.display());
         dir
     });
@@ -137,7 +137,7 @@ fn main() {
     fs::write(skill.join("SKILL.md"), "# video-use (demo stand-in)\n").expect("write SKILL.md");
     fs::write(skill.join(".env"), "ELEVENLABS_API_KEY=demo\n").expect("write .env");
 
-    let store = Store::open(data.join("videocrm.db")).expect("open the demo database");
+    let store = Store::open(data.join("rushes.db")).expect("open the demo database");
     let mut state = AppState::new(store).expect("load the demo workspace");
     let fake_agent = fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/fake-agent"))
         .expect("scripts/fake-agent");

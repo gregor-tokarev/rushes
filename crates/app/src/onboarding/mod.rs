@@ -1,4 +1,4 @@
-//! First-run onboarding: what VideoCRM is, the media folder, YouTube, AI
+//! First-run onboarding: what Rushes is, the media folder, YouTube, AI
 //! editing, and how to start. Embeds `publish::YoutubeSettings` and
 //! `ai_edit::DoctorChecklist`.
 
@@ -283,11 +283,11 @@ impl Onboarding {
 fn step_copy(step: Step) -> (&'static str, &'static str) {
     match step {
         Step::Welcome => (
-            "Welcome to VideoCRM",
+            "Welcome to Rushes",
             "Your production home for YouTube videos, from the first idea to the published upload.",
         ),
         Step::MediaFolder => {
-            ("Where should footage live?", "VideoCRM keeps one folder per video for raw takes and AI edit outputs.")
+            ("Where should footage live?", "Rushes keeps one folder per video for raw takes and AI edit outputs.")
         }
         Step::Youtube => {
             ("Connect YouTube", "Upload videos and keep their links on each page. You can do this later in Settings.")

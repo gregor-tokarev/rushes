@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use gpui_kit::assets::{IconName, icon_assets};
 use gpui_kit::{AssetSource, Result, SharedString};
-use videocrm_core::{BuiltinField, Column, PropertyDef, PropertyKind, ViewKind};
+use rushes_core::{BuiltinField, Column, PropertyDef, PropertyKind, ViewKind};
 
 // The Lucide icons the database views draw, beyond the default component set.
 icon_assets!(

@@ -10,8 +10,8 @@ use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, ClipboardItem, ElementId, Entity, TestAppContext, Window,
     WindowBounds, WindowOptions, point, px, size,
 };
-use videocrm::editor::{DocumentEditor, DocumentEditorEvent};
-use videocrm_core::{Block, BlockId, BlockKind, Document, DocumentId, DocumentKind, VideoId};
+use rushes::editor::{DocumentEditor, DocumentEditorEvent};
+use rushes_core::{Block, BlockId, BlockKind, Document, DocumentId, DocumentKind, VideoId};
 
 struct Fixture {
     window: AnyWindowHandle,
@@ -674,7 +674,7 @@ fn focus_on_the_editor_itself_leaves_no_block_focused(cx: &mut TestAppContext) {
 fn pasting_the_markdown_export_restores_callouts_and_cues(cx: &mut TestAppContext) {
     let f = Fixture::new(cx, vec![paragraph("")]);
     f.focus_first(cx);
-    let exported = videocrm_core::document::to_markdown(&[
+    let exported = rushes_core::document::to_markdown(&[
         block(BlockKind::Heading2, "Setup"),
         block(BlockKind::Callout, "Pin the Rust version before recording."),
         block(BlockKind::BRoll, "Slow pan across the desk"),

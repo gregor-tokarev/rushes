@@ -1,6 +1,6 @@
 //! Where the main area of the window is pointed.
 
-use videocrm_core::{VideoId, ViewId};
+use rushes_core::{VideoId, ViewId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum VideoTab {

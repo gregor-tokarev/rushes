@@ -14,9 +14,9 @@ use gpui_kit::{
     ParentElement as _, PathPromptOptions, Rems, Render, SharedString, Styled as _, Subscription, Task,
     TestSupportExt as _, Window, div,
 };
-use videocrm_core::input::{PathInputError, display_user_path, expand_user_path};
-use videocrm_core::settings::{DEFAULT_AGENT_COMMAND, PipelineSettings};
-use videocrm_pipeline::default_skill_dir;
+use rushes_core::input::{PathInputError, display_user_path, expand_user_path};
+use rushes_core::settings::{DEFAULT_AGENT_COMMAND, PipelineSettings};
+use rushes_pipeline::default_skill_dir;
 
 use super::brief::{COLOR_GRADES, color_grade_label};
 use super::doctor::DoctorChecklist;
@@ -258,7 +258,7 @@ impl AiSettings {
             Ok(Some(dir)) => self.use_skill_dir(dir, cx),
             Ok(None) => {}
             Err(error) => {
-                log_line!("videocrm: folder chooser failed: {error}");
+                log_line!("rushes: folder chooser failed: {error}");
                 let request = PathRequest::new(
                     PathKind::Folder,
                     "Type the path of the video-use folder instead.",
@@ -534,7 +534,7 @@ mod tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{Bounds, ElementId, TestAppContext, WindowBounds, WindowOptions, px, size};
-    use videocrm_core::Store;
+    use rushes_core::Store;
 
     use super::*;
 

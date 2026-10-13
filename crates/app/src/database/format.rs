@@ -1,7 +1,7 @@
 //! Text presentation of cell values: script stats, runtimes, dates and numbers.
 
 use chrono::{DateTime, Datelike as _, Local, NaiveDate, Utc};
-use videocrm_core::{UploadStatus, YoutubeState};
+use rushes_core::{UploadStatus, YoutubeState};
 
 /// Numbers at least this large are shown as Rust formats them, without
 /// grouping: past it an `f64` no longer holds every whole number exactly.
@@ -161,11 +161,11 @@ mod tests {
     #[test]
     fn youtube_shows_visibility_once_the_video_is_there() {
         let now = Utc.with_ymd_and_hms(2026, 10, 9, 12, 0, 0).unwrap();
-        let link = videocrm_core::YoutubeLink {
+        let link = rushes_core::YoutubeLink {
             video_id: "abc".into(),
             url: "https://www.youtube.com/watch?v=abc".into(),
             channel_id: "UC1".into(),
-            privacy: videocrm_core::Privacy::Unlisted,
+            privacy: rushes_core::Privacy::Unlisted,
             uploaded_at: now,
         };
         let live = YoutubeState::Live(&link);

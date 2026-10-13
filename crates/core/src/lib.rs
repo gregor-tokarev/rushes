@@ -1,4 +1,4 @@
-//! Domain model, persistence and document logic for VideoCRM.
+//! Domain model, persistence and document logic for Rushes.
 
 pub mod document;
 pub mod input;

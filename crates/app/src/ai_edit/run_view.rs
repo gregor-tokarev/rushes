@@ -23,8 +23,8 @@ use gpui_kit::{
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, TestSupportExt as _,
     Window, canvas, div, list, px, rems,
 };
-use videocrm_core::{PipelineRun, RunId, RunStatus, VideoId};
-use videocrm_pipeline::{MediaInfo, probe_media};
+use rushes_core::{PipelineRun, RunId, RunStatus, VideoId};
+use rushes_pipeline::{MediaInfo, probe_media};
 
 use super::format;
 use super::icons::tool_icon;
@@ -640,7 +640,7 @@ impl RunView {
                     None if message == INTERRUPTED => (
                         true,
                         if strategy { "The revision was interrupted" } else { "Your last change was interrupted" },
-                        "VideoCRM closed while the agent worked.",
+                        "Rushes closed while the agent worked.",
                         stderr,
                     ),
                     None => (

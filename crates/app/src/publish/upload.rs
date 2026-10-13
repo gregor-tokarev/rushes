@@ -15,8 +15,8 @@ use futures::channel::mpsc;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, AppContext as _, Context, SharedString};
-use videocrm_core::{FileStamp, Privacy, UploadId, UploadJob, UploadStatus, Video, VideoId, VideoStatus, YoutubeLink};
-use videocrm_youtube::{
+use rushes_core::{FileStamp, Privacy, UploadId, UploadJob, UploadStatus, Video, VideoId, VideoStatus, YoutubeLink};
+use rushes_youtube::{
     Error as YoutubeError, ProcessingStatus, RetryCause, UploadProgress, UploadStatus as YoutubeUploadStatus,
     UploadedVideo, VideoInfo, VideoMetadata, YoutubeClient,
 };
@@ -468,10 +468,10 @@ impl YoutubeService {
             .name("youtube-upload".into())
             .spawn(move || transfer_file(&worker.0, &file, &request, &worker.1, &sender));
         if let Err(error) = spawned {
-            log_line!("videocrm: couldn't start the upload thread: {error}");
+            log_line!("rushes: couldn't start the upload thread: {error}");
             self.update_job(id, cx, |job| {
                 job.status = UploadStatus::Failed {
-                    error: "Couldn’t start the upload. Quit VideoCRM and open it again, then retry.".to_owned(),
+                    error: "Couldn’t start the upload. Quit Rushes and open it again, then retry.".to_owned(),
                 }
             });
             return false;
@@ -612,7 +612,7 @@ impl YoutubeService {
                 _ => false,
             };
         let message = if session_gone {
-            log_line!("videocrm: youtube: {error}");
+            log_line!("rushes: youtube: {error}");
             SESSION_GONE.to_owned()
         } else {
             describe_error(error)
@@ -886,7 +886,7 @@ fn file_stamp(path: &Path) -> Option<FileStamp> {
 
 #[cfg(test)]
 mod tests {
-    use videocrm_youtube::Privacy as YoutubePrivacy;
+    use rushes_youtube::Privacy as YoutubePrivacy;
 
     use super::*;
 

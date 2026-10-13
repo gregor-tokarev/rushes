@@ -2,8 +2,8 @@
 //! multi-line text pasted into the editor, which is read like an imported
 //! Markdown file ([`from_markdown`]).
 
-use videocrm_core::document::{from_markdown, quote_marker};
-use videocrm_core::{Block, BlockKind};
+use rushes_core::document::{from_markdown, quote_marker};
+use rushes_core::{Block, BlockKind};
 
 use super::blocks::MAX_INDENT;
 
