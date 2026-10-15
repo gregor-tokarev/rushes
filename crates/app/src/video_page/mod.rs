@@ -16,7 +16,7 @@ use gpui_kit::component::input::{Enter, Input, InputEvent, InputState, MoveDown,
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::scroll::Scrollbar;
-use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::tab::{Tab, TabBar, TabVariant};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Sizable as _, Size, StyledExt as _, WindowExt as _, h_flex, v_flex,
 };
@@ -35,6 +35,7 @@ use crate::publish::PublishPanel;
 use crate::route::{Route, VideoTab};
 use crate::state::{AppEvent, AppState};
 use crate::ui::dialog::confirm_delete_videos;
+use crate::ui::zoom::tab_size;
 use crate::ui::{EmptyState, PageIcon};
 
 pub use document::{DocumentTab, PathPurpose, SAVE_DELAY, ScriptRail, ScriptStats};
@@ -581,6 +582,7 @@ impl VideoPage {
             || [&self.script, &self.notes].into_iter().flatten().any(|tab| tab.read(cx).is_save_failing(cx));
         TabBar::new("video-tabs")
             .underline()
+            .with_size(tab_size(TabVariant::Underline, Size::Medium, cx))
             .w_full()
             .selected_index(selected)
             .children(VideoTab::ALL.iter().map(|tab| Tab::new().label(tab.label())))

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use chrono::{NaiveDate, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use gpui_kit::component::calendar::{Calendar, CalendarEvent, CalendarState, Date};
+use gpui_kit::component::calendar::{CalendarEvent, CalendarState, Date};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Backspace, Input, InputEvent, InputState};
 use gpui_kit::component::link::Link;
@@ -34,6 +34,7 @@ use crate::database::{
     NO_OPTIONS_ON_PAGE, PropertyEditor, PropertyEditorMode, format, kind_icon, multi_select_list, query, select_menu,
 };
 use crate::state::{AppEvent, AppState};
+use crate::ui::date_field;
 
 /// Retained editors of one video's properties. Values are written through
 /// [`AppState`] as soon as an editor commits.
@@ -497,9 +498,9 @@ impl PropertiesPanel {
                 this.set_date_open(open.then_some(field), window, cx);
             }))
             .trigger(trigger)
-            .content(move |_, _, _| {
+            .content(move |_, _, cx| {
                 let panel = panel.clone();
-                let calendar = Calendar::new(&calendar).small().first_day_of_week(first_day);
+                let calendar = date_field::calendar(&calendar, first_day, cx);
                 v_flex().gap_2().child(calendar).when(date.is_some(), |this| {
                     this.child(
                         Button::new("clear-date").ghost().small().icon(IconName::X).label("Clear date").on_click(

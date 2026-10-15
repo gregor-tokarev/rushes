@@ -10,7 +10,7 @@ use std::rc::Rc;
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::calendar::{Calendar, CalendarState};
+use gpui_kit::component::calendar::CalendarState;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
@@ -41,7 +41,7 @@ use super::panel::{CELL_EDITOR_CONTEXT, CellRef, DatabasePanel, TEXT_ENTRY_CONTE
 use super::property_editor::PropertyEditorMode;
 use super::query::column_name;
 use crate::publish::{ChannelChoices, ChooseChannel};
-use crate::ui::{EmptyState, format_when, video_icon};
+use crate::ui::{EmptyState, date_field, format_when, video_icon};
 
 /// Narrowest a column can be resized to, in pixels.
 const MIN_COLUMN_WIDTH: f32 = 72.0;
@@ -64,7 +64,6 @@ pub(crate) enum EmptyReason {
 }
 
 /// What the table shows, prepared by the panel.
-#[derive(Default)]
 pub(crate) struct TableModel {
     pub rows: Vec<VideoRow>,
     pub columns: Vec<ColumnLayout>,
@@ -78,6 +77,27 @@ pub(crate) struct TableModel {
     pub empty: EmptyReason,
     pub now: DateTime<Utc>,
     pub week_start: WeekStart,
+    /// The interface zoom's scale, 1.0 at 100%: column widths are kept at 100%.
+    pub scale: f32,
+}
+
+impl Default for TableModel {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            columns: Vec::new(),
+            properties: Rc::from([]),
+            sorts: Vec::new(),
+            known_tags: Rc::from([]),
+            editing: None,
+            date_target: None,
+            tags_target: None,
+            empty: EmptyReason::default(),
+            now: DateTime::default(),
+            week_start: WeekStart::default(),
+            scale: 1.,
+        }
+    }
 }
 
 impl TableModel {
@@ -400,9 +420,9 @@ impl VideoTable {
             .open(self.model.date_target == Some(cell))
             .on_open_change(on_open_change)
             .trigger(trigger)
-            .content(move |_, _, _| {
+            .content(move |_, _, cx| {
                 let clear = clear.clone();
-                let calendar = Calendar::new(&calendar).small().first_day_of_week(first_day);
+                let calendar = date_field::calendar(&calendar, first_day, cx);
                 v_flex().gap_2().child(calendar).when(value.is_some(), |this| {
                     this.child(
                         Button::new("clear-date").ghost().small().icon(IconName::X).label("Clear date").on_click(
@@ -622,7 +642,7 @@ impl TableDelegate for VideoTable {
     fn column(&self, col_ix: usize, _: &App) -> TableColumn {
         let Some(layout) = self.model.columns.get(col_ix) else {
             return TableColumn::new("add-property", "Add property")
-                .width(px(ADD_COLUMN_WIDTH))
+                .width(px(ADD_COLUMN_WIDTH * self.model.scale))
                 .resizable(false)
                 .movable(false)
                 .selectable(false);
@@ -638,8 +658,8 @@ impl TableDelegate for VideoTable {
                 .any(|def| def.id == id && def.kind == PropertyKind::Number)
         );
         TableColumn::new(column_key(column), name)
-            .width(px(layout.width.max(MIN_COLUMN_WIDTH)))
-            .min_width(px(MIN_COLUMN_WIDTH))
+            .width(px(layout.width.max(MIN_COLUMN_WIDTH) * self.model.scale))
+            .min_width(px(MIN_COLUMN_WIDTH * self.model.scale))
             .movable(false)
             .selectable(false)
             .when(column == Column::Builtin(BuiltinField::Title), |this| this.fixed_left())

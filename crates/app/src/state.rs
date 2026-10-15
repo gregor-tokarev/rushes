@@ -141,6 +141,11 @@ impl AppState {
         cx.global::<GlobalAppState>().0.clone()
     }
 
+    /// The app's state, unless the app started without one (it couldn't open its data).
+    pub fn try_global(cx: &App) -> Option<Entity<AppState>> {
+        cx.try_global::<GlobalAppState>().map(|global| global.0.clone())
+    }
+
     /// A connection of its own to the database, for reading or writing it
     /// outside the app's write queue, as tests do. It waits up to 5 s for
     /// another program's lock: never use it on the UI thread. The app's

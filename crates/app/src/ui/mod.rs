@@ -35,12 +35,17 @@
 //! - **Page icons.** A video's icon is a [`PageIcon`]: a bundled colour image
 //!   for every emoji the app offers, the text for any other emoji, and one
 //!   neutral page glyph for a video without an icon.
-//! - **Dates.** Timestamps read [`format_when`]: `Today, 14:02`.
+//! - **Dates.** Timestamps read [`format_when`]: `Today, 14:02`. A date to
+//!   pick is a [`date_field::DateField`], or [`date_field::calendar`] in a
+//!   popover of its own: the kit's `DatePicker` keeps its calendar at 100%.
 //! - **Focus.** Every row, card and control the app makes focusable itself
 //!   takes focus through [`KeyboardFocus`]: a click doesn't take the keyboard,
 //!   and the focus ring shows only focus the keyboard gave.
 //! - **Tooltips.** A tooltip that explains a passing state, such as why a
 //!   control is disabled, is a [`state_tooltip`], which leaves with the state.
+//! - **Zoom.** Sizes are in rems, which follow the creator's zoom. Geometry
+//!   that a kit component takes in pixels is the design's value through
+//!   [`zoom::zoomed`]; a tab bar takes its size from [`zoom::tab_size`].
 //!
 //! # Button sizes
 //!
@@ -57,6 +62,7 @@
 
 mod choice_card;
 pub mod contrast;
+pub mod date_field;
 pub mod dialog;
 mod empty_state;
 mod focus;
@@ -69,6 +75,7 @@ pub mod settings;
 mod state_tooltip;
 mod table;
 mod time;
+pub mod zoom;
 
 use gpui_kit::App;
 use gpui_kit::component::WindowExt as _;

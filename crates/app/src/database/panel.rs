@@ -23,7 +23,7 @@ use gpui_kit::{
     Subscription, Task, Window, actions, div,
 };
 use rushes_core::input::{normalize_title, parse_number};
-use rushes_core::settings::WeekStart;
+use rushes_core::settings::{WeekStart, Zoom};
 use rushes_core::{
     BuiltinField, Column, DatabaseView, FilterSpec, PropertyDef, PropertyId, PropertyKind, PropertyValue,
     SortDirection, SortSpec, Video, VideoId, VideoRow, VideoStatus, ViewId, ViewKind,
@@ -124,6 +124,8 @@ pub struct DatabasePanel {
     tags_target: Option<VideoId>,
     /// The day the date cells' calendar starts its weeks on.
     week_start: WeekStart,
+    /// The interface zoom: the table's rows and columns are sized in pixels.
+    zoom: Zoom,
     /// The view whose tab was right-clicked, for the tab context menu.
     pub(super) menu_view: Option<ViewId>,
     /// The sort rule whose column the Sort popover is choosing, if any.
@@ -242,6 +244,7 @@ impl DatabasePanel {
             date_target: None,
             tags_target: None,
             week_start: WeekStart::default(),
+            zoom: Zoom::DEFAULT,
             menu_view: None,
             sort_picker: None,
             view_tabs_overflow: Rc::default(),
@@ -288,6 +291,15 @@ impl DatabasePanel {
     pub fn set_week_start(&mut self, week_start: WeekStart, cx: &mut Context<Self>) {
         if self.week_start != week_start {
             self.week_start = week_start;
+            self.refresh(cx);
+        }
+    }
+
+    /// Sizes the table's rows and columns for `zoom`. Views keep their column
+    /// widths at 100%, so every zoom shows the same proportions.
+    pub fn set_zoom(&mut self, zoom: Zoom, cx: &mut Context<Self>) {
+        if self.zoom != zoom {
+            self.zoom = zoom;
             self.refresh(cx);
         }
     }
@@ -999,6 +1011,7 @@ impl DatabasePanel {
             empty: self.empty_reason(cx),
             now: Utc::now(),
             week_start: self.week_start,
+            scale: self.zoom.factor(),
         };
         let selected_ix = self.selected.and_then(|id| model.rows.iter().position(|row| row.video.id == id));
         self.table.update(cx, |table, cx| {
@@ -1030,6 +1043,7 @@ impl DatabasePanel {
             }
             TableEvent::ClearSelection => self.selected = None,
             TableEvent::ColumnWidthsChanged(widths) => {
+                let scale = self.zoom.factor();
                 let widths: Vec<(Column, Pixels)> = widths
                     .iter()
                     .enumerate()
@@ -1041,7 +1055,7 @@ impl DatabasePanel {
                         let mut columns = resolve_columns(view, &properties);
                         for (column, width) in widths {
                             if let Some(layout) = columns.iter_mut().find(|layout| layout.column == column) {
-                                layout.width = f32::from(width).round();
+                                layout.width = (f32::from(width) / scale).round();
                             }
                         }
                         view.columns = columns;
@@ -1098,7 +1112,7 @@ impl DatabasePanel {
     }
 
     fn render_table(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let row_height = Size::Medium.table_row_height();
+        let row_height = Size::Medium.table_row_height() * self.zoom.factor();
         let rows = self.shown.len();
         let mut count = match rows {
             1 => "1 video".to_string(),
@@ -1130,7 +1144,13 @@ impl DatabasePanel {
                             this.h(row_height * (rows + 1) as f32)
                         }
                     })
-                    .child(DataTable::new(&self.table).bordered(false)),
+                    // A custom row height leaves the cells' text size to the table.
+                    .child(
+                        div()
+                            .size_full()
+                            .text_sm()
+                            .child(DataTable::new(&self.table).bordered(false).with_size(Size::Size(row_height))),
+                    ),
             )
             .when(rows > 0, |this| {
                 this.child(

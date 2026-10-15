@@ -74,6 +74,8 @@ pub(crate) struct RunView {
     /// it follows the tail, the newest rows stay in view until the creator scrolls up;
     /// scrolling back to the end resumes following.
     rows: ListState,
+    /// The `rem` the rows were measured at: zooming changes their heights.
+    rows_rem_size: Pixels,
     /// The log's content height, measured after the last layout.
     log_height: Rc<Cell<Option<Pixels>>>,
     output: Option<OutputFacts>,
@@ -106,6 +108,7 @@ impl RunView {
             items: Vec::new(),
             folded_len: 0,
             rows: ListState::new(0, ListAlignment::Top, rems(TIMELINE_HEIGHT).to_pixels(window.rem_size())),
+            rows_rem_size: window.rem_size(),
             log_height: Rc::default(),
             output: None,
             output_task: None,
@@ -964,6 +967,10 @@ impl Render for RunView {
         let Some(run) = self.run(cx).cloned() else {
             return div();
         };
+        if self.rows_rem_size != window.rem_size() {
+            self.rows_rem_size = window.rem_size();
+            self.rows.remeasure();
+        }
         let live = self.live(cx);
         let stepper = self.render_stepper(&run, cx).into_any_element();
         let state_card: Option<AnyElement> = match (live, run.status) {

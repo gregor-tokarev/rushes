@@ -3,12 +3,13 @@
 use chrono::NaiveDate;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
-use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState, DateTime};
 use gpui_kit::component::form::{Field, Form};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, Icon, Side, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::tab::{Tab, TabBar, TabVariant};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, Side, Sizable as _, Size, StyledExt as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Global, InteractiveElement as _, IntoElement, KeyBinding,
@@ -21,7 +22,9 @@ use rushes_core::{NewVideo, VideoFormat, VideoStatus};
 
 use crate::database::Chip;
 use crate::state::AppState;
+use crate::ui::date_field::{DateField, DateFieldEvent, DateFieldState};
 use crate::ui::dialog::form_footer;
+use crate::ui::zoom::tab_size;
 use crate::ui::{ChoiceCard, KeyboardFocus as _, PageIcon};
 
 actions!(new_video, [PreviousFormat, NextFormat]);
@@ -54,12 +57,11 @@ pub fn open_new_video_dialog(status: Option<VideoStatus>, window: &mut Window, c
     bind_keys(cx);
     let form = cx.new(|cx| NewVideoForm::new(status.unwrap_or_default(), window, cx));
     let title = form.read(cx).title.clone();
-    let width = window.rem_size() * 36.;
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         let form = form.clone();
         dialog
             .title("New video")
-            .width(width)
+            .width(window.rem_size() * 36.)
             .child(form.clone())
             .footer(form_footer("new-video-cancel", "new-video-create", "Create"))
             // `submit` closes the dialog itself before it opens the new video.
@@ -83,7 +85,7 @@ struct NewVideoForm {
     /// Whether the user picked the template, so a format change keeps it.
     template_chosen: bool,
     status: VideoStatus,
-    publish_date: Entity<DatePickerState>,
+    publish_date: Entity<DateFieldState>,
     publish_on: Option<NaiveDate>,
     error: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
@@ -94,11 +96,10 @@ impl NewVideoForm {
         let title = cx.new(|cx| InputState::new(window, cx).placeholder("Video title"));
         let hook = cx.new(|cx| InputState::new(window, cx).placeholder("One-line hook — why would someone click?"));
         let first_day = AppState::global(cx).read(cx).settings().week_start.weekday();
-        let publish_date =
-            cx.new(|cx| DatePickerState::new(window, cx).first_day_of_week(first_day).date_format("%b %-d, %Y"));
+        let publish_date = cx.new(|cx| DateFieldState::date(window, cx).first_day_of_week(first_day));
         let subscriptions = vec![
-            cx.subscribe(&publish_date, |this: &mut Self, _, event: &DatePickerEvent, cx| {
-                let DatePickerEvent::Change(DateTime::Single(date)) = event else { return };
+            cx.subscribe(&publish_date, |this: &mut Self, _, event: &DateFieldEvent, cx| {
+                let DateFieldEvent::Change(date) = event;
                 this.publish_on = date.map(|date| date.date());
                 cx.notify();
             }),
@@ -206,7 +207,7 @@ impl NewVideoForm {
             .child(
                 TabBar::new("new-video-format-tabs")
                     .segmented()
-                    .small()
+                    .with_size(tab_size(TabVariant::Segmented, Size::Small, cx))
                     .selected_index(selected)
                     .children(VideoFormat::ALL.iter().map(|format| Tab::new().label(format.label())))
                     .on_click(cx.listener(|this, ix: &usize, _, cx| {
@@ -311,10 +312,14 @@ impl Render for NewVideoForm {
                                         .child(div().text_sm().font_medium().child("Publish date"))
                                         .child(
                                             div().id("new-video-publish-date").test_support().child(
-                                                DatePicker::new(&self.publish_date)
-                                                    .small()
-                                                    .cleanable(true)
-                                                    .placeholder("No date"),
+                                                DateField::new(
+                                                    "new-video-publish-date-field",
+                                                    "Publish date",
+                                                    &self.publish_date,
+                                                )
+                                                .small()
+                                                .cleanable(true)
+                                                .placeholder("No date"),
                                             ),
                                         ),
                                 ),

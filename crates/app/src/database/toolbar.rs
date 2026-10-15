@@ -8,9 +8,9 @@ use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::tab::{Tab, TabBar, TabVariant};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, ElementExt as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, ElementExt as _, Icon, Sizable as _, Size, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -30,6 +30,7 @@ use super::property_editor::PropertyEditorMode;
 use super::query::{active_filter_count, column_name, resolve_columns};
 use super::table::column_key;
 use crate::ui::PAGE_INSET;
+use crate::ui::zoom::tab_size;
 
 impl DatabasePanel {
     pub(super) fn set_sort_picker(&mut self, picker: Option<SortPicker>, cx: &mut Context<Self>) {
@@ -112,7 +113,7 @@ impl DatabasePanel {
         let tabs_scroll = self.view_tabs_scroll.clone();
         let tabs = TabBar::new("database-views")
             .underline()
-            .small()
+            .with_size(tab_size(TabVariant::Underline, Size::Small, cx))
             .track_scroll(&self.view_tabs_scroll)
             .menu(overflow.get())
             .when_some(self.active_index(), |this, ix| this.selected_index(ix))
