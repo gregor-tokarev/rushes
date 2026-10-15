@@ -92,7 +92,7 @@ pub use choice_card::ChoiceCard;
 pub use contrast::warning_text;
 pub use empty_state::EmptyState;
 pub use focus::KeyboardFocus;
-pub use menu::menu_item;
+pub use menu::{menu_item, scrolling_menu};
 pub use page::{PAGE_INSET, PageHeader, page_frame};
 pub use page_icon::{Assets, PageIcon, has_page_icon_image, video_icon};
 pub use row_button::{RowButton, section_label};

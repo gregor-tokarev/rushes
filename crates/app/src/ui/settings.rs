@@ -25,7 +25,7 @@ use gpui_kit::{
     Styled as _, Window, div,
 };
 
-use super::menu_item;
+use super::{menu_item, scrolling_menu};
 
 /// The widest a settings group, and with it a text field, grows: a path or an
 /// ID doesn't need the whole page, and a switch or select beside a short
@@ -60,9 +60,8 @@ pub fn dropdown_field(
             .outline()
             .disabled(field.is_disabled())
             .with_size(field.size())
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                // Zoomed in, the options may be taller than the window.
-                options.iter().fold(menu.scrollable(true), |menu, (value, label)| {
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, _| {
+                options.iter().fold(scrolling_menu(menu, window), |menu, (value, label)| {
                     let (value, set_value) = (value.clone(), set_value.clone());
                     menu.item(
                         menu_item(label.clone())

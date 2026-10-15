@@ -528,9 +528,9 @@ impl VideoTable {
                         Some(option) => this.child(Chip::new(option.name.clone(), option.color)),
                         None => this.child(empty_value(cx)),
                     })
-                    .dropdown_menu(move |menu, _, _| {
+                    .dropdown_menu(move |menu, window, _| {
                         let panel = panel.clone();
-                        select_menu(menu, &options, selected.as_deref(), NO_OPTIONS_IN_TABLE, move |value, cx| {
+                        select_menu(menu, window, &options, selected.as_deref(), NO_OPTIONS_IN_TABLE, move |value, cx| {
                             let value = PropertyValue::Select(value);
                             _ = panel.update(cx, |panel, cx| panel.set_property_value(id, property, Some(value), cx));
                         })

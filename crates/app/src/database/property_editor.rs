@@ -19,7 +19,7 @@ use super::elements::Chip;
 use super::icons::kind_icon;
 use super::panel::TEXT_ENTRY_CONTEXT;
 use crate::ui::dialog::form_footer;
-use crate::ui::menu_item;
+use crate::ui::{menu_item, scrolling_menu};
 
 /// What the property dialog edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,9 +199,9 @@ impl PropertyEditor {
             .child(h_flex().gap_2().child(Icon::new(kind_icon(&self.kind)).small()).child(self.kind.label()))
             .dropdown_caret(true)
             .disabled(self.existing.is_some())
-            .dropdown_menu(move |menu, _, _| {
+            .dropdown_menu(move |menu, window, _| {
                 // Each item has an icon, so the check goes on the trailing side.
-                KINDS.iter().fold(menu.check_side(Side::Right), |menu, kind| {
+                KINDS.iter().fold(scrolling_menu(menu, window).check_side(Side::Right), |menu, kind| {
                     let kind = kind();
                     let editor = editor.clone();
                     let chosen = kind.clone();

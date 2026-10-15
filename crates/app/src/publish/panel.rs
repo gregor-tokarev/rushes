@@ -52,7 +52,7 @@ use crate::route::{Route, VideoTab};
 use crate::state::{AppEvent, AppState};
 use crate::ui::date_field::{DateField, DateFieldEvent, DateFieldState};
 use crate::ui::path_prompt::{self, PathKind, PathRequest};
-use crate::ui::{menu_item, notification, state_tooltip, warning_text};
+use crate::ui::{menu_item, notification, scrolling_menu, state_tooltip, warning_text};
 
 /// Form edits are saved this long after the last keystroke.
 const SAVE_DELAY: Duration = Duration::from_millis(500);
@@ -1414,9 +1414,9 @@ impl PublishPanel {
                     })
                 };
                 button
-                    .dropdown_menu(move |menu, _, _| {
+                    .dropdown_menu(move |menu, window, _| {
                         let panel = panel.clone();
-                        choices.menu(menu.check_side(Side::Right), choose.clone()).separator().item(
+                        choices.menu(scrolling_menu(menu, window).check_side(Side::Right), choose.clone()).separator().item(
                             menu_item("Add account…").icon(IconName::Plus).disabled(signing_in).on_click(
                                 move |_, _, cx| {
                                     panel.update(cx, |panel, cx| panel.add_account(cx)).ok();
@@ -1516,9 +1516,9 @@ impl PublishPanel {
                 .small()
                 .outline()
                 .dropdown_caret(true)
-                .dropdown_menu(move |menu, _, _| {
+                .dropdown_menu(move |menu, window, _| {
                     // The film icons take the left side; the chosen file is ticked on the right.
-                    let mut menu = menu.check_side(Side::Right);
+                    let mut menu = scrolling_menu(menu, window).check_side(Side::Right);
                     for (ix, choice) in choices.iter().enumerate() {
                         if ix == 0 || choices[ix - 1].source != choice.source {
                             menu = menu.label(choice.source);

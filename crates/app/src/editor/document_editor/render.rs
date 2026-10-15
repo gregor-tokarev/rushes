@@ -28,7 +28,7 @@ use crate::editor::inline::RichText;
 use crate::editor::markdown::is_list;
 use crate::editor::palette::EditorPalette;
 use crate::editor::slash::BLOCK_TYPES;
-use crate::ui::{menu_item, notification};
+use crate::ui::{menu_item, notification, scrolling_menu};
 
 /// Width of the gutter holding the add button and drag handle. The same
 /// space is reserved on the trailing side so text stays centered.
@@ -775,8 +775,8 @@ pub(super) fn block_menu(
     };
     let turn_into = {
         let editor = editor.clone();
-        move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
-            BLOCK_TYPES.iter().fold(menu.check_side(Side::Right), |menu, ty| {
+        move |menu: PopupMenu, window: &mut Window, _: &mut Context<PopupMenu>| {
+            BLOCK_TYPES.iter().fold(scrolling_menu(menu, window).check_side(Side::Right), |menu, ty| {
                 let editor = editor.clone();
                 let kind = ty.kind;
                 menu.item(menu_item(ty.label()).icon(Icon::new(ty.icon)).checked(kind == current).on_click(
