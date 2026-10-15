@@ -168,9 +168,11 @@ GPUI Kit app. Main pieces:
   `zoom` setting through 75–150%. The workspace sets the kit theme's base font, which
   GPUI Kit makes the window's `rem`, to 16 px times the zoom, so rem-sized UI scales.
   What the kit sizes in pixels is scaled by hand: title bar, sidebar width, table rows
-  and column widths (views store widths at 100%), notifications; tab bars step up a kit
-  size when their label outgrows the frame. Above 150% the kit's tab frames can't hold
-  their labels, and a 1440 × 900 screen drops below the window's designed minimum.
+  and column widths (views store widths at 100%), notifications, calendars; tab bars step
+  up a kit size when their label outgrows the frame. The kit's `DatePicker` can't be
+  widened, so dates are picked in `ui::date_field` (kit calendar and time field in a
+  popover). Above 150% the kit's tab frames can't hold their labels, and a 1440 × 900
+  screen drops below the window's designed minimum.
 - `database/` — Notion-like videos database: table view (inline cell editing, column
   menu, add property, sort/filter/search) and board view (kanban by status, drag cards).
 - `editor/` — block-based rich document editor (slash menu, markdown shortcuts,

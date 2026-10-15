@@ -1416,3 +1416,36 @@ fn zoom_keys_scale_the_whole_interface_and_are_kept(cx: &mut TestAppContext) {
     assert_eq!(rem(cx), px(12.8));
     assert_eq!(title_bar(cx), px(34.), "the title bar keeps room for the window buttons");
 }
+
+#[gpui_kit::test]
+fn a_zoomed_calendar_keeps_its_last_days_and_arrows_inside(cx: &mut TestAppContext) {
+    use chrono::{Datelike as _, Local, Months, NaiveDate, Weekday};
+
+    let app = Fixture::open(cx, true, &[]);
+    for _ in 0..3 {
+        app.press(cx, "secondary-+");
+    }
+    assert_eq!(cx.read(|cx| app.state.read(cx).settings().zoom.percent()), 150);
+
+    app.press(cx, "secondary-n");
+    app.click(cx, "new-video-publish-date");
+    assert!(app.has(cx, "weekday-0-0"), "the calendar opens");
+    // Arrows and Saturdays sit at the calendar's far edge, which a calendar
+    // narrower than its zoomed days would leave outside its popup: a click
+    // there would close it.
+    app.click(cx, "calendar-next");
+    assert!(app.has(cx, "weekday-0-0"), "the calendar stays open on the next month");
+    let today = Local::now().date_naive();
+    let next = today.with_day(1).and_then(|first| first.checked_add_months(Months::new(1))).expect("next month");
+    let saturday = (0..7).map(|ix| next + chrono::Days::new(ix)).find(|day| day.weekday() == Weekday::Sat).unwrap();
+    // A Sunday-first month shows its first Saturday at the end of the first row.
+    app.click(cx, ElementId::Name(format!("calendar-{saturday}-0-0").into()));
+    assert!(!app.has(cx, "weekday-0-0"), "picking the day closes the calendar");
+
+    app.click(cx, "new-video-title");
+    app.type_text(cx, "Zoomed launch");
+    app.click(cx, "new-video-create");
+    let id = app.video_id(cx, "Zoomed launch");
+    let picked: Option<NaiveDate> = cx.read(|cx| app.state.read(cx).video(id).and_then(|video| video.publish_date));
+    assert_eq!(picked, Some(saturday));
+}

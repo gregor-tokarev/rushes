@@ -35,7 +35,9 @@
 //! - **Page icons.** A video's icon is a [`PageIcon`]: a bundled colour image
 //!   for every emoji the app offers, the text for any other emoji, and one
 //!   neutral page glyph for a video without an icon.
-//! - **Dates.** Timestamps read [`format_when`]: `Today, 14:02`.
+//! - **Dates.** Timestamps read [`format_when`]: `Today, 14:02`. A date to
+//!   pick is a [`date_field::DateField`], or [`date_field::calendar`] in a
+//!   popover of its own: the kit's `DatePicker` keeps its calendar at 100%.
 //! - **Focus.** Every row, card and control the app makes focusable itself
 //!   takes focus through [`KeyboardFocus`]: a click doesn't take the keyboard,
 //!   and the focus ring shows only focus the keyboard gave.
@@ -60,6 +62,7 @@
 
 mod choice_card;
 pub mod contrast;
+pub mod date_field;
 pub mod dialog;
 mod empty_state;
 mod focus;

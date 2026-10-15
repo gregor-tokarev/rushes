@@ -10,7 +10,7 @@ use std::rc::Rc;
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::calendar::{Calendar, CalendarState};
+use gpui_kit::component::calendar::CalendarState;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
@@ -41,7 +41,7 @@ use super::panel::{CELL_EDITOR_CONTEXT, CellRef, DatabasePanel, TEXT_ENTRY_CONTE
 use super::property_editor::PropertyEditorMode;
 use super::query::column_name;
 use crate::publish::{ChannelChoices, ChooseChannel};
-use crate::ui::{EmptyState, format_when, video_icon};
+use crate::ui::{EmptyState, date_field, format_when, video_icon};
 
 /// Narrowest a column can be resized to, in pixels.
 const MIN_COLUMN_WIDTH: f32 = 72.0;
@@ -420,9 +420,9 @@ impl VideoTable {
             .open(self.model.date_target == Some(cell))
             .on_open_change(on_open_change)
             .trigger(trigger)
-            .content(move |_, _, _| {
+            .content(move |_, _, cx| {
                 let clear = clear.clone();
-                let calendar = Calendar::new(&calendar).small().first_day_of_week(first_day);
+                let calendar = date_field::calendar(&calendar, first_day, cx);
                 v_flex().gap_2().child(calendar).when(value.is_some(), |this| {
                     this.child(
                         Button::new("clear-date").ghost().small().icon(IconName::X).label("Clear date").on_click(
