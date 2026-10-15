@@ -26,18 +26,21 @@ pub fn exits_when_empty(kind: BlockKind) -> bool {
             | BlockKind::Todo
             | BlockKind::Quote
             | BlockKind::Callout
+            | BlockKind::TalkingPoint
             | BlockKind::BRoll
             | BlockKind::OnScreen
     )
 }
 
-/// The block Enter creates after `block`: list items continue the list,
-/// everything else is followed by a paragraph.
+/// The block Enter creates after `block`: list items continue the list and
+/// talking points the run of points, everything else is followed by a paragraph.
 pub fn continuation(block: &Block, text: impl Into<String>) -> Block {
     let mut next = Block::paragraph(text);
     if is_list(block.kind) {
         next.kind = block.kind;
         next.indent = block.indent;
+    } else if block.kind == BlockKind::TalkingPoint {
+        next.kind = block.kind;
     }
     next
 }
@@ -360,6 +363,14 @@ mod tests {
         let mut blocks = vec![Block { checked: true, ..block(BlockKind::Todo, "ab") }];
         split(&mut blocks, 0, 1);
         assert_eq!((blocks[1].kind, blocks[1].checked), (BlockKind::Todo, false));
+
+        let mut blocks = vec![block(BlockKind::TalkingPoint, "Why")];
+        split(&mut blocks, 0, 3);
+        assert_eq!(kinds_and_texts(&blocks), [(BlockKind::TalkingPoint, "Why"), (BlockKind::TalkingPoint, "")]);
+
+        let mut blocks = vec![block(BlockKind::BRoll, "Drone")];
+        split(&mut blocks, 0, 5);
+        assert_eq!(blocks[1].kind, BlockKind::Paragraph);
     }
 
     #[test]

@@ -529,8 +529,9 @@ pub enum DocumentKind {
     Custom,
 }
 
-/// Kind of a document block. Script-specific kinds (`BRoll`, `OnScreen`) are
-/// production cues: they are shown in the script but not counted as spoken words.
+/// Kind of a document block. Script-specific kinds (`TalkingPoint`, `BRoll`,
+/// `OnScreen`) are shown in the script but not counted as spoken words: a talking
+/// point is said in the creator's own words, the others are production cues.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockKind {
@@ -546,6 +547,9 @@ pub enum BlockKind {
     Callout,
     Code,
     Divider,
+    /// An idea the creator talks through in their own words while recording,
+    /// instead of reading it.
+    TalkingPoint,
     /// Visual cue for the editor: footage to cut away to.
     BRoll,
     /// Text overlay shown on screen.
@@ -553,7 +557,7 @@ pub enum BlockKind {
 }
 
 impl BlockKind {
-    pub const ALL: [BlockKind; 13] = [
+    pub const ALL: [BlockKind; 14] = [
         BlockKind::Paragraph,
         BlockKind::Heading1,
         BlockKind::Heading2,
@@ -565,6 +569,7 @@ impl BlockKind {
         BlockKind::Callout,
         BlockKind::Code,
         BlockKind::Divider,
+        BlockKind::TalkingPoint,
         BlockKind::BRoll,
         BlockKind::OnScreen,
     ];
@@ -582,12 +587,13 @@ impl BlockKind {
             BlockKind::Callout => "Callout",
             BlockKind::Code => "Code",
             BlockKind::Divider => "Divider",
+            BlockKind::TalkingPoint => "Talking point",
             BlockKind::BRoll => "B-roll cue",
             BlockKind::OnScreen => "On-screen text",
         }
     }
 
-    /// Whether the block's text is read aloud in the video.
+    /// Whether the block's text is read aloud in the video, word for word.
     pub fn is_spoken(self) -> bool {
         matches!(self, BlockKind::Paragraph | BlockKind::Bulleted | BlockKind::Numbered | BlockKind::Quote)
     }

@@ -189,6 +189,29 @@ fn enter_continues_lists_and_leaves_them_when_empty(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn talking_points_from_the_slash_menu_continue_on_enter(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![paragraph("")]);
+    f.focus_first(cx);
+    f.type_text(cx, "/");
+    f.type_text(cx, "point");
+    assert!(f.is_visible(cx, slash_item("Talking point")));
+    f.press(cx, &["enter"]);
+    f.type_text(cx, "Why the ultrawide went");
+    f.press(cx, &["enter"]);
+    f.type_text(cx, "What replaced it");
+    f.press(cx, &["enter", "enter"]);
+    f.type_text(cx, "Scripted again");
+    assert_eq!(
+        f.summary(cx),
+        owned(&[
+            (BlockKind::TalkingPoint, "Why the ultrawide went"),
+            (BlockKind::TalkingPoint, "What replaced it"),
+            (BlockKind::Paragraph, "Scripted again"),
+        ])
+    );
+}
+
+#[gpui_kit::test]
 fn shift_enter_inserts_a_soft_line_break(cx: &mut TestAppContext) {
     let f = Fixture::new(cx, vec![paragraph("one")]);
     f.focus_last(cx);
@@ -641,7 +664,7 @@ fn slash_menu_scrolls_to_the_keyboard_selection(cx: &mut TestAppContext) {
     f.press(cx, &["down"; 10]);
     assert!(f.is_visible(cx, slash_item("Divider")));
     // Wrapping around shows the top of the list again.
-    f.press(cx, &["down"; 3]);
+    f.press(cx, &["down"; 4]);
     assert!(f.is_visible(cx, slash_item("Text")));
     f.press(cx, &["enter"]);
     assert_eq!(f.summary(cx), owned(&[(BlockKind::Paragraph, "")]));

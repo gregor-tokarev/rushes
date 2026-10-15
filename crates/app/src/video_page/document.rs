@@ -39,6 +39,8 @@ pub const SAVE_DELAY: Duration = Duration::from_millis(600);
 pub struct ScriptStats {
     pub words: usize,
     pub seconds: u32,
+    /// Ideas said in the creator's own words: not in `words` or `seconds`.
+    pub talking_points: usize,
     pub broll_cues: usize,
     pub onscreen_cues: usize,
     pub outline: Vec<OutlineItem>,
@@ -50,6 +52,7 @@ impl ScriptStats {
         Self {
             words: spoken_word_count(blocks),
             seconds: estimated_runtime_secs(blocks, DEFAULT_WPM),
+            talking_points: cues(BlockKind::TalkingPoint),
             broll_cues: cues(BlockKind::BRoll),
             onscreen_cues: cues(BlockKind::OnScreen),
             outline: outline(blocks),
@@ -71,9 +74,11 @@ impl ScriptStats {
 
     /// One line for narrow windows, e.g. "1,240 words · ~8m 16s".
     pub fn summary(&self) -> String {
-        match self.words {
-            0 => "No spoken words yet".to_string(),
-            1 => format!("1 word · {}", self.runtime_label()),
+        match (self.words, self.talking_points) {
+            (0, 0) => "No spoken words yet".to_string(),
+            (0, 1) => "1 talking point".to_string(),
+            (0, points) => format!("{points} talking points"),
+            (1, _) => format!("1 word · {}", self.runtime_label()),
             _ => format!("{} words · {}", self.words_label(), self.runtime_label()),
         }
     }
@@ -563,7 +568,10 @@ pub enum PathPurpose {
 /// where the rail is hidden.
 pub fn script_menu(menu: PopupMenu, tab: &Entity<DocumentTab>, cx: &App) -> PopupMenu {
     let stats = tab.read(cx).stats().clone();
-    let cues = format!("{} B-roll · {} on-screen cues", stats.broll_cues, stats.onscreen_cues);
+    let cues = format!(
+        "{} talking points · {} B-roll · {} on-screen cues",
+        stats.talking_points, stats.broll_cues, stats.onscreen_cues
+    );
     let menu = SCRIPT_COMMANDS.iter().fold(menu.label(cues).separator(), |menu, (_, icon, label, run)| {
         let (tab, run) = (tab.clone(), *run);
         menu.item(
@@ -586,7 +594,8 @@ pub fn script_menu(menu: PopupMenu, tab: &Entity<DocumentTab>, cx: &App) -> Popu
     })
 }
 
-/// The Script tab's rail: spoken length, cues, Markdown actions and outline.
+/// The Script tab's rail: spoken length, talking points and cues, Markdown
+/// actions and outline.
 /// Only the outline scrolls, so the actions stay put however long it gets.
 pub struct ScriptRail {
     tab: Entity<DocumentTab>,
@@ -649,15 +658,14 @@ impl Render for ScriptRail {
                             .gap_4()
                             .child(stat(stats.words_label(), "spoken words", cx))
                             .child(stat(stats.runtime_label(), "runtime", cx))
+                            .child(stat(stats.talking_points.to_string(), "talking points", cx))
                             .child(stat(stats.broll_cues.to_string(), "B-roll cues", cx))
                             .child(stat(stats.onscreen_cues.to_string(), "on-screen cues", cx)),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("Runtime at {DEFAULT_WPM} words per minute.")),
-                    ),
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(match stats.talking_points {
+                        0 => format!("Runtime at {DEFAULT_WPM} words per minute."),
+                        _ => format!("Runtime at {DEFAULT_WPM} words per minute, without talking points."),
+                    })),
             )
             .child(
                 v_flex()
@@ -725,5 +733,10 @@ mod tests {
         let empty = ScriptStats::default();
         assert_eq!(empty.runtime_label(), "0s");
         assert_eq!(empty.summary(), "No spoken words yet");
+
+        let points = ScriptStats { talking_points: 3, ..ScriptStats::default() };
+        assert_eq!(points.summary(), "3 talking points");
+        let both = ScriptStats { talking_points: 1, ..stats };
+        assert_eq!(both.summary(), "4,177 words · ~27m 51s");
     }
 }

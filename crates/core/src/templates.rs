@@ -1,9 +1,10 @@
 //! Script templates for new videos.
 //!
-//! Each template is a skeleton of sections (headings) with spoken paragraphs,
-//! B-roll and on-screen cues, and a production checklist. Guidance for the
-//! creator is the placeholder of an empty block ([`Block::guided`]): the editor
-//! shows it until the creator writes there, and it never counts as script.
+//! Each template is a skeleton of sections (headings) with spoken paragraphs or
+//! talking points, B-roll and on-screen cues, and a production checklist.
+//! Guidance for the creator is the placeholder of an empty block
+//! ([`Block::guided`]): the editor shows it until the creator writes there, and
+//! it never counts as script.
 //! The video's hook and title are filled in where they belong.
 
 use serde::{Deserialize, Serialize};
@@ -40,7 +41,7 @@ impl TemplateKind {
             TemplateKind::Blank => "An empty script.",
             TemplateKind::Tutorial => "Hook, prerequisites, three steps, common mistakes and a recap.",
             TemplateKind::Review => "Verdict tease, context, real-world use, drawbacks and who should buy it.",
-            TemplateKind::Vlog => "Cold open and a three-beat story with B-roll cues.",
+            TemplateKind::Vlog => "Cold open and a three-beat story told from talking points, with B-roll cues.",
             TemplateKind::Short => "Hook, payoff and loop for a vertical video under 60 seconds.",
         }
     }
@@ -134,13 +135,13 @@ pub fn script_template(kind: TemplateKind, video: &Video) -> Vec<Block> {
             guide("Where you are, what today is about, and the question this video answers."),
             onscreen(&title_card),
             h2("Beat 1 · the setup"),
-            guide("Set up the goal or the problem for the day."),
+            guide_point("The goal or the problem for the day"),
             broll("Establishing shots: location, weather, people."),
             h2("Beat 2 · the turn"),
-            guide("Something doesn't go to plan. This is the story, so slow down here."),
+            guide_point("What didn't go to plan: this is the story, so slow down here"),
             broll("Reaction shots and details that show the change."),
             h2("Beat 3 · the payoff"),
-            guide("How it resolved and what you learned."),
+            guide_point("How it resolved and what you learned"),
             broll("Closing shot: sunset, timelapse or walking away from camera."),
             h2("Outro"),
             guide("Reflect in one or two sentences and tease the next video."),
@@ -208,8 +209,17 @@ fn guide_bullet(guidance: &str) -> Block {
     Block::guided(BlockKind::Bulleted, guidance)
 }
 
+/// An empty talking point showing `guidance` until the creator writes there.
+fn guide_point(guidance: &str) -> Block {
+    Block::guided(BlockKind::TalkingPoint, guidance)
+}
+
 pub(crate) fn callout(text: &str) -> Block {
     Block::new(BlockKind::Callout, text)
+}
+
+pub(crate) fn talking_point(text: &str) -> Block {
+    Block::new(BlockKind::TalkingPoint, text)
 }
 
 pub(crate) fn broll(text: &str) -> Block {
@@ -271,6 +281,14 @@ mod tests {
             let ids: std::collections::HashSet<_> = blocks.iter().map(|block| block.id).collect();
             assert_eq!(ids.len(), blocks.len(), "{kind:?} block ids are unique");
         }
+    }
+
+    #[test]
+    fn vlog_beats_are_talking_points() {
+        let blocks = script_template(TemplateKind::Vlog, &Video::new("A day in Osaka"));
+        let points: Vec<_> = blocks.iter().filter(|block| block.kind == BlockKind::TalkingPoint).collect();
+        assert_eq!(points.len(), 3);
+        assert!(points.iter().all(|point| point.guidance().is_some()));
     }
 
     #[test]

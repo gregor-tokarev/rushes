@@ -65,6 +65,7 @@ fn placeholder(kind: BlockKind) -> &'static str {
         BlockKind::Callout => "Type something…",
         BlockKind::Code => "Code",
         BlockKind::Divider => "",
+        BlockKind::TalkingPoint => "The point to make in your own words…",
         BlockKind::BRoll => "Describe the shot…",
         BlockKind::OnScreen => "Text shown on screen…",
     }
@@ -132,7 +133,9 @@ impl Metrics {
                 Metrics { text_size: Rems(0.875), line_height: Rems(1.375), space_above: Rems(0.5), inset: Rems(1.) }
             }
             BlockKind::Callout => Metrics { space_above: Rems(0.375), inset: Rems(0.875), ..body },
-            BlockKind::BRoll | BlockKind::OnScreen => Metrics { space_above: Rems(0.375), inset: Rems(0.5), ..body },
+            BlockKind::TalkingPoint | BlockKind::BRoll | BlockKind::OnScreen => {
+                Metrics { space_above: Rems(0.375), inset: Rems(0.5), ..body }
+            }
             _ => body,
         }
     }
@@ -497,8 +500,9 @@ impl DocumentEditor {
                     .child(div().w_full().h(px(1.)).bg(palette.rule))
                     .into_any_element()
             }
-            BlockKind::BRoll | BlockKind::OnScreen => {
+            BlockKind::TalkingPoint | BlockKind::BRoll | BlockKind::OnScreen => {
                 let (accent, icon, label) = match block.kind {
+                    BlockKind::TalkingPoint => (palette.talking_point, IconName::Mic, "TALKING POINT"),
                     BlockKind::BRoll => (palette.broll, IconName::Clapperboard, "B-ROLL"),
                     _ => (palette.onscreen, IconName::Type, "ON SCREEN"),
                 };

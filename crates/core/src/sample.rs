@@ -10,7 +10,9 @@ use crate::model::{
     Block, BlockKind, Document, DocumentId, DocumentKind, Privacy, PropertyDef, PropertyId, PropertyKind,
     PropertyValue, PublishSettings, SelectOption, TagColor, Video, VideoFormat, VideoStatus, YoutubeLink,
 };
-use crate::templates::{TemplateKind, broll, bullet, callout, h2, h3, onscreen, p, script_template, todo};
+use crate::templates::{
+    TemplateKind, broll, bullet, callout, h2, h3, onscreen, p, script_template, talking_point, todo,
+};
 
 pub(crate) struct SampleWorkspace {
     pub properties: Vec<PropertyDef>,
@@ -337,7 +339,8 @@ fn desk_setup(options: &Options, today: NaiveDate) -> Sample {
         broll("Close-ups: monitor arm, key light, typing sounds."),
         callout("Sponsor segment: 60–90 seconds, show the hot-swap switches, mention code DESK10."),
         h2("Beat 2 · the regrets"),
-        p("The ultrawide. I loved it for a week, then realised I was turning my head like I was watching tennis."),
+        talking_point("The ultrawide: loved it for a week, then I was turning my head like I was watching tennis"),
+        talking_point("The standing desk I stood at twice; why I'd still buy it again"),
         broll("Ultrawide boxed up in the closet."),
         h2("Beat 3 · the twenty-dollar upgrade"),
         p("A cable tray under the desk. It's boring, nobody films it, and it's the reason this desk stays clean."),

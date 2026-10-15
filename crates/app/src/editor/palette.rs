@@ -18,6 +18,8 @@ pub struct EditorPalette {
     /// Fill behind code blocks, inline code and callouts.
     pub surface: Hsla,
     pub quote_bar: Hsla,
+    /// Accent of talking points; their fill is a tint of it.
+    pub talking_point: Hsla,
     /// Accent of B-roll cues; the cue's fill is a tint of it.
     pub broll: Hsla,
     /// Accent of on-screen text cues.
@@ -37,6 +39,7 @@ impl EditorPalette {
             drop_indicator: theme.drag_border,
             surface: theme.muted,
             quote_bar: theme.foreground,
+            talking_point: theme.green,
             broll: theme.blue,
             onscreen: theme.magenta,
         }

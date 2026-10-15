@@ -105,8 +105,10 @@ database's write lock for seconds. The UI thread never waits for it:
   "Board" view.
 - `document.rs` — document logic: spoken word count, estimated runtime (150 wpm default),
   outline (headings), Markdown export/import (round-trippable for all `BlockKind`s;
-  B-roll / on-screen cues use a `> [!broll]` / `> [!onscreen]` callout syntax), teleprompter
-  text (spoken blocks only, inline markdown stripped).
+  talking points / B-roll / on-screen cues use a `> [!talkingpoint]` / `> [!broll]` /
+  `> [!onscreen]` callout syntax), teleprompter text (spoken blocks plus talking points
+  marked `[Talking point]`, inline markdown stripped). Talking points are ideas the creator
+  says in their own words, so they count toward neither the word count nor the runtime.
 - `templates.rs` — script templates (Tutorial, Review, Vlog, Short, Blank) producing
   `Vec<Block>` personalised with title/hook/format.
 - `media.rs` — media root, per-video folder creation, footage listing (video/audio

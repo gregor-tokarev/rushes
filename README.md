@@ -16,6 +16,8 @@
 
 - **Plan** every video in a Notion-style database, as a table or a board.
 - **Write** scripts in rich documents with B-roll and on-screen cues, word count and runtime.
+  Mark the ideas you'd rather say in your own words as talking points instead of scripting
+  every line.
 - **Edit with AI**: hand your raw takes and script to [video-use](https://github.com/browser-use/video-use), approve its plan, get a cut.
 - **Upload** to your YouTube channels from the video's page, with resumable uploads. Connect
   several accounts and pick, per video, the channel it goes to.

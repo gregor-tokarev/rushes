@@ -3,9 +3,9 @@
 use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
-use rushes_core::document::teleprompter_text;
+use rushes_core::document::{TALKING_POINT_MARK, teleprompter_text};
 use rushes_core::settings::EditPreferences;
-use rushes_core::{Block, Video, VideoFormat};
+use rushes_core::{Block, BlockKind, Video, VideoFormat};
 
 /// The state of a video's brief form, kept while its tab is closed and across restarts.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -74,8 +74,14 @@ pub fn default_brief(
 
     let spoken = teleprompter_text(script);
     if !spoken.is_empty() {
-        brief
-            .push_str("\nScript (what the creator meant to say; use it to choose the best takes and their order):\n\n");
+        brief.push_str("\nScript (what the creator meant to say; use it to choose the best takes and their order):\n");
+        if script.iter().any(|block| block.kind == BlockKind::TalkingPoint && !block.text.trim().is_empty()) {
+            brief.push_str(&format!(
+                "{TALKING_POINT_MARK} lines are ideas the creator said in their own words: pick the takes that make \
+                 the point; they won't match it word for word.\n"
+            ));
+        }
+        brief.push('\n');
         brief.push_str(&cap(&spoken, SCRIPT_CHARS));
         brief.push('\n');
     }
@@ -340,6 +346,25 @@ mod tests {
              \n\
              House style:\n\
              Keep my intro jingle.\n"
+        );
+    }
+
+    #[test]
+    fn brief_explains_talking_points() {
+        let script =
+            vec![Block::paragraph("Welcome back."), Block::new(BlockKind::TalkingPoint, "Why I *sold* the ultrawide")];
+        let brief = default_brief(&video(), &script, &EditPreferences::default(), "");
+        assert!(
+            brief.ends_with(
+                "Script (what the creator meant to say; use it to choose the best takes and their order):\n\
+                 [Talking point] lines are ideas the creator said in their own words: pick the takes that make the \
+                 point; they won't match it word for word.\n\
+                 \n\
+                 Welcome back.\n\
+                 \n\
+                 [Talking point] Why I sold the ultrawide\n"
+            ),
+            "{brief}"
         );
     }
 

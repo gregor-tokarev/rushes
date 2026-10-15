@@ -892,7 +892,7 @@ fn the_outline_puts_a_later_heading_at_the_top(cx: &mut TestAppContext) {
 
     let page = app.page(cx);
     let outline = cx.read(|cx| page.read(cx).script().expect("script").read(cx).stats().outline.clone());
-    let heading = outline[12].block_id;
+    let heading = outline[10].block_id;
     app.click(cx, ElementId::Name(format!("outline-{heading}").into()));
     assert_eq!(app.script_focused_block(cx), Some(heading));
     // A frame to lay out the reveal.

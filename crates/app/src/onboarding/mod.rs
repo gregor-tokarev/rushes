@@ -224,7 +224,7 @@ impl Onboarding {
                     .child(feature(
                         IconName::ScrollText,
                         "Write scripts in rich documents",
-                        "Notion-style blocks with B-roll and on-screen cues, word count and runtime.",
+                        "Notion-style blocks with talking points, B-roll and on-screen cues, word count and runtime.",
                     ))
                     .child(feature(
                         IconName::WandSparkles,

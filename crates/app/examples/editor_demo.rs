@@ -129,6 +129,7 @@ fn sample_script() -> Vec<Block> {
         Block { indent: 1, ..block(BlockKind::Numbered, "Every cut lands on a word boundary") },
         block(BlockKind::Numbered, "Review the edit plan before anything renders"),
         block(BlockKind::BRoll, "Screen recording: the agent's plan scrolling by in the terminal"),
+        block(BlockKind::TalkingPoint, "Why reviewing the plan beats reviewing the render"),
         block(BlockKind::Paragraph, "What you get back is a first cut with:"),
         block(BlockKind::Bulleted, "Color grade presets applied per scene"),
         block(BlockKind::Bulleted, "Burned-in subtitles in your brand font"),
