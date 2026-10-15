@@ -146,13 +146,12 @@ impl CommandPalette {
         let palette = cx.weak_entity();
         let command = self.command.clone();
         let focus_on_mount = Rc::new(Cell::new(true));
-        let width = window.rem_size() * 36.;
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
             let palette = palette.clone();
             let command = command.clone();
             let workspace = workspace.clone();
             let focus_on_mount = focus_on_mount.clone();
-            dialog.close_button(false).p_0().w(width).content(move |content, window, cx| {
+            dialog.close_button(false).p_0().w(window.rem_size() * 36.).content(move |content, window, cx| {
                 if focus_on_mount.replace(false) {
                     let command = command.clone();
                     window.defer(cx, move |window, cx| command.update(cx, |command, cx| command.focus(window, cx)));

@@ -160,13 +160,12 @@ pub fn open(
     let title = request.kind.title();
     let form = cx.new(|cx| PathForm::new(request, Rc::new(accept), window, cx));
     let input = form.read(cx).input.clone();
-    let width = window.rem_size() * 30.;
-    window.open_dialog(cx, move |dialog, _, cx| {
+    window.open_dialog(cx, move |dialog, window, cx| {
         let footer = form.read(cx).footer(&form);
         let (submit, closed) = (form.clone(), form.clone());
         dialog
             .title(title)
-            .width(width)
+            .width(window.rem_size() * 30.)
             .child(form.clone())
             .footer(footer)
             .on_ok(move |_, window, cx| {

@@ -116,8 +116,8 @@ database's write lock for seconds. The UI thread never waits for it:
 - `settings.rs` — typed `AppSettings` stored in the settings table: media root,
   YouTube backend (`Google { client_id, client_secret }` | `Emulator { google_url, youtube_url }`),
   pipeline config (agent command, video-use skill dir, extra instructions, auto-approve),
-  `onboarding_completed`, theme, week start, updates, and whether video pages open with
-  their properties folded (`properties_collapsed`).
+  `onboarding_completed`, theme, zoom, week start, updates, and whether video pages open
+  with their properties folded (`properties_collapsed`).
 
 ## youtube (`rushes-youtube`)
 
@@ -163,6 +163,14 @@ GPUI Kit app. Main pieces:
   through it and emit events.
 - Shell: title bar, sidebar (Videos views, AI edits, Uploads, recent pages, account,
   settings), routed main area.
+- Zoom (`ui/zoom.rs`, `shell/zoom.rs`): Ctrl/⌘ with `=`/`+`, `-` and `0` (app-wide
+  actions, so they work in dialogs and onboarding) or Settings › General step the
+  `zoom` setting through 75–150%. The workspace sets the kit theme's base font, which
+  GPUI Kit makes the window's `rem`, to 16 px times the zoom, so rem-sized UI scales.
+  What the kit sizes in pixels is scaled by hand: title bar, sidebar width, table rows
+  and column widths (views store widths at 100%), notifications; tab bars step up a kit
+  size when their label outgrows the frame. Above 150% the kit's tab frames can't hold
+  their labels, and a 1440 × 900 screen drops below the window's designed minimum.
 - `database/` — Notion-like videos database: table view (inline cell editing, column
   menu, add property, sort/filter/search) and board view (kanban by status, drag cards).
 - `editor/` — block-based rich document editor (slash menu, markdown shortcuts,

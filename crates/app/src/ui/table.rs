@@ -14,6 +14,7 @@ use gpui_kit::{
 };
 
 use super::KeyboardFocus as _;
+use super::zoom::zoomed;
 
 /// The narrowest a fill column gets: room for a short title.
 const FILL_MIN_WIDTH: Rems = Rems(10.);
@@ -143,7 +144,7 @@ pub fn table_header(columns: &[TableColumn], cx: &App) -> Div {
     h_flex()
         .w_full()
         .flex_shrink_0()
-        .h(Size::Medium.table_row_height())
+        .h(zoomed(Size::Medium.table_row_height(), cx))
         .bg(theme.tokens.table_head)
         .text_sm()
         .text_color(theme.muted_foreground)
@@ -205,7 +206,7 @@ impl RenderOnce for TableRowButton {
             .id(self.id.clone())
             .test_support()
             .w_full()
-            .min_h(Size::Medium.table_row_height())
+            .min_h(zoomed(Size::Medium.table_row_height(), cx))
             .py_1p5()
             .text_sm()
             .border_b_1()

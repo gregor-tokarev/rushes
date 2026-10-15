@@ -64,7 +64,6 @@ pub(crate) enum EmptyReason {
 }
 
 /// What the table shows, prepared by the panel.
-#[derive(Default)]
 pub(crate) struct TableModel {
     pub rows: Vec<VideoRow>,
     pub columns: Vec<ColumnLayout>,
@@ -78,6 +77,27 @@ pub(crate) struct TableModel {
     pub empty: EmptyReason,
     pub now: DateTime<Utc>,
     pub week_start: WeekStart,
+    /// The interface zoom's scale, 1.0 at 100%: column widths are kept at 100%.
+    pub scale: f32,
+}
+
+impl Default for TableModel {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            columns: Vec::new(),
+            properties: Rc::from([]),
+            sorts: Vec::new(),
+            known_tags: Rc::from([]),
+            editing: None,
+            date_target: None,
+            tags_target: None,
+            empty: EmptyReason::default(),
+            now: DateTime::default(),
+            week_start: WeekStart::default(),
+            scale: 1.,
+        }
+    }
 }
 
 impl TableModel {
@@ -622,7 +642,7 @@ impl TableDelegate for VideoTable {
     fn column(&self, col_ix: usize, _: &App) -> TableColumn {
         let Some(layout) = self.model.columns.get(col_ix) else {
             return TableColumn::new("add-property", "Add property")
-                .width(px(ADD_COLUMN_WIDTH))
+                .width(px(ADD_COLUMN_WIDTH * self.model.scale))
                 .resizable(false)
                 .movable(false)
                 .selectable(false);
@@ -638,8 +658,8 @@ impl TableDelegate for VideoTable {
                 .any(|def| def.id == id && def.kind == PropertyKind::Number)
         );
         TableColumn::new(column_key(column), name)
-            .width(px(layout.width.max(MIN_COLUMN_WIDTH)))
-            .min_width(px(MIN_COLUMN_WIDTH))
+            .width(px(layout.width.max(MIN_COLUMN_WIDTH) * self.model.scale))
+            .min_width(px(MIN_COLUMN_WIDTH * self.model.scale))
             .movable(false)
             .selectable(false)
             .when(column == Column::Builtin(BuiltinField::Title), |this| this.fixed_left())

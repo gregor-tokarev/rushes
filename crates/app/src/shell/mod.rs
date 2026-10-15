@@ -12,6 +12,7 @@ mod signals;
 mod startup;
 mod theme;
 mod title_bar;
+mod zoom;
 
 use std::collections::HashSet;
 
@@ -25,7 +26,7 @@ use gpui_kit::{
     KeyBinding, ParentElement as _, Render, SharedString, Styled as _, Subscription, TestSupportExt as _, Window,
     actions,
 };
-use rushes_core::settings::ThemeMode;
+use rushes_core::settings::{ThemeMode, Zoom};
 use rushes_core::{RunStatus, VideoId, VideoRow, VideoStatus, ViewId};
 
 use crate::ai_edit::PipelinesPage;
@@ -35,6 +36,7 @@ use crate::publish::{AccountBadge, UploadsPage};
 use crate::route::{Route, SettingsSection, VideoTab};
 use crate::settings_page::SettingsPage;
 use crate::state::{AppEvent, AppState, Problem, Remedy, Severity};
+use crate::ui::zoom::apply_zoom;
 use crate::ui::{PageHeader, page_frame};
 use crate::update::UpdateService;
 use crate::video_page::VideoPage;
@@ -47,6 +49,7 @@ pub use startup::{
     InstanceLock, StartupNotice, StartupProblem, adopt_legacy_data, adopt_rushes_app_name, open_startup_notice,
 };
 pub use theme::{apply_theme, register_fonts};
+pub use zoom::zoom_shortcuts;
 
 actions!(
     rushes,
@@ -67,6 +70,12 @@ actions!(
         OpenSettings,
         /// Save pending edits and quit.
         Quit,
+        /// Draw the whole interface one zoom level larger.
+        ZoomIn,
+        /// Draw the whole interface one zoom level smaller.
+        ZoomOut,
+        /// Draw the interface at its designed size.
+        ResetZoom,
     ]
 );
 
@@ -81,12 +90,22 @@ const KEY_CONTEXT: &str = "Workspace";
 pub fn init(cx: &mut App) {
     // Pending saves are written by each workspace's quit hook.
     cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+    // App-wide, so zooming works wherever focus is: in a dialog, in onboarding.
+    cx.on_action(|_: &ZoomIn, cx: &mut App| zoom::change_zoom(Zoom::zoom_in, cx));
+    cx.on_action(|_: &ZoomOut, cx: &mut App| zoom::change_zoom(Zoom::zoom_out, cx));
+    cx.on_action(|_: &ResetZoom, cx: &mut App| zoom::change_zoom(|_| Zoom::DEFAULT, cx));
     cx.bind_keys([
         KeyBinding::new("secondary-n", NewVideo, None),
         KeyBinding::new("secondary-k", OpenCommandPalette, None),
         KeyBinding::new("secondary-\\", ToggleSidebar, None),
         KeyBinding::new("secondary-,", OpenSettings, None),
         KeyBinding::new("secondary-q", Quit, None),
+        // The key with = and + on it, with or without Shift (and the keypad's +, whose
+        // character is +); bound last, + is the one shortcut hints show.
+        KeyBinding::new("secondary-=", ZoomIn, None),
+        KeyBinding::new(zoom::ZOOM_IN_KEY, ZoomIn, None),
+        KeyBinding::new(zoom::ZOOM_OUT_KEY, ZoomOut, None),
+        KeyBinding::new(zoom::RESET_ZOOM_KEY, ResetZoom, None),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-[", GoBack, None),
         #[cfg(target_os = "macos")]
@@ -140,6 +159,8 @@ pub struct Workspace {
     awaiting_approval: Option<HashSet<VideoId>>,
     /// The theme mode last applied, so unrelated settings changes leave the theme alone.
     theme_mode: ThemeMode,
+    /// The zoom last applied.
+    zoom: Zoom,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -148,6 +169,9 @@ impl Workspace {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let database = cx.new(|cx| DatabasePanel::new(window, cx));
         database.update(cx, |panel, cx| panel.set_week_start(state.read(cx).settings().week_start, cx));
+        let zoom = state.read(cx).settings().zoom;
+        apply_zoom(zoom, cx);
+        database.update(cx, |panel, cx| panel.set_zoom(zoom, cx));
         let account = cx.new(|cx| AccountBadge::new(window, cx));
         let palette = cx.new(|cx| CommandPalette::new(window, cx));
         let theme_mode = state.read(cx).settings().theme;
@@ -199,6 +223,7 @@ impl Workspace {
             shown: None,
             awaiting_approval: None,
             theme_mode,
+            zoom,
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
@@ -276,12 +301,19 @@ impl Workspace {
             AppEvent::RouteChanged => self.sync_route(window, cx),
             AppEvent::SettingsChanged => {
                 let settings = self.state.read(cx).settings();
-                let (mode, week_start) = (settings.theme, settings.week_start);
+                let (mode, week_start, zoom) = (settings.theme, settings.week_start, settings.zoom);
                 if mode != self.theme_mode {
                     self.theme_mode = mode;
                     apply_theme(mode, Some(window), cx);
                 }
-                self.database.update(cx, |panel, cx| panel.set_week_start(week_start, cx));
+                if zoom != self.zoom {
+                    self.zoom = zoom;
+                    apply_zoom(zoom, cx);
+                }
+                self.database.update(cx, |panel, cx| {
+                    panel.set_week_start(week_start, cx);
+                    panel.set_zoom(zoom, cx);
+                });
             }
             AppEvent::Error(message) => {
                 window.push_notification(Notification::error(message.clone()), cx);

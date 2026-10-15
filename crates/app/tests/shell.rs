@@ -19,7 +19,7 @@ use rushes::shell::{self, Page, Workspace};
 use rushes::state::AppState;
 use rushes::ui::path_prompt;
 use rushes::video_page::{DocumentTab, PathPurpose, SAVE_DELAY};
-use rushes_core::settings::{AppSettings, ThemeMode, WeekStart};
+use rushes_core::settings::{AppSettings, ThemeMode, WeekStart, Zoom};
 use rushes_core::templates::TemplateKind;
 use rushes_core::{
     BlockId, DatabaseView, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, Store,
@@ -1009,7 +1009,8 @@ fn calendars_start_weeks_on_the_day_settings_choose(cx: &mut TestAppContext) {
     assert!(!app.has(cx, "weekday-0-0"), "the calendar closes");
 
     app.navigate(cx, Route::Settings { section: SettingsSection::General });
-    app.step(cx, |window, cx| window.within("group-0").within("item-1").click("btn", cx));
+    // Theme, Zoom, then Week starts on.
+    app.step(cx, |window, cx| window.within("group-0").within("item-2").click("btn", cx));
     app.step(cx, |window, cx| window.within("popup-menu").click(1usize, cx));
     assert_eq!(cx.read(|cx| app.state.read(cx).settings().week_start), WeekStart::Monday);
 
@@ -1355,4 +1356,63 @@ fn an_edit_waiting_for_approval_stands_out(cx: &mut TestAppContext) {
 
     app.click(cx, "review-strategy");
     assert_eq!(app.route(cx), Route::Video { id, tab: VideoTab::Footage });
+}
+
+#[gpui_kit::test]
+fn zoom_keys_scale_the_whole_interface_and_are_kept(cx: &mut TestAppContext) {
+    let app = Fixture::open(cx, true, &["Desk setup tour"]);
+    let zoom = |cx: &mut TestAppContext| cx.read(|cx| app.state.read(cx).settings().zoom.percent());
+    let stored = |cx: &mut TestAppContext| {
+        cx.read(|cx| {
+            let store = app.state.read(cx).store();
+            let store = store.lock().expect("store lock");
+            store.load_settings().expect("load settings").zoom.percent()
+        })
+    };
+    let rem = |cx: &mut TestAppContext| {
+        cx.update_window(app.window, |_, window, _| window.rem_size()).expect("window is open")
+    };
+    // The page starts under the title bar.
+    let title_bar = |cx: &mut TestAppContext| {
+        cx.update_window(app.window, |_, window, _| window.find("database-page").bounds().top())
+            .expect("window is open")
+    };
+    let notifications = |cx: &mut TestAppContext| {
+        cx.update_window(app.window, |_, window, cx| window.notifications(cx).len()).expect("window is open")
+    };
+    assert_eq!((zoom(cx), rem(cx), title_bar(cx)), (100, px(16.), px(34.)));
+
+    // The key with = and + on it, with and without Shift, a level at a time.
+    app.press(cx, "secondary-=");
+    assert_eq!((zoom(cx), rem(cx)), (110, px(17.6)));
+    assert_eq!(notifications(cx), 1, "a notification names the level");
+    app.press(cx, "secondary-+");
+    app.press(cx, "secondary-+");
+    assert_eq!((zoom(cx), rem(cx), title_bar(cx)), (150, px(24.), px(51.)));
+    assert_eq!(stored(cx), 150, "the zoom is kept for the next start");
+    assert_eq!(notifications(cx), 1, "one notification, saying the latest level");
+    app.press(cx, "secondary-+");
+    assert_eq!(zoom(cx), 150, "150% is the largest");
+
+    // In a dialog too: the command palette's search field has the keyboard.
+    app.press(cx, "secondary-k");
+    assert!(app.has_dialog(cx));
+    app.press(cx, "secondary--");
+    assert_eq!((zoom(cx), rem(cx)), (125, px(20.)));
+    app.press(cx, "escape");
+    app.press(cx, "escape");
+
+    // Switching the theme keeps the zoom.
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| state.update(cx, |state, cx| state.update_settings(cx, |s| s.theme = ThemeMode::Light)));
+    assert_eq!(rem(cx), px(20.));
+
+    app.press(cx, "secondary-0");
+    assert_eq!((zoom(cx), rem(cx), title_bar(cx)), (100, px(16.), px(34.)));
+
+    // Settings › Appearance › Zoom picks a level the same way.
+    let state = app.state.clone();
+    app.step(cx, move |_, cx| state.update(cx, |state, cx| state.update_settings(cx, |s| s.zoom = Zoom::new(80))));
+    assert_eq!(rem(cx), px(12.8));
+    assert_eq!(title_bar(cx), px(34.), "the title bar keeps room for the window buttons");
 }

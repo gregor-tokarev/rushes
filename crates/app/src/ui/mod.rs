@@ -41,6 +41,9 @@
 //!   and the focus ring shows only focus the keyboard gave.
 //! - **Tooltips.** A tooltip that explains a passing state, such as why a
 //!   control is disabled, is a [`state_tooltip`], which leaves with the state.
+//! - **Zoom.** Sizes are in rems, which follow the creator's zoom. Geometry
+//!   that a kit component takes in pixels is the design's value through
+//!   [`zoom::zoomed`]; a tab bar takes its size from [`zoom::tab_size`].
 //!
 //! # Button sizes
 //!
@@ -69,6 +72,7 @@ pub mod settings;
 mod state_tooltip;
 mod table;
 mod time;
+pub mod zoom;
 
 use gpui_kit::App;
 use gpui_kit::component::WindowExt as _;

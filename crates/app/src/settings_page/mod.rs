@@ -1,4 +1,4 @@
-//! Settings page: General (theme, week start, folders), YouTube, AI editing and About.
+//! Settings page: General (theme, zoom, week start, folders), YouTube, AI editing and About.
 //! Embeds `publish::YoutubeSettings` and `ai_edit::AiSettings` as sections.
 
 mod media_folder;
@@ -14,11 +14,12 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
 };
 use rushes_core::input::display_user_path;
-use rushes_core::settings::{ThemeMode, WeekStart, data_dir};
+use rushes_core::settings::{ThemeMode, WeekStart, Zoom, data_dir};
 
 use crate::ai_edit::AiSettings;
 use crate::publish::YoutubeSettings;
 use crate::route::SettingsSection;
+use crate::shell;
 use crate::state::{AppEvent, AppState};
 use crate::ui::settings::{FIELD_MAX_WIDTH, setting_group};
 use crate::update::{self, UpdateService};
@@ -130,6 +131,24 @@ impl SettingsPage {
                         )
                         .description(theme_description(AppState::global(cx).read(cx).settings().theme)),
                         SettingItem::new(
+                            "Zoom",
+                            SettingField::dropdown(
+                                Zoom::LEVELS
+                                    .iter()
+                                    .map(|percent| (zoom_key(Zoom::new(*percent)), Zoom::new(*percent).label().into()))
+                                    .collect(),
+                                |cx: &App| zoom_key(AppState::global(cx).read(cx).settings().zoom),
+                                |key: SharedString, cx: &mut App| {
+                                    let Ok(percent) = key.parse::<u16>() else { return };
+                                    AppState::global(cx).update(cx, |state, cx| {
+                                        state.update_settings(cx, |settings| settings.zoom = Zoom::new(percent))
+                                    });
+                                },
+                            ),
+                        )
+                        .description(shell::zoom_shortcuts())
+                        .keywords(["scale", "font size", "larger", "smaller"]),
+                        SettingItem::new(
                             "Week starts on",
                             SettingField::dropdown(
                                 WeekStart::ALL
@@ -225,6 +244,10 @@ fn theme_description(mode: ThemeMode) -> &'static str {
 
 fn theme_key(mode: ThemeMode) -> SharedString {
     mode.label().to_lowercase().into()
+}
+
+fn zoom_key(zoom: Zoom) -> SharedString {
+    zoom.percent().to_string().into()
 }
 
 fn week_start_key(day: WeekStart) -> SharedString {

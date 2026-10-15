@@ -21,15 +21,17 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, TestAppContext, Window, WindowBounds, WindowOptions, div, point, px,
     size,
 };
-use tempfile::TempDir;
 use rushes::ai_edit::{
     AiEditPanel, AiSettings, INTERRUPTED, LogEvent, PhaseKind, PhaseStarted, PipelineService, PipelinesPage,
     RENDERED_WITH_ERROR, RunError, RunMarker, TimelineEntry, delete_run_notice, split_failure,
 };
 use rushes::route::{Route, VideoTab};
 use rushes::state::{AppEvent, AppState, SAVE_RETRY_DELAY};
+use rushes::ui::zoom::apply_zoom;
+use rushes_core::settings::Zoom;
 use rushes_core::{Block, DocumentKind, NewVideo, PipelineRun, RunId, RunStatus, Store, VideoId, VideoStatus};
 use rushes_pipeline::{AgentEvent, AgentProcess};
+use tempfile::TempDir;
 
 const TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -2009,5 +2011,56 @@ fn a_short_activity_log_takes_only_the_room_it_needs(cx: &mut TestAppContext) {
         let row = window.find(ElementId::Name(last.clone().into())).bounds();
         let log = window.find("run-activity").bounds();
         log.size.height < px(200.) && row.bottom() <= log.bottom()
+    });
+}
+
+#[gpui_kit::test]
+fn the_activity_log_follows_the_zoom(cx: &mut TestAppContext) {
+    let fx = Fixture::with_store(cx, Store::open_in_memory().unwrap(), &[], false);
+    let now = Utc::now();
+    let run = PipelineRun {
+        id: RunId::new(),
+        video_id: fx.video,
+        status: RunStatus::Failed,
+        brief: String::new(),
+        footage_dir: fx.footage.clone(),
+        session_id: None,
+        summary: None,
+        output: None,
+        error: Some("The agent stopped.".into()),
+        cost_usd: None,
+        created_at: now,
+        updated_at: now,
+    };
+    cx.read(|cx| {
+        let store = fx.state.read(cx).store();
+        let mut store = store.lock().unwrap();
+        store.insert_run(&run).unwrap();
+        let events = [
+            LogEvent::Phase(PhaseStarted { phase: PhaseKind::Plan, text: None, retry: false }),
+            LogEvent::Agent(AgentEvent::AssistantText { text: "Looking at the footage.".into() }),
+            LogEvent::Agent(AgentEvent::ToolUse { id: "t1".into(), name: "Bash".into(), summary: "ls".into() }),
+        ];
+        for event in events {
+            store.append_run_event(run.id, &event.to_payload()).unwrap();
+        }
+    });
+    cx.update(|cx| PipelineService::init(fx.state.clone(), cx));
+    let video = fx.video;
+    let window = open(cx, move |window, cx| AiEditPanel::new(video, window, cx));
+    let rows: Vec<ElementId> =
+        (1..=3).map(|seq| ElementId::Name(format!("timeline-{seq}-{}", run.id).into())).collect();
+    let bounds = |window: &mut Window| rows.iter().map(|row| window.find(row.clone()).bounds()).collect::<Vec<_>>();
+    wait_for_window(cx, window, "the log", |window, _| shows(window, "run-activity"));
+    let before = cx.update_window(window, |_, window, _| bounds(window)[1].size.height).expect("window");
+
+    cx.update(|cx| apply_zoom(Zoom::new(150), cx));
+    // The rows grow with the zoom, one under the other, inside the box.
+    wait_for_window(cx, window, "the rows laid out at 150%", |window, _| {
+        let rows = bounds(window);
+        let log = window.find("run-activity").bounds();
+        rows[1].size.height >= before * 1.4
+            && rows.windows(2).all(|pair| pair[0].bottom() <= pair[1].top() + px(0.5))
+            && rows[2].bottom() <= log.bottom()
     });
 }

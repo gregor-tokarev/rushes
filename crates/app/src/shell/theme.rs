@@ -35,6 +35,8 @@ pub fn register_fonts(cx: &mut App) {
 /// Applies `mode` to the global theme and keeps the UI font on it. `System`
 /// follows the window's appearance (the platform's when there is no window).
 pub fn apply_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
+    // The base fonts carry the zoom, which a theme file could reset.
+    let fonts = cx.has_global::<Theme>().then(|| (Theme::global(cx).font_size, Theme::global(cx).mono_font_size));
     match mode {
         ThemeMode::Light => Theme::change(KitThemeMode::Light, None, cx),
         ThemeMode::Dark => Theme::change(KitThemeMode::Dark, None, cx),
@@ -43,6 +45,10 @@ pub fn apply_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
     Theme::update(cx, |theme| {
         readable_danger_text(theme);
         solid_danger_buttons(theme);
+        if let Some((font_size, mono_font_size)) = fonts {
+            theme.font_size = font_size;
+            theme.mono_font_size = mono_font_size;
+        }
     });
     let has_ui_font = cx.text_system().all_font_names().iter().any(|name| name == UI_FONT);
     if has_ui_font && Theme::global(cx).font_family != UI_FONT {

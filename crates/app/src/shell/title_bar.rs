@@ -16,6 +16,7 @@ use super::{GoBack, GoForward, OpenCommandPalette, ToggleSidebar, ToggleTheme, W
 use crate::route::{Route, VideoTab};
 use crate::state::AppState;
 use crate::ui::PageIcon;
+use crate::ui::zoom::title_bar_height;
 use crate::update;
 
 impl Workspace {
@@ -27,6 +28,7 @@ impl Workspace {
     ) -> impl IntoElement {
         if onboarding {
             return TitleBar::new()
+                .h(title_bar_height(cx))
                 .child(div().text_sm().font_medium().text_color(cx.theme().muted_foreground).child("Rushes"))
                 .into_any_element();
         }
@@ -39,6 +41,7 @@ impl Workspace {
         let is_dark = cx.theme().is_dark();
 
         TitleBar::new()
+            .h(title_bar_height(cx))
             .child(
                 h_flex()
                     .id("title-bar-navigation")

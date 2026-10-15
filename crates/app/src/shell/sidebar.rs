@@ -10,8 +10,8 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Collapsible, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Role, SharedString,
-    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
+    AnyElement, App, Context, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Role,
+    SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div, px,
 };
 use rushes_core::{RunStatus, UploadStatus, VideoId, ViewKind};
 
@@ -21,6 +21,10 @@ use crate::route::{Route, SettingsSection, VideoTab};
 use crate::state::AppState;
 use crate::ui::PageIcon;
 use crate::ui::contrast::warning_badge;
+use crate::ui::zoom::zoomed;
+
+/// The kit's sidebar width, at 100%.
+const SIDEBAR_WIDTH: Pixels = px(255.);
 
 /// One block of the sidebar. The kit's sidebar takes a single item type, so
 /// menus, labelled groups and the recent-pages list share this enum.
@@ -258,6 +262,8 @@ impl Workspace {
             );
 
         let mut sidebar = Sidebar::new("sidebar")
+            // In pixels, which the kit animates when the sidebar shows or hides.
+            .w(zoomed(SIDEBAR_WIDTH, cx))
             .collapsible(SidebarCollapsible::Offcanvas)
             .collapsed(self.sidebar_collapsed)
             .header(self.render_sidebar_header(window, cx))

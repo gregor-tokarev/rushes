@@ -73,6 +73,8 @@ pub struct AppSettings {
     pub updates: UpdateSettings,
     /// Video pages open with their properties folded to a count.
     pub properties_collapsed: bool,
+    /// How large the whole interface is drawn.
+    pub zoom: Zoom,
 }
 
 impl AppSettings {
@@ -228,6 +230,68 @@ impl WeekStart {
     }
 }
 
+/// How large the interface is drawn, in percent of its designed size: text,
+/// spacing and controls all scale together, as when zooming a web page.
+/// A value outside [`Zoom::LEVELS`] (a hand-edited database) is brought into range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "u16", into = "u16")]
+pub struct Zoom(u16);
+
+impl Zoom {
+    /// The levels zooming in and out steps through, as a web browser does. At
+    /// 150% a 1440 × 900 screen still holds the window's designed minimum.
+    pub const LEVELS: [u16; 7] = [75, 80, 90, 100, 110, 125, 150];
+    /// The interface at its designed size.
+    pub const DEFAULT: Zoom = Zoom(100);
+
+    /// `percent`, kept within the smallest and largest of [`Zoom::LEVELS`].
+    pub fn new(percent: u16) -> Self {
+        Zoom(percent.clamp(Self::LEVELS[0], Self::LEVELS[Self::LEVELS.len() - 1]))
+    }
+
+    pub fn percent(self) -> u16 {
+        self.0
+    }
+
+    /// The scale it draws the interface at: 1.0 at 100%.
+    pub fn factor(self) -> f32 {
+        f32::from(self.0) / 100.
+    }
+
+    /// The next level up; the largest stays.
+    pub fn zoom_in(self) -> Self {
+        Self::LEVELS.into_iter().find(|level| *level > self.0).map_or(self, Zoom)
+    }
+
+    /// The next level down; the smallest stays.
+    pub fn zoom_out(self) -> Self {
+        Self::LEVELS.into_iter().rev().find(|level| *level < self.0).map_or(self, Zoom)
+    }
+
+    /// `125%`.
+    pub fn label(self) -> String {
+        format!("{}%", self.0)
+    }
+}
+
+impl Default for Zoom {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl From<u16> for Zoom {
+    fn from(percent: u16) -> Self {
+        Zoom::new(percent)
+    }
+}
+
+impl From<Zoom> for u16 {
+    fn from(zoom: Zoom) -> Self {
+        zoom.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +328,7 @@ mod tests {
         assert!(!settings.onboarding_completed);
         assert!(settings.updates.automatic);
         assert!(!settings.properties_collapsed, "video pages open with their properties shown");
+        assert_eq!(settings.zoom, Zoom::DEFAULT);
     }
 
     #[test]
@@ -276,6 +341,45 @@ mod tests {
         assert_eq!(settings.youtube, YoutubeBackend::default());
         assert!(settings.updates.automatic, "settings saved before updates existed update automatically");
         assert_eq!(settings.week_start, WeekStart::Sunday, "weeks kept starting on Sunday");
+        assert_eq!(settings.zoom.percent(), 100, "settings saved before zoom existed draw at the designed size");
+    }
+
+    #[test]
+    fn zoom_steps_through_its_levels() {
+        let mut zoom = Zoom::DEFAULT;
+        let mut larger = Vec::new();
+        for _ in 0..Zoom::LEVELS.len() {
+            zoom = zoom.zoom_in();
+            larger.push(zoom.percent());
+        }
+        assert_eq!(larger, [110, 125, 150, 150, 150, 150, 150], "the largest level stays");
+        let mut smaller = Vec::new();
+        for _ in 0..Zoom::LEVELS.len() {
+            zoom = zoom.zoom_out();
+            smaller.push(zoom.percent());
+        }
+        assert_eq!(smaller, [125, 110, 100, 90, 80, 75, 75], "the smallest level stays");
+        assert_eq!(Zoom::DEFAULT.factor(), 1.);
+        assert_eq!(Zoom::new(150).factor(), 1.5);
+        assert_eq!(Zoom::new(125).label(), "125%");
+    }
+
+    #[test]
+    fn zoom_between_levels_steps_to_the_nearest_one() {
+        assert_eq!(Zoom::new(130).zoom_in().percent(), 150);
+        assert_eq!(Zoom::new(130).zoom_out().percent(), 125);
+    }
+
+    #[test]
+    fn zoom_round_trips_and_stays_in_range() {
+        let settings = AppSettings { zoom: Zoom::new(125), ..AppSettings::default() };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""zoom":125"#), "{json}");
+        assert_eq!(serde_json::from_str::<AppSettings>(&json).unwrap(), settings);
+        for (stored, read) in [(0, 75), (50, 75), (1000, 150)] {
+            let settings: AppSettings = serde_json::from_str(&format!(r#"{{"zoom": {stored}}}"#)).unwrap();
+            assert_eq!(settings.zoom.percent(), read, "{stored}");
+        }
     }
 
     #[test]
