@@ -501,7 +501,7 @@ impl DocumentEditor {
                     .into_any_element()
             }
             BlockKind::TalkingPoint | BlockKind::BRoll | BlockKind::OnScreen => {
-                let (accent, icon, label) = match block.kind {
+                let (colors, icon, label) = match block.kind {
                     BlockKind::TalkingPoint => (palette.talking_point, IconName::Mic, "TALKING POINT"),
                     BlockKind::BRoll => (palette.broll, IconName::Clapperboard, "B-ROLL"),
                     _ => (palette.onscreen, IconName::Type, "ON SCREEN"),
@@ -512,13 +512,13 @@ impl DocumentEditor {
                     .px_3()
                     .py(metrics.inset)
                     .rounded(radius)
-                    .bg(EditorPalette::tint(accent))
+                    .bg(colors.fill)
                     .child(
                         h_flex()
                             .flex_none()
                             .h(metrics.line_height)
                             .gap_1p5()
-                            .text_color(accent)
+                            .text_color(colors.label)
                             .child(Icon::new(icon).small())
                             .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).child(label)),
                     )
