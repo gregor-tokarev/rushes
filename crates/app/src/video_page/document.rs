@@ -8,7 +8,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::menu::DropdownMenu as _;
-use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -29,7 +29,7 @@ use crate::database::format;
 use crate::editor::{DocumentEditor, DocumentEditorEvent};
 use crate::state::AppState;
 use crate::ui::path_prompt::{self, Finish, PathKind, PathRequest, read_error_reason, write_error_reason};
-use crate::ui::{EmptyState, RowButton, section_label};
+use crate::ui::{EmptyState, RowButton, menu_item, section_label};
 
 /// How long after the last edit a document is written.
 pub const SAVE_DELAY: Duration = Duration::from_millis(600);
@@ -575,7 +575,7 @@ pub fn script_menu(menu: PopupMenu, tab: &Entity<DocumentTab>, cx: &App) -> Popu
     let menu = SCRIPT_COMMANDS.iter().fold(menu.label(cues).separator(), |menu, (_, icon, label, run)| {
         let (tab, run) = (tab.clone(), *run);
         menu.item(
-            PopupMenuItem::new(*label)
+            menu_item(*label)
                 .icon(Icon::new(*icon))
                 .on_click(move |_, window, cx| tab.update(cx, |tab, cx| run(tab, window, cx))),
         )
@@ -588,7 +588,7 @@ pub fn script_menu(menu: PopupMenu, tab: &Entity<DocumentTab>, cx: &App) -> Popu
         let (tab, id) = (tab.clone(), item.block_id);
         let indent = "   ".repeat(usize::from(item.level - top_level));
         menu.item(
-            PopupMenuItem::new(format!("{indent}{}", item.text))
+            menu_item(format!("{indent}{}", item.text))
                 .on_click(move |_, window, cx| tab.update(cx, |tab, cx| tab.focus_block(id, window, cx))),
         )
     })

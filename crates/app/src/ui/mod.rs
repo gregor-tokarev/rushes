@@ -43,9 +43,14 @@
 //!   and the focus ring shows only focus the keyboard gave.
 //! - **Tooltips.** A tooltip that explains a passing state, such as why a
 //!   control is disabled, is a [`state_tooltip`], which leaves with the state.
+//! - **Menus.** A menu item is a [`menu_item`], which grows with the zoom, not
+//!   the kit's `PopupMenuItem::new`.
+//! - **Notifications.** A notification is built by [`notification`], whose
+//!   icon stays on its first line at any zoom, not by the kit's `info`,
+//!   `success`, `warning` and `error`.
 //! - **Zoom.** Sizes are in rems, which follow the creator's zoom. Geometry
 //!   that a kit component takes in pixels is the design's value through
-//!   [`zoom::zoomed`]; a tab bar takes its size from [`zoom::tab_size`].
+//!   [`zoom::zoomed`]; a tab bar goes through [`zoom::zoomed_tabs`].
 //!
 //! # Button sizes
 //!
@@ -66,6 +71,8 @@ pub mod date_field;
 pub mod dialog;
 mod empty_state;
 mod focus;
+mod menu;
+pub mod notification;
 mod page;
 mod page_icon;
 pub mod path_prompt;
@@ -85,6 +92,7 @@ pub use choice_card::ChoiceCard;
 pub use contrast::warning_text;
 pub use empty_state::EmptyState;
 pub use focus::KeyboardFocus;
+pub use menu::{menu_item, scrolling_menu};
 pub use page::{PAGE_INSET, PageHeader, page_frame};
 pub use page_icon::{Assets, PageIcon, has_page_icon_image, video_icon};
 pub use row_button::{RowButton, section_label};
@@ -95,10 +103,10 @@ pub use time::format_when;
 
 /// Shows a notification in the active window, for services that have no
 /// window of their own; nothing happens without a window.
-pub fn push_notification(cx: &mut App, notification: impl FnOnce() -> Notification) {
+pub fn push_notification(cx: &mut App, notification: impl FnOnce(&App) -> Notification) {
     let window = cx.active_window().or_else(|| cx.windows().into_iter().next());
     if let Some(window) = window {
-        let notification = notification();
+        let notification = notification(cx);
         // The window may have closed since; then there is nobody to tell.
         let _ = window.update(cx, |_, window, cx| window.push_notification(notification, cx));
     }

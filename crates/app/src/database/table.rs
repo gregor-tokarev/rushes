@@ -41,7 +41,7 @@ use super::panel::{CELL_EDITOR_CONTEXT, CellRef, DatabasePanel, TEXT_ENTRY_CONTE
 use super::property_editor::PropertyEditorMode;
 use super::query::column_name;
 use crate::publish::{ChannelChoices, ChooseChannel};
-use crate::ui::{EmptyState, date_field, format_when, video_icon};
+use crate::ui::{EmptyState, date_field, format_when, menu_item, video_icon};
 
 /// Narrowest a column can be resized to, in pixels.
 const MIN_COLUMN_WIDTH: f32 = 72.0;
@@ -528,9 +528,9 @@ impl VideoTable {
                         Some(option) => this.child(Chip::new(option.name.clone(), option.color)),
                         None => this.child(empty_value(cx)),
                     })
-                    .dropdown_menu(move |menu, _, _| {
+                    .dropdown_menu(move |menu, window, _| {
                         let panel = panel.clone();
-                        select_menu(menu, &options, selected.as_deref(), NO_OPTIONS_IN_TABLE, move |value, cx| {
+                        select_menu(menu, window, &options, selected.as_deref(), NO_OPTIONS_IN_TABLE, move |value, cx| {
                             let value = PropertyValue::Select(value);
                             _ = panel.update(cx, |panel, cx| panel.set_property_value(id, property, Some(value), cx));
                         })
@@ -760,12 +760,10 @@ pub(crate) fn video_menu(
         }
     };
     menu.item(
-        PopupMenuItem::new("Open")
-            .icon(IconName::PanelRightOpen)
-            .on_click(command(|panel, id, _, cx| panel.open_video(id, cx))),
+        menu_item("Open").icon(IconName::PanelRightOpen).on_click(command(|panel, id, _, cx| panel.open_video(id, cx))),
     )
     .when(renamable, |menu| {
-        menu.item(PopupMenuItem::new("Rename").icon(IconName::Pencil).on_click(command(|_, id, window, cx| {
+        menu.item(menu_item("Rename").icon(IconName::Pencil).on_click(command(|_, id, window, cx| {
             // Once the menu has closed: it takes the keyboard back while it is open.
             let panel = cx.weak_entity();
             window.defer(cx, move |window, cx| {
@@ -775,13 +773,11 @@ pub(crate) fn video_menu(
         })))
     })
     .item(
-        PopupMenuItem::new("Duplicate")
-            .icon(IconName::Copy)
-            .on_click(command(|panel, id, _, cx| panel.duplicate_video(id, cx))),
+        menu_item("Duplicate").icon(IconName::Copy).on_click(command(|panel, id, _, cx| panel.duplicate_video(id, cx))),
     )
     .separator()
     .item(
-        PopupMenuItem::new("Delete…")
+        menu_item("Delete…")
             .icon(IconName::Trash)
             .on_click(command(|panel, id, window, cx| panel.confirm_delete_videos(vec![id], window, cx))),
     )
@@ -808,13 +804,11 @@ fn column_menu(
     };
 
     let menu = menu
-        .item(PopupMenuItem::new("Sort ascending").icon(IconName::ArrowUp).on_click(sort(SortDirection::Ascending)))
-        .item(
-            PopupMenuItem::new("Sort descending").icon(IconName::ArrowDown).on_click(sort(SortDirection::Descending)),
-        );
+        .item(menu_item("Sort ascending").icon(IconName::ArrowUp).on_click(sort(SortDirection::Ascending)))
+        .item(menu_item("Sort descending").icon(IconName::ArrowDown).on_click(sort(SortDirection::Descending)));
     let menu = menu.when(column != Column::Builtin(BuiltinField::Title), |menu| {
         menu.separator().item(
-            PopupMenuItem::new("Hide")
+            menu_item("Hide")
                 .icon(IconName::EyeOff)
                 .on_click(command(Rc::new(move |panel, _, cx| panel.set_column_visible(column, false, cx)))),
         )
@@ -830,15 +824,15 @@ fn column_menu(
         command(Rc::new(move |panel, window, cx| panel.open_property_editor(Some(property), mode, window, cx)))
     };
     menu.separator()
-        .item(PopupMenuItem::new("Rename…").icon(IconName::Pencil).on_click(edit(PropertyEditorMode::Rename)))
+        .item(menu_item("Rename…").icon(IconName::Pencil).on_click(edit(PropertyEditorMode::Rename)))
         .when(has_options, |menu| {
-            menu.item(PopupMenuItem::new("Edit options…").icon(IconName::List).on_click(edit(PropertyEditorMode::Edit)))
+            menu.item(menu_item("Edit options…").icon(IconName::List).on_click(edit(PropertyEditorMode::Edit)))
         })
         .separator()
         .item(
-            PopupMenuItem::new("Delete property…").icon(IconName::Trash).on_click(command(Rc::new(
-                move |panel, window, cx| panel.confirm_delete_property(property, window, cx),
-            ))),
+            menu_item("Delete property…").icon(IconName::Trash).on_click(command(Rc::new(move |panel, window, cx| {
+                panel.confirm_delete_property(property, window, cx)
+            }))),
         )
 }
 

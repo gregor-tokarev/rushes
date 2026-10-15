@@ -5,7 +5,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::Input;
-use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar, TabVariant};
@@ -29,8 +29,8 @@ use super::panel::{DatabasePanel, SortPicker};
 use super::property_editor::PropertyEditorMode;
 use super::query::{active_filter_count, column_name, resolve_columns};
 use super::table::column_key;
-use crate::ui::PAGE_INSET;
-use crate::ui::zoom::tab_size;
+use crate::ui::zoom::zoomed_tabs;
+use crate::ui::{PAGE_INSET, menu_item};
 
 impl DatabasePanel {
     pub(super) fn set_sort_picker(&mut self, picker: Option<SortPicker>, cx: &mut Context<Self>) {
@@ -112,8 +112,6 @@ impl DatabasePanel {
         let overflow = self.view_tabs_overflow.clone();
         let tabs_scroll = self.view_tabs_scroll.clone();
         let tabs = TabBar::new("database-views")
-            .underline()
-            .with_size(tab_size(TabVariant::Underline, Size::Small, cx))
             .track_scroll(&self.view_tabs_scroll)
             .menu(overflow.get())
             .when_some(self.active_index(), |this, ix| this.selected_index(ix))
@@ -128,6 +126,7 @@ impl DatabasePanel {
                     this.select_view(*id, window, cx);
                 }
             }));
+        let tabs = zoomed_tabs(tabs, TabVariant::Underline, Size::Small, cx);
 
         let menu_panel = panel.clone();
         let overflow_panel = panel.clone();
@@ -179,16 +178,8 @@ impl DatabasePanel {
                             }
                         };
                         menu.label("Add a view")
-                            .item(
-                                PopupMenuItem::new("Table")
-                                    .icon(view_icon(ViewKind::Table))
-                                    .on_click(add(ViewKind::Table)),
-                            )
-                            .item(
-                                PopupMenuItem::new("Board")
-                                    .icon(view_icon(ViewKind::Board))
-                                    .on_click(add(ViewKind::Board)),
-                            )
+                            .item(menu_item("Table").icon(view_icon(ViewKind::Table)).on_click(add(ViewKind::Table)))
+                            .item(menu_item("Board").icon(view_icon(ViewKind::Board)).on_click(add(ViewKind::Board)))
                     },
                 )
             })
@@ -253,11 +244,11 @@ impl DatabasePanel {
 fn view_menu(menu: PopupMenu, id: ViewId, can_delete: bool, panel: &WeakEntity<DatabasePanel>) -> PopupMenu {
     let rename = panel.clone();
     let delete = panel.clone();
-    menu.item(PopupMenuItem::new("Rename…").icon(IconName::Pencil).on_click(move |_, window, cx| {
+    menu.item(menu_item("Rename…").icon(IconName::Pencil).on_click(move |_, window, cx| {
         _ = rename.update(cx, |panel, cx| panel.open_rename_view(id, window, cx));
     }))
     .separator()
-    .item(PopupMenuItem::new("Delete view…").icon(IconName::Trash).disabled(!can_delete).on_click(
+    .item(menu_item("Delete view…").icon(IconName::Trash).disabled(!can_delete).on_click(
         move |_, window, cx| {
             _ = delete.update(cx, |panel, cx| panel.confirm_delete_view(id, window, cx));
         },

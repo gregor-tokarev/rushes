@@ -12,8 +12,7 @@ use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::link::Link;
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::notification::Notification;
+use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
@@ -53,7 +52,7 @@ use crate::route::{Route, VideoTab};
 use crate::state::{AppEvent, AppState};
 use crate::ui::date_field::{DateField, DateFieldEvent, DateFieldState};
 use crate::ui::path_prompt::{self, PathKind, PathRequest};
-use crate::ui::{state_tooltip, warning_text};
+use crate::ui::{menu_item, notification, scrolling_menu, state_tooltip, warning_text};
 
 /// Form edits are saved this long after the last keystroke.
 const SAVE_DELAY: Duration = Duration::from_millis(500);
@@ -612,7 +611,7 @@ impl PublishPanel {
 
     fn set_thumbnail(&mut self, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         if path.as_deref().is_some_and(|path| !is_thumbnail_image(path)) {
-            window.push_notification(Notification::warning("Choose a JPG, PNG, GIF or BMP image."), cx);
+            window.push_notification(notification::warning("Choose a JPG, PNG, GIF or BMP image.", cx), cx);
             return;
         }
         self.draft.thumbnail = path;
@@ -696,7 +695,7 @@ impl PublishPanel {
     fn on_drop(&mut self, target: FileTarget, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = paths.paths().iter().find(|path| path.is_file()).cloned() else { return };
         if target == FileTarget::Video && self.is_uploading(cx) {
-            window.push_notification(Notification::warning(UPLOAD_FILE_LOCKED), cx);
+            window.push_notification(notification::warning(UPLOAD_FILE_LOCKED, cx), cx);
             return;
         }
         match target {
@@ -795,7 +794,7 @@ impl PublishPanel {
         let started = self.service.update(cx, |service, cx| service.start_upload(video_id, cx));
         if let Err(error) = started {
             self.on_upload_refused(&error, cx);
-            window.push_notification(Notification::error(error.to_string()).title("Couldn’t start the upload"), cx);
+            window.push_notification(notification::error(error.to_string(), cx).title("Couldn’t start the upload"), cx);
         }
     }
 
@@ -806,7 +805,8 @@ impl PublishPanel {
         let resumed = self.service.update(cx, |service, cx| service.resume_upload(id, cx));
         if let Err(error) = resumed {
             self.on_upload_refused(&error, cx);
-            window.push_notification(Notification::error(error.to_string()).title("Couldn’t resume the upload"), cx);
+            window
+                .push_notification(notification::error(error.to_string(), cx).title("Couldn’t resume the upload"), cx);
         }
     }
 
@@ -1414,10 +1414,10 @@ impl PublishPanel {
                     })
                 };
                 button
-                    .dropdown_menu(move |menu, _, _| {
+                    .dropdown_menu(move |menu, window, _| {
                         let panel = panel.clone();
-                        choices.menu(menu.check_side(Side::Right), choose.clone()).separator().item(
-                            PopupMenuItem::new("Add account…").icon(IconName::Plus).disabled(signing_in).on_click(
+                        choices.menu(scrolling_menu(menu, window).check_side(Side::Right), choose.clone()).separator().item(
+                            menu_item("Add account…").icon(IconName::Plus).disabled(signing_in).on_click(
                                 move |_, _, cx| {
                                     panel.update(cx, |panel, cx| panel.add_account(cx)).ok();
                                 },
@@ -1516,16 +1516,16 @@ impl PublishPanel {
                 .small()
                 .outline()
                 .dropdown_caret(true)
-                .dropdown_menu(move |menu, _, _| {
+                .dropdown_menu(move |menu, window, _| {
                     // The film icons take the left side; the chosen file is ticked on the right.
-                    let mut menu = menu.check_side(Side::Right);
+                    let mut menu = scrolling_menu(menu, window).check_side(Side::Right);
                     for (ix, choice) in choices.iter().enumerate() {
                         if ix == 0 || choices[ix - 1].source != choice.source {
                             menu = menu.label(choice.source);
                         }
                         let (panel, path) = (panel.clone(), choice.path.clone());
                         menu = menu.item(
-                            PopupMenuItem::new(file_name(&choice.path))
+                            menu_item(file_name(&choice.path))
                                 .icon(IconName::Film)
                                 .checked(chosen.as_ref() == Some(&choice.path))
                                 .on_click(move |_, _, cx| {
@@ -1537,11 +1537,9 @@ impl PublishPanel {
                         menu = menu.separator();
                     }
                     let panel = panel.clone();
-                    menu.item(PopupMenuItem::new("Choose file…").icon(IconName::FolderOpen).on_click(
-                        move |_, window, cx| {
-                            panel.update(cx, |panel, cx| panel.choose_file(window, cx, false)).ok();
-                        },
-                    ))
+                    menu.item(menu_item("Choose file…").icon(IconName::FolderOpen).on_click(move |_, window, cx| {
+                        panel.update(cx, |panel, cx| panel.choose_file(window, cx, false)).ok();
+                    }))
                 })
                 .into_any_element()
         };

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -22,6 +22,7 @@ use super::brief::{COLOR_GRADES, color_grade_label};
 use super::doctor::DoctorChecklist;
 use super::service::PipelineService;
 use crate::state::{AppEvent, AppState};
+use crate::ui::menu_item;
 use crate::ui::path_prompt::{self, PathKind, PathRequest};
 use crate::ui::settings::{SettingsField, SettingsSection};
 
@@ -344,7 +345,7 @@ impl AiSettings {
                     .dropdown_menu(move |mut menu, _, _| {
                         for choice in ModelChoice::ALL {
                             let settings = settings.clone();
-                            menu = menu.item(PopupMenuItem::new(choice.label()).checked(choice == current).on_click(
+                            menu = menu.item(menu_item(choice.label()).checked(choice == current).on_click(
                                 move |_, window, cx| {
                                     _ = settings.update(cx, |this, cx| this.set_model(choice, window, cx));
                                 },
@@ -398,7 +399,7 @@ impl AiSettings {
             .dropdown_menu(move |mut menu, _, _| {
                 for (value, label) in COLOR_GRADES {
                     let settings = settings.clone();
-                    menu = menu.item(PopupMenuItem::new(label).checked(grade == value).on_click(move |_, _, cx| {
+                    menu = menu.item(menu_item(label).checked(grade == value).on_click(move |_, _, cx| {
                         _ = settings.update(cx, |this, cx| {
                             this.update(cx, |pipeline| pipeline.default_preferences.color_grade = value.to_owned())
                         });

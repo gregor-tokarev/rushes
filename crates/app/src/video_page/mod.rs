@@ -13,7 +13,7 @@ use chrono::Utc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Enter, Input, InputEvent, InputState, MoveDown, Position, Textarea, TextareaState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::tab::{Tab, TabBar, TabVariant};
@@ -35,8 +35,8 @@ use crate::publish::PublishPanel;
 use crate::route::{Route, VideoTab};
 use crate::state::{AppEvent, AppState};
 use crate::ui::dialog::confirm_delete_videos;
-use crate::ui::zoom::tab_size;
-use crate::ui::{EmptyState, PageIcon};
+use crate::ui::zoom::zoomed_tabs;
+use crate::ui::{EmptyState, PageIcon, menu_item};
 
 pub use document::{DocumentTab, PathPurpose, SAVE_DELAY, ScriptRail, ScriptStats};
 pub use emoji::ICON_CHOICES;
@@ -534,7 +534,7 @@ impl VideoPage {
                             icon: IconName,
                             run: fn(&mut VideoPage, &mut Window, &mut Context<VideoPage>)| {
                     let page = page.clone();
-                    PopupMenuItem::new(label).icon(Icon::new(icon)).on_click(move |_, window, cx| {
+                    menu_item(label).icon(Icon::new(icon)).on_click(move |_, window, cx| {
                         _ = page.update(cx, |page, cx| run(page, window, cx));
                     })
                 };
@@ -580,9 +580,7 @@ impl VideoPage {
         let script_menu = self.script.as_ref().filter(|_| !wide && self.tab == VideoTab::Script);
         let unsaved = self.state.read(cx).is_save_failing(self.video_id)
             || [&self.script, &self.notes].into_iter().flatten().any(|tab| tab.read(cx).is_save_failing(cx));
-        TabBar::new("video-tabs")
-            .underline()
-            .with_size(tab_size(TabVariant::Underline, Size::Medium, cx))
+        let tabs = TabBar::new("video-tabs")
             .w_full()
             .selected_index(selected)
             .children(VideoTab::ALL.iter().map(|tab| Tab::new().label(tab.label())))
@@ -609,7 +607,8 @@ impl VideoPage {
                 if let Some(tab) = VideoTab::ALL.get(*ix) {
                     this.open_tab(*tab, cx);
                 }
-            }))
+            }));
+        zoomed_tabs(tabs, TabVariant::Underline, Size::Medium, cx)
     }
 
     /// The current tab's content, as wide as the page column: documents bring

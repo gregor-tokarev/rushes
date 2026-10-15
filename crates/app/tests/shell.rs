@@ -1391,21 +1391,24 @@ fn zoom_keys_scale_the_whole_interface_and_are_kept(cx: &mut TestAppContext) {
     assert_eq!((zoom(cx), rem(cx), title_bar(cx)), (150, px(24.), px(51.)));
     assert_eq!(stored(cx), 150, "the zoom is kept for the next start");
     assert_eq!(notifications(cx), 1, "one notification, saying the latest level");
-    app.press(cx, "secondary-+");
-    assert_eq!(zoom(cx), 150, "150% is the largest");
+    for _ in 0..4 {
+        app.press(cx, "secondary-+");
+    }
+    assert_eq!((zoom(cx), rem(cx), title_bar(cx)), (250, px(40.), px(85.)), "250% is the largest");
+    assert_eq!(stored(cx), 250);
 
     // In a dialog too: the command palette's search field has the keyboard.
     app.press(cx, "secondary-k");
     assert!(app.has_dialog(cx));
     app.press(cx, "secondary--");
-    assert_eq!((zoom(cx), rem(cx)), (125, px(20.)));
+    assert_eq!((zoom(cx), rem(cx)), (200, px(32.)));
     app.press(cx, "escape");
     app.press(cx, "escape");
 
     // Switching the theme keeps the zoom.
     let state = app.state.clone();
     app.step(cx, move |_, cx| state.update(cx, |state, cx| state.update_settings(cx, |s| s.theme = ThemeMode::Light)));
-    assert_eq!(rem(cx), px(20.));
+    assert_eq!(rem(cx), px(32.));
 
     app.press(cx, "secondary-0");
     assert_eq!((zoom(cx), rem(cx), title_bar(cx)), (100, px(16.), px(34.)));

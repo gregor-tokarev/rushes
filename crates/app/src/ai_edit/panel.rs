@@ -34,7 +34,7 @@ use crate::database::Chip;
 use crate::database::colors::run_status_color;
 use crate::state::{AppEvent, AppState};
 use crate::ui::format_when;
-use crate::ui::{Card, SectionHeader};
+use crate::ui::{Card, SectionHeader, menu_item};
 
 /// How long the brief form waits after a change before it is saved.
 const DRAFT_SAVE_DELAY: Duration = Duration::from_millis(500);
@@ -453,15 +453,13 @@ impl AiEditPanel {
                 .dropdown_menu(move |mut menu, _, _| {
                     for (value, label) in COLOR_GRADES {
                         let panel = panel.clone();
-                        menu = menu.item(PopupMenuItem::new(label).checked(current == value).on_click(
-                            move |_, window, cx| {
-                                _ = panel.update(cx, |panel, cx| {
-                                    panel.set_preferences(window, cx, |preferences| {
-                                        preferences.color_grade = value.to_owned()
-                                    })
-                                });
-                            },
-                        ));
+                        menu = menu.item(menu_item(label).checked(current == value).on_click(move |_, window, cx| {
+                            _ = panel.update(cx, |panel, cx| {
+                                panel.set_preferences(window, cx, |preferences| {
+                                    preferences.color_grade = value.to_owned()
+                                })
+                            });
+                        }));
                     }
                     menu
                 })

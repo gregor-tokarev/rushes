@@ -21,7 +21,7 @@ use crate::publish::YoutubeSettings;
 use crate::route::SettingsSection;
 use crate::shell;
 use crate::state::{AppEvent, AppState};
-use crate::ui::settings::{FIELD_MAX_WIDTH, setting_group};
+use crate::ui::settings::{FIELD_MAX_WIDTH, dropdown_field, setting_group};
 use crate::update::{self, UpdateService};
 
 pub use media_folder::{Commit, MediaFolderEvent, MediaFolderField};
@@ -112,7 +112,7 @@ impl SettingsPage {
                     setting_group().title("Appearance").items(vec![
                         SettingItem::new(
                             "Theme",
-                            SettingField::dropdown(
+                            dropdown_field(
                                 ThemeMode::ALL
                                     .iter()
                                     .map(|mode| (theme_key(*mode), SharedString::from(mode.label())))
@@ -132,7 +132,7 @@ impl SettingsPage {
                         .description(theme_description(AppState::global(cx).read(cx).settings().theme)),
                         SettingItem::new(
                             "Zoom",
-                            SettingField::dropdown(
+                            dropdown_field(
                                 Zoom::LEVELS
                                     .iter()
                                     .map(|percent| (zoom_key(Zoom::new(*percent)), Zoom::new(*percent).label().into()))
@@ -150,7 +150,7 @@ impl SettingsPage {
                         .keywords(["scale", "font size", "larger", "smaller"]),
                         SettingItem::new(
                             "Week starts on",
-                            SettingField::dropdown(
+                            dropdown_field(
                                 WeekStart::ALL
                                     .iter()
                                     .map(|day| (week_start_key(*day), SharedString::from(day.label())))

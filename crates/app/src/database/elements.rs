@@ -16,6 +16,7 @@ use rushes_core::{SelectOption, TagColor};
 
 use super::colors::tag_colors;
 use super::format;
+use crate::ui::{menu_item, scrolling_menu};
 
 /// A colored, Notion-style value chip: select options, statuses and tags.
 #[derive(IntoElement)]
@@ -226,6 +227,7 @@ pub(crate) const NO_OPTIONS_ON_PAGE: &str =
 /// Without options it says `no_options`.
 pub(crate) fn select_menu(
     menu: PopupMenu,
+    window: &Window,
     options: &[SelectOption],
     current: Option<&str>,
     no_options: &'static str,
@@ -234,7 +236,7 @@ pub(crate) fn select_menu(
     if options.is_empty() {
         return menu.label(no_options);
     }
-    let menu = options.iter().fold(menu.check_side(Side::Right), |menu, option| {
+    let menu = options.iter().fold(scrolling_menu(menu, window).check_side(Side::Right), |menu, option| {
         let (name, color, id) = (option.name.clone(), option.color, option.id.clone());
         let set = set.clone();
         menu.item(
@@ -244,9 +246,7 @@ pub(crate) fn select_menu(
         )
     });
     match current {
-        Some(_) => {
-            menu.separator().item(PopupMenuItem::new("Clear").icon(IconName::X).on_click(move |_, _, cx| set(None, cx)))
-        }
+        Some(_) => menu.separator().item(menu_item("Clear").icon(IconName::X).on_click(move |_, _, cx| set(None, cx))),
         None => menu,
     }
 }

@@ -2,15 +2,15 @@
 
 use std::path::Path;
 
-use gpui_kit::SharedString;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::notification::Notification;
+use gpui_kit::{App, SharedString};
 use rushes_core::input::display_user_path;
 use rushes_update::{Error as UpdateError, ManualReason, Version};
 
 use super::service::{UpdateFailure, UpdateStatus};
-use crate::ui::format_when;
+use crate::ui::{format_when, notification};
 
 /// Title and description of the update status in Settings.
 pub(super) fn status(
@@ -111,8 +111,8 @@ pub(super) fn install_failed(version: &Version, error: &UpdateError, page_url: S
     }
 }
 
-pub(super) fn ready_notification(version: &Version) -> Notification {
-    Notification::success("Restart Rushes to use it.")
+pub(super) fn ready_notification(version: &Version, cx: &App) -> Notification {
+    notification::success("Restart Rushes to use it.", cx)
         .title(format!("Version {version} is ready"))
         .id::<UpdateFailure>()
         .action(|_, _, cx| {
@@ -125,27 +125,32 @@ pub(super) fn ready_notification(version: &Version) -> Notification {
         })
 }
 
-pub(super) fn available_notification(version: &Version, page_url: SharedString, reason: &ManualReason) -> Notification {
-    Notification::info(manual_reason(reason))
+pub(super) fn available_notification(
+    version: &Version,
+    page_url: SharedString,
+    reason: &ManualReason,
+    cx: &App,
+) -> Notification {
+    notification::info(manual_reason(reason), cx)
         .title(format!("Version {version} is available"))
         .id::<UpdateFailure>()
         .action(move |_, _, cx| download_button(page_url.clone(), cx))
 }
 
-pub(super) fn failure_notification(failure: &UpdateFailure) -> Notification {
-    let notification = Notification::error(failure.message.clone()).title(failure.title.clone()).id::<UpdateFailure>();
+pub(super) fn failure_notification(failure: &UpdateFailure, cx: &App) -> Notification {
+    let failed = notification::error(failure.message.clone(), cx).title(failure.title.clone()).id::<UpdateFailure>();
     match failure.page_url.clone() {
-        Some(page_url) => notification.action(move |_, _, cx| download_button(page_url.clone(), cx)),
-        None => notification,
+        Some(page_url) => failed.action(move |_, _, cx| download_button(page_url.clone(), cx)),
+        None => failed,
     }
 }
 
-pub(super) fn restart_failed(version: Option<&Version>) -> Notification {
+pub(super) fn restart_failed(version: Option<&Version>, cx: &App) -> Notification {
     let message = match version {
         Some(version) => format!("Quit Rushes and open it again to use version {version}."),
         None => "Quit Rushes and open it again.".into(),
     };
-    Notification::error(message).title("Couldn’t restart Rushes").id::<UpdateFailure>()
+    notification::error(message, cx).title("Couldn’t restart Rushes").id::<UpdateFailure>()
 }
 
 /// Opens the release page, where the new version is downloaded by hand.

@@ -4,7 +4,6 @@
 //! names it, since nothing on screen does.
 
 use gpui_kit::component::kbd::Kbd;
-use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, Keystroke};
 use rushes_core::settings::Zoom;
 
@@ -32,7 +31,7 @@ pub(super) fn change_zoom(change: impl FnOnce(Zoom) -> Zoom, cx: &mut App) {
     let message = zoom_message(before, now);
     // The window is busy dispatching the key that got here.
     cx.defer(move |cx| {
-        ui::push_notification(cx, || Notification::info(message).id::<Zoom>());
+        ui::push_notification(cx, |cx| ui::notification::info(message, cx).id::<Zoom>());
     });
 }
 
@@ -74,7 +73,8 @@ mod tests {
         let reset = shortcut(RESET_ZOOM_KEY);
         assert_eq!(zoom_message(Zoom::DEFAULT, Zoom::new(110)), format!("Zoom 110%. {reset} resets it."));
         assert_eq!(zoom_message(Zoom::new(110), Zoom::DEFAULT), "Zoom 100%.");
-        assert_eq!(zoom_message(Zoom::new(150), Zoom::new(150)), "Zoom 150% is the largest.");
+        assert_eq!(zoom_message(Zoom::new(150), Zoom::new(175)), format!("Zoom 175%. {reset} resets it."));
+        assert_eq!(zoom_message(Zoom::new(250), Zoom::new(250)), "Zoom 250% is the largest.");
         assert_eq!(zoom_message(Zoom::new(75), Zoom::new(75)), "Zoom 75% is the smallest.");
     }
 

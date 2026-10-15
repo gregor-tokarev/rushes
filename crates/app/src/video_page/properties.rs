@@ -607,9 +607,9 @@ impl PropertiesPanel {
                         Some(option) => this.child(Chip::new(option.name.clone(), option.color)),
                         None => this.child(empty_value(cx)),
                     })
-                    .dropdown_menu(move |menu, _, _| {
+                    .dropdown_menu(move |menu, window, _| {
                         let panel = panel.clone();
-                        select_menu(menu, &options, current.as_deref(), NO_OPTIONS_ON_PAGE, move |value, cx| {
+                        select_menu(menu, window, &options, current.as_deref(), NO_OPTIONS_ON_PAGE, move |value, cx| {
                             let value = value.map(|option| PropertyValue::Select(Some(option)));
                             _ = panel.update(cx, |panel, cx| panel.set_value(id, value, cx));
                         })

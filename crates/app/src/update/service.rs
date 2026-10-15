@@ -190,7 +190,7 @@ impl UpdateService {
             Err(error) => {
                 log_line!("rushes: cannot restart: {error}");
                 let version = self.installed.clone();
-                crate::ui::push_notification(cx, move || copy::restart_failed(version.as_ref()));
+                crate::ui::push_notification(cx, move |cx| copy::restart_failed(version.as_ref(), cx));
             }
         }
     }
@@ -248,7 +248,9 @@ impl UpdateService {
             Delivery::Manual(reason) => {
                 if trigger == Trigger::Automatic && self.first_notice(&version, Notice::Available) {
                     let (version, page_url, reason) = (version.clone(), page_url.clone(), reason.clone());
-                    crate::ui::push_notification(cx, move || copy::available_notification(&version, page_url, &reason));
+                    crate::ui::push_notification(cx, move |cx| {
+                        copy::available_notification(&version, page_url, &reason, cx)
+                    });
                 }
                 self.set_status(UpdateStatus::Available { version, page_url, reason }, cx);
             }
@@ -313,7 +315,7 @@ impl UpdateService {
                 log_line!("rushes: installed version {version}; it starts with the next launch");
                 self.installed = Some(version.clone());
                 if self.first_notice(&version, Notice::Ready) {
-                    crate::ui::push_notification(cx, move || copy::ready_notification(&version));
+                    crate::ui::push_notification(cx, move |cx| copy::ready_notification(&version, cx));
                 }
                 self.set_status(UpdateStatus::UpToDate { checked_at: Utc::now() }, cx);
             }
@@ -323,7 +325,7 @@ impl UpdateService {
                 let failure = copy::install_failed(&version, &error, page_url);
                 if trigger == Trigger::Automatic && self.first_notice(&version, Notice::Failed) {
                     let failure = failure.clone();
-                    crate::ui::push_notification(cx, move || copy::failure_notification(&failure));
+                    crate::ui::push_notification(cx, move |cx| copy::failure_notification(&failure, cx));
                 }
                 self.set_status(UpdateStatus::Failed(failure), cx);
             }

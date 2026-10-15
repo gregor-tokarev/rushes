@@ -238,9 +238,8 @@ impl WeekStart {
 pub struct Zoom(u16);
 
 impl Zoom {
-    /// The levels zooming in and out steps through, as a web browser does. At
-    /// 150% a 1440 × 900 screen still holds the window's designed minimum.
-    pub const LEVELS: [u16; 7] = [75, 80, 90, 100, 110, 125, 150];
+    /// The levels zooming in and out steps through, as a web browser does.
+    pub const LEVELS: [u16; 10] = [75, 80, 90, 100, 110, 125, 150, 175, 200, 250];
     /// The interface at its designed size.
     pub const DEFAULT: Zoom = Zoom(100);
 
@@ -352,15 +351,16 @@ mod tests {
             zoom = zoom.zoom_in();
             larger.push(zoom.percent());
         }
-        assert_eq!(larger, [110, 125, 150, 150, 150, 150, 150], "the largest level stays");
+        assert_eq!(larger, [110, 125, 150, 175, 200, 250, 250, 250, 250, 250], "the largest level stays");
         let mut smaller = Vec::new();
         for _ in 0..Zoom::LEVELS.len() {
             zoom = zoom.zoom_out();
             smaller.push(zoom.percent());
         }
-        assert_eq!(smaller, [125, 110, 100, 90, 80, 75, 75], "the smallest level stays");
+        assert_eq!(smaller, [200, 175, 150, 125, 110, 100, 90, 80, 75, 75], "the smallest level stays");
         assert_eq!(Zoom::DEFAULT.factor(), 1.);
         assert_eq!(Zoom::new(150).factor(), 1.5);
+        assert_eq!(Zoom::new(250).factor(), 2.5);
         assert_eq!(Zoom::new(125).label(), "125%");
     }
 
@@ -368,6 +368,8 @@ mod tests {
     fn zoom_between_levels_steps_to_the_nearest_one() {
         assert_eq!(Zoom::new(130).zoom_in().percent(), 150);
         assert_eq!(Zoom::new(130).zoom_out().percent(), 125);
+        assert_eq!(Zoom::new(220).zoom_in().percent(), 250);
+        assert_eq!(Zoom::new(220).zoom_out().percent(), 200);
     }
 
     #[test]
@@ -376,7 +378,7 @@ mod tests {
         let json = serde_json::to_string(&settings).unwrap();
         assert!(json.contains(r#""zoom":125"#), "{json}");
         assert_eq!(serde_json::from_str::<AppSettings>(&json).unwrap(), settings);
-        for (stored, read) in [(0, 75), (50, 75), (1000, 150)] {
+        for (stored, read) in [(0, 75), (50, 75), (1000, 250)] {
             let settings: AppSettings = serde_json::from_str(&format!(r#"{{"zoom": {stored}}}"#)).unwrap();
             assert_eq!(settings.zoom.percent(), read, "{stored}");
         }

@@ -37,13 +37,13 @@ use crate::route::{Route, SettingsSection, VideoTab};
 use crate::settings_page::SettingsPage;
 use crate::state::{AppEvent, AppState, Problem, Remedy, Severity};
 use crate::ui::zoom::apply_zoom;
-use crate::ui::{PageHeader, page_frame};
+use crate::ui::{PageHeader, notification, page_frame};
 use crate::update::UpdateService;
 use crate::video_page::VideoPage;
 use crate::wizard;
 
-use palette::CommandPalette;
 pub use launch_path::extend_tool_path;
+use palette::CommandPalette;
 pub use signals::on_termination_signal;
 pub use startup::{
     InstanceLock, StartupNotice, StartupProblem, adopt_legacy_data, adopt_rushes_app_name, open_startup_notice,
@@ -234,7 +234,7 @@ impl Workspace {
             // The window's notification layer exists once the window does.
             window.defer(cx, move |window, cx| {
                 for problem in &problems {
-                    window.push_notification(problem_notification(problem), cx);
+                    window.push_notification(problem_notification(problem, cx), cx);
                 }
             });
         }
@@ -316,9 +316,9 @@ impl Workspace {
                 });
             }
             AppEvent::Error(message) => {
-                window.push_notification(Notification::error(message.clone()), cx);
+                window.push_notification(notification::error(message.clone(), cx), cx);
             }
-            AppEvent::Problem(problem) => window.push_notification(problem_notification(problem), cx),
+            AppEvent::Problem(problem) => window.push_notification(problem_notification(problem, cx), cx),
         }
     }
 
@@ -345,7 +345,7 @@ impl Workspace {
                 continue;
             }
             let title = sidebar::display_title(&row.video.title);
-            let notification = Notification::info("Review the plan, then approve it or ask for changes.")
+            let notification = notification::info("Review the plan, then approve it or ask for changes.", cx)
                 .title(format!("Edit strategy ready for “{title}”"))
                 .id1::<RunStatus>(SharedString::from(id.to_string()))
                 .action(move |_, _, cx| {
@@ -505,12 +505,12 @@ impl Workspace {
 /// A notification for `problem` in the style of its severity, with a button
 /// for its remedy. The same problem raised again replaces the one shown
 /// instead of stacking.
-fn problem_notification(problem: &Problem) -> Notification {
+fn problem_notification(problem: &Problem, cx: &App) -> Notification {
     let message = problem.message().clone();
     let notification = match problem.severity() {
-        Severity::Error => Notification::error(message),
-        Severity::Info => Notification::info(message),
-        Severity::Success => Notification::success(message),
+        Severity::Error => notification::error(message, cx),
+        Severity::Info => notification::info(message, cx),
+        Severity::Success => notification::success(message, cx),
     };
     let notification = notification.title(problem.title().clone()).id1::<Problem>(problem.title().clone());
     let Some(remedy) = problem.remedy() else { return notification };

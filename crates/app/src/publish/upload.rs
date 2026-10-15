@@ -13,7 +13,6 @@ use chrono::{DateTime, Local, Utc};
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui_kit::component::button::Button;
-use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, AppContext as _, Context, SharedString};
 use rushes_core::{FileStamp, Privacy, UploadId, UploadJob, UploadStatus, Video, VideoId, VideoStatus, YoutubeLink};
 use rushes_youtube::{
@@ -25,7 +24,7 @@ use super::rules::{self, AccountAccess, BlockingReason};
 use super::service::{YoutubeEvent, YoutubeService, describe_error, report_problem};
 use super::transfer::{PROGRESS_INTERVAL, Throttle, Transfer};
 use crate::state::Problem;
-use crate::ui::push_notification;
+use crate::ui::{notification, push_notification};
 
 /// Status message of jobs a previous run left mid-transfer with a session to resume.
 pub const INTERRUPTED_RESUMABLE: &str = "Interrupted — you can resume";
@@ -557,10 +556,11 @@ impl YoutubeService {
     fn on_orphan_finished(&mut self, upload: ActiveUpload, uploaded: Option<UploadedVideo>, cx: &mut Context<Self>) {
         let Some(uploaded) = uploaded else { return };
         let (title, url): (String, SharedString) = (upload.title, uploaded.url.into());
-        push_notification(cx, move || {
-            Notification::warning(
+        push_notification(cx, move |cx| {
+            notification::warning(
                 "The upload finished before the video was deleted, so it is on your channel. \
                  Remove it in YouTube Studio if you don’t want it there.",
+                cx,
             )
             .title(format!("“{title}” reached YouTube"))
             .action(move |_, _, _| {
@@ -630,7 +630,7 @@ impl YoutubeService {
         }
         let title = self.video_title(id, cx);
         let headline = if resumed { "Couldn’t resume" } else { "Couldn’t upload" };
-        push_notification(cx, move || Notification::error(message).title(format!("{headline} “{title}”")));
+        push_notification(cx, move |cx| notification::error(message, cx).title(format!("{headline} “{title}”")));
     }
 
     fn on_uploaded(
@@ -668,8 +668,8 @@ impl YoutubeService {
 
         let title = self.video_title(id, cx);
         let url: SharedString = uploaded.url.clone().into();
-        push_notification(cx, move || {
-            Notification::success(format!("“{title}”"))
+        push_notification(cx, move |cx| {
+            notification::success(format!("“{title}”"), cx)
                 .title("Uploaded to YouTube")
                 .action(move |_, _, _| {
                     let url = url.clone();
@@ -705,8 +705,8 @@ impl YoutubeService {
                     // The toast goes away; the Upload card and the Uploads page keep the reason.
                     this.thumbnail_problems.insert(id, message.clone());
                     cx.notify();
-                    push_notification(cx, move || {
-                        Notification::warning(message).title(format!("The thumbnail of “{title}” wasn’t set"))
+                    push_notification(cx, move |cx| {
+                        notification::warning(message, cx).title(format!("The thumbnail of “{title}” wasn’t set"))
                     });
                 })
                 .ok();
