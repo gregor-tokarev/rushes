@@ -296,13 +296,19 @@ fn script_line(block: &Block) -> String {
     if block.kind.is_spoken() { text.to_owned() } else { format!("[{}: {text}]", block.kind.label()) }
 }
 
-/// `text` cut to at most `max` characters at a paragraph or word boundary.
+/// `text` cut to at most `max` characters at a paragraph or word boundary. A paragraph
+/// boundary in the first half would drop most of the excerpt (a heading before a long
+/// monologue), so then it cuts at a word.
 fn cap(text: &str, max: usize) -> String {
     let Some((cut, _)) = text.char_indices().nth(max) else {
         return text.to_owned();
     };
     let head = &text[..cut];
-    let boundary = head.rfind("\n\n").or_else(|| head.rfind(char::is_whitespace)).unwrap_or(cut);
+    let boundary = head
+        .rfind("\n\n")
+        .filter(|&at| at > head.len() / 2)
+        .or_else(|| head.rfind(char::is_whitespace))
+        .unwrap_or(cut);
     format!("{}\n\n[The script continues; the rest is omitted here.]", head[..boundary].trim_end())
 }
 
@@ -410,6 +416,16 @@ mod tests {
         assert!(brief.chars().count() < SCRIPT_CHARS + 1_000, "{}", brief.len());
         assert!(brief.contains("word\n\n[The script continues; the rest is omitted here.]"));
         assert!(!brief.contains("square brackets"), "only spoken lines, so no word on cues");
+    }
+
+    #[test]
+    fn a_heading_before_a_long_monologue_keeps_the_monologue() {
+        let monologue = "word ".repeat(3_000);
+        let script = [Block::new(BlockKind::Heading1, "Intro"), Block::paragraph(monologue.trim())];
+        let brief = default_brief(&video(), &script, &EditPreferences::default(), "");
+        assert!(brief.contains("[Heading 1: Intro]\n\nword word"), "{brief}");
+        assert!(brief.matches("word").count() > 1_500, "{}", brief.matches("word").count());
+        assert!(brief.contains("word\n\n[The script continues; the rest is omitted here.]"));
     }
 
     #[test]
