@@ -44,7 +44,7 @@ fn is_ordered_marker(typed: &str) -> bool {
         .is_some_and(|digits| !digits.is_empty() && digits.len() <= 3 && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Detects a callout-style marker (`[!note] `, `[!broll] `, `[!onscreen] `)
+/// Detects a callout-style marker (`[!note] `, `[!point] `, `[!broll] `, `[!onscreen] `)
 /// just typed at the start of a quote: the syntax Markdown files use for
 /// callouts and cues, typed after the `> ` shortcut.
 pub fn detect_quote_marker(text: &str, cursor: usize) -> Option<Shortcut> {
@@ -107,6 +107,7 @@ mod tests {
         assert_eq!(kind("[!broll] ", 9), Some((BlockKind::BRoll, 9)));
         assert_eq!(kind("[!onscreen] Subscribe", 12), Some((BlockKind::OnScreen, 12)));
         assert_eq!(kind("[!note] ", 8), Some((BlockKind::Callout, 8)));
+        assert_eq!(kind("[!point] ", 9), Some((BlockKind::TalkingPoint, 9)));
         assert_eq!(kind("[!NOTE] ", 8), Some((BlockKind::Callout, 8)));
         assert_eq!(kind("[!broll]", 8), None, "not before the space");
         assert_eq!(kind("[!broll] Slow pan", 17), None);

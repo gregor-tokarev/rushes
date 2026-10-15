@@ -3,19 +3,20 @@
 //!
 //! Markdown mapping (export and import are inverses for every [`BlockKind`]):
 //!
-//! | Block       | Markdown                                    |
-//! |-------------|---------------------------------------------|
-//! | Heading 1–3 | `# `, `## `, `### `                         |
-//! | Bulleted    | `- ` (two spaces of indent per level)       |
-//! | Numbered    | `1. ` (numbered per list, indented likewise) |
-//! | Todo        | `- [ ] ` / `- [x] `                         |
-//! | Quote       | `> `                                        |
-//! | Callout     | `> [!note] `                                |
-//! | B-roll cue  | `> [!broll] `                               |
-//! | On-screen   | `> [!onscreen] `                            |
-//! | Code        | fenced with backticks, no language          |
-//! | Divider     | `---`                                       |
-//! | Paragraph   | plain text, blocks separated by blank lines |
+//! | Block         | Markdown                                     |
+//! |---------------|----------------------------------------------|
+//! | Heading 1–3   | `# `, `## `, `### `                          |
+//! | Bulleted      | `- ` (two spaces of indent per level)        |
+//! | Numbered      | `1. ` (numbered per list, indented likewise) |
+//! | Todo          | `- [ ] ` / `- [x] `                          |
+//! | Quote         | `> `                                         |
+//! | Callout       | `> [!note] `                                 |
+//! | Talking point | `> [!talkingpoint] `                         |
+//! | B-roll cue    | `> [!broll] `                                |
+//! | On-screen     | `> [!onscreen] `                             |
+//! | Code          | fenced with backticks, no language           |
+//! | Divider       | `---`                                        |
+//! | Paragraph     | plain text, blocks separated by blank lines  |
 //!
 //! Text lines that would otherwise read as markup are escaped with a leading
 //! backslash. Normalisations: empty paragraphs and empty blocks that only show
@@ -29,6 +30,10 @@ use crate::model::{Block, BlockId, BlockKind};
 
 /// Speaking rate used for runtime estimates, in words per minute.
 pub const DEFAULT_WPM: u32 = 150;
+
+/// Marks a talking point in teleprompter text. Bracketed text is the
+/// teleprompter convention for a line that isn't read out.
+pub const TALKING_POINT_MARK: &str = "[Talking point]";
 
 /// Words read aloud: spoken block kinds only, inline Markdown stripped,
 /// punctuation-only tokens ignored.
@@ -95,14 +100,21 @@ pub fn outline(blocks: &[Block]) -> Vec<OutlineItem> {
         .collect()
 }
 
-/// What the presenter reads: spoken blocks only, inline Markdown stripped, one
-/// blank line between blocks.
+/// What the presenter reads: spoken blocks, and talking points marked with
+/// [`TALKING_POINT_MARK`] to say in their own words. Inline Markdown stripped,
+/// one blank line between blocks.
 pub fn teleprompter_text(blocks: &[Block]) -> String {
     blocks
         .iter()
-        .filter(|block| block.kind.is_spoken())
-        .map(|block| strip_inline_markdown(&block.text).trim().to_string())
-        .filter(|text| !text.is_empty())
+        .filter(|block| block.kind.is_spoken() || block.kind == BlockKind::TalkingPoint)
+        .filter_map(|block| {
+            let text = strip_inline_markdown(&block.text).trim().to_string();
+            match block.kind {
+                _ if text.is_empty() => None,
+                BlockKind::TalkingPoint => Some(format!("{TALKING_POINT_MARK} {text}")),
+                _ => Some(text),
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -185,9 +197,10 @@ fn write_block(out: &mut String, block: &Block, number: u32) {
             let marker = format!("{pad}- [{}]", if block.checked { 'x' } else { ' ' });
             write_list_item(out, &marker, &escape_leading_backslash(first_line(text)), text, &format!("{pad}  "));
         }
-        BlockKind::Quote | BlockKind::Callout | BlockKind::BRoll | BlockKind::OnScreen => {
+        BlockKind::Quote | BlockKind::Callout | BlockKind::TalkingPoint | BlockKind::BRoll | BlockKind::OnScreen => {
             let marker = match block.kind {
                 BlockKind::Callout => "> [!note]",
+                BlockKind::TalkingPoint => "> [!talkingpoint]",
                 BlockKind::BRoll => "> [!broll]",
                 BlockKind::OnScreen => "> [!onscreen]",
                 _ => ">",
@@ -359,13 +372,15 @@ fn unescape(text: &str) -> &str {
 }
 
 /// The block kind a callout-style marker at the start of a quote's text
-/// selects, with the marker's length: `[!note]` is a callout, `[!broll]` a
-/// B-roll cue, `[!onscreen]` an on-screen cue, and GitHub alert names
+/// selects, with the marker's length: `[!note]` is a callout, `[!talkingpoint]`
+/// (or `[!point]`) a talking point, `[!broll]` a B-roll cue, `[!onscreen]` an
+/// on-screen cue, and GitHub alert names
 /// (`[!NOTE]`, `[!TIP]`, ...) are callouts too. The editor uses it for the
 /// same syntax typed into a quote.
 pub fn quote_marker(text: &str) -> Option<(BlockKind, usize)> {
     let (name, _) = text.strip_prefix("[!")?.split_once(']')?;
     let kind = match name.to_ascii_lowercase().as_str() {
+        "talkingpoint" | "talking-point" | "point" => BlockKind::TalkingPoint,
         "broll" | "b-roll" => BlockKind::BRoll,
         "onscreen" | "on-screen" => BlockKind::OnScreen,
         "note" | "tip" | "info" | "important" | "warning" | "caution" => BlockKind::Callout,
@@ -384,7 +399,10 @@ fn quote_kind(first_line: &str) -> (BlockKind, &str) {
 }
 
 fn is_quote_like(kind: BlockKind) -> bool {
-    matches!(kind, BlockKind::Quote | BlockKind::Callout | BlockKind::BRoll | BlockKind::OnScreen)
+    matches!(
+        kind,
+        BlockKind::Quote | BlockKind::Callout | BlockKind::TalkingPoint | BlockKind::BRoll | BlockKind::OnScreen
+    )
 }
 
 /// Visual width of leading whitespace (tabs advance to the next multiple of 4).
@@ -869,6 +887,7 @@ mod tests {
             block(BlockKind::Numbered, "three"),
             block(BlockKind::Quote, "four five"),
             block(BlockKind::Todo, "not spoken"),
+            block(BlockKind::TalkingPoint, "said in my own words"),
             block(BlockKind::BRoll, "drone shot"),
             block(BlockKind::OnScreen, "Title"),
             block(BlockKind::Callout, "note"),
@@ -933,21 +952,28 @@ mod tests {
         assert_eq!(quote_marker("[!broll] Slow pan"), Some((BlockKind::BRoll, 8)));
         assert_eq!(quote_marker("[!NOTE]"), Some((BlockKind::Callout, 7)));
         assert_eq!(quote_marker("[!on-screen] Subscribe"), Some((BlockKind::OnScreen, 12)));
+        assert_eq!(quote_marker("[!talkingpoint] Why"), Some((BlockKind::TalkingPoint, 15)));
+        assert_eq!(quote_marker("[!Point] Why"), Some((BlockKind::TalkingPoint, 8)));
         assert_eq!(quote_marker("[!quote] text"), None);
         assert_eq!(quote_marker("[!note"), None);
         assert_eq!(quote_marker("plain"), None);
     }
 
     #[test]
-    fn teleprompter_has_spoken_blocks_only() {
+    fn teleprompter_has_spoken_blocks_and_marked_talking_points() {
         let blocks = vec![
             block(BlockKind::Heading2, "Hook"),
             block(BlockKind::Paragraph, "Stop using **print** to debug."),
             block(BlockKind::BRoll, "screen recording"),
             block(BlockKind::Paragraph, "   "),
+            block(BlockKind::TalkingPoint, "Why **print** hides the bug"),
+            block(BlockKind::TalkingPoint, "  "),
             block(BlockKind::Bulleted, "Use `breakpoint()` instead"),
         ];
-        assert_eq!(teleprompter_text(&blocks), "Stop using print to debug.\n\nUse breakpoint() instead");
+        assert_eq!(
+            teleprompter_text(&blocks),
+            "Stop using print to debug.\n\n[Talking point] Why print hides the bug\n\nUse breakpoint() instead"
+        );
     }
 
     // --- markdown ---------------------------------------------------------
@@ -967,13 +993,15 @@ mod tests {
             block(BlockKind::Todo, "open"),
             block(BlockKind::Quote, "quoted"),
             block(BlockKind::Callout, "heads up"),
+            block(BlockKind::TalkingPoint, "why it matters"),
             block(BlockKind::BRoll, "drone shot"),
             block(BlockKind::OnScreen, "Subscribe"),
             block(BlockKind::Code, "fn main() {}"),
             block(BlockKind::Divider, ""),
         ];
         let expected = "# Title\n\n## Section\n\n### Sub\n\nSome **bold** text.\n\n- bullet\n  - nested\n1. first\n\
-                        2. second\n- [x] done\n- [ ] open\n\n> quoted\n\n> [!note] heads up\n\n> [!broll] drone shot\n\n\
+                        2. second\n- [x] done\n- [ ] open\n\n> quoted\n\n> [!note] heads up\n\n\
+                        > [!talkingpoint] why it matters\n\n> [!broll] drone shot\n\n\
                         > [!onscreen] Subscribe\n\n```\nfn main() {}\n```\n\n---\n";
         assert_eq!(to_markdown(&blocks), expected);
         assert_round_trip(&blocks);
@@ -1018,6 +1046,7 @@ mod tests {
             indented(BlockKind::Todo, "nested todo\nmore", 1),
             block(BlockKind::Quote, "quote\n\nwith a gap"),
             block(BlockKind::BRoll, "cue\nsecond line"),
+            block(BlockKind::TalkingPoint, "point\nand an example"),
             block(BlockKind::Code, "fn main() {\n\n    println!(\"hi\");\n}\n"),
         ]);
     }
@@ -1056,6 +1085,7 @@ mod tests {
             block(BlockKind::Numbered, ""),
             block(BlockKind::Quote, ""),
             block(BlockKind::OnScreen, ""),
+            block(BlockKind::TalkingPoint, ""),
             block(BlockKind::Code, ""),
         ];
         let parsed = from_markdown(&to_markdown(&blocks));
@@ -1086,6 +1116,7 @@ mod tests {
             "[ ] box",
             "[x] done",
             "[!broll] cue",
+            "[!point] idea",
             "[!NOTE] alert",
             "**bold** _it_ `code`",
             "[link](https://x.dev)",

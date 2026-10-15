@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 use rushes_core::settings::EditPreferences;
-use rushes_core::{Block, Video, VideoFormat};
+use rushes_core::{Block, BlockKind, Video, VideoFormat};
 
 /// The state of a video's brief form, kept while its tab is closed and across restarts.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -75,9 +75,17 @@ pub fn default_brief(
         script.iter().filter(|block| block.kind.has_text() && !block.text.trim().is_empty()).collect();
     if !blocks.is_empty() {
         brief.push_str("\nScript (what the creator meant to say; use it to choose the best takes and their order):\n");
-        if blocks.iter().any(|block| !block.kind.is_spoken()) {
+        let talking_points = blocks.iter().any(|block| block.kind == BlockKind::TalkingPoint);
+        if talking_points {
             brief.push_str(
-                "Lines in square brackets are not spoken: they are headings, cues and notes at that point of \
+                "[Talking point: …] lines are ideas the creator said in their own words: pick the takes that \
+                 make each point; they won't match it word for word.\n",
+            );
+        }
+        if blocks.iter().any(|block| !block.kind.is_spoken() && block.kind != BlockKind::TalkingPoint) {
+            brief.push_str(if talking_points { "Other lines" } else { "Lines" });
+            brief.push_str(
+                " in square brackets are not spoken: they are headings, cues and notes at that point of \
                  the script, such as B-roll to cut away to or text to show on screen.\n",
             );
         }
@@ -389,6 +397,37 @@ mod tests {
         let guided = [Block::guided(BlockKind::BRoll, "A shot of the desk"), Block::new(BlockKind::Divider, "")];
         let brief = default_brief(&video(), &guided, &EditPreferences::default(), "");
         assert!(!brief.contains("Script") && !brief.contains("A shot of the desk"), "{brief}");
+    }
+
+    #[test]
+    fn brief_explains_talking_points() {
+        let script = vec![
+            Block::paragraph("Welcome back."),
+            Block::new(BlockKind::TalkingPoint, "Why I *sold* the ultrawide"),
+            Block::new(BlockKind::BRoll, "Ultrawide in the closet"),
+        ];
+        let brief = default_brief(&video(), &script, &EditPreferences::default(), "");
+        assert!(
+            brief.ends_with(
+                "Script (what the creator meant to say; use it to choose the best takes and their order):\n\
+                 [Talking point: …] lines are ideas the creator said in their own words: pick the takes that make \
+                 each point; they won't match it word for word.\n\
+                 Other lines in square brackets are not spoken: they are headings, cues and notes at that point \
+                 of the script, such as B-roll to cut away to or text to show on screen.\n\
+                 \n\
+                 Welcome back.\n\
+                 \n\
+                 [Talking point: Why I *sold* the ultrawide]\n\
+                 \n\
+                 [B-roll cue: Ultrawide in the closet]\n"
+            ),
+            "{brief}"
+        );
+
+        let script = [Block::new(BlockKind::TalkingPoint, "Why I sold it")];
+        let brief = default_brief(&video(), &script, &EditPreferences::default(), "");
+        assert!(brief.contains("word for word.\n\n[Talking point: Why I sold it]\n"), "{brief}");
+        assert!(!brief.contains("square brackets"), "no cues, so no word on them: {brief}");
     }
 
     #[test]

@@ -28,7 +28,7 @@ impl BlockType {
     }
 }
 
-pub const BLOCK_TYPES: [BlockType; 13] = [
+pub const BLOCK_TYPES: [BlockType; 14] = [
     BlockType {
         kind: BlockKind::Paragraph,
         icon: IconName::Pilcrow,
@@ -94,6 +94,12 @@ pub const BLOCK_TYPES: [BlockType; 13] = [
         icon: IconName::SeparatorHorizontal,
         description: "Separate sections",
         aliases: &["hr", "line", "separator", "rule"],
+    },
+    BlockType {
+        kind: BlockKind::TalkingPoint,
+        icon: IconName::Mic,
+        description: "An idea to say in your own words",
+        aliases: &["point", "idea", "ad-lib", "riff", "unscripted", "improvise"],
     },
     BlockType {
         kind: BlockKind::BRoll,
@@ -167,6 +173,9 @@ mod tests {
         assert_eq!(kinds("B-Roll"), vec![BlockKind::BRoll]);
         assert_eq!(kinds("h2"), vec![BlockKind::Heading2]);
         assert_eq!(kinds("overlay"), vec![BlockKind::OnScreen]);
+        assert_eq!(kinds("talking"), vec![BlockKind::TalkingPoint]);
+        assert_eq!(kinds("point"), vec![BlockKind::TalkingPoint]);
+        assert_eq!(kinds("adlib"), vec![BlockKind::TalkingPoint]);
         assert!(kinds("zzz").is_empty());
     }
 
