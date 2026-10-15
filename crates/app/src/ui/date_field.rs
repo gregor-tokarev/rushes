@@ -174,16 +174,19 @@ impl DateFieldState {
 pub struct DateField {
     id: SharedString,
     state: Entity<DateFieldState>,
+    name: SharedString,
     placeholder: SharedString,
     cleanable: bool,
     size: Size,
 }
 
 impl DateField {
-    pub fn new(id: impl Into<SharedString>, state: &Entity<DateFieldState>) -> Self {
+    /// `name` is what assistive technology announces, with the value shown.
+    pub fn new(id: impl Into<SharedString>, name: impl Into<SharedString>, state: &Entity<DateFieldState>) -> Self {
         Self {
             id: id.into(),
             state: state.clone(),
+            name: name.into(),
             placeholder: SharedString::default(),
             cleanable: false,
             size: Size::Medium,
@@ -217,21 +220,29 @@ impl RenderOnce for DateField {
         let (calendar, time) = (field.calendar.clone(), field.time.clone());
         let shown = value.map(|value| SharedString::from(value.format(&field.format).to_string()));
         let muted = cx.theme().muted_foreground;
-        let trigger = Button::new(self.id.clone()).outline().with_size(self.size).w_full().selected(open).child(
-            h_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_2()
-                .justify_between()
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .when(shown.is_none(), |this| this.text_color(muted))
-                        .child(shown.unwrap_or(self.placeholder)),
-                )
-                .child(Icon::new(IconName::Calendar).xsmall().text_color(muted)),
-        );
+        // The text inside the button isn't its name: the name says what it is and what it holds.
+        let announced = format!("{}: {}", self.name, shown.as_ref().unwrap_or(&self.placeholder));
+        let trigger = Button::new(self.id.clone())
+            .outline()
+            .with_size(self.size)
+            .w_full()
+            .selected(open)
+            .accessibility_label(announced)
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .justify_between()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .when(shown.is_none(), |this| this.text_color(muted))
+                            .child(shown.unwrap_or(self.placeholder)),
+                    )
+                    .child(Icon::new(IconName::Calendar).xsmall().text_color(muted)),
+            );
         let state = self.state.clone();
         let clear = (self.cleanable && value.is_some()).then(|| self.state.clone());
         Popover::new(SharedString::from(format!("{}-popover", self.id)))

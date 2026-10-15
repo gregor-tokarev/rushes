@@ -1428,6 +1428,8 @@ fn a_zoomed_calendar_keeps_its_last_days_and_arrows_inside(cx: &mut TestAppConte
     assert_eq!(cx.read(|cx| app.state.read(cx).settings().zoom.percent()), 150);
 
     app.press(cx, "secondary-n");
+    let field = || ElementId::Name("new-video-publish-date-field".into());
+    assert_eq!(app.label_of(cx, field()).as_deref(), Some("Publish date: No date"));
     app.click(cx, "new-video-publish-date");
     assert!(app.has(cx, "weekday-0-0"), "the calendar opens");
     // Arrows and Saturdays sit at the calendar's far edge, which a calendar
@@ -1441,6 +1443,8 @@ fn a_zoomed_calendar_keeps_its_last_days_and_arrows_inside(cx: &mut TestAppConte
     // A Sunday-first month shows its first Saturday at the end of the first row.
     app.click(cx, ElementId::Name(format!("calendar-{saturday}-0-0").into()));
     assert!(!app.has(cx, "weekday-0-0"), "picking the day closes the calendar");
+    let shown = saturday.format("%b %-d, %Y");
+    assert_eq!(app.label_of(cx, field()), Some(format!("Publish date: {shown}")), "the field names its date");
 
     app.click(cx, "new-video-title");
     app.type_text(cx, "Zoomed launch");

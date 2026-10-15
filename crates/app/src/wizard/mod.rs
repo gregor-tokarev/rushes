@@ -312,10 +312,14 @@ impl Render for NewVideoForm {
                                         .child(div().text_sm().font_medium().child("Publish date"))
                                         .child(
                                             div().id("new-video-publish-date").test_support().child(
-                                                DateField::new("new-video-publish-date-field", &self.publish_date)
-                                                    .small()
-                                                    .cleanable(true)
-                                                    .placeholder("No date"),
+                                                DateField::new(
+                                                    "new-video-publish-date-field",
+                                                    "Publish date",
+                                                    &self.publish_date,
+                                                )
+                                                .small()
+                                                .cleanable(true)
+                                                .placeholder("No date"),
                                             ),
                                         ),
                                 ),

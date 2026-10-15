@@ -971,7 +971,7 @@ impl PublishPanel {
                                         .test_support()
                                         .max_w(rems(20.))
                                         .child(
-                                            DateField::new("publish-schedule-field", &self.schedule)
+                                            DateField::new("publish-schedule-field", "Publish time", &self.schedule)
                                                 .placeholder("Publish time"),
                                         ),
                                 )
