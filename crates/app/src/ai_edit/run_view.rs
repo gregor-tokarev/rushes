@@ -76,7 +76,8 @@ pub(crate) struct RunView {
     rows: ListState,
     /// The `rem` the rows were measured at: zooming changes their heights.
     rows_rem_size: Pixels,
-    /// The log's content height, measured after the last layout.
+    /// The log's content height (or the empty log's message's), measured after the
+    /// last layout; `None` until a run's log has been laid out once.
     log_height: Rc<Cell<Option<Pixels>>>,
     output: Option<OutputFacts>,
     output_task: Option<Task<()>>,
@@ -733,11 +734,13 @@ impl RunView {
         let rem_size = window.rem_size();
         let body = if self.items.is_empty() {
             div()
+                .relative()
                 .px_4()
                 .py_5()
                 .text_sm()
                 .text_color(theme.muted_foreground)
                 .child(if live { "Waiting for the agent…" } else { "No activity recorded." })
+                .child(self.measure_placeholder())
                 .into_any_element()
         } else {
             let rows = list(
@@ -747,18 +750,24 @@ impl RunView {
                     _ => div().into_any_element(),
                 }),
             )
-            // The box takes the log's measured height, up to TIMELINE_HEIGHT. The list's
-            // own `Infer` sizing measures rows at an unwrapped width, which re-pins a log
-            // with a row taller than the box to its end on every frame.
+            // The list's own `Infer` sizing measures rows at an unwrapped width, which
+            // re-pins a log with a row taller than the box to its end on every frame. So
+            // the list always takes TIMELINE_HEIGHT and the box around it cuts it off at
+            // the log's height, measured after layout: a row that comes in shows a frame
+            // later, when the box has grown to it, instead of following the tail in the
+            // smaller box pushing the rows above it out of view for that frame.
             .with_sizing_behavior(ListSizingBehavior::Auto)
             .w_full()
-            .h(self.log_box_height(rem_size))
+            .h(rems(TIMELINE_HEIGHT))
+            .flex_shrink_0()
             .py(rems(TIMELINE_PADDING));
             let (at_start, at_end) = log_edges(&self.rows, rems(TIMELINE_PADDING).to_pixels(rem_size));
             div()
                 .id("run-activity")
                 .test_support()
                 .relative()
+                .h(self.log_box_height(rem_size))
+                .overflow_hidden()
                 // The page scrolls too: the wheel moves the log until it reaches its start
                 // or end, then the page.
                 .on_scroll_wheel(move |event, _, cx| {
@@ -782,13 +791,31 @@ impl RunView {
                         this.child(div().text_sm().text_color(theme.muted_foreground).child(count.to_string()))
                     }),
             )
-            .child(div().rounded(theme.radius_lg).border_1().border_color(theme.border).overflow_hidden().child(body))
+            .child(
+                div()
+                    .rounded(theme.radius_lg)
+                    .border_1()
+                    .border_color(theme.border)
+                    .overflow_hidden()
+                    // A log not laid out yet has no height to show: rather than flash a
+                    // box of the wrong height, it shows from the next frame.
+                    .when(!self.items.is_empty() && self.log_height.get().is_none(), |this| this.invisible())
+                    .child(body),
+            )
     }
 
-    /// Height of the activity box: the log's measured content, at most TIMELINE_HEIGHT.
+    /// Height of the activity box: the log's measured content, at most TIMELINE_HEIGHT;
+    /// nothing until it has been measured.
     fn log_box_height(&self, rem_size: Pixels) -> Pixels {
         let max = rems(TIMELINE_HEIGHT).to_pixels(rem_size);
-        self.log_height.get().map_or(max, |content| content.min(max))
+        self.log_height.get().map_or(px(0.), |content| content.min(max))
+    }
+
+    /// Measures the empty log's message, so the box keeps its height until the first
+    /// rows are measured.
+    fn measure_placeholder(&self) -> impl IntoElement {
+        let measured = self.log_height.clone();
+        canvas(move |bounds, _, _| measured.set(Some(bounds.size.height)), |_, _, _, _| {}).absolute().size_full()
     }
 
     /// Measures the log once it is laid out, and lays the view out again when the box
