@@ -5,7 +5,7 @@
 
 #![cfg(unix)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -17,9 +17,9 @@ use chrono::Utc;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     AnyView, AnyWindowHandle, App, AppContext as _, Bounds, Context, ElementId, Entity, ExternalPaths, FileDropEvent,
-    InteractiveElement as _, IntoElement, ParentElement as _, PlatformInput, Render, ScrollDelta, ScrollHandle,
-    StatefulInteractiveElement as _, Styled as _, TestAppContext, Window, WindowBounds, WindowOptions, div, point, px,
-    size,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, PlatformInput, Render, ScrollDelta, ScrollHandle,
+    StatefulInteractiveElement as _, Styled as _, TestAppContext, Window, WindowBounds, WindowOptions, canvas, div,
+    point, px, size,
 };
 use rushes::ai_edit::{
     AiEditPanel, AiSettings, INTERRUPTED, LogEvent, PhaseKind, PhaseStarted, PipelineService, PipelinesPage,
@@ -258,6 +258,29 @@ assistant({"type": "text", "text": summary})
 out({"type": "result", "subtype": "success", "is_error": False, "result": summary, "total_cost_usd": 0.5})
 "#,
     );
+    path
+}
+
+/// An agent that sends its next tool call each time the test creates the next numbered
+/// file (`0`, `1`, ...) in `gate`, then ends after `steps` of them.
+fn stepping_agent(dir: &Path, gate: &Path, steps: usize) -> PathBuf {
+    let path = dir.join("stepping-agent");
+    let script = r#"#!/usr/bin/env python3
+import json, os, time
+def out(event):
+    event.setdefault("session_id", "stepping-session")
+    print(json.dumps(event), flush=True)
+out({"type": "system", "subtype": "init", "cwd": "/", "tools": ["Bash"], "model": "stepping"})
+for ix in range(STEPS):
+    while not os.path.exists(os.path.join(GATE, str(ix))):
+        time.sleep(0.01)
+    out({"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": f"t{ix}", "name": "Bash", "input": {"command": f"ffprobe take{ix}.mp4"}}]}})
+out({"type": "result", "subtype": "success", "is_error": False, "result": "A strategy.", "total_cost_usd": 0.1})
+"#;
+    let script =
+        script.replace("STEPS", &steps.to_string()).replace("GATE", &format!("{:?}", gate.display().to_string()));
+    write_executable(&path, &script);
     path
 }
 
@@ -2012,6 +2035,86 @@ fn a_short_activity_log_takes_only_the_room_it_needs(cx: &mut TestAppContext) {
         let log = window.find("run-activity").bounds();
         log.size.height < px(200.) && row.bottom() <= log.bottom()
     });
+}
+
+/// A check of what a frame drew.
+type FrameCheck = dyn Fn(&Window, &App);
+
+/// The AI edit panel, with a check that runs after each frame it draws.
+struct CheckedPanel {
+    panel: Entity<AiEditPanel>,
+    check: Rc<FrameCheck>,
+}
+
+impl Render for CheckedPanel {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let check = self.check.clone();
+        div().child(self.panel.clone()).child(canvas(|_, _, _| {}, move |_, _, window, cx| check(window, cx)))
+    }
+}
+
+#[gpui_kit::test]
+fn rows_that_come_in_leave_the_rows_above_in_place(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    const STEPS: usize = 6;
+    let fx = Fixture::new(cx, &[]);
+    let gate = fx.root.path().join("gate");
+    fs::create_dir_all(&gate).unwrap();
+    let agent = stepping_agent(fx.root.path(), &gate, STEPS);
+    cx.update(|cx| {
+        fx.state.update(cx, |state, cx| {
+            state.update_settings(cx, |settings| settings.pipeline.agent_command = agent.display().to_string())
+        })
+    });
+
+    // In every frame that shows the box, the first row stays where it first was and the
+    // box is no taller than the rows in it.
+    let checked_frames = Rc::new(Cell::new(0));
+    let check = {
+        let (service, video, checked_frames) = (fx.service.clone(), fx.video, checked_frames.clone());
+        let first_row_offset = Cell::new(None);
+        move |window: &Window, cx: &App| {
+            let Some(id) = service.read(cx).video_runs(video).next().map(|run| run.id) else { return };
+            if !shows(window, "run-activity") {
+                return;
+            }
+            let log = window.find("run-activity").bounds();
+            let first = window.try_find(ElementId::Name(format!("timeline-1-{id}").into()));
+            let first = first.filter(|first| first.visible()).expect("the first row stays in view");
+            let offset = first.bounds().top() - log.top();
+            let expected = first_row_offset.get().unwrap_or(offset);
+            first_row_offset.set(Some(expected));
+            assert!((offset - expected).abs() < px(0.5), "the first row moved from {expected:?} to {offset:?}");
+            let rows_bottom = (1..=STEPS as u32 + 10)
+                .filter_map(|seq| window.try_find(ElementId::Name(format!("timeline-{seq}-{id}").into())))
+                .map(|row| row.bounds().bottom())
+                .fold(log.top(), Pixels::max);
+            // Below the last row, only the log's padding (0.5rem).
+            assert!(log.bottom() <= rows_bottom + px(8.5), "the box is taller than its rows");
+            checked_frames.set(checked_frames.get() + 1);
+        }
+    };
+    let video = fx.video;
+    let window = open(cx, move |window, cx| CheckedPanel {
+        panel: cx.new(|cx| AiEditPanel::new(video, window, cx)),
+        check: Rc::new(check),
+    });
+    let id = fx.start(cx, false);
+    let timeline_len = |cx: &mut TestAppContext| cx.read(|cx| fx.service.read(cx).timeline(id).len());
+    let render = |cx: &mut TestAppContext| cx.update_window(window, |_, window, cx| window.render_frame(cx)).unwrap();
+
+    render(cx);
+    render(cx);
+    for step in 0..STEPS {
+        let len = timeline_len(cx);
+        fs::write(gate.join(step.to_string()), "").unwrap();
+        wait_until(cx, "the next row", |cx| fx.service.read(cx).timeline(id).len() > len);
+        render(cx);
+    }
+    fx.wait_for_status(cx, id, RunStatus::AwaitingApproval);
+    assert!(checked_frames.get() > STEPS, "the box showed in {} frames", checked_frames.get());
 }
 
 #[gpui_kit::test]
