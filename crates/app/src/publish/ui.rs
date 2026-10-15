@@ -8,7 +8,6 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::link::Link;
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, Size, h_flex, v_flex};
@@ -26,7 +25,7 @@ use crate::database::Chip;
 use crate::database::colors::upload_status_color;
 use crate::route::SettingsSection;
 use crate::state::AppState;
-use crate::ui::{Card, SectionHeader};
+use crate::ui::{Card, SectionHeader, notification};
 
 /// Heading of a group of fields.
 pub(super) fn section_heading(title: &'static str) -> SectionHeader {
@@ -424,8 +423,9 @@ pub(super) fn sign_in_progress(service: &Entity<YoutubeService>, authorize_url: 
                         Button::new("copy-link").label("Copy link").icon(IconName::Copy).small().outline().on_click(
                             move |_, window, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(url.to_string()));
-                                let copied = Notification::success(
+                                let copied = notification::success(
                                     "Open it in a browser on this computer to finish signing in.",
+                                    cx,
                                 )
                                 .title("Sign-in link copied");
                                 window.push_notification(copied, cx);

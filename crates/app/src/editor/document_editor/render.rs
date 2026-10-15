@@ -7,8 +7,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::input::Textarea;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
-use gpui_kit::component::notification::Notification;
+use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Side, Sizable as _, ThemeStyled as _, WindowExt as _, h_flex, v_flex,
 };
@@ -29,6 +28,7 @@ use crate::editor::inline::RichText;
 use crate::editor::markdown::is_list;
 use crate::editor::palette::EditorPalette;
 use crate::editor::slash::BLOCK_TYPES;
+use crate::ui::{menu_item, notification};
 
 /// Width of the gutter holding the add button and drag handle. The same
 /// space is reserved on the trailing side so text stays centered.
@@ -99,7 +99,7 @@ fn open_link(url: &str, window: &mut Window, cx: &mut App) {
     match normalize_link(url) {
         Some(url) => cx.open_url(&url),
         None => window.push_notification(
-            Notification::warning("Only web and email links open from a document.").title("Link not opened"),
+            notification::warning("Only web and email links open from a document.", cx).title("Link not opened"),
             cx,
         ),
     }
@@ -779,7 +779,7 @@ pub(super) fn block_menu(
             BLOCK_TYPES.iter().fold(menu.check_side(Side::Right), |menu, ty| {
                 let editor = editor.clone();
                 let kind = ty.kind;
-                menu.item(PopupMenuItem::new(ty.label()).icon(Icon::new(ty.icon)).checked(kind == current).on_click(
+                menu.item(menu_item(ty.label()).icon(Icon::new(ty.icon)).checked(kind == current).on_click(
                     move |_, window, cx| {
                         editor.update(cx, |editor, cx| editor.turn_into(id, kind, window, cx)).ok();
                     },
@@ -790,29 +790,21 @@ pub(super) fn block_menu(
     menu.min_w(window.rem_size() * 14.)
         .submenu_with_icon(Some(Icon::new(IconName::Repeat2)), "Turn into", window, cx, turn_into)
         .separator()
+        .item(menu_item("Duplicate").icon(Icon::new(IconName::Copy)).on_click(command(DocumentEditor::duplicate_block)))
         .item(
-            PopupMenuItem::new("Duplicate")
-                .icon(Icon::new(IconName::Copy))
-                .on_click(command(DocumentEditor::duplicate_block)),
-        )
-        .item(
-            PopupMenuItem::new("Move up")
+            menu_item("Move up")
                 .icon(Icon::new(IconName::ArrowUp))
                 .disabled(target.is_first)
                 .on_click(command(|editor, id, window, cx| editor.move_block_by(id, -1, window, cx))),
         )
         .item(
-            PopupMenuItem::new("Move down")
+            menu_item("Move down")
                 .icon(Icon::new(IconName::ArrowDown))
                 .disabled(target.is_last)
                 .on_click(command(|editor, id, window, cx| editor.move_block_by(id, 1, window, cx))),
         )
         .separator()
-        .item(
-            PopupMenuItem::new("Delete")
-                .icon(Icon::new(IconName::Trash))
-                .on_click(command(DocumentEditor::delete_block)),
-        )
+        .item(menu_item("Delete").icon(Icon::new(IconName::Trash)).on_click(command(DocumentEditor::delete_block)))
 }
 
 /// Floating label under the pointer while a block is dragged.

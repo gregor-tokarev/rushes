@@ -5,13 +5,14 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui_kit::component::avatar::Avatar;
-use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{App, Div, ParentElement as _, Styled as _, div};
 use rushes_core::Video;
 
 use super::service::YoutubeService;
+use crate::ui::menu_item;
 
 /// Called with the key of the account chosen in [`ChannelChoices::menu`].
 pub type ChooseChannel = Rc<dyn Fn(&str, &mut App)>;
@@ -120,7 +121,7 @@ impl ChannelChoices {
         self.accounts.iter().fold(menu, |menu, choice| {
             let (key, choose) = (choice.key.clone(), choose.clone());
             menu.item(
-                PopupMenuItem::new(choice.label.clone())
+                menu_item(choice.label.clone())
                     .checked(self.current.as_deref() == Some(choice.key.as_str()))
                     .on_click(move |_, _, cx| choose(&key, cx)),
             )

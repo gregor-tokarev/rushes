@@ -24,7 +24,7 @@ use crate::database::Chip;
 use crate::state::AppState;
 use crate::ui::date_field::{DateField, DateFieldEvent, DateFieldState};
 use crate::ui::dialog::form_footer;
-use crate::ui::zoom::tab_size;
+use crate::ui::zoom::zoomed_tabs;
 use crate::ui::{ChoiceCard, KeyboardFocus as _, PageIcon};
 
 actions!(new_video, [PreviousFormat, NextFormat]);
@@ -204,10 +204,8 @@ impl NewVideoForm {
             .on_action(cx.listener(|this, _: &NextFormat, _, cx| this.step_format(1, cx)))
             // The segmented bar's own radius, so the ring follows its outline.
             .rounded(cx.theme().radius)
-            .child(
+            .child(zoomed_tabs(
                 TabBar::new("new-video-format-tabs")
-                    .segmented()
-                    .with_size(tab_size(TabVariant::Segmented, Size::Small, cx))
                     .selected_index(selected)
                     .children(VideoFormat::ALL.iter().map(|format| Tab::new().label(format.label())))
                     .on_click(cx.listener(|this, ix: &usize, _, cx| {
@@ -215,7 +213,10 @@ impl NewVideoForm {
                             this.set_format(*format, cx);
                         }
                     })),
-            )
+                TabVariant::Segmented,
+                Size::Small,
+                cx,
+            ))
     }
 
     fn render_status(&self, cx: &mut Context<Self>) -> impl IntoElement {

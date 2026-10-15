@@ -13,7 +13,6 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::calendar::{CalendarEvent, CalendarState, Date};
 use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, Size, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -34,8 +33,8 @@ use super::property_editor::{PropertyEditor, PropertyEditorMode};
 use super::query::{self, resolve_columns, view_rows, visible_columns};
 use super::table::{CellEditors, EmptyReason, TableModel, VideoTable};
 use crate::publish::{YoutubeAccount, YoutubeEvent, YoutubeService};
-use crate::ui::PAGE_INSET;
 use crate::ui::dialog::confirm_delete_videos;
+use crate::ui::{PAGE_INSET, notification};
 
 actions!(video_database, [OpenSelected, RenameSelected, DeleteSelected, CancelEdit]);
 
@@ -465,7 +464,7 @@ impl DatabasePanel {
         match self.take_edit(cx) {
             Some(Ok(edited)) => self.update_video(edited.id, |video| *video = edited, cx),
             // Not a number: keep the previous value, and say so.
-            Some(Err(message)) => window.push_notification(Notification::error(message), cx),
+            Some(Err(message)) => window.push_notification(notification::error(message, cx), cx),
             None => {}
         }
     }

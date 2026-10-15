@@ -15,13 +15,17 @@
 
 use std::rc::Rc;
 
-use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem};
-use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::menu::DropdownMenu as _;
+use gpui_kit::component::setting::{RenderOptions, SettingField, SettingGroup, SettingItem};
+use gpui_kit::component::{ActiveTheme as _, AxisExt as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Axis, Context, Entity, IntoElement, ParentElement as _, Rems, RenderOnce, SharedString,
+    Anchor, AnyElement, App, Axis, Context, Entity, IntoElement, ParentElement as _, Rems, RenderOnce, SharedString,
     Styled as _, Window, div,
 };
+
+use super::menu_item;
 
 /// The widest a settings group, and with it a text field, grows: a path or an
 /// ID doesn't need the whole page, and a switch or select beside a short
@@ -31,6 +35,43 @@ pub const FIELD_MAX_WIDTH: Rems = Rems(40.);
 /// A settings group on the column every group shares.
 pub fn setting_group() -> SettingGroup {
     SettingGroup::new().max_w(FIELD_MAX_WIDTH)
+}
+
+/// The kit's `SettingField::dropdown`: a button naming the chosen option that
+/// opens a menu of `options`, `(value, label)` pairs, with a check on the
+/// chosen one. Its items are [`menu_item`]s, which grow with the zoom.
+pub fn dropdown_field(
+    options: Vec<(SharedString, SharedString)>,
+    value: impl Fn(&App) -> SharedString + 'static,
+    set_value: impl Fn(SharedString, &mut App) + 'static,
+) -> SettingField<SharedString> {
+    let options = Rc::new(options);
+    let set_value = Rc::new(set_value);
+    SettingField::render(move |field: &RenderOptions, _, cx| {
+        let current = value(cx);
+        let label =
+            options.iter().find(|(value, _)| *value == current).map_or(current.clone(), |(_, label)| label.clone());
+        let (options, set_value) = (options.clone(), set_value.clone());
+        // The kit's id for the button, which tests click.
+        Button::new("btn")
+            .when(field.layout().is_vertical(), |this| this.w_full())
+            .label(label)
+            .dropdown_caret(true)
+            .outline()
+            .disabled(field.is_disabled())
+            .with_size(field.size())
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                // Zoomed in, the options may be taller than the window.
+                options.iter().fold(menu.scrollable(true), |menu, (value, label)| {
+                    let (value, set_value) = (value.clone(), set_value.clone());
+                    menu.item(
+                        menu_item(label.clone())
+                            .checked(value == current)
+                            .on_click(move |_, _, cx| set_value(value.clone(), cx)),
+                    )
+                })
+            })
+    })
 }
 
 /// Renders one part of a settings view.

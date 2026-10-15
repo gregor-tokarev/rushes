@@ -16,6 +16,7 @@ use rushes_core::{SelectOption, TagColor};
 
 use super::colors::tag_colors;
 use super::format;
+use crate::ui::menu_item;
 
 /// A colored, Notion-style value chip: select options, statuses and tags.
 #[derive(IntoElement)]
@@ -244,9 +245,7 @@ pub(crate) fn select_menu(
         )
     });
     match current {
-        Some(_) => {
-            menu.separator().item(PopupMenuItem::new("Clear").icon(IconName::X).on_click(move |_, _, cx| set(None, cx)))
-        }
+        Some(_) => menu.separator().item(menu_item("Clear").icon(IconName::X).on_click(move |_, _, cx| set(None, cx))),
         None => menu,
     }
 }

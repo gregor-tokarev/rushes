@@ -19,6 +19,7 @@ use super::elements::Chip;
 use super::icons::kind_icon;
 use super::panel::TEXT_ENTRY_CONTEXT;
 use crate::ui::dialog::form_footer;
+use crate::ui::menu_item;
 
 /// What the property dialog edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,18 +205,15 @@ impl PropertyEditor {
                     let kind = kind();
                     let editor = editor.clone();
                     let chosen = kind.clone();
-                    menu.item(
-                        PopupMenuItem::new(kind.label())
-                            .icon(kind_icon(&kind))
-                            .checked(kind.label() == current)
-                            .on_click(move |_, _, cx| {
-                                let kind = chosen.clone();
-                                _ = editor.update(cx, |editor, cx| {
-                                    editor.kind = kind;
-                                    cx.notify();
-                                });
-                            }),
-                    )
+                    menu.item(menu_item(kind.label()).icon(kind_icon(&kind)).checked(kind.label() == current).on_click(
+                        move |_, _, cx| {
+                            let kind = chosen.clone();
+                            _ = editor.update(cx, |editor, cx| {
+                                editor.kind = kind;
+                                cx.notify();
+                            });
+                        },
+                    ))
                 })
             })
     }

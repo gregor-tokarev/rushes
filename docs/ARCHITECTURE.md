@@ -165,14 +165,18 @@ GPUI Kit app. Main pieces:
   settings), routed main area.
 - Zoom (`ui/zoom.rs`, `shell/zoom.rs`): Ctrl/⌘ with `=`/`+`, `-` and `0` (app-wide
   actions, so they work in dialogs and onboarding) or Settings › General step the
-  `zoom` setting through 75–150%. The workspace sets the kit theme's base font, which
+  `zoom` setting through 75–250%. The workspace sets the kit theme's base font, which
   GPUI Kit makes the window's `rem`, to 16 px times the zoom, so rem-sized UI scales.
   What the kit sizes in pixels is scaled by hand: title bar, sidebar width, table rows
-  and column widths (views store widths at 100%), notifications, calendars; tab bars step
-  up a kit size when their label outgrows the frame. The kit's `DatePicker` can't be
-  widened, so dates are picked in `ui::date_field` (kit calendar and time field in a
-  popover). Above 150% the kit's tab frames can't hold their labels, and a 1440 × 900
-  screen drops below the window's designed minimum.
+  and column widths (views store widths at 100%), notifications, calendars. The kit
+  hangs a notification's icon in pixels, so notifications come from `ui::notification`,
+  which hangs it in rems. Tab bars (`zoom::zoomed_tabs`) step up a kit size when their
+  label outgrows the frame; past the largest frame (about 175%, 155% for segmented tabs)
+  the bar is drawn at the largest rem that frame holds, so its labels stop growing
+  instead of being cut. The kit's `DatePicker` can't be widened, so dates are picked in
+  `ui::date_field` (kit calendar and time field in a popover). Above 150% a 1440 × 900
+  screen holds less than the window's designed minimum: pages wrap and the sidebar
+  scrolls.
 - `database/` — Notion-like videos database: table view (inline cell editing, column
   menu, add property, sort/filter/search) and board view (kanban by status, drag cards).
 - `editor/` — block-based rich document editor (slash menu, markdown shortcuts,

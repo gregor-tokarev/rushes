@@ -3,7 +3,6 @@
 use chrono::Local;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex};
@@ -23,8 +22,8 @@ use crate::database::Chip;
 use crate::route::{Route, VideoTab};
 use crate::state::AppState;
 use crate::ui::{
-    CollectionTable, EmptyState, PAGE_INSET, PageHeader, TableColumn, TableRowButton, format_when, page_frame,
-    state_tooltip, video_icon,
+    CollectionTable, EmptyState, PAGE_INSET, PageHeader, TableColumn, TableRowButton, format_when, notification,
+    page_frame, state_tooltip, video_icon,
 };
 
 /// The Uploads page: every upload job, with resume for interrupted ones.
@@ -89,7 +88,7 @@ impl UploadsPage {
             RowAction::Resume => {
                 if let Err(error) = self.service.update(cx, |service, cx| service.resume_upload(id, cx)) {
                     window.push_notification(
-                        Notification::error(error.to_string()).title("Couldn’t resume the upload"),
+                        notification::error(error.to_string(), cx).title("Couldn’t resume the upload"),
                         cx,
                     );
                 }
