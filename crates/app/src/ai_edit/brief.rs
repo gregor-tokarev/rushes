@@ -3,7 +3,6 @@
 use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
-use rushes_core::document::{TALKING_POINT_MARK, teleprompter_text};
 use rushes_core::settings::EditPreferences;
 use rushes_core::{Block, BlockKind, Video, VideoFormat};
 
@@ -49,8 +48,8 @@ pub fn color_grade_label(grade: &str) -> &str {
 }
 
 /// The brief the edit form starts from: the video's premise, the edit preferences, the
-/// spoken script (so the agent can pick the takes that match it) and the creator's
-/// standing instructions.
+/// script with its cues (so the agent can pick the takes that match it and place the
+/// B-roll and on-screen text) and the creator's standing instructions.
 pub fn default_brief(
     video: &Video,
     script: &[Block],
@@ -72,17 +71,27 @@ pub fn default_brief(
     brief.push('\n');
     brief.push_str(&preference_lines(preferences));
 
-    let spoken = teleprompter_text(script);
-    if !spoken.is_empty() {
+    let blocks: Vec<&Block> =
+        script.iter().filter(|block| block.kind.has_text() && !block.text.trim().is_empty()).collect();
+    if !blocks.is_empty() {
         brief.push_str("\nScript (what the creator meant to say; use it to choose the best takes and their order):\n");
-        if script.iter().any(|block| block.kind == BlockKind::TalkingPoint && !block.text.trim().is_empty()) {
-            brief.push_str(&format!(
-                "{TALKING_POINT_MARK} lines are ideas the creator said in their own words: pick the takes that make \
-                 the point; they won't match it word for word.\n"
-            ));
+        let talking_points = blocks.iter().any(|block| block.kind == BlockKind::TalkingPoint);
+        if talking_points {
+            brief.push_str(
+                "[Talking point: …] lines are ideas the creator said in their own words: pick the takes that \
+                 make each point; they won't match it word for word.\n",
+            );
+        }
+        if blocks.iter().any(|block| !block.kind.is_spoken() && block.kind != BlockKind::TalkingPoint) {
+            brief.push_str(if talking_points { "Other lines" } else { "Lines" });
+            brief.push_str(
+                " in square brackets are not spoken: they are headings, cues and notes at that point of \
+                 the script, such as B-roll to cut away to or text to show on screen.\n",
+            );
         }
         brief.push('\n');
-        brief.push_str(&cap(&spoken, SCRIPT_CHARS));
+        let lines: Vec<String> = blocks.into_iter().map(script_line).collect();
+        brief.push_str(&cap(&lines.join("\n\n"), SCRIPT_CHARS));
         brief.push('\n');
     }
 
@@ -287,13 +296,27 @@ fn preference_line_array(preferences: &EditPreferences) -> [String; 4] {
     ]
 }
 
-/// `text` cut to at most `max` characters at a paragraph or word boundary.
+/// One script block as the agent reads it: spoken text as it is, any other kind of
+/// block (a B-roll or on-screen cue, a heading, a note, and any kind added later) as a
+/// bracketed line naming its kind. Unlike the teleprompter text, nothing is left out.
+fn script_line(block: &Block) -> String {
+    let text = block.text.trim();
+    if block.kind.is_spoken() { text.to_owned() } else { format!("[{}: {text}]", block.kind.label()) }
+}
+
+/// `text` cut to at most `max` characters at a paragraph or word boundary. A paragraph
+/// boundary in the first half would drop most of the excerpt (a heading before a long
+/// monologue), so then it cuts at a word.
 fn cap(text: &str, max: usize) -> String {
     let Some((cut, _)) = text.char_indices().nth(max) else {
         return text.to_owned();
     };
     let head = &text[..cut];
-    let boundary = head.rfind("\n\n").or_else(|| head.rfind(char::is_whitespace)).unwrap_or(cut);
+    let boundary = head
+        .rfind("\n\n")
+        .filter(|&at| at > head.len() / 2)
+        .or_else(|| head.rfind(char::is_whitespace))
+        .unwrap_or(cut);
     format!("{}\n\n[The script continues; the rest is omitted here.]", head[..boundary].trim_end())
 }
 
@@ -339,8 +362,14 @@ mod tests {
              - Colour grade: neutral punch.\n\
              \n\
              Script (what the creator meant to say; use it to choose the best takes and their order):\n\
+             Lines in square brackets are not spoken: they are headings, cues and notes at that point of \
+             the script, such as B-roll to cut away to or text to show on screen.\n\
              \n\
-             Welcome back to the channel.\n\
+             [Heading 1: Intro]\n\
+             \n\
+             Welcome back to the **channel**.\n\
+             \n\
+             [B-roll cue: Desk overview shot]\n\
              \n\
              Today: my desk.\n\
              \n\
@@ -350,22 +379,55 @@ mod tests {
     }
 
     #[test]
+    fn every_kind_of_block_with_text_reaches_the_agent() {
+        let script: Vec<Block> = BlockKind::ALL
+            .into_iter()
+            .filter(|kind| kind.has_text())
+            .map(|kind| Block::new(kind, format!("{kind:?} text")))
+            .collect();
+        let brief = default_brief(&video(), &script, &EditPreferences::default(), "");
+        for block in &script {
+            let line = match block.kind {
+                kind if kind.is_spoken() => block.text.clone(),
+                kind => format!("[{}: {}]", kind.label(), block.text),
+            };
+            assert!(brief.contains(&format!("\n{line}\n")), "{line} is missing from {brief}");
+        }
+        // Empty blocks, dividers and template guidance are not part of the script.
+        let guided = [Block::guided(BlockKind::BRoll, "A shot of the desk"), Block::new(BlockKind::Divider, "")];
+        let brief = default_brief(&video(), &guided, &EditPreferences::default(), "");
+        assert!(!brief.contains("Script") && !brief.contains("A shot of the desk"), "{brief}");
+    }
+
+    #[test]
     fn brief_explains_talking_points() {
-        let script =
-            vec![Block::paragraph("Welcome back."), Block::new(BlockKind::TalkingPoint, "Why I *sold* the ultrawide")];
+        let script = vec![
+            Block::paragraph("Welcome back."),
+            Block::new(BlockKind::TalkingPoint, "Why I *sold* the ultrawide"),
+            Block::new(BlockKind::BRoll, "Ultrawide in the closet"),
+        ];
         let brief = default_brief(&video(), &script, &EditPreferences::default(), "");
         assert!(
             brief.ends_with(
                 "Script (what the creator meant to say; use it to choose the best takes and their order):\n\
-                 [Talking point] lines are ideas the creator said in their own words: pick the takes that make the \
-                 point; they won't match it word for word.\n\
+                 [Talking point: …] lines are ideas the creator said in their own words: pick the takes that make \
+                 each point; they won't match it word for word.\n\
+                 Other lines in square brackets are not spoken: they are headings, cues and notes at that point \
+                 of the script, such as B-roll to cut away to or text to show on screen.\n\
                  \n\
                  Welcome back.\n\
                  \n\
-                 [Talking point] Why I sold the ultrawide\n"
+                 [Talking point: Why I *sold* the ultrawide]\n\
+                 \n\
+                 [B-roll cue: Ultrawide in the closet]\n"
             ),
             "{brief}"
         );
+
+        let script = [Block::new(BlockKind::TalkingPoint, "Why I sold it")];
+        let brief = default_brief(&video(), &script, &EditPreferences::default(), "");
+        assert!(brief.contains("word for word.\n\n[Talking point: Why I sold it]\n"), "{brief}");
+        assert!(!brief.contains("square brackets"), "no cues, so no word on them: {brief}");
     }
 
     #[test]
@@ -391,6 +453,17 @@ mod tests {
         let script: Vec<Block> = (0..20).map(|_| Block::paragraph(paragraph.trim())).collect();
         let brief = default_brief(&video(), &script, &EditPreferences::default(), "");
         assert!(brief.chars().count() < SCRIPT_CHARS + 1_000, "{}", brief.len());
+        assert!(brief.contains("word\n\n[The script continues; the rest is omitted here.]"));
+        assert!(!brief.contains("square brackets"), "only spoken lines, so no word on cues");
+    }
+
+    #[test]
+    fn a_heading_before_a_long_monologue_keeps_the_monologue() {
+        let monologue = "word ".repeat(3_000);
+        let script = [Block::new(BlockKind::Heading1, "Intro"), Block::paragraph(monologue.trim())];
+        let brief = default_brief(&video(), &script, &EditPreferences::default(), "");
+        assert!(brief.contains("[Heading 1: Intro]\n\nword word"), "{brief}");
+        assert!(brief.matches("word").count() > 1_500, "{}", brief.matches("word").count());
         assert!(brief.contains("word\n\n[The script continues; the rest is omitted here.]"));
     }
 
