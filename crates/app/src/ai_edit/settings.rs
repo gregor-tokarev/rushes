@@ -15,7 +15,7 @@ use gpui_kit::{
     TestSupportExt as _, Window, div,
 };
 use rushes_core::input::{PathInputError, display_user_path, expand_user_path};
-use rushes_core::settings::{DEFAULT_AGENT_COMMAND, PipelineSettings};
+use rushes_core::settings::{DEFAULT_AGENT_COMMAND, DEFAULT_CODEX_COMMAND, PipelineSettings};
 use rushes_pipeline::default_skill_dir;
 
 use super::brief::{COLOR_GRADES, color_grade_label};
@@ -84,6 +84,7 @@ impl ModelChoice {
 pub struct AiSettings {
     state: Entity<AppState>,
     agent_command: Entity<InputState>,
+    codex_command: Entity<InputState>,
     custom_model: Entity<InputState>,
     skill_dir: Entity<InputState>,
     extra_instructions: Entity<TextareaState>,
@@ -104,6 +105,7 @@ impl AiSettings {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).default_value(value))
         };
         let agent_command = input(display_command(&settings.agent_command), DEFAULT_AGENT_COMMAND, window, cx);
+        let codex_command = input(display_command(&settings.codex_command), DEFAULT_CODEX_COMMAND, window, cx);
         let model = ModelChoice::of(settings.model.as_deref());
         let custom_model = input(
             if model == ModelChoice::Custom { settings.model.clone().unwrap_or_default() } else { String::new() },
@@ -141,7 +143,7 @@ impl AiSettings {
                 }
             }),
         ];
-        for input in [&agent_command, &custom_model, &skill_dir, &target_length] {
+        for input in [&agent_command, &codex_command, &custom_model, &skill_dir, &target_length] {
             subscriptions.push(cx.subscribe(input, |this, _, event: &InputEvent, cx| this.on_text_event(event, cx)));
         }
         subscriptions
@@ -156,6 +158,7 @@ impl AiSettings {
         Self {
             state,
             agent_command,
+            codex_command,
             custom_model,
             skill_dir,
             extra_instructions,
@@ -189,7 +192,8 @@ impl AiSettings {
 
     fn write_text(&mut self, cx: &mut App) {
         self.save_task = None;
-        let agent_command = agent_command_input(&self.agent_command.read(cx).value());
+        let agent_command = command_input(&self.agent_command.read(cx).value(), DEFAULT_AGENT_COMMAND);
+        let codex_command = command_input(&self.codex_command.read(cx).value(), DEFAULT_CODEX_COMMAND);
         let skill_dir = skill_dir_input(&self.skill_dir.read(cx).value());
         self.skill_dir_error = skill_dir.as_ref().err().map(|error| error.clone().into());
         let extra_instructions = self.extra_instructions.read(cx).value().to_string();
@@ -199,6 +203,7 @@ impl AiSettings {
             state.update_settings(cx, |settings| {
                 let pipeline = &mut settings.pipeline;
                 pipeline.agent_command = agent_command;
+                pipeline.codex_command = codex_command;
                 // A path that can't be used is not saved; the field says why.
                 if let Ok(skill_dir) = skill_dir {
                     pipeline.skill_dir = skill_dir;
@@ -289,6 +294,7 @@ impl AiSettings {
         let skill_dir = pipeline.skill_dir.as_deref().map(display_user_path).unwrap_or_default();
         let fields = [
             (&self.agent_command, display_command(&pipeline.agent_command)),
+            (&self.codex_command, display_command(&pipeline.codex_command)),
             (&self.skill_dir, skill_dir),
             (&self.target_length, pipeline.default_preferences.target_length.clone()),
         ];
@@ -453,6 +459,20 @@ impl AiSettings {
                     ),
                 ),
             SettingsSection::new()
+                .title("Publishing")
+                .description(
+                    "On the Publish tab the agent writes the title, description and tags, and Codex draws \
+                     thumbnails.",
+                )
+                .keywords(["thumbnail", "codex", "openai", "title", "description", "tags"])
+                .field(
+                    SettingsField::new("Codex command", |this: &mut Self, _, _| {
+                        Input::new(&this.codex_command).id("ai-settings-codex-command")
+                    })
+                    .description("The Codex CLI, signed in: a command on PATH or the full path to it.")
+                    .stacked(),
+                ),
+            SettingsSection::new()
                 .title("New edits")
                 .description("Where every new edit brief starts.")
                 .field(SettingsField::new("Remove fillers", |this: &mut Self, _, cx| {
@@ -492,12 +512,12 @@ impl AiSettings {
     }
 }
 
-/// The agent command typed in the field: a command name as typed, a path starting
-/// with `~` expanded; empty is the default command.
-fn agent_command_input(text: &str) -> String {
+/// A command typed in a field: a command name as typed, a path starting with `~`
+/// expanded; empty is `default`.
+fn command_input(text: &str, default: &str) -> String {
     let text = text.trim();
     match text {
-        "" => DEFAULT_AGENT_COMMAND.to_owned(),
+        "" => default.to_owned(),
         path if path.starts_with('~') => {
             expand_user_path(path).map_or_else(|_| path.to_owned(), |path| path.display().to_string())
         }
@@ -590,9 +610,13 @@ mod tests {
         assert_eq!(skill_dir_input("  "), Ok(None));
         assert_eq!(skill_dir_input("video-use"), Err("Use a full path, like ~/.claude/skills/video-use.".to_owned()));
 
-        assert_eq!(agent_command_input("~/.local/bin/claude"), home.join(".local/bin/claude").display().to_string());
-        assert_eq!(agent_command_input(" claude "), "claude");
-        assert_eq!(agent_command_input(""), DEFAULT_AGENT_COMMAND);
+        assert_eq!(
+            command_input("~/.local/bin/claude", DEFAULT_AGENT_COMMAND),
+            home.join(".local/bin/claude").display().to_string()
+        );
+        assert_eq!(command_input(" claude ", DEFAULT_AGENT_COMMAND), "claude");
+        assert_eq!(command_input("", DEFAULT_AGENT_COMMAND), DEFAULT_AGENT_COMMAND);
+        assert_eq!(command_input("", DEFAULT_CODEX_COMMAND), "codex");
         assert_eq!(display_command(&home.join(".local/bin/claude").display().to_string()), "~/.local/bin/claude");
         assert_eq!(display_command("claude"), "claude");
     }

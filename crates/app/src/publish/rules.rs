@@ -4,6 +4,7 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 use rushes_core::{Privacy, Video};
+use rushes_pipeline::VideoDetails;
 use rushes_youtube::VideoMetadata;
 
 pub const TITLE_MAX_CHARS: usize = 100;
@@ -168,6 +169,53 @@ pub fn blocking_reasons(
         }
     }
     reasons
+}
+
+/// Details an agent wrote, made to fit YouTube: no `<` or `>`, the title cut at a word
+/// within [`TITLE_MAX_CHARS`], the description within `description_max` bytes, tags
+/// trimmed and without `#`, each once, and only as many as [`TAGS_MAX_CHARS`] holds.
+pub fn fit_details(details: VideoDetails, description_max: usize) -> VideoDetails {
+    let clean = |text: &str| text.replace(['<', '>'], "");
+    let title = clean(details.title.trim());
+    let description = clean(details.description.trim());
+    let mut tags: Vec<String> = Vec::new();
+    for tag in &details.tags {
+        let tag = clean(tag.trim().trim_start_matches('#').trim());
+        if tag.is_empty() || tags.iter().any(|kept| kept.eq_ignore_ascii_case(&tag)) {
+            continue;
+        }
+        tags.push(tag);
+        if tags_length(&tags) > TAGS_MAX_CHARS {
+            tags.pop();
+        }
+    }
+    VideoDetails {
+        title: cut_at_word(&title, |text| text.chars().count() <= TITLE_MAX_CHARS),
+        description: cut_at_word(&description, |text| text.len() <= description_max),
+        tags,
+    }
+}
+
+/// `text`, or its longest start that `fits` ending at a word boundary.
+fn cut_at_word(text: &str, fits: impl Fn(&str) -> bool) -> String {
+    if fits(text) {
+        return text.to_owned();
+    }
+    let mut cut = String::new();
+    for (ix, ch) in text.char_indices() {
+        if ch.is_whitespace() && fits(text[..ix].trim_end()) {
+            cut = text[..ix].trim_end().to_owned();
+        }
+        if !fits(&text[..ix]) {
+            break;
+        }
+    }
+    if cut.is_empty() {
+        // One long word: cut it where it fits.
+        let end = text.char_indices().map(|(ix, _)| ix).take_while(|ix| fits(&text[..*ix])).last().unwrap_or(0);
+        cut = text[..end].to_owned();
+    }
+    cut
 }
 
 /// The `videos.insert` metadata for `video`.
@@ -373,6 +421,27 @@ mod tests {
 
         video.publish.category_id = "28".into();
         assert_eq!(super::metadata(&video).category_id, "28");
+    }
+
+    #[test]
+    fn written_details_are_made_to_fit() {
+        let details = VideoDetails {
+            title: format!("  {} <b>end", "word ".repeat(30)),
+            description: "Learn <this> and that.".into(),
+            tags: vec![" #Rust ".into(), "rust".into(), String::new(), "<gpui>".into(), "x".repeat(498), "ok".into()],
+        };
+        let fitted = fit_details(details, DESCRIPTION_MAX_BYTES);
+        assert!(fitted.title.chars().count() <= TITLE_MAX_CHARS, "{}", fitted.title);
+        assert!(fitted.title.ends_with("word"), "cut at a word: {:?}", fitted.title);
+        assert_eq!(fitted.description, "Learn this and that.");
+        // The long tag would take the total past 500; the short one after it still fits.
+        assert_eq!(fitted.tags, ["Rust", "gpui", "ok"]);
+        assert!(tags_length(&fitted.tags) <= TAGS_MAX_CHARS);
+
+        let long = VideoDetails { description: "é".repeat(10), ..VideoDetails::default() };
+        assert_eq!(fit_details(long, 7).description, "ééé", "bytes, on a character boundary");
+        let title = VideoDetails { title: "x".repeat(120), ..VideoDetails::default() };
+        assert_eq!(fit_details(title, 0).title.len(), TITLE_MAX_CHARS);
     }
 
     #[test]

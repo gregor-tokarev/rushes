@@ -19,6 +19,9 @@
   Mark the ideas you'd rather say in your own words as talking points instead of scripting
   every line.
 - **Edit with AI**: hand your raw takes and script to [video-use](https://github.com/browser-use/video-use), approve its plan, get a cut.
+- **Publish** with AI help: have the agent write the title, description and tags from your
+  script and what you actually said on camera, and have Codex draw a few thumbnails to
+  pick from.
 - **Upload** to your YouTube channels from the video's page, with resumable uploads. Connect
   several accounts and pick, per video, the channel it goes to.
 
@@ -43,7 +46,8 @@ your videos, scripts, settings and YouTube sign-ins; footage stays in its folder
 `VideoCRM-…` files on the Releases page are only for that update.
 
 AI editing also needs [Claude Code](https://claude.com/claude-code), ffmpeg and the
-video-use skill; the app checks for them and says what's missing.
+video-use skill; the app checks for them and says what's missing. Thumbnails need the
+[Codex CLI](https://github.com/openai/codex), signed in.
 
 ## Build from source
 

@@ -3,7 +3,7 @@
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 use rushes::ai_edit::PipelineService;
-use rushes::publish::YoutubeService;
+use rushes::publish::{PublishAssistant, YoutubeService};
 use rushes::shell::{self, InstanceLock, StartupProblem, Workspace};
 use rushes::state::AppState;
 use rushes::update::UpdateService;
@@ -64,6 +64,7 @@ fn open_workspace(state: AppState, adopted_legacy_data: bool, cx: &mut App) {
     AppState::set_global(state.clone(), cx);
     YoutubeService::init(state.clone(), cx);
     PipelineService::init(state.clone(), cx);
+    PublishAssistant::init(state.clone(), cx);
     UpdateService::init(state.clone(), cx);
     shell::apply_theme(theme, None, cx);
     // The workspace's quit hook writes pending edits, as for Ctrl+Q.

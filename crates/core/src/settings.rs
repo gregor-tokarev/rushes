@@ -24,6 +24,7 @@ pub const LEGACY_DATABASE_FILE: &str = "videocrm.db";
 pub const DEFAULT_EMULATOR_GOOGLE_URL: &str = "http://127.0.0.1:4002";
 pub const DEFAULT_EMULATOR_YOUTUBE_URL: &str = "http://127.0.0.1:4020";
 pub const DEFAULT_AGENT_COMMAND: &str = "claude";
+pub const DEFAULT_CODEX_COMMAND: &str = "codex";
 
 /// Directory holding the database and credentials: `$RUSHES_DATA_DIR` when set,
 /// otherwise `<platform data dir>/rushes`.
@@ -131,6 +132,8 @@ pub struct PipelineSettings {
     /// Skip the strategy approval step and render straight away.
     pub auto_approve: bool,
     pub default_preferences: EditPreferences,
+    /// Executable of Codex, which draws thumbnails on the Publish tab.
+    pub codex_command: String,
 }
 
 impl Default for PipelineSettings {
@@ -142,6 +145,7 @@ impl Default for PipelineSettings {
             extra_instructions: String::new(),
             auto_approve: false,
             default_preferences: EditPreferences::default(),
+            codex_command: DEFAULT_CODEX_COMMAND.to_string(),
         }
     }
 }
