@@ -141,12 +141,13 @@ impl VideoTable {
         self.model.columns.get(col_ix).map(|layout| layout.column)
     }
 
-    /// The width the Title column is drawn at in a table `table_width` wide
-    /// (unbounded before the table is measured); `None` while it is hidden.
-    pub fn title_width(&self, table_width: Option<Pixels>) -> Option<Pixels> {
-        let layout = self.model.columns.iter().find(|layout| layout.column == Column::Builtin(BuiltinField::Title))?;
-        let width = self.column_width(layout);
-        Some(table_width.map_or(width, |table_width| width.min(self.title_max_width(table_width))))
+    /// Takes the table's width, measured in the frame just laid out. Returns
+    /// whether the columns change: the Title's widest, while it is shown.
+    pub fn set_table_width(&mut self, width: Pixels) -> bool {
+        let title = Column::Builtin(BuiltinField::Title);
+        let before = self.title_bound(title);
+        self.model.table_width = Some(width);
+        self.model.columns.iter().any(|layout| layout.column == title) && self.title_bound(title) != before
     }
 
     /// The width, at 100%, the view keeps for `column` that a resize left

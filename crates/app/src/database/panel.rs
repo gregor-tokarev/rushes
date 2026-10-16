@@ -307,17 +307,22 @@ impl DatabasePanel {
         }
     }
 
-    /// Records the table's width, measured in the frame just laid out.
-    /// Returns whether the Title column, which takes at most half of it,
-    /// changes width, and so the table with it.
+    /// Records the table's width, measured in the frame just laid out, and
+    /// hands it to the table: the Title column takes at most half of it.
+    /// Only the columns are refreshed, not the rows. Returns whether they
+    /// changed.
     fn set_table_width(&mut self, width: Pixels, cx: &mut Context<Self>) -> bool {
-        let previous = self.table_width.replace(width);
-        let table = self.table.read(cx).delegate();
-        if previous == Some(width) || table.title_width(previous) == table.title_width(Some(width)) {
+        if self.table_width.replace(width) == Some(width) {
             return false;
         }
-        self.sync_table(cx);
-        true
+        self.table.update(cx, |table, cx| {
+            let changed = table.delegate_mut().set_table_width(width);
+            if changed {
+                table.refresh(cx);
+                cx.notify();
+            }
+            changed
+        })
     }
 
     /// Shows `view` without reporting it back as [`DatabaseEvent::ActiveViewChanged`].

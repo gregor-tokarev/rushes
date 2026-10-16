@@ -498,6 +498,31 @@ fn a_zoomed_table_keeps_room_beside_its_title_and_scrolls_to_every_column(cx: &m
 }
 
 #[gpui_kit::test]
+fn a_wider_window_lets_the_title_be_dragged_wider(cx: &mut TestAppContext) {
+    // At 110% the Title is 330px: held at half the table in the smallest
+    // window, then at its own width in wider ones, it may be dragged wider
+    // as far as the widest window allows.
+    let db = Fixture::open_sized(cx, size(px(703.), px(600.)));
+    db.step(cx, |_, cx| db.panel.update(cx, |panel, cx| panel.set_zoom(Zoom::new(110), cx)));
+    db.render(cx);
+    for width in [800., 1600.] {
+        VisualTestContext::from_window(db.window, cx).simulate_resize(size(px(width), px(900.)));
+        db.render(cx);
+    }
+    let title = db.with_window(cx, |window, _| window.find(("col-header", 0usize)).bounds());
+    assert_eq!(title.size.width, px(330.));
+    let y = title.center().y;
+    db.step(cx, |window, cx| window.drag(point(title.right() - px(2.), y), point(title.right() + px(218.), y), cx));
+    let events = db.take_events();
+    let [DatabaseEvent::SaveView(view)] = events.as_slice() else {
+        panic!("expected one SaveView, got {events:?}");
+    };
+    let width = view.columns.iter().find(|layout| layout.column == Column::Builtin(BuiltinField::Title)).unwrap().width;
+    // About 220px wider at 110%: 500 at 100%.
+    assert!((490.0..=510.0).contains(&width), "expected about 500, got {width}");
+}
+
+#[gpui_kit::test]
 fn titles_open_the_video_and_new_video_reports_its_status(cx: &mut TestAppContext) {
     let db = Fixture::open(cx);
 
