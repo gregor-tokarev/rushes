@@ -16,10 +16,12 @@ use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
+use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IndexPath, Side, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IndexPath, Selectable as _, Side, Sizable as _, WindowExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -33,8 +35,10 @@ use rushes_core::settings::WeekStart;
 use rushes_core::{
     DocumentKind, Privacy, PublishSettings, UploadJob, UploadStatus, Video, VideoFormat, VideoId, VideoStatus,
 };
-use rushes_pipeline::{MediaInfo, kept_cuts};
+use rushes_pipeline::{MediaInfo, has_transcript, kept_cuts, list_thumbnails};
 
+use super::assist_dialogs::{open_details_dialog, open_thumbnails_dialog};
+use super::assistant::{AssistEvent, DetailSources, DetailsJob, PublishAssistant, ThumbnailJob};
 use super::channel::{ChannelChoices, ChooseChannel};
 use super::chapters::{MIN_CHAPTERS, chapters, chapters_text, insert_chapters, timestamp};
 use super::rules::{
@@ -243,6 +247,13 @@ pub struct PublishPanel {
     /// The panel's width in the last frame; below [`TWO_COLUMN_MIN_WIDTH`] the
     /// side cards go under the form.
     width: Rc<Cell<Option<Pixels>>>,
+    /// Writes the details with the agent and draws thumbnails with Codex, when the
+    /// app has one.
+    assistant: Option<Entity<PublishAssistant>>,
+    /// What the agent can write the details from.
+    sources: DetailSources,
+    /// The thumbnails drawn for the video, newest first.
+    drawn: Vec<PathBuf>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -307,6 +318,7 @@ impl PublishPanel {
                 if window.is_window_active() {
                     this.refresh_choices(cx);
                     this.refresh_file(cx);
+                    this.refresh_drawn(cx);
                     this.service.update(cx, |service, cx| service.check_stopped_uploads(cx));
                     if this.is_shown(cx) {
                         this.refresh_youtube_video(cx);
@@ -320,6 +332,18 @@ impl PublishPanel {
                 async {}
             }),
         ];
+
+        let assistant = PublishAssistant::try_global(cx);
+        let mut subscriptions = subscriptions;
+        if let Some(assistant) = &assistant {
+            subscriptions.push(cx.observe(assistant, |_, _, cx| cx.notify()));
+            subscriptions.push(cx.subscribe(assistant, |this, _, event: &AssistEvent, cx| {
+                let AssistEvent::ThumbnailsDrawn(video_id) = *event;
+                if video_id == this.video_id {
+                    this.refresh_drawn(cx);
+                }
+            }));
+        }
 
         let mut panel = Self {
             video_id,
@@ -342,12 +366,16 @@ impl PublishPanel {
             chapters: Err(NO_SECTIONS),
             unscheduled_privacy: None,
             width: Rc::default(),
+            assistant,
+            sources: DetailSources { script: false, transcript: false },
+            drawn: Vec::new(),
             _subscriptions: subscriptions,
         };
         panel.refresh_chapters(cx);
         panel.refresh_choices(cx);
         panel.refresh_file(cx);
         panel.refresh_thumbnail(cx);
+        panel.refresh_drawn(cx);
         panel.refresh_youtube_video(cx);
         panel.service.update(cx, |service, cx| service.check_stopped_uploads(cx));
         panel
@@ -439,6 +467,14 @@ impl PublishPanel {
     }
 
     fn schedule_save(&mut self, field: Field, cx: &mut Context<Self>) {
+        // Once the creator changes what the agent wrote, Undo would throw that away.
+        if matches!(field, Field::Title | Field::Description | Field::Tags)
+            && let Some(assistant) = &self.assistant
+            && matches!(assistant.read(cx).details(self.video_id), Some(DetailsJob::Written(_)))
+        {
+            let video_id = self.video_id;
+            assistant.update(cx, |assistant, cx| assistant.dismiss_details(video_id, cx));
+        }
         self.edited.insert(field);
         self.save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SAVE_DELAY).await;
@@ -539,6 +575,11 @@ impl PublishPanel {
         let documents = self.state.read(cx).documents(self.video_id);
         let script = documents.iter().find(|document| document.kind == DocumentKind::Script);
         let found = script.map(|script| chapters(&script.blocks, DEFAULT_WPM)).unwrap_or_default();
+        let has_script = script.is_some_and(|script| script.blocks.iter().any(|block| !block.text.trim().is_empty()));
+        if has_script != self.sources.script {
+            self.sources.script = has_script;
+            cx.notify();
+        }
         let short = self.state.read(cx).video(self.video_id).is_some_and(|video| video.format == VideoFormat::Short);
         // YouTube silently drops a list it can't use, so only usable ones are offered.
         let offer = match found.last() {
@@ -563,16 +604,65 @@ impl PublishPanel {
             .unwrap_or_default();
         cuts.extend(self.draft.file.clone());
         cx.spawn(async move |this, cx| {
-            let choices = cx.background_spawn(async move { file_choices(&dir, &cuts) }).await;
+            let (choices, transcript) =
+                cx.background_spawn(async move { (file_choices(&dir, &cuts), has_transcript(&dir)) }).await;
             this.update(cx, |this, cx| {
-                if this.choices != choices {
+                if this.choices != choices || this.sources.transcript != transcript {
                     this.choices = choices;
+                    this.sources.transcript = transcript;
                     cx.notify();
                 }
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Lists the thumbnails drawn for the video.
+    fn refresh_drawn(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.state.read(cx).video(self.video_id).and_then(media::thumbnails_dir) else { return };
+        cx.spawn(async move |this, cx| {
+            let drawn = cx.background_spawn(async move { list_thumbnails(&dir) }).await;
+            this.update(cx, |this, cx| {
+                if this.drawn != drawn {
+                    this.drawn = drawn;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn details_job(&self, cx: &App) -> Option<DetailsJob> {
+        self.assistant.as_ref()?.read(cx).details(self.video_id).cloned()
+    }
+
+    fn thumbnail_job(&self, cx: &App) -> Option<ThumbnailJob> {
+        self.assistant.as_ref()?.read(cx).thumbnails(self.video_id).cloned()
+    }
+
+    /// Asks what to tell the agent, then has it write the details.
+    fn open_write_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // What the creator typed a moment ago is what the agent replaces, and Undo restores.
+        self.save_pending(cx);
+        open_details_dialog(self.video_id, self.sources, window, cx);
+    }
+
+    fn open_generate_thumbnails(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let has_video = self.draft.file.is_some() || self.choices.iter().any(|choice| choice.source == "Footage");
+        open_thumbnails_dialog(self.video_id, has_video, window, cx);
+    }
+
+    fn with_assistant(
+        &self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut PublishAssistant, VideoId, &mut Context<PublishAssistant>),
+    ) {
+        if let Some(assistant) = &self.assistant {
+            let video_id = self.video_id;
+            assistant.update(cx, |assistant, cx| f(assistant, video_id, cx));
+        }
     }
 
     fn refresh_file(&mut self, cx: &mut Context<Self>) {
@@ -867,12 +957,19 @@ impl PublishPanel {
 
     fn render_details(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let title_len = self.draft_video(cx).map_or(0, |video| video.upload_title().chars().count());
+        let job = self.details_job(cx);
+        // The agent replaces these fields; typing meanwhile would be lost.
+        let writing = job == Some(DetailsJob::Writing);
+        let mut heading = section_heading("Details");
+        if let Some(button) = self.write_details_button(writing, cx) {
+            heading = heading.action(button);
+        }
         let chapters_button = Button::new("insert-chapters")
             .label("Insert chapters from script")
             .icon(IconName::ListOrdered)
             .small()
             .outline()
-            .disabled(self.chapters.is_err())
+            .disabled(self.chapters.is_err() || writing)
             .on_click(cx.listener(|this, _, window, cx| this.insert_chapters(window, cx)));
         // The estimate may run past the end of the chosen file, where YouTube ignores it.
         let file_secs = self
@@ -902,7 +999,7 @@ impl PublishPanel {
         let uploaded = self.state.read(cx).video(self.video_id).is_some_and(|video| video.youtube.is_some());
         v_flex()
             .gap_5()
-            .child(v_flex().gap_0p5().child(section_heading("Details")).when(uploaded, |this| {
+            .child(v_flex().gap_0p5().child(heading).when(uploaded, |this| {
                 // The form doesn't reach the uploaded video; saying so avoids edits that go nowhere.
                 // It reads as the section's description.
                 this.child(
@@ -917,23 +1014,24 @@ impl PublishPanel {
                         .test_support(),
                 )
             }))
+            .children(job.map(|job| self.render_details_job(job, cx)))
             .child(
                 FieldRow::new("Title")
                     .counter(title_len, TITLE_MAX_CHARS)
                     .help("Leave empty to use the video’s title.")
-                    .control(Input::new(&self.title).id("publish-title")),
+                    .control(Input::new(&self.title).id("publish-title").disabled(writing)),
             )
             .child(
                 FieldRow::new("Description")
                     .counter(self.draft.description.len(), DESCRIPTION_MAX_BYTES)
-                    .control(Textarea::new(&self.description).aria_label("Description")),
+                    .control(Textarea::new(&self.description).aria_label("Description").disabled(writing)),
             )
             .child(h_flex().gap_3().child(chapters_button).child(chapters_help.flex_1().min_w_0()))
             .child(
                 FieldRow::new("Tags")
                     .counter(tags_length(&self.draft.tags), TAGS_MAX_CHARS)
                     .help("Press Enter or type a comma to add a tag.")
-                    .control(self.render_tags(cx)),
+                    .control(self.render_tags(writing, cx)),
             )
             .child(
                 FieldRow::new("Category").control(
@@ -944,7 +1042,87 @@ impl PublishPanel {
             )
     }
 
-    fn render_tags(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// "Write with AI…", unless the app has no assistant. Without a script or a
+    /// transcript there is nothing to write from, which its tooltip says.
+    fn write_details_button(&self, writing: bool, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        self.assistant.as_ref()?;
+        let reason = (!self.sources.any())
+            .then(|| SharedString::from("Write the script first, or run an AI edit to transcribe the footage."));
+        let button = Button::new("write-details")
+            .label("Write with AI…")
+            .icon(IconName::Sparkles)
+            .small()
+            .outline()
+            .disabled(writing || reason.is_some())
+            .on_click(cx.listener(|this, _, window, cx| this.open_write_details(window, cx)));
+        Some(state_tooltip("write-details-reason", reason, button))
+    }
+
+    /// Where the agent writing the details stands, with what can be done about it.
+    fn render_details_job(&self, job: DetailsJob, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let cancelling = self.assistant.as_ref().is_some_and(|a| a.read(cx).is_cancelling_details(self.video_id));
+        let (status, actions): (Div, Vec<Button>) = match job {
+            DetailsJob::Writing => (
+                h_flex().gap_2().child(Spinner::new().small().color(theme.muted_foreground)).child(
+                    div().text_sm().child(if cancelling {
+                        "Stopping…"
+                    } else {
+                        "Writing the title, description and tags…"
+                    }),
+                ),
+                vec![
+                    Button::new("cancel-write-details").label("Cancel").small().ghost().disabled(cancelling).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.with_assistant(cx, |assistant, id, cx| assistant.cancel_details(id, cx))
+                        }),
+                    ),
+                ],
+            ),
+            DetailsJob::Failed(error) => (
+                status_line(IconName::CircleAlert, theme.danger, "Couldn’t write the details", Some(error), cx),
+                vec![
+                    Button::new("retry-write-details")
+                        .label("Try again…")
+                        .small()
+                        .outline()
+                        .on_click(cx.listener(|this, _, window, cx| this.open_write_details(window, cx))),
+                    Button::new("dismiss-write-details").label("Dismiss").small().ghost().on_click(cx.listener(
+                        |this, _, _, cx| this.with_assistant(cx, |assistant, id, cx| assistant.dismiss_details(id, cx)),
+                    )),
+                ],
+            ),
+            DetailsJob::Written(_) => (
+                status_line(
+                    IconName::Sparkles,
+                    theme.muted_foreground,
+                    "Written with AI",
+                    Some("Read them over before you upload.".into()),
+                    cx,
+                ),
+                vec![
+                    Button::new("undo-write-details").label("Undo").small().outline().on_click(cx.listener(
+                        |this, _, _, cx| this.with_assistant(cx, |assistant, id, cx| assistant.undo_details(id, cx)),
+                    )),
+                    Button::new("dismiss-write-details").label("Dismiss").small().ghost().on_click(cx.listener(
+                        |this, _, _, cx| this.with_assistant(cx, |assistant, id, cx| assistant.dismiss_details(id, cx)),
+                    )),
+                ],
+            ),
+        };
+        h_flex()
+            .id("details-job")
+            .gap_3()
+            .items_start()
+            .justify_between()
+            .child(status.flex_1().min_w_0())
+            .child(h_flex().gap_1().flex_shrink_0().children(actions))
+            // Tests check what the line says.
+            .test_support()
+            .into_any_element()
+    }
+
+    fn render_tags(&self, writing: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         h_flex()
             .flex_wrap()
@@ -966,10 +1144,16 @@ impl PublishPanel {
                             .ghost()
                             .xsmall()
                             .accessibility_label(format!("Remove {tag}"))
+                            .disabled(writing)
                             .on_click(cx.listener(move |this, _, _, cx| this.remove_tag(&remove, cx))),
                     )
             }))
-            .child(div().min_w(rems(12.)).flex_1().child(Input::new(&self.tag_input).id("publish-tag-input")))
+            .child(
+                div()
+                    .min_w(rems(12.))
+                    .flex_1()
+                    .child(Input::new(&self.tag_input).id("publish-tag-input").disabled(writing)),
+            )
     }
 
     fn render_visibility(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1645,6 +1829,14 @@ impl PublishPanel {
     }
 
     fn render_thumbnail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let job = self.thumbnail_job(cx);
+        let drawing = match &job {
+            Some(ThumbnailJob::Drawing { count, .. }) => *count,
+            _ => 0,
+        };
+        let job_line = job.and_then(|job| self.render_thumbnail_job(job, cx));
+        let drawn = self.render_drawn(drawing, cx);
+        let generated = self.render_generated(drawing, job_line, drawn, cx);
         let theme = cx.theme();
         let current = self.draft.thumbnail.clone();
         let size =
@@ -1723,7 +1915,183 @@ impl PublishPanel {
                             )
                         }),
                 )
-                .child(help_text(notes.join(" "), cx)),
+                .child(help_text(notes.join(" "), cx))
+                .children(generated),
+        )
+    }
+
+    /// Thumbnails Codex drew, and the button that asks for more: `None` without
+    /// an assistant.
+    fn render_generated(
+        &self,
+        drawing: usize,
+        job_line: Option<AnyElement>,
+        drawn: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        self.assistant.as_ref()?;
+        let empty = job_line.is_none() && drawn.is_none();
+        let theme = cx.theme();
+        Some(
+            v_flex()
+                .gap_3()
+                .pt_4()
+                .border_t_1()
+                .border_color(theme.border)
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .gap_2()
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Generated"))
+                        .child(
+                            Button::new("generate-thumbnails")
+                                .label("Generate…")
+                                .icon(IconName::Sparkles)
+                                .small()
+                                .outline()
+                                .disabled(drawing > 0)
+                                .on_click(cx.listener(|this, _, window, cx| this.open_generate_thumbnails(window, cx))),
+                        ),
+                )
+                .when(empty, |this| {
+                    this.child(help_text("Codex can draw a few from the video’s title and script.", cx))
+                })
+                .children(job_line)
+                .children(drawn)
+                .into_any_element(),
+        )
+    }
+
+    /// Where Codex drawing thumbnails stands, with what can be done about it; `None`
+    /// once it drew them all, which the grid shows.
+    fn render_thumbnail_job(&self, job: ThumbnailJob, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let cancelling = self.assistant.as_ref().is_some_and(|a| a.read(cx).is_cancelling_thumbnails(self.video_id));
+        let theme = cx.theme();
+        let (status, actions): (Div, Vec<Button>) = match job {
+            ThumbnailJob::Drawing { count, activity } => (
+                h_flex()
+                    .gap_2()
+                    .items_start()
+                    .child(div().pt_0p5().child(Spinner::new().small().color(theme.muted_foreground)))
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(if cancelling {
+                                "Stopping…".to_owned()
+                            } else if count == 1 {
+                                "Drawing a thumbnail…".to_owned()
+                            } else {
+                                format!("Drawing {count} thumbnails…")
+                            }))
+                            .child(help_text(activity.unwrap_or_else(|| "Codex takes a few minutes.".into()), cx)),
+                    ),
+                vec![Button::new("cancel-thumbnails").label("Cancel").small().ghost().disabled(cancelling).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.with_assistant(cx, |assistant, id, cx| assistant.cancel_thumbnails(id, cx))
+                    }),
+                )],
+            ),
+            ThumbnailJob::Failed(error) => (
+                status_line(IconName::CircleAlert, theme.danger, "Couldn’t generate thumbnails", Some(error), cx),
+                vec![
+                    Button::new("retry-thumbnails")
+                        .label("Try again…")
+                        .small()
+                        .outline()
+                        .on_click(cx.listener(|this, _, window, cx| this.open_generate_thumbnails(window, cx))),
+                    self.dismiss_thumbnails_button(cx),
+                ],
+            ),
+            ThumbnailJob::Drawn { made, asked, problem } if made < asked => (
+                status_line(
+                    IconName::TriangleAlert,
+                    theme.warning,
+                    format!("Codex drew {made} of {asked}"),
+                    problem,
+                    cx,
+                ),
+                vec![self.dismiss_thumbnails_button(cx)],
+            ),
+            ThumbnailJob::Drawn { .. } => return None,
+        };
+        // The side column is narrow: the actions go under the status.
+        Some(
+            v_flex()
+                .id("thumbnail-job")
+                .gap_2()
+                .child(status)
+                .child(h_flex().gap_1().children(actions))
+                // Tests check what the card says.
+                .test_support()
+                .into_any_element(),
+        )
+    }
+
+    fn dismiss_thumbnails_button(&self, cx: &mut Context<Self>) -> Button {
+        Button::new("dismiss-thumbnails").label("Dismiss").small().ghost().on_click(cx.listener(|this, _, _, cx| {
+            this.with_assistant(cx, |assistant, id, cx| assistant.dismiss_thumbnails(id, cx))
+        }))
+    }
+
+    /// The thumbnails drawn for the video, newest first, after `drawing` places for
+    /// the ones on their way. Choosing one makes it the thumbnail.
+    fn render_drawn(&self, drawing: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.drawn.is_empty() && drawing == 0 {
+            return None;
+        }
+        let (radius, ring, check_fg, check_bg) = {
+            let theme = cx.theme();
+            (theme.radius, theme.primary, theme.primary_foreground, theme.primary)
+        };
+        let chosen = self.draft.thumbnail.as_ref();
+        let placeholders = (0..drawing)
+            .map(|_| Skeleton::new().w_full().h_auto().aspect_ratio(16. / 9.).rounded(radius).into_any_element());
+        let tiles = self.drawn.iter().map(|path| {
+            let name = file_name(path);
+            let target = path.clone();
+            let selected = chosen == Some(path);
+            Button::new(SharedString::from(format!("drawn-{name}")))
+                .outline()
+                .selected(selected)
+                .accessibility_label(format!("Use {name}"))
+                .w_full()
+                .h_auto()
+                .p_1()
+                .when(selected, |this| this.border_color(ring))
+                .child(
+                    div()
+                        .relative()
+                        .w_full()
+                        .aspect_ratio(16. / 9.)
+                        .overflow_hidden()
+                        .rounded(radius)
+                        .child(img(path.clone()).size_full().object_fit(ObjectFit::Cover))
+                        .when(selected, |this| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .top_1()
+                                    .right_1()
+                                    .rounded_full()
+                                    .bg(check_bg)
+                                    .p_0p5()
+                                    .child(Icon::new(IconName::Check).xsmall().text_color(check_fg)),
+                            )
+                        }),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| this.set_thumbnail(Some(target.clone()), window, cx)))
+                .into_any_element()
+        });
+        let none_chosen = !self.drawn.iter().any(|path| chosen == Some(path));
+        Some(
+            v_flex()
+                .gap_2()
+                .child(div().id("drawn-thumbnails").grid().grid_cols(2).gap_2().children(placeholders).children(tiles))
+                .when(none_chosen && !self.drawn.is_empty(), |this| {
+                    this.child(help_text("Choose one to use it. They’re in the video’s thumbnails folder.", cx))
+                })
+                .into_any_element(),
         )
     }
 }

@@ -10,7 +10,8 @@ a media folder per video.
 crates/
   core/       rushes-core      domain model, SQLite store, documents, templates, media folders
   youtube/    rushes-youtube   Google OAuth (loopback + PKCE), YouTube Data API v3 client, resumable upload
-  pipeline/   rushes-pipeline  AI edit pipelines: drives a coding agent (Claude Code) with the video-use skill
+  pipeline/   rushes-pipeline  AI edit pipelines: drives a coding agent (Claude Code) with the video-use skill;
+                               writes YouTube details with it and draws thumbnails with Codex
   update/     rushes-update    self-update: newest GitHub release, verified download, install in place, relaunch
   app/        rushes           GPUI Kit desktop app (the only crate that depends on gpui-kit)
 emulators/    local API emulation for dev/tests: vercel-labs/emulate (Google OAuth) + custom YouTube emulator
@@ -79,6 +80,7 @@ database's write lock for seconds. The UI thread never waits for it:
 - Media root (default `dirs::video_dir()/Rushes`, fallback `~/Videos/Rushes`):
   one folder per video `<slug>-<short id>/` containing `footage/` (raw takes).
   video-use writes all outputs to `footage/edit/` (`final.mp4`, `project.md`, ...).
+  Thumbnails Codex draws go to `thumbnails/` (`thumbnail-<n>.jpg`) beside `footage/`.
 - OAuth credentials: one file per signed-in YouTube account in `youtube-accounts/`, file
   mode 0600. Never logged. A `credentials.json` left by a release that kept one account
   moves there at the next start.
@@ -115,7 +117,8 @@ database's write lock for seconds. The UI thread never waits for it:
   extensions, size, mtime), finding edit outputs (`footage/edit/final.mp4`, `preview.mp4`).
 - `settings.rs` — typed `AppSettings` stored in the settings table: media root,
   YouTube backend (`Google { client_id, client_secret }` | `Emulator { google_url, youtube_url }`),
-  pipeline config (agent command, video-use skill dir, extra instructions, auto-approve),
+  pipeline config (agent command, video-use skill dir, extra instructions, auto-approve,
+  Codex command),
   `onboarding_completed`, theme, zoom, week start, updates, and whether video pages open
   with their properties folded (`properties_collapsed`).
 
@@ -154,6 +157,12 @@ it proposes a strategy and waits for approval, so a run has two phases:
 CLI, the video-use skill, ffmpeg/ffprobe and the ElevenLabs key are available.
 `scripts/fake-agent` imitates the agent's stream-json output for tests.
 
+The same agent writes a video's YouTube title, description and tags in one turn without
+tools (`write_details`, JSON checked against a schema), from the script and video-use's
+transcript; Codex (`codex exec --json`) draws thumbnails with its image generation
+(`generate_thumbnails`), which ffmpeg turns into 1280 × 720 JPGs. `scripts/fake-codex`
+stands in for Codex in tests.
+
 ## app (`rushes`)
 
 GPUI Kit app. Main pieces:
@@ -187,7 +196,9 @@ GPUI Kit app. Main pieces:
   default one), metadata form, upload with progress, resume. The thumbnail goes up
   when the upload finishes, and at once when it's chosen for a video already on
   YouTube (`publish/thumbnail.rs`); `YoutubeLink.thumbnail` records the image YouTube
-  has, so the Thumbnail card can say whether the chosen one is there.
+  has, so the Thumbnail card can say whether the chosen one is there. `PublishAssistant`
+  has the agent write the title, description and tags (with Undo) and Codex draw
+  thumbnails to choose from; both keep running when the tab is left.
 - AI edit: footage list, edit brief, run timeline (agent messages/tool calls), approve /
   feedback, output preview and "use for upload".
 - `update/` — `UpdateService`: automatic checks, background install, Settings › About ›
@@ -206,7 +217,7 @@ new version once the app quits. Details in [updates.md](updates.md).
 - `cargo test -p rushes-core` — store, documents, templates.
 - `cargo test -p rushes-youtube` — unit tests + integration tests against the emulators
   (`emulators/`; skipped with a message when Node is unavailable).
-- `cargo test -p rushes-pipeline` — with `scripts/fake-agent`.
+- `cargo test -p rushes-pipeline` — with `scripts/fake-agent` and `scripts/fake-codex`.
 - `cargo test -p rushes-update` — against a local stand-in for GitHub.
 - `cargo test -p rushes` — GPUI UI integration tests (`#[gpui_kit::test]`).
 - Visual checks: `scripts/screenshot.sh` runs the app under Xvfb and captures PNGs.

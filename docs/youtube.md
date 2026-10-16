@@ -150,6 +150,7 @@ views and the `YoutubeService` global.
 | `YoutubeSettings::new(window, cx)` | `settings.rs` | YouTube section of Settings and onboarding |
 | `AccountBadge::new(window, cx)` | `badge.rs` | Sidebar footer: the default account; click opens `Route::Settings` |
 | `ChannelChoices::of(video, cx)` | `channel.rs` | Which account a video uploads to and the menu to choose another, for the Channel column, the Channel property and the Publish tab |
+| `PublishAssistant` | `assistant.rs`, `assist_dialogs.rs` | Global entity (`PublishAssistant::init(state, cx)`): the agent writing a video's title, description and tags, Codex drawing its thumbnails, and their dialogs |
 | rules, chapters, progress maths | `rules.rs`, `chapters.rs`, `transfer.rs` | Pure functions, unit tested |
 
 The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `ListOrdered`,
@@ -352,6 +353,27 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   thumbnail). Files can also be dropped on the Video file and Thumbnail cards. The list refreshes when the window is
   activated again. Size, duration and resolution come from `rushes_pipeline::probe_media`
   on the background executor.
+- **Write with AI…** (Details heading) asks for optional instructions, then has the AI
+  edit's agent (Claude Code, Settings › AI editing) write the title, description and tags
+  from the script and, once an AI edit transcribed the footage, the transcript and the
+  edit notes (`rushes_pipeline::write_details`). The button is disabled, with a tooltip,
+  while there is neither. While the agent writes, the three fields take no typing and a
+  line under the heading offers **Cancel**. The answer is made to fit YouTube
+  (`rules::fit_details`: no `<`/`>`, the title cut at a word, tags without `#`, each once,
+  within 500 characters) and written to `video.publish`, keeping the description's
+  `Chapters:` list; the agent is told to keep links and other standing text. The line
+  then offers **Undo**, which puts back what was replaced, until a field is edited. A
+  failure says why, with **Try again…** (the dialog keeps the instructions) and
+  **Dismiss**. It keeps running when the tab is left: the assistant writes to the video
+  itself.
+- **Generate…** (Thumbnail card, under "Generated") asks how many (1–4), for ideas and
+  whether to show Codex frames of the video (the upload file, else the first footage
+  take), then has Codex draw them (`rushes_pipeline::generate_thumbnails`) into the
+  video's `thumbnails/` folder as `thumbnail-<n>.jpg` (1280 × 720). Placeholders stand in
+  while Codex works, with its latest message and **Cancel**; the drawn thumbnails, newest
+  first, are buttons that make one the thumbnail (the chosen one has a ring and a check).
+  Codex drawing fewer than asked, or failing, says why. The Codex command is set in
+  Settings › AI editing › Publishing.
 
 ### Trying it
 
@@ -371,6 +393,7 @@ the link, submit the account's form (`email` field) and follow the redirect to `
 cargo test -p rushes --lib publish        # validation, chapters, progress and formatting
 cargo test -p rushes --test publish       # YoutubeService against the emulators
 cargo test -p rushes --test publish_ui    # the views in headless windows, clicks and typing
+cargo test -p rushes --test publish_assist  # Write with AI and Generate, with scripts/fake-agent and fake-codex
 ```
 
 `tests/publish.rs` covers sign-in (consent posted like a browser), restart, disconnect,

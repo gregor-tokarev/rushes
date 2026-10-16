@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Stand-in for `codex exec --json` in Rushes thumbnail tests.
+
+Accepts the flags rushes-pipeline passes to Codex, reads the prompt from stdin and
+prints `--json` events shaped like real Codex output. It calls no model: for every
+draft path the prompt lists (`- /…/draft-<n>.png`) it saves a 1536 × 1024 PNG test
+pattern with ffmpeg, as Codex copies what its image tool drew.
+
+Environment:
+  FAKE_CODEX_MODE=fail     report a failed turn (a usage limit), exit 1
+  FAKE_CODEX_DRAW=N        draw only the first N drafts, then fail like a usage limit
+  FAKE_CODEX_DELAY_MS=N    sleep N ms (in a child `sleep` process) between events
+  FAKE_CODEX_ARGV_FILE=path   write the received argv as JSON
+  FAKE_CODEX_PROMPT_FILE=path write the prompt
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import uuid
+
+
+def emit(event):
+    sys.stdout.write(json.dumps(event, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+    delay = int(os.environ.get("FAKE_CODEX_DELAY_MS", "0")) / 1000.0
+    if delay > 0:
+        subprocess.run(["sleep", str(delay)])
+
+
+def command(item_id, cmd, output, exit_code=0):
+    item = {"id": item_id, "type": "command_execution", "command": f"/bin/bash -lc '{cmd}'"}
+    emit({"type": "item.started", "item": {**item, "aggregated_output": "", "exit_code": None, "status": "in_progress"}})
+    status = "completed" if exit_code == 0 else "failed"
+    emit({"type": "item.completed", "item": {**item, "aggregated_output": output, "exit_code": exit_code, "status": status}})
+
+
+def draw(path, n):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    result = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+         "-i", f"testsrc2=size=1536x1024:rate=1:duration=1", "-vf", f"hue=h={n * 90}",
+         "-frames:v", "1", path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv[:1] == ["--version"]:
+        print("codex-cli 0.0.0-fake")
+        return 0
+    if os.environ.get("FAKE_CODEX_ARGV_FILE"):
+        with open(os.environ["FAKE_CODEX_ARGV_FILE"], "w") as f:
+            json.dump(argv, f)
+    if argv[:1] != ["exec"] or "--json" not in argv:
+        print("fake-codex: expected exec --json", file=sys.stderr)
+        return 2
+    prompt = sys.stdin.read()
+    if os.environ.get("FAKE_CODEX_PROMPT_FILE"):
+        with open(os.environ["FAKE_CODEX_PROMPT_FILE"], "w") as f:
+            f.write(prompt)
+
+    emit({"type": "thread.started", "thread_id": str(uuid.uuid4())})
+    emit({"type": "turn.started"})
+    if os.environ.get("FAKE_CODEX_MODE") == "fail":
+        print("ERROR: fake-codex: simulated failure", file=sys.stderr)
+        emit({"type": "error", "message": "You've hit your usage limit."})
+        emit({"type": "turn.failed", "error": {"message": "You've hit your usage limit."}})
+        return 1
+
+    drafts = re.findall(r"^- (/.*\.png)$", prompt, re.M)
+    limit = int(os.environ.get("FAKE_CODEX_DRAW", len(drafts)))
+    emit({"type": "item.completed", "item": {"id": "item_0", "type": "agent_message",
+                                             "text": f"Drawing {len(drafts)} thumbnail ideas."}})
+    ideas = []
+    for n, path in enumerate(drafts[:limit], start=1):
+        emit({"type": "item.completed", "item": {"id": f"img_{n}", "type": "image_generation_call"}})
+        ok = draw(path, n)
+        command(f"cp_{n}", f"cp ~/.codex/generated_images/fake/{n}.png {path}",
+                "" if ok else "ffmpeg failed", 0 if ok else 1)
+        ideas.append(f"{n}. Test pattern number {n}.")
+    if limit < len(drafts):
+        emit({"type": "turn.failed", "error": {"message": "You've hit your usage limit."}})
+        return 1
+    emit({"type": "item.completed", "item": {"id": "item_last", "type": "agent_message", "text": "\n".join(ideas)}})
+    emit({"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 10}})
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

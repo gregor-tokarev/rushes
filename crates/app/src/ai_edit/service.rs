@@ -1087,24 +1087,32 @@ impl PipelineService {
     }
 
     fn agent_config(&self, settings: &PipelineSettings) -> AgentConfig {
-        let command = settings.agent_command.trim();
-        let defaults = AgentConfig::default();
-        AgentConfig {
-            command: match command {
-                "" => defaults.command.clone(),
-                // Saved before the settings expanded `~` themselves.
-                path if path.starts_with('~') => expand_user_path(path).unwrap_or_else(|_| PathBuf::from(path)),
-                command => PathBuf::from(command),
-            },
-            model: settings.model.as_deref().map(str::trim).filter(|model| !model.is_empty()).map(str::to_owned),
-            env: self.agent_env.clone(),
-            ..defaults
-        }
+        agent_config(settings, self.agent_env.clone())
     }
 
     fn report(&self, error: impl fmt::Display, cx: &mut Context<Self>) {
         let message = SharedString::from(error.to_string());
         self.state.update(cx, |_, cx| cx.emit(AppEvent::Error(message)));
+    }
+}
+
+/// How the settings launch the agent, with extra environment `env`.
+pub(crate) fn agent_config(settings: &PipelineSettings, env: Vec<(String, String)>) -> AgentConfig {
+    AgentConfig {
+        command: command_path(&settings.agent_command, &AgentConfig::default().command),
+        model: settings.model.as_deref().map(str::trim).filter(|model| !model.is_empty()).map(str::to_owned),
+        env,
+        ..AgentConfig::default()
+    }
+}
+
+/// The program a command setting names: `default` when empty, `~` expanded.
+pub(crate) fn command_path(command: &str, default: &Path) -> PathBuf {
+    match command.trim() {
+        "" => default.to_owned(),
+        // Saved before the settings expanded `~` themselves.
+        path if path.starts_with('~') => expand_user_path(path).unwrap_or_else(|_| PathBuf::from(path)),
+        command => PathBuf::from(command),
     }
 }
 
@@ -1225,7 +1233,7 @@ fn revision_brief(brief: &str, feedback: &str) -> String {
 }
 
 /// A pipeline message as a sentence: capitalised, ending in a full stop.
-fn sentence(message: &str) -> String {
+pub(crate) fn sentence(message: &str) -> String {
     let message = message.trim();
     let mut chars = message.chars();
     let mut text: String = chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default();

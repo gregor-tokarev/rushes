@@ -106,6 +106,7 @@ pub fn run_phase(
         prompt: build_prompt(&phase, &skill_dir.join(SKILL_FILE), &footage),
         resume: resume.clone(),
         add_dirs: vec![skill_dir],
+        ..Invocation::default()
     };
     let (status, run) = run_agent(config, &program, &invocation, on_event, cancel)?;
 
