@@ -22,6 +22,7 @@ use rushes_youtube::{
 
 use super::rules::{self, AccountAccess, BlockingReason};
 use super::service::{YoutubeEvent, YoutubeService, describe_error, report_problem};
+use super::thumbnail::ThumbnailTarget;
 use super::transfer::{PROGRESS_INTERVAL, Throttle, Transfer};
 use crate::state::Problem;
 use crate::ui::{notification, push_notification};
@@ -245,11 +246,6 @@ impl YoutubeService {
 
     pub fn active_upload_count(&self) -> usize {
         self.active.len()
-    }
-
-    /// Why the custom thumbnail of a finished upload wasn't set.
-    pub fn thumbnail_problem(&self, id: UploadId) -> Option<&str> {
-        self.thumbnail_problems.get(&id).map(String::as_str)
     }
 
     /// Processing state of a finished upload, while this run of the app follows it.
@@ -586,7 +582,11 @@ impl YoutubeService {
                 upload.cancel();
             }
             self.outcomes.remove(id);
-            self.thumbnail_problems.remove(id);
+            if let Some(UploadStatus::Processing { video_id } | UploadStatus::Done { video_id }) =
+                self.job(*id).map(|job| job.status.clone())
+            {
+                self.thumbnails.remove(&video_id);
+            }
             self.retired.remove(id);
         }
         self.jobs.retain(|job| !gone.contains(&job.id));
@@ -653,6 +653,7 @@ impl YoutubeService {
                 channel_id: uploaded.channel_id.clone(),
                 privacy,
                 uploaded_at: Utc::now(),
+                thumbnail: None,
             });
             if let Some(publish_at) = video.publish.publish_at {
                 video.status = VideoStatus::Scheduled;
@@ -682,37 +683,10 @@ impl YoutubeService {
         });
 
         if let Some(thumbnail) = thumbnail {
-            self.set_thumbnail(id, client.clone(), youtube_id.clone(), thumbnail, cx);
+            let target = ThumbnailTarget { video_id, youtube_id: youtube_id.clone(), channel: uploaded.channel_id };
+            self.send_thumbnail(target, client.clone(), thumbnail, true, cx);
         }
         self.follow_processing(id, client, youtube_id, cx);
-    }
-
-    /// Custom thumbnails need a verified channel; failing to set one does not fail the upload.
-    fn set_thumbnail(
-        &mut self,
-        id: UploadId,
-        client: Arc<YoutubeClient>,
-        youtube_id: String,
-        thumbnail: PathBuf,
-        cx: &mut Context<Self>,
-    ) {
-        cx.spawn(async move |this, cx| {
-            let result = cx.background_spawn(async move { client.set_thumbnail(&youtube_id, &thumbnail) }).await;
-            if let Err(error) = result {
-                this.update(cx, |this, cx| {
-                    let title = this.video_title(id, cx);
-                    let message = describe_error(&error);
-                    // The toast goes away; the Upload card and the Uploads page keep the reason.
-                    this.thumbnail_problems.insert(id, message.clone());
-                    cx.notify();
-                    push_notification(cx, move |cx| {
-                        notification::warning(message, cx).title(format!("The thumbnail of “{title}” wasn’t set"))
-                    });
-                })
-                .ok();
-            }
-        })
-        .detach();
     }
 
     /// Asks YouTube about the video every few seconds until it is processed.

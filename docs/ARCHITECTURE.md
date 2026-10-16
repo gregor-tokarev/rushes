@@ -184,7 +184,10 @@ GPUI Kit app. Main pieces:
 - Video page: icon + title, properties panel, tabs Script / Notes / Footage & AI edit / Publish.
 - Onboarding (first run) and New-video wizard (templates).
 - Publish: the video's YouTube account (one of several connected accounts, or the
-  default one), metadata form, upload with progress, resume.
+  default one), metadata form, upload with progress, resume. The thumbnail goes up
+  when the upload finishes, and at once when it's chosen for a video already on
+  YouTube (`publish/thumbnail.rs`); `YoutubeLink.thumbnail` records the image YouTube
+  has, so the Thumbnail card can say whether the chosen one is there.
 - AI edit: footage list, edit brief, run timeline (agent messages/tool calls), approve /
   feedback, output preview and "use for upload".
 - `update/` — `UpdateService`: automatic checks, background install, Settings › About ›

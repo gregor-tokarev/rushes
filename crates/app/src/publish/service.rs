@@ -24,6 +24,7 @@ use rushes_youtube::{
 };
 
 use super::rules::AccountAccess;
+use super::thumbnail::ThumbnailSync;
 use super::ui::display_name;
 use super::upload::{ActiveUpload, ProcessingOutcome, Retired};
 use crate::state::{AppEvent, AppState, Problem, Severity};
@@ -151,8 +152,9 @@ pub struct YoutubeService {
     pub(super) jobs: Vec<UploadJob>,
     pub(super) active: HashMap<UploadId, ActiveUpload>,
     pub(super) outcomes: HashMap<UploadId, ProcessingOutcome>,
-    /// Why the custom thumbnail of a finished upload wasn't set, for this run of the app.
-    pub(super) thumbnail_problems: HashMap<UploadId, String>,
+    /// Thumbnails on their way to YouTube, or that YouTube didn't take, by YouTube
+    /// video id, for this run of the app.
+    pub(super) thumbnails: HashMap<String, ThumbnailSync>,
     /// Why stopped uploads stopped offering Resume, for this run of the app.
     pub(super) retired: HashMap<UploadId, Retired>,
     /// A background check of the files of stopped uploads is running.
@@ -317,7 +319,7 @@ impl YoutubeService {
             jobs: Vec::new(),
             active: HashMap::new(),
             outcomes: HashMap::new(),
-            thumbnail_problems: HashMap::new(),
+            thumbnails: HashMap::new(),
             retired: HashMap::new(),
             checking_files: false,
             remote: HashMap::new(),
@@ -1260,7 +1262,7 @@ pub(super) fn describe_error(error: &YoutubeError) -> String {
         }
         YoutubeError::ThumbnailsNotAllowed => {
             "YouTube allows custom thumbnails only on verified channels. Verify yours at youtube.com/verify, \
-             then set the thumbnail in YouTube Studio."
+             then try again."
         }
         YoutubeError::Api { status: 400..=499, .. } => {
             "YouTube refused the request. Check the video’s details and file, then try again."

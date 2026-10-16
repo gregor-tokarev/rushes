@@ -102,7 +102,7 @@ fn uploads_a_video_and_follows_processing(cx: &mut TestAppContext) {
         video.publish.category_id = "28".into();
         video.publish.privacy = Privacy::Public;
         video.publish.file = Some(file.clone());
-        video.publish.thumbnail = Some(thumbnail);
+        video.publish.thumbnail = Some(thumbnail.clone());
     });
 
     let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
@@ -154,7 +154,11 @@ fn uploads_a_video_and_follows_processing(cx: &mut TestAppContext) {
     let saved = workspace.saved_logins().pop().unwrap().1;
     assert_eq!(saved.account.and_then(|account| account.video_count), Some(1));
 
-    // The custom thumbnail was set after the upload.
+    // The custom thumbnail was set after the upload, and the video's link says so.
+    let link = wait_until(cx, "the thumbnail", |cx| {
+        workspace.video(cx, video_id).youtube.filter(|link| link.thumbnail.is_some())
+    });
+    assert_eq!(link.thumbnail, Some(thumbnail));
     let client = service.read_with(cx, |s, _| s.client()).unwrap();
     let info = client.get_video(&youtube_id).unwrap().unwrap();
     assert!(info.thumbnail.is_some_and(|url| url.contains("?v=")), "custom thumbnail");
