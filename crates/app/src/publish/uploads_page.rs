@@ -22,8 +22,8 @@ use crate::database::Chip;
 use crate::route::{Route, VideoTab};
 use crate::state::AppState;
 use crate::ui::{
-    CollectionTable, EmptyState, PAGE_INSET, PageHeader, TableColumn, TableRowButton, format_when, notification,
-    page_frame, state_tooltip, video_icon,
+    CollectionTable, EmptyState, PageHeader, TableColumn, TableRowButton, format_when, notification, page_frame,
+    state_tooltip, video_icon,
 };
 
 /// The Uploads page: every upload job, with resume for interrupted ones.
@@ -306,12 +306,7 @@ impl Render for UploadsPage {
             self.render_empty().into_any_element()
         } else {
             let rows: Vec<TableRowButton> = jobs.iter().map(|job| self.render_row(job, cx)).collect();
-            div()
-                .id("uploads-list")
-                .size_full()
-                .overflow_y_scroll()
-                .child(div().px(PAGE_INSET).pb_8().child(CollectionTable::new("uploads-table", &COLUMNS).rows(rows)))
-                .into_any_element()
+            CollectionTable::new("uploads-table", &COLUMNS).rows(rows).into_any_element()
         };
         page_frame(header, content).id("uploads-page")
     }

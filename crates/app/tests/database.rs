@@ -15,7 +15,7 @@ use gpui_kit::{
     WindowOptions, point, px, size,
 };
 use rushes::database::{DatabaseEvent, DatabasePanel};
-use rushes_core::settings::WeekStart;
+use rushes_core::settings::{WeekStart, Zoom};
 use rushes_core::{
     BuiltinField, Column, DatabaseView, FilterSpec, Privacy, PropertyKind, RunStatus, SortDirection, SortSpec,
     UploadStatus, Video, VideoFormat, VideoId, VideoRow, VideoStatus, ViewId, ViewKind, YoutubeLink,
@@ -457,6 +457,69 @@ fn the_board_scrolls_sideways_to_columns_past_the_window_edge(cx: &mut TestAppCo
     let end = published(cx);
     assert!(end.right() <= edge, "the last column is in view, ending at {:?}", end.right());
     assert!(end.left() > px(0.), "the board stops at its last column, which starts at {:?}", end.left());
+}
+
+#[gpui_kit::test]
+fn a_zoomed_table_keeps_room_beside_its_title_and_scrolls_to_every_column(cx: &mut TestAppContext) {
+    // The page column at the app's minimum window size, beside the sidebar.
+    let db = Fixture::open_sized(cx, size(px(703.), px(600.)));
+    db.step(cx, |_, cx| db.panel.update(cx, |panel, cx| panel.set_zoom(Zoom::new(150), cx)));
+    db.render(cx);
+    let edge = db.with_window(cx, |window, _| window.viewport_size().width);
+    let bounds = |cx: &mut TestAppContext, id: ElementId| db.with_window(cx, |window, _| window.find(id).bounds());
+    let header = |ix: usize| ElementId::from(("col-header", ix));
+
+    // At 150% the Title would be 450px wide, most of the table: it takes
+    // half, and the Status column beside it is in view.
+    let title = bounds(cx, header(0));
+    let status = bounds(cx, header(1));
+    assert!(title.size.width < px(400.), "the Title gives up room: {title:?}");
+    assert!(status.right() < edge, "Status is in view: {status:?}");
+
+    // Widening Status keeps the Title's own width in the view.
+    let y = status.center().y;
+    db.step(cx, |window, cx| window.drag(point(status.right() - px(2.), y), point(status.right() + px(28.), y), cx));
+    let events = db.take_events();
+    let [DatabaseEvent::SaveView(view)] = events.as_slice() else {
+        panic!("expected one SaveView, got {events:?}");
+    };
+    let width = |field| view.columns.iter().find(|layout| layout.column == Column::Builtin(field)).unwrap().width;
+    assert_eq!(width(BuiltinField::Title), 300., "the Title keeps its width for a wider table");
+    assert!(width(BuiltinField::Status) > 150., "Status is wider: {}", width(BuiltinField::Status));
+
+    // The last column is past the window's edge (not even laid out yet);
+    // scrolling sideways brings it in while the Title stays.
+    let last = db.with_window(cx, |window, _| window.try_find("add-property").map(|button| button.bounds()));
+    assert!(last.is_none_or(|last| last.left() > edge), "the last column starts past the window's edge: {last:?}");
+    db.step(cx, |window, cx| window.scroll(header(1), ScrollDelta::Pixels(point(px(-5000.), px(0.))), cx));
+    let end = bounds(cx, "add-property".into());
+    assert!(end.right() <= edge, "the last column is in view, ending at {:?}", end.right());
+    assert_eq!(bounds(cx, header(0)), title, "the Title stays put");
+}
+
+#[gpui_kit::test]
+fn a_wider_window_lets_the_title_be_dragged_wider(cx: &mut TestAppContext) {
+    // At 110% the Title is 330px: held at half the table in the smallest
+    // window, then at its own width in wider ones, it may be dragged wider
+    // as far as the widest window allows.
+    let db = Fixture::open_sized(cx, size(px(703.), px(600.)));
+    db.step(cx, |_, cx| db.panel.update(cx, |panel, cx| panel.set_zoom(Zoom::new(110), cx)));
+    db.render(cx);
+    for width in [800., 1600.] {
+        VisualTestContext::from_window(db.window, cx).simulate_resize(size(px(width), px(900.)));
+        db.render(cx);
+    }
+    let title = db.with_window(cx, |window, _| window.find(("col-header", 0usize)).bounds());
+    assert_eq!(title.size.width, px(330.));
+    let y = title.center().y;
+    db.step(cx, |window, cx| window.drag(point(title.right() - px(2.), y), point(title.right() + px(218.), y), cx));
+    let events = db.take_events();
+    let [DatabaseEvent::SaveView(view)] = events.as_slice() else {
+        panic!("expected one SaveView, got {events:?}");
+    };
+    let width = view.columns.iter().find(|layout| layout.column == Column::Builtin(BuiltinField::Title)).unwrap().width;
+    // About 220px wider at 110%: 500 at 100%.
+    assert!((490.0..=510.0).contains(&width), "expected about 500, got {width}");
 }
 
 #[gpui_kit::test]

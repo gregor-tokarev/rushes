@@ -20,7 +20,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
+    IntoElement, ParentElement as _, Pixels, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
     TestSupportExt as _, WeakEntity, Window, div, px,
 };
 use rushes_core::input::normalize_link;
@@ -45,6 +45,9 @@ use crate::ui::{EmptyState, date_field, format_when, menu_item, video_icon};
 
 /// Narrowest a column can be resized to, in pixels.
 const MIN_COLUMN_WIDTH: f32 = 72.0;
+/// The share of the table the frozen Title column takes at most, so the
+/// columns beside it keep room to scroll into view.
+const TITLE_MAX_SHARE: f32 = 0.5;
 /// Width of the trailing "+" column that adds a property, in pixels.
 const ADD_COLUMN_WIDTH: f32 = 44.0;
 /// Most tag suggestions offered at once.
@@ -79,6 +82,8 @@ pub(crate) struct TableModel {
     pub week_start: WeekStart,
     /// The interface zoom's scale, 1.0 at 100%: column widths are kept at 100%.
     pub scale: f32,
+    /// The table's width in the last frame, which bounds the Title column.
+    pub table_width: Option<Pixels>,
 }
 
 impl Default for TableModel {
@@ -96,6 +101,7 @@ impl Default for TableModel {
             now: DateTime::default(),
             week_start: WeekStart::default(),
             scale: 1.,
+            table_width: None,
         }
     }
 }
@@ -133,6 +139,45 @@ impl VideoTable {
     /// trailing add-property column.
     pub fn column_at(&self, col_ix: usize) -> Option<Column> {
         self.model.columns.get(col_ix).map(|layout| layout.column)
+    }
+
+    /// Takes the table's width, measured in the frame just laid out. Returns
+    /// whether the columns change: the Title's widest, while it is shown.
+    pub fn set_table_width(&mut self, width: Pixels) -> bool {
+        let title = Column::Builtin(BuiltinField::Title);
+        let before = self.title_bound(title);
+        self.model.table_width = Some(width);
+        self.model.columns.iter().any(|layout| layout.column == title) && self.title_bound(title) != before
+    }
+
+    /// The width, at 100%, the view keeps for `column` that a resize left
+    /// `width` wide. A Title held at its widest keeps the width it had, so
+    /// a narrow window doesn't shrink it for good.
+    pub fn kept_width(&self, column: Column, width: Pixels) -> f32 {
+        let layout = self.model.columns.iter().find(|layout| layout.column == column);
+        if let (Some(layout), Some(max)) = (layout, self.title_bound(column))
+            && width >= max
+            && self.column_width(layout) > max
+        {
+            return layout.width;
+        }
+        (f32::from(width) / self.model.scale).round()
+    }
+
+    /// A column's width at the current zoom.
+    fn column_width(&self, layout: &ColumnLayout) -> Pixels {
+        px(layout.width.max(MIN_COLUMN_WIDTH) * self.model.scale)
+    }
+
+    /// The widest the Title column gets in a table `table_width` wide.
+    fn title_max_width(&self, table_width: Pixels) -> Pixels {
+        (table_width * TITLE_MAX_SHARE).max(px(MIN_COLUMN_WIDTH * self.model.scale))
+    }
+
+    /// The widest `column` gets in the measured table, if it is the Title.
+    fn title_bound(&self, column: Column) -> Option<Pixels> {
+        let table_width = self.model.table_width.filter(|_| column == Column::Builtin(BuiltinField::Title))?;
+        Some(self.title_max_width(table_width))
     }
 
     fn render_cell(&self, row: &VideoRow, column: Column, window: &mut Window, cx: &mut App) -> AnyElement {
@@ -658,8 +703,9 @@ impl TableDelegate for VideoTable {
                 .any(|def| def.id == id && def.kind == PropertyKind::Number)
         );
         TableColumn::new(column_key(column), name)
-            .width(px(layout.width.max(MIN_COLUMN_WIDTH) * self.model.scale))
+            .width(self.column_width(layout))
             .min_width(px(MIN_COLUMN_WIDTH * self.model.scale))
+            .when_some(self.title_bound(column), |this, max| this.max_width(max))
             .movable(false)
             .selectable(false)
             .when(column == Column::Builtin(BuiltinField::Title), |this| this.fixed_left())

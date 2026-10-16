@@ -19,7 +19,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Global, InteractiveElement as _,
     IntoElement, KeyBinding, NoAction, ParentElement as _, Pixels, Render, ScrollHandle, SharedString, Styled as _,
-    Subscription, Task, Window, actions, div,
+    Subscription, Task, Window, actions, canvas, div,
 };
 use rushes_core::input::{normalize_title, parse_number};
 use rushes_core::settings::{WeekStart, Zoom};
@@ -125,6 +125,9 @@ pub struct DatabasePanel {
     week_start: WeekStart,
     /// The interface zoom: the table's rows and columns are sized in pixels.
     zoom: Zoom,
+    /// The table's width in the last frame: the frozen Title column takes at
+    /// most half of it.
+    table_width: Option<Pixels>,
     /// The view whose tab was right-clicked, for the tab context menu.
     pub(super) menu_view: Option<ViewId>,
     /// The sort rule whose column the Sort popover is choosing, if any.
@@ -244,6 +247,7 @@ impl DatabasePanel {
             tags_target: None,
             week_start: WeekStart::default(),
             zoom: Zoom::DEFAULT,
+            table_width: None,
             menu_view: None,
             sort_picker: None,
             view_tabs_overflow: Rc::default(),
@@ -301,6 +305,24 @@ impl DatabasePanel {
             self.zoom = zoom;
             self.refresh(cx);
         }
+    }
+
+    /// Records the table's width, measured in the frame just laid out, and
+    /// hands it to the table: the Title column takes at most half of it.
+    /// Only the columns are refreshed, not the rows. Returns whether they
+    /// changed.
+    fn set_table_width(&mut self, width: Pixels, cx: &mut Context<Self>) -> bool {
+        if self.table_width.replace(width) == Some(width) {
+            return false;
+        }
+        self.table.update(cx, |table, cx| {
+            let changed = table.delegate_mut().set_table_width(width);
+            if changed {
+                table.refresh(cx);
+                cx.notify();
+            }
+            changed
+        })
     }
 
     /// Shows `view` without reporting it back as [`DatabaseEvent::ActiveViewChanged`].
@@ -1011,6 +1033,7 @@ impl DatabasePanel {
             now: Utc::now(),
             week_start: self.week_start,
             scale: self.zoom.factor(),
+            table_width: self.table_width,
         };
         let selected_ix = self.selected.and_then(|id| model.rows.iter().position(|row| row.video.id == id));
         self.table.update(cx, |table, cx| {
@@ -1042,11 +1065,14 @@ impl DatabasePanel {
             }
             TableEvent::ClearSelection => self.selected = None,
             TableEvent::ColumnWidthsChanged(widths) => {
-                let scale = self.zoom.factor();
-                let widths: Vec<(Column, Pixels)> = widths
+                let table = table.read(cx).delegate();
+                let widths: Vec<(Column, f32)> = widths
                     .iter()
                     .enumerate()
-                    .filter_map(|(ix, width)| Some((table.read(cx).delegate().column_at(ix)?, *width)))
+                    .filter_map(|(ix, width)| {
+                        let column = table.column_at(ix)?;
+                        Some((column, table.kept_width(column, *width)))
+                    })
                     .collect();
                 let properties = self.properties.clone();
                 self.update_view(
@@ -1054,7 +1080,7 @@ impl DatabasePanel {
                         let mut columns = resolve_columns(view, &properties);
                         for (column, width) in widths {
                             if let Some(layout) = columns.iter_mut().find(|layout| layout.column == column) {
-                                layout.width = (f32::from(width) / scale).round();
+                                layout.width = width;
                             }
                         }
                         view.columns = columns;
@@ -1124,6 +1150,7 @@ impl DatabasePanel {
             hidden => count.push_str(&format!(" · {hidden} archived hidden")),
         }
         let panel = cx.weak_entity();
+        let measured = panel.clone();
 
         v_flex()
             .flex_1()
@@ -1146,9 +1173,26 @@ impl DatabasePanel {
                     // A custom row height leaves the cells' text size to the table.
                     .child(
                         div()
+                            .relative()
                             .size_full()
                             .text_sm()
-                            .child(DataTable::new(&self.table).bordered(false).with_size(Size::Size(row_height))),
+                            .child(DataTable::new(&self.table).bordered(false).with_size(Size::Size(row_height)))
+                            .child(
+                                canvas(
+                                    move |bounds, window, cx| {
+                                        let width = bounds.size.width;
+                                        let changed = measured
+                                            .update(cx, |panel, cx| panel.set_table_width(width, cx))
+                                            .unwrap_or(false);
+                                        if changed {
+                                            window.request_animation_frame();
+                                        }
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .size_full(),
+                            ),
                     ),
             )
             .when(rows > 0, |this| {
