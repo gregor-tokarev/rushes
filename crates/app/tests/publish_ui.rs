@@ -1237,11 +1237,8 @@ fn the_done_card_shows_what_youtube_has_and_what_did_not_work(cx: &mut TestAppCo
     });
 }
 
-#[gpui_kit::test]
-fn a_thumbnail_chosen_after_the_upload_goes_to_youtube(cx: &mut TestAppContext) {
-    let Some(emulators) = Emulators::start() else { return };
-    let workspace = Workspace::open(cx, emulators.backend());
-    workspace.sign_in(cx, "creator@example.com");
+/// A private video uploaded without a thumbnail: its id and its YouTube id.
+fn uploaded_without_thumbnail(cx: &mut TestAppContext, workspace: &Workspace) -> (VideoId, String) {
     let service = workspace.service.clone();
     let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
     let video_id = workspace.create_video(cx, "It’s Just Autocomplete", |video| {
@@ -1257,6 +1254,16 @@ fn a_thumbnail_chosen_after_the_upload_goes_to_youtube(cx: &mut TestAppContext) 
             _ => None,
         }
     });
+    (video_id, youtube_id)
+}
+
+#[gpui_kit::test]
+fn a_thumbnail_chosen_after_the_upload_goes_to_youtube(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let (video_id, youtube_id) = uploaded_without_thumbnail(cx, &workspace);
     let thumbnail_on_youtube = |cx: &mut TestAppContext| {
         let client = service.read_with(cx, |s, _| s.client()).unwrap();
         client.get_video(&youtube_id).unwrap().unwrap().thumbnail.is_some_and(|url| url.contains("?v="))
@@ -1298,6 +1305,32 @@ fn a_thumbnail_chosen_after_the_upload_goes_to_youtube(cx: &mut TestAppContext) 
         assert!(window.find("youtube-thumbnail").visible());
         assert!(window.try_find("set-thumbnail-on-youtube").is_none());
     });
+}
+
+#[gpui_kit::test]
+fn an_image_chosen_again_while_the_last_one_sends_follows_it(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let (video_id, youtube_id) = uploaded_without_thumbnail(cx, &workspace);
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    // YouTube refuses the first send; the same file chosen again meanwhile (it may
+    // have new contents) goes once that one is done.
+    emulators.inject_fault(
+        json!({"method": "POST", "path": "/upload/youtube/v3/thumbnails/set", "status": 403, "reason": "forbidden"}),
+    );
+    let image = publish_support::png_file(workspace.dir.path(), "thumbnail.png");
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        drop_files(window, "thumbnail-drop", vec![image.clone()], cx);
+        drop_files(window, "thumbnail-drop", vec![image.clone()], cx);
+    });
+    let link = wait_until(cx, "the thumbnail on YouTube", |cx| {
+        workspace.video(cx, video_id).youtube.filter(|link| link.thumbnail.is_some())
+    });
+    assert_eq!(link.thumbnail, Some(image));
+    assert_eq!(service.read_with(cx, |s, _| s.thumbnail_sync(&youtube_id).cloned()), None);
 }
 
 #[gpui_kit::test]

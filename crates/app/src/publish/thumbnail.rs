@@ -50,11 +50,16 @@ impl YoutubeService {
     }
 
     /// Sets the image chosen for `video_id` as the custom thumbnail of its video on
-    /// YouTube. An image chosen while another is on its way follows that one.
+    /// YouTube. An image chosen while another is on its way follows that one. While
+    /// the video uploads again, the upload takes the image to its new video instead.
     pub fn set_youtube_thumbnail(&mut self, video_id: VideoId, cx: &mut Context<Self>) {
+        if self.is_uploading_any(&[video_id]) {
+            return;
+        }
         let Some(video) = self.state.read(cx).video(video_id) else { return };
         let (Some(link), Some(image)) = (video.youtube.clone(), video.publish.thumbnail.clone()) else { return };
         if matches!(self.thumbnails.get(&link.video_id), Some(ThumbnailSync::Sending(_))) {
+            self.thumbnails_chosen_again.insert(link.video_id);
             return;
         }
         let target = ThumbnailTarget { video_id, youtube_id: link.video_id, channel: link.channel_id };
@@ -133,8 +138,8 @@ impl YoutubeService {
             }
         }
         cx.notify();
-        // Another image chosen while this one was on its way follows it.
-        if video.is_some_and(|video| video.publish.thumbnail.is_some_and(|chosen| chosen != image)) {
+        // An image chosen while this one was on its way follows it.
+        if self.thumbnails_chosen_again.remove(&target.youtube_id) && video.is_some() {
             self.set_youtube_thumbnail(target.video_id, cx);
         }
     }

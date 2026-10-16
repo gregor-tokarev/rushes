@@ -155,6 +155,9 @@ pub struct YoutubeService {
     /// Thumbnails on their way to YouTube, or that YouTube didn't take, by YouTube
     /// video id, for this run of the app.
     pub(super) thumbnails: HashMap<String, ThumbnailSync>,
+    /// YouTube videos whose thumbnail was chosen again while one was on its way, maybe
+    /// the same file with new contents: it goes once that one is done.
+    pub(super) thumbnails_chosen_again: HashSet<String>,
     /// Why stopped uploads stopped offering Resume, for this run of the app.
     pub(super) retired: HashMap<UploadId, Retired>,
     /// A background check of the files of stopped uploads is running.
@@ -320,6 +323,7 @@ impl YoutubeService {
             active: HashMap::new(),
             outcomes: HashMap::new(),
             thumbnails: HashMap::new(),
+            thumbnails_chosen_again: HashSet::new(),
             retired: HashMap::new(),
             checking_files: false,
             remote: HashMap::new(),

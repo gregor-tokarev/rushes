@@ -586,6 +586,7 @@ impl YoutubeService {
                 self.job(*id).map(|job| job.status.clone())
             {
                 self.thumbnails.remove(&video_id);
+                self.thumbnails_chosen_again.remove(&video_id);
             }
             self.retired.remove(id);
         }
