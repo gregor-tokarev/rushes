@@ -46,6 +46,7 @@ use super::rules::{
     THUMBNAIL_MAX_BYTES, TITLE_MAX_CHARS, tags_length,
 };
 use super::service::{Connection, YoutubeAccount, YoutubeEvent, YoutubeService};
+use super::thumbnail::ThumbnailSync;
 use super::transfer::{format_bytes, format_duration, format_eta, format_speed};
 use super::ui::{
     ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, sign_in_progress, status_line, youtube_link,
@@ -62,7 +63,9 @@ use crate::ui::{menu_item, notification, scrolling_menu, state_tooltip, warning_
 const SAVE_DELAY: Duration = Duration::from_millis(500);
 const PRIVACY_HELP: [&str; 3] =
     ["Only you can watch it.", "Anyone with the link can watch it.", "Everyone can find and watch it."];
-const THUMBNAIL_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "gif", "bmp"];
+/// What YouTube takes as a custom thumbnail.
+const THUMBNAIL_EXTENSIONS: [&str; 3] = ["jpg", "jpeg", "png"];
+const NOT_A_THUMBNAIL: &str = "Choose a JPG or PNG image.";
 /// Wide enough for the cards' buttons; the form takes the rest of the page column.
 const SIDE_COLUMN_WIDTH: Rems = Rems(17.);
 /// The narrowest the form gets beside the side column.
@@ -113,6 +116,20 @@ impl FileTarget {
             FileTarget::Thumbnail => "~/Pictures/thumbnail.png",
         }
     }
+}
+
+/// Where the chosen thumbnail stands on YouTube, for a video that is there.
+#[derive(Clone, Debug, PartialEq)]
+enum YoutubeThumbnail {
+    Sending,
+    Set,
+    /// Chosen while YouTube couldn't be asked, or before Rushes set thumbnails of
+    /// uploaded videos.
+    NotSet,
+    /// YouTube didn't take it; why, as the creator should read it.
+    Failed(SharedString),
+    /// No image is chosen; YouTube keeps the one it has.
+    Kept,
 }
 
 /// A video file the creator is likely to upload.
@@ -701,13 +718,45 @@ impl PublishPanel {
 
     fn set_thumbnail(&mut self, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         if path.as_deref().is_some_and(|path| !is_thumbnail_image(path)) {
-            window.push_notification(notification::warning("Choose a JPG, PNG, GIF or BMP image.", cx), cx);
+            window.push_notification(notification::warning(NOT_A_THUMBNAIL, cx), cx);
             return;
         }
+        let chosen = path.is_some();
         self.draft.thumbnail = path;
         self.thumbnail_size = None;
         self.refresh_thumbnail(cx);
         self.schedule_save(Field::Thumbnail, cx);
+        // An upload under way takes the image to YouTube when it finishes.
+        if chosen && self.uploaded_before(cx) && !self.is_uploading(cx) {
+            self.send_thumbnail(cx);
+        }
+    }
+
+    /// Sets the chosen image as the thumbnail of the video on YouTube.
+    fn send_thumbnail(&mut self, cx: &mut Context<Self>) {
+        self.save_pending(cx);
+        let video_id = self.video_id;
+        self.service.update(cx, |service, cx| service.set_youtube_thumbnail(video_id, cx));
+    }
+
+    /// Where the chosen thumbnail stands on YouTube, while the video is there and no
+    /// upload is under way: an upload takes the chosen image to its new video.
+    fn youtube_thumbnail(&self, cx: &App) -> Option<YoutubeThumbnail> {
+        if self.is_uploading(cx) {
+            return None;
+        }
+        let link = self.state.read(cx).video(self.video_id)?.youtube.as_ref()?;
+        let chosen = self.draft.thumbnail.as_ref();
+        Some(match (self.service.read(cx).thumbnail_sync(&link.video_id), chosen) {
+            (Some(ThumbnailSync::Sending(_)), _) => YoutubeThumbnail::Sending,
+            (Some(ThumbnailSync::Failed { image, problem }), Some(chosen)) if image == chosen => {
+                YoutubeThumbnail::Failed(problem.clone().into())
+            }
+            (_, Some(chosen)) if link.thumbnail.as_ref() == Some(chosen) => YoutubeThumbnail::Set,
+            (_, Some(_)) => YoutubeThumbnail::NotSet,
+            (_, None) if link.thumbnail.is_some() => YoutubeThumbnail::Kept,
+            (_, None) => return None,
+        })
     }
 
     fn choose_file(&mut self, window: &mut Window, cx: &mut Context<Self>, thumbnail: bool) {
@@ -760,9 +809,7 @@ impl PublishPanel {
                 "Type the path of the image instead, or drop the file on the Thumbnail card.",
                 target.placeholder(),
             )
-            .check(|path| {
-                if is_thumbnail_image(path) { Ok(()) } else { Err("Choose a JPG, PNG, GIF or BMP image.".into()) }
-            }),
+            .check(|path| if is_thumbnail_image(path) { Ok(()) } else { Err(NOT_A_THUMBNAIL.into()) }),
         };
         let panel = cx.weak_entity();
         path_prompt::open(request, window, cx, move |path, _, _| {
@@ -1313,8 +1360,6 @@ impl PublishPanel {
                     .video(self.video_id)
                     .and_then(|video| video.youtube.as_ref())
                     .map(|link| format!("https://studio.youtube.com/video/{}/edit", link.video_id));
-                let thumbnail_problem =
-                    service.thumbnail_problem(job.id).map(|problem| SharedString::from(problem.to_owned()));
                 v_flex()
                     .gap_3()
                     .child(
@@ -1341,21 +1386,6 @@ impl PublishPanel {
                                     .when_some(detail, |this, detail| this.child(help_text(detail, cx))),
                             ),
                     )
-                    .when_some(thumbnail_problem, |this, problem| {
-                        this.child(
-                            div()
-                                .id("thumbnail-not-set")
-                                .child(status_line(
-                                    IconName::TriangleAlert,
-                                    theme.warning,
-                                    "Thumbnail not set",
-                                    Some(problem),
-                                    cx,
-                                ))
-                                // Tests check that the note stays on the card.
-                                .test_support(),
-                        )
-                    })
                     .child(
                         h_flex()
                             .flex_wrap()
@@ -1838,6 +1868,8 @@ impl PublishPanel {
             _ => {}
         }
         let (drop_border, drop_fill) = (theme.primary, theme.drop_target);
+        let on_youtube = self.youtube_thumbnail(cx).map(|state| render_youtube_thumbnail(state, cx));
+        let theme = cx.theme();
         card("publish-thumbnail", "Thumbnail").child(
             v_flex()
                 .gap_3()
@@ -1862,6 +1894,7 @@ impl PublishPanel {
                 .when_some(current.as_ref(), |this, path| {
                     this.child(div().text_xs().text_color(theme.muted_foreground).truncate().child(file_name(path)))
                 })
+                .when_some(on_youtube, |this, on_youtube| this.child(on_youtube))
                 .child(
                     h_flex()
                         .gap_2()
@@ -2225,6 +2258,37 @@ fn file_choices(footage_dir: &Path, cuts: &[PathBuf]) -> Vec<FileChoice> {
             .map(|file| FileChoice { path: file.path, source: "Footage" }),
     );
     choices
+}
+
+/// The chosen thumbnail on YouTube, under the image on the Thumbnail card.
+fn render_youtube_thumbnail(state: YoutubeThumbnail, cx: &mut Context<PublishPanel>) -> AnyElement {
+    let theme = cx.theme();
+    let send = |label: &'static str| {
+        h_flex().child(
+            Button::new("set-thumbnail-on-youtube")
+                .label(label)
+                .small()
+                .outline()
+                .on_click(cx.listener(|this, _, _, cx| this.send_thumbnail(cx))),
+        )
+    };
+    let body = match state {
+        YoutubeThumbnail::Sending => h_flex()
+            .gap_2()
+            .child(Spinner::new().small().color(theme.muted_foreground))
+            .child(div().text_sm().child("Sending to YouTube…")),
+        YoutubeThumbnail::Set => status_line(IconName::CircleCheck, theme.success, "On YouTube", None, cx),
+        YoutubeThumbnail::NotSet => {
+            v_flex().gap_2().child(help_text("YouTube doesn’t have this image yet.", cx)).child(send("Set on YouTube"))
+        }
+        YoutubeThumbnail::Failed(problem) => v_flex()
+            .gap_2()
+            .child(status_line(IconName::TriangleAlert, theme.warning, "Not set on YouTube", Some(problem), cx))
+            .child(send("Try again")),
+        YoutubeThumbnail::Kept => help_text("YouTube keeps its thumbnail until you choose another image.", cx),
+    };
+    // Tests check what the card says.
+    div().id("youtube-thumbnail").child(body).test_support().into_any_element()
 }
 
 fn is_thumbnail_image(path: &Path) -> bool {

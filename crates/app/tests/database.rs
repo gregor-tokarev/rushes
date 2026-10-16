@@ -929,6 +929,7 @@ fn a_live_video_and_a_finished_edit_win_over_newer_attempts(cx: &mut TestAppCont
                             channel_id: "UC1".into(),
                             privacy: Privacy::Public,
                             uploaded_at: Utc::now(),
+                            thumbnail: None,
                         });
                         row.latest_upload = Some(UploadStatus::Cancelled);
                         row.latest_run = Some(RunStatus::Failed);

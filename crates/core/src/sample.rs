@@ -156,6 +156,7 @@ fn mini_pc_review(options: &Options, today: NaiveDate) -> Sample {
         channel_id: "UCq3v8bX2fZ0sAmPleCh4nnel".to_string(),
         privacy: Privacy::Public,
         uploaded_at,
+        thumbnail: None,
     });
 
     let script = vec![

@@ -167,6 +167,7 @@ mod tests {
             channel_id: "UC1".into(),
             privacy: rushes_core::Privacy::Unlisted,
             uploaded_at: now,
+            thumbnail: None,
         };
         let live = YoutubeState::Live(&link);
         assert_eq!(youtube(live, false), "Unlisted");

@@ -18,6 +18,7 @@ mod panel;
 mod rules;
 mod service;
 mod settings;
+mod thumbnail;
 mod transfer;
 mod ui;
 mod upload;
@@ -34,6 +35,7 @@ pub use panel::PublishPanel;
 pub use rules::{AccountAccess, BlockingReason, CATEGORIES, Category, blocking_reasons, tags_length};
 pub use service::{Connection, EmulatorCheck, YoutubeAccount, YoutubeEvent, YoutubeService, backend_config};
 pub use settings::YoutubeSettings;
+pub use thumbnail::ThumbnailSync;
 pub use transfer::Transfer;
 pub use upload::{
     INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, Retired, Retry, UPLOAD_FILE_LOCKED, UploadError,
