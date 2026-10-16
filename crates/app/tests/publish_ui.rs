@@ -20,7 +20,8 @@ use publish_support::{Emulators, Workspace, wait_until};
 use serde_json::json;
 use rushes::ai_edit::{AiEditPanel, PipelineService};
 use rushes::publish::{
-    AccountBadge, BlockingReason, CHAPTERS_HEADING, Connection, PublishPanel, UploadsPage, YoutubeSettings,
+    AccountBadge, BlockingReason, CHAPTERS_HEADING, Connection, PublishPanel, ThumbnailSync, UploadsPage,
+    YoutubeSettings,
 };
 use rushes::route::{Route, SettingsSection, VideoTab};
 use rushes::state::{AppEvent, Severity};
@@ -288,6 +289,7 @@ fn a_finished_upload_says_why_it_cannot_go_up_again(cx: &mut TestAppContext) {
             channel_id: "UC1".into(),
             privacy: Privacy::Public,
             uploaded_at: Utc::now(),
+            thumbnail: None,
         });
     });
     let done = UploadJob {
@@ -330,6 +332,7 @@ fn after_a_failed_reupload_the_button_still_says_upload_again(cx: &mut TestAppCo
             channel_id: "UC1".into(),
             privacy: Privacy::Private,
             uploaded_at: Utc::now(),
+            thumbnail: None,
         });
     });
     // "Upload again…" ran out of quota.
@@ -508,6 +511,7 @@ fn the_uploads_page_offers_what_each_job_allows(cx: &mut TestAppContext) {
             channel_id: "UC1".into(),
             privacy: Privacy::Unlisted,
             uploaded_at: Utc::now(),
+            thumbnail: None,
         });
     });
     let job = |status: UploadStatus, session_url: Option<&str>| UploadJob {
@@ -1225,11 +1229,108 @@ fn the_done_card_shows_what_youtube_has_and_what_did_not_work(cx: &mut TestAppCo
     window(cx, handle, |window, cx| {
         window.clear_notifications(cx);
         window.render_frame(cx);
-        // "Private · goes public …", the lasting thumbnail note, and where edits go.
+        // "Private · goes public …", the lasting thumbnail note with another try, and
+        // where edits go.
         assert!(window.find("youtube-visibility").visible());
-        assert!(window.find("thumbnail-not-set").visible());
+        assert!(window.within("youtube-thumbnail").find("set-thumbnail-on-youtube").visible());
         assert!(window.find("publish-next-upload-note").visible());
     });
+}
+
+/// A private video uploaded without a thumbnail: its id and its YouTube id.
+fn uploaded_without_thumbnail(cx: &mut TestAppContext, workspace: &Workspace) -> (VideoId, String) {
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "It’s Just Autocomplete", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.privacy = Privacy::Private;
+    });
+    let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    let youtube_id = wait_until(cx, "the processed upload", |cx| {
+        cx.executor().advance_clock(Duration::from_secs(5));
+        match service.read_with(cx, |s, _| s.job(upload).map(|job| job.status.clone())) {
+            Some(UploadStatus::Done { video_id }) => Some(video_id),
+            Some(UploadStatus::Failed { error }) => panic!("upload failed: {error}"),
+            _ => None,
+        }
+    });
+    (video_id, youtube_id)
+}
+
+#[gpui_kit::test]
+fn a_thumbnail_chosen_after_the_upload_goes_to_youtube(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let (video_id, youtube_id) = uploaded_without_thumbnail(cx, &workspace);
+    let thumbnail_on_youtube = |cx: &mut TestAppContext| {
+        let client = service.read_with(cx, |s, _| s.client()).unwrap();
+        client.get_video(&youtube_id).unwrap().unwrap().thumbnail.is_some_and(|url| url.contains("?v="))
+    };
+    assert!(!thumbnail_on_youtube(cx), "YouTube shows a frame of the video");
+
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    // YouTube refuses the image at first: the card says why and offers another try.
+    emulators.inject_fault(
+        json!({"method": "POST", "path": "/upload/youtube/v3/thumbnails/set", "status": 403, "reason": "forbidden"}),
+    );
+    let image = publish_support::png_file(workspace.dir.path(), "thumbnail.png");
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        drop_files(window, "thumbnail-drop", vec![image.clone()], cx);
+    });
+    let problem = wait_until(cx, "the refusal", |cx| {
+        service.read_with(cx, |s, _| match s.thumbnail_sync(&youtube_id) {
+            Some(ThumbnailSync::Failed { problem, .. }) => Some(problem.clone()),
+            _ => None,
+        })
+    });
+    assert!(problem.contains("verified channels"), "{problem}");
+    assert_eq!(workspace.video(cx, video_id).youtube.unwrap().thumbnail, None);
+    assert!(!thumbnail_on_youtube(cx));
+
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.within("youtube-thumbnail").click("set-thumbnail-on-youtube", cx);
+    });
+    let link = wait_until(cx, "the thumbnail on YouTube", |cx| {
+        workspace.video(cx, video_id).youtube.filter(|link| link.thumbnail.is_some())
+    });
+    assert_eq!(link.thumbnail, Some(image));
+    assert_eq!(service.read_with(cx, |s, _| s.thumbnail_sync(&youtube_id).cloned()), None);
+    assert!(thumbnail_on_youtube(cx), "the custom thumbnail is on YouTube");
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("youtube-thumbnail").visible());
+        assert!(window.try_find("set-thumbnail-on-youtube").is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn an_image_chosen_again_while_the_last_one_sends_follows_it(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let (video_id, youtube_id) = uploaded_without_thumbnail(cx, &workspace);
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    // YouTube refuses the first send; the same file chosen again meanwhile (it may
+    // have new contents) goes once that one is done.
+    emulators.inject_fault(
+        json!({"method": "POST", "path": "/upload/youtube/v3/thumbnails/set", "status": 403, "reason": "forbidden"}),
+    );
+    let image = publish_support::png_file(workspace.dir.path(), "thumbnail.png");
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        drop_files(window, "thumbnail-drop", vec![image.clone()], cx);
+        drop_files(window, "thumbnail-drop", vec![image.clone()], cx);
+    });
+    let link = wait_until(cx, "the thumbnail on YouTube", |cx| {
+        workspace.video(cx, video_id).youtube.filter(|link| link.thumbnail.is_some())
+    });
+    assert_eq!(link.thumbnail, Some(image));
+    assert_eq!(service.read_with(cx, |s, _| s.thumbnail_sync(&youtube_id).cloned()), None);
 }
 
 #[gpui_kit::test]
