@@ -7,6 +7,7 @@
 //! were drawn, so a Publish tab opened later shows the outcome too.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -24,7 +25,7 @@ use rushes_pipeline::{
     read_transcript, write_details,
 };
 
-use super::chapters::{CHAPTERS_HEADING, insert_chapters};
+use super::chapters::{CHAPTERS_HEADING, MIN_CHAPTERS};
 use super::rules::{DESCRIPTION_MAX_BYTES, fit_details};
 use crate::ai_edit::{agent_config, command_path, sentence};
 use crate::state::{AppEvent, AppState};
@@ -585,7 +586,7 @@ fn apply_details(video: &mut Video, written: VideoDetails) -> VideoDetails {
     let room = chapters.as_ref().map_or(DESCRIPTION_MAX_BYTES, |list| DESCRIPTION_MAX_BYTES - list.len() - 2);
     let mut details = fit_details(written, room);
     if let Some(list) = chapters {
-        details.description = insert_chapters(&details.description, &list);
+        details.description = keep_chapters(&details.description, &list);
     }
     publish.title.clone_from(&details.title);
     publish.description.clone_from(&details.description);
@@ -593,11 +594,54 @@ fn apply_details(video: &mut Video, written: VideoDetails) -> VideoDetails {
     details
 }
 
-/// The chapter list in `description`: its heading to the first blank line.
+/// The chapter list in `description`: the one Rushes inserts, from its heading to the
+/// first blank line, or one typed by hand, a paragraph of timed lines from 0:00.
 fn chapter_list(description: &str) -> Option<&str> {
-    let start = description.find(CHAPTERS_HEADING)?;
-    let end = description[start..].find("\n\n").map_or(description.len(), |offset| start + offset);
-    Some(description[start..end].trim_end())
+    chapter_span(description).map(|span| &description[span])
+}
+
+fn chapter_span(description: &str) -> Option<Range<usize>> {
+    if let Some(start) = description.find(CHAPTERS_HEADING) {
+        let end = description[start..].find("\n\n").map_or(description.len(), |offset| start + offset);
+        return Some(start..start + description[start..end].trim_end().len());
+    }
+    let mut offset = 0;
+    for paragraph in description.split("\n\n") {
+        let lines: Vec<&str> = paragraph.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+        let timed = lines.len() >= MIN_CHAPTERS
+            && (lines[0].starts_with("0:00") || lines[0].starts_with("00:00"))
+            && lines.iter().all(|line| starts_with_time(line));
+        if timed {
+            let start = offset + paragraph.len() - paragraph.trim_start().len();
+            return Some(start..offset + paragraph.trim_end().len());
+        }
+        offset += paragraph.len() + 2;
+    }
+    None
+}
+
+/// Whether `line` starts with a chapter time: `1:05`, `12:05` or `1:02:05`.
+fn starts_with_time(line: &str) -> bool {
+    let digits = |part: &str, lengths: std::ops::RangeInclusive<usize>| {
+        lengths.contains(&part.len()) && part.bytes().all(|byte| byte.is_ascii_digit())
+    };
+    let mut parts = line.split_whitespace().next().unwrap_or_default().split(':');
+    let hours_or_minutes = parts.next().is_some_and(|part| digits(part, 1..=2));
+    let rest: Vec<&str> = parts.collect();
+    hours_or_minutes && (1..=2).contains(&rest.len()) && rest.iter().all(|part| digits(part, 2..=2))
+}
+
+/// `description` with the chapter `list` it had before the agent wrote it: as the
+/// agent kept it, in place of a list the agent changed, or after the text.
+fn keep_chapters(description: &str, list: &str) -> String {
+    if description.contains(list) {
+        return description.to_owned();
+    }
+    if let Some(span) = chapter_span(description) {
+        return format!("{}{list}{}", &description[..span.start], &description[span.end..]);
+    }
+    let body = description.trim_end();
+    if body.is_empty() { list.to_owned() } else { format!("{body}\n\n{list}") }
 }
 
 /// What the creator reads when `who` ("the agent", "Codex") couldn't finish.
@@ -649,9 +693,30 @@ mod tests {
     }
 
     #[test]
+    fn a_chapter_list_typed_by_hand_is_kept_too() {
+        let list = "0:00 The experiment\n0:42 Specs and price\n1:30 Week one";
+        let mut video = Video::new("Mini PC");
+        video.publish.description = format!("Old words.\n\n{list}\n\nhttps://example.com");
+        let written = |description: &str| VideoDetails { description: description.into(), ..VideoDetails::default() };
+
+        apply_details(&mut video, written("New words.\n\nhttps://example.com"));
+        assert_eq!(video.publish.description, format!("New words.\n\nhttps://example.com\n\n{list}"));
+        // Kept as it was, it stays where the agent put it.
+        apply_details(&mut video, written(&format!("Newer words.\n\n{list}")));
+        assert_eq!(video.publish.description, format!("Newer words.\n\n{list}"));
+        // Changed, the creator's list takes its place.
+        apply_details(&mut video, written("Words.\n\n0:00 Intro\n0:40 Specs\n1:30 Week 1\n\nBye."));
+        assert_eq!(video.publish.description, format!("Words.\n\n{list}\n\nBye."));
+    }
+
+    #[test]
     fn a_chapter_list_runs_to_the_first_blank_line() {
         assert_eq!(chapter_list("Hi.\n\nChapters:\n0:00 Intro\n\nBye."), Some("Chapters:\n0:00 Intro"));
         assert_eq!(chapter_list("Chapters:\n0:00 Intro\n"), Some("Chapters:\n0:00 Intro"));
+        assert_eq!(chapter_list("Hi.\n\n0:00 A\n1:05 B\n1:02:05 - C\n\nBye."), Some("0:00 A\n1:05 B\n1:02:05 - C"));
+        assert_eq!(chapter_list("1:00 A\n2:00 B\n3:00 C"), None, "YouTube needs the first at 0:00");
+        assert_eq!(chapter_list("0:00 A\nThen B\n3:00 C"), None);
+        assert_eq!(chapter_list("0:00 A\n1:00 B"), None, "too short for YouTube");
         assert_eq!(chapter_list("No list."), None);
     }
 
