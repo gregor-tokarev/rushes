@@ -138,8 +138,11 @@ impl YoutubeService {
             }
         }
         cx.notify();
-        // An image chosen while this one was on its way follows it.
-        if self.thumbnails_chosen_again.remove(&target.youtube_id) && video.is_some() {
+        // An image chosen while this one was on its way follows it: chosen again, or
+        // saved since (the form saves a moment after the choice).
+        let chosen_again = self.thumbnails_chosen_again.remove(&target.youtube_id);
+        let changed = video.as_ref().is_some_and(|video| video.publish.thumbnail.as_ref() != Some(&image));
+        if video.is_some() && (chosen_again || changed) {
             self.set_youtube_thumbnail(target.video_id, cx);
         }
     }
