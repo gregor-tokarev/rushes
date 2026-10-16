@@ -15,7 +15,8 @@ use rushes::publish::YoutubeService;
 use rushes::route::{Route, SettingsSection, VideoTab};
 use rushes::shell::{self, Workspace};
 use rushes::state::AppState;
-use rushes_core::settings::AppSettings;
+use rushes::ui::CollectionTable;
+use rushes_core::settings::{AppSettings, Zoom};
 use rushes_core::templates::TemplateKind;
 use rushes_core::{NewVideo, PipelineRun, RunId, RunStatus, Store, VideoId, media};
 
@@ -181,4 +182,67 @@ fn a_pipelines_row_opens_its_video_with_the_run_in_view(cx: &mut TestAppContext)
     assert_eq!(cx.read(|cx| app.state.read(cx).route().clone()), Route::Video { id: video, tab: VideoTab::Footage });
     assert!(app.shows(cx, "ai-edit-history"), "the AI edit section is in view");
     assert!(app.shows(cx, "run-use-for-upload"), "and so is the run's result");
+}
+
+#[gpui_kit::test]
+fn the_ai_edits_table_scrolls_under_its_header_and_sideways(cx: &mut TestAppContext) {
+    let mut runs = Vec::new();
+    let window_size = size(px(960.), px(600.));
+    let app = Fixture::open(cx, window_size, |store, media_root| {
+        for take in 0..30 {
+            let new = NewVideo { title: format!("Take {take}"), template: TemplateKind::Blank, ..NewVideo::default() };
+            let (mut video, _) = store.create_video(new).expect("create video");
+            let folder = media::ensure_video_folder(media_root, &mut video).expect("media folder");
+            store.update_video(&mut video).expect("save folder");
+            // Newest first: each run a minute after the one before.
+            let at = Utc::now() + chrono::Duration::minutes(take);
+            let run = PipelineRun {
+                id: RunId::new(),
+                video_id: video.id,
+                status: RunStatus::Succeeded,
+                brief: String::new(),
+                footage_dir: folder.join("footage"),
+                session_id: None,
+                summary: None,
+                output: None,
+                error: None,
+                cost_usd: Some(0.5),
+                created_at: at,
+                updated_at: at,
+            };
+            store.insert_run(&run).expect("insert run");
+            runs.push(run.id);
+        }
+    });
+    // Zoomed in, the smallest window is too narrow for every column.
+    cx.update(|cx| app.state.update(cx, |state, cx| state.update_settings(cx, |s| s.zoom = Zoom::new(150))));
+    app.navigate(cx, Route::Pipelines);
+    app.settle(cx);
+    let newest = ElementId::Name(format!("pipeline-run-{}", runs[29]).into());
+    let header = CollectionTable::header_id("pipelines-table");
+    let bounds = |cx: &mut TestAppContext, id: &ElementId| {
+        let id = id.clone();
+        cx.update_window(app.window, |_, window, _| window.find(id).bounds()).expect("window is open")
+    };
+    let scroll = |cx: &mut TestAppContext, id: &ElementId, delta: ScrollDelta| {
+        let id = id.clone();
+        cx.update_window(app.window, |_, window, cx| window.scroll(id, delta, cx)).expect("window is open");
+        app.settle(cx);
+    };
+    let (row, head) = (bounds(cx, &newest), bounds(cx, &header));
+    assert!(row.right() > window_size.width, "the Cost column is past the window's edge: {row:?}");
+
+    // The wheel scrolls the rows under the header, not sideways.
+    scroll(cx, &newest, ScrollDelta::Lines(point(0., -3.)));
+    let down = bounds(cx, &newest);
+    assert!(down.top() < row.top(), "the rows scrolled: {down:?}");
+    assert_eq!(down.left(), row.left(), "and only down");
+    assert_eq!(bounds(cx, &header), head, "the header stays put");
+
+    // A sideways swipe brings the last columns in, header and rows together.
+    scroll(cx, &header, ScrollDelta::Pixels(point(px(-5000.), px(0.))));
+    let across = bounds(cx, &newest);
+    assert!(across.right() <= window_size.width, "the Cost column is in view: {across:?}");
+    assert_eq!(across.top(), down.top(), "and only sideways");
+    assert_eq!(bounds(cx, &header).left(), across.left(), "the header moved with the rows");
 }

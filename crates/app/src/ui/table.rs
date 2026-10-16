@@ -1,19 +1,23 @@
 //! Collection tables whose rows open something (Pipelines, Uploads), drawn
 //! with the geometry of the Videos table (the kit's data table): the table
-//! head fill, muted labels, row hairlines and hover, medium cell padding.
+//! head fill, muted labels, row hairlines and hover, medium cell padding. Like
+//! that table, the head stays put while the rows scroll, and a table too
+//! narrow for its columns scrolls sideways.
 
 use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui_kit::component::{ActiveTheme as _, Size, h_flex, v_flex};
+use gpui_kit::component::scroll::Scrollbar;
+use gpui_kit::component::{ActiveTheme as _, InteractiveElementExt as _, Size, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Div, ElementId, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
-    ParentElement as _, Pixels, Rems, RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
-    TestSupportExt as _, Window, canvas, div,
+    ParentElement as _, Pixels, Rems, RenderOnce, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, TestSupportExt as _, Window, canvas, div,
 };
 
 use super::KeyboardFocus as _;
+use super::PAGE_INSET;
 use super::zoom::zoomed;
 
 /// The narrowest a fill column gets: room for a short title.
@@ -87,8 +91,11 @@ fn visible_columns(columns: &[TableColumn], width: Option<f32>) -> Vec<TableColu
     visible
 }
 
-/// A collection: [`table_header`] over its rows, on the full width of its
-/// parent. Too narrow for every column, it drops the optional ones.
+/// A collection: the header over its rows, filling its parent, which it
+/// scrolls itself with [`PAGE_INSET`] inside, so its scrollbars sit on the
+/// region's edges. Too narrow for every column, it drops the optional ones;
+/// still too narrow, it keeps the columns' room and scrolls sideways, head
+/// and rows together. The rows scroll under the head.
 #[derive(IntoElement)]
 pub struct CollectionTable {
     id: ElementId,
@@ -105,18 +112,44 @@ impl CollectionTable {
         self.rows.extend(rows);
         self
     }
+
+    /// The ID of the header row.
+    pub fn header_id(id: impl Into<ElementId>) -> ElementId {
+        (id.into(), "header").into()
+    }
+
+    /// The ID of the region that scrolls the rows.
+    fn rows_id(id: impl Into<ElementId>) -> ElementId {
+        (id.into(), "rows").into()
+    }
+
+    /// The ID of the region that scrolls the table sideways.
+    fn sideways_id(id: impl Into<ElementId>) -> ElementId {
+        (id.into(), "sideways").into()
+    }
+}
+
+/// What a table keeps between frames: its width, measured in the previous
+/// frame, and where its rows and columns are scrolled to.
+#[derive(Clone, Default)]
+struct TableScroll {
+    width: Rc<Cell<Option<Pixels>>>,
+    rows: ScrollHandle,
+    sideways: ScrollHandle,
 }
 
 impl RenderOnce for CollectionTable {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        // Measured in the previous frame; a change of the visible columns
-        // draws the table once more.
-        let width =
-            window.use_keyed_state(self.id.clone(), cx, |_, _| Rc::new(Cell::new(None::<Pixels>))).read(cx).clone();
+        let scroll = window.use_keyed_state(self.id.clone(), cx, |_, _| TableScroll::default()).read(cx).clone();
         let rem = window.rem_size();
         let columns = self.columns;
-        let shown = move |width: Option<Pixels>| visible_columns(columns, width.map(|width| width / rem)).len();
-        let visible = visible_columns(columns, width.get().map(|width| width / rem));
+        // The room the columns have: the table's width inside the page inset.
+        let room = move |width: Pixels| (width - PAGE_INSET.to_pixels(rem) * 2.) / rem;
+        let shown = move |width: Option<Pixels>| visible_columns(columns, width.map(room)).len();
+        let visible = visible_columns(columns, scroll.width.get().map(room));
+        let needs = Rems(visible.iter().map(|column| column.needs()).sum::<f32>() + PAGE_INSET.0 * 2.);
+        // A change of the visible columns draws the table once more.
+        let width = scroll.width.clone();
         let measure = canvas(
             move |bounds, window, _| {
                 let previous = width.replace(Some(bounds.size.width));
@@ -128,29 +161,72 @@ impl RenderOnce for CollectionTable {
         )
         .absolute()
         .size_full();
-        v_flex()
-            .id(self.id)
+
+        let rows = div()
+            .id(Self::rows_id(self.id.clone()))
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .lock_scroll_axis()
+            .track_scroll(&scroll.rows)
+            .child(v_flex().w_full().pb_8().children(self.rows.into_iter().map(|row| row.columns(&visible))))
+            .test_support();
+        let table = v_flex()
+            .flex_none()
+            .h_full()
+            .w(needs)
+            .min_w_full()
+            .px(PAGE_INSET)
+            .child(table_header(Self::header_id(self.id.clone()), &visible, cx))
+            .child(rows);
+        let sideways = div()
+            .id(Self::sideways_id(self.id.clone()))
+            .flex()
+            .size_full()
+            .overflow_x_scroll()
+            .lock_scroll_axis()
+            .track_scroll(&scroll.sideways)
+            .child(table)
+            .test_support();
+
+        div()
+            .id(self.id.clone())
             .relative()
-            .w_full()
-            .child(table_header(&visible, cx))
-            .children(self.rows.into_iter().map(|row| row.columns(&visible)))
+            .size_full()
+            .child(sideways)
+            .child(
+                // Beside the rows only: the head doesn't scroll.
+                div().absolute().top(header_height(cx)).bottom_0().left_0().right_0().child(
+                    Scrollbar::vertical(&scroll.rows).id((self.id.clone(), "rows-scrollbar")).viewport_from_layout(),
+                ),
+            )
+            .child(div().absolute().inset_0().child(
+                Scrollbar::horizontal(&scroll.sideways).id((self.id, "sideways-scrollbar")).viewport_from_layout(),
+            ))
             .child(measure)
     }
 }
 
+/// The height of the header row: a row of the kit's medium table.
+fn header_height(cx: &App) -> Pixels {
+    zoomed(Size::Medium.table_row_height(), cx)
+}
+
 /// The header row: the kit's table head fill and muted labels.
-pub fn table_header(columns: &[TableColumn], cx: &App) -> Div {
+fn table_header(id: ElementId, columns: &[TableColumn], cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     h_flex()
+        .id(id)
         .w_full()
         .flex_shrink_0()
-        .h(zoomed(Size::Medium.table_row_height(), cx))
+        .h(header_height(cx))
         .bg(theme.tokens.table_head)
         .text_sm()
         .text_color(theme.muted_foreground)
         .border_b_1()
         .border_color(theme.table_row_border)
         .children(columns.iter().map(|column| column.cell(div().truncate().child(column.label))))
+        .test_support()
 }
 
 /// A row that opens what it stands for: by click, or with Enter or Space

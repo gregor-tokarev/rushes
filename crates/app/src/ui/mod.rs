@@ -98,7 +98,7 @@ pub use page_icon::{Assets, PageIcon, has_page_icon_image, video_icon};
 pub use row_button::{RowButton, section_label};
 pub use section::{Card, SectionHeader};
 pub use state_tooltip::state_tooltip;
-pub use table::{CollectionTable, TableColumn, TableRowButton, table_header};
+pub use table::{CollectionTable, TableColumn, TableRowButton};
 pub use time::format_when;
 
 /// Shows a notification in the active window, for services that have no

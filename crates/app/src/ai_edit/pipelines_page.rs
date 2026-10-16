@@ -8,7 +8,7 @@ use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
 use gpui_kit::{
     Context, ElementId, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Rems, Render,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
+    Styled as _, Subscription, Task, Window, div,
 };
 use rushes_core::{PipelineRun, RunStatus};
 
@@ -19,8 +19,7 @@ use crate::database::colors::run_status_color;
 use crate::route::{Route, VideoTab};
 use crate::state::AppState;
 use crate::ui::{
-    CollectionTable, EmptyState, PAGE_INSET, PageHeader, TableColumn, TableRowButton, format_when, page_frame,
-    video_icon,
+    CollectionTable, EmptyState, PageHeader, TableColumn, TableRowButton, format_when, page_frame, video_icon,
 };
 
 /// The AI edits page: runs across all videos, newest first. A row opens the
@@ -158,12 +157,7 @@ impl Render for PipelinesPage {
             self.render_empty().into_any_element()
         } else {
             let rows: Vec<TableRowButton> = runs.iter().map(|run| self.render_row(run, cx)).collect();
-            div()
-                .id("pipelines-list")
-                .size_full()
-                .overflow_y_scroll()
-                .child(div().px(PAGE_INSET).pb_8().child(CollectionTable::new("pipelines-table", &COLUMNS).rows(rows)))
-                .into_any_element()
+            CollectionTable::new("pipelines-table", &COLUMNS).rows(rows).into_any_element()
         };
         page_frame(header, content).id("pipelines-page")
     }
