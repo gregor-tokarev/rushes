@@ -7,7 +7,8 @@
 //! once. Picture and sound therefore cannot drift apart at the joins (joining AAC clips
 //! does: each carries encoder priming), and no span inherits ffmpeg's AAC seek offset.
 //! Clips are cached by what they contain, so a revised cut re-encodes only the spans
-//! that changed.
+//! that changed. Overlays replace the picture of the frames they cover (an image, or
+//! another take's picture) and leave the sound alone.
 
 use std::fs;
 use std::io::{BufWriter, Write as _};
@@ -21,7 +22,7 @@ use sha2::{Digest, Sha256};
 
 use crate::audio;
 use crate::error::{EditError, Result};
-use crate::plan::{ResolvedCut, Span, clock};
+use crate::plan::{Framing, Overlay, ResolvedCut, Span, clock};
 use crate::project::Take;
 use crate::rational::Rational;
 use crate::session::Session;
@@ -121,6 +122,21 @@ impl Placed {
     }
 }
 
+/// A run of output frames and where their picture comes from: the span's own take, or
+/// an overlay's.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Picture {
+    pub take: String,
+    /// Take time of the first frame (0 for an image).
+    pub start: f64,
+    pub frames: u64,
+    pub framing: Framing,
+    /// Output time of the first frame.
+    pub out_start: f64,
+    /// The overlay shown (its index in the plan), if any.
+    pub overlay: Option<usize>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Loudness {
     pub integrated: f64,
@@ -145,6 +161,9 @@ pub struct RenderRecord {
     /// File names of the cached clips this render joined.
     #[serde(default)]
     pub clips: Vec<String>,
+    /// Where the picture of each run of frames comes from.
+    #[serde(default)]
+    pub pictures: Vec<Picture>,
 }
 
 impl RenderRecord {
@@ -197,15 +216,34 @@ pub fn last_record(session: &Session, quality: Quality) -> Result<Option<RenderR
     Ok(Some(serde_json::from_slice(&fs::read(path)?)?))
 }
 
-/// The output size and rate: the first video take's, 720p and at most 30 fps for previews.
+/// The output size and rate: those of the footage the cut shows longest (not an insert
+/// from another video), 720p and at most 30 fps for previews.
 pub fn output_format(session: &Session, cut: &ResolvedCut, quality: Quality) -> Result<Format> {
-    let mut video = None;
+    let mut shown: Vec<(&str, f64)> = Vec::new();
     for span in &cut.spans {
-        if let Some(info) = &session.take(&span.take)?.media.video {
-            video = Some(info.clone());
-            break;
+        let take = session.take(&span.take)?;
+        if take.media.video.is_some() && !take.still() {
+            match shown.iter_mut().find(|(id, _)| *id == span.take) {
+                Some(entry) => entry.1 += span.duration(),
+                None => shown.push((&span.take, span.duration())),
+            }
         }
     }
+    let main = shown.iter().fold(None, |best: Option<&(&str, f64)>, entry| match best {
+        Some(best) if best.1 >= entry.1 => Some(best),
+        _ => Some(entry),
+    });
+    let video = match main {
+        Some((take, _)) => session.take(take)?.media.video.clone(),
+        // Only images on screen (sound with a picture held over it): 30 fps.
+        None => cut
+            .spans
+            .iter()
+            .map(|span| &span.take)
+            .chain(cut.overlays.iter().map(|overlay| &overlay.take))
+            .find_map(|take| session.take(take).ok()?.media.video.clone())
+            .map(|video| crate::probe::VideoInfo { rate: Rational::new(30, 1), r_rate: Rational::new(30, 1), ..video }),
+    };
     let video = video.ok_or_else(|| EditError::invalid("none of the takes in the cut has a picture"))?;
     let rate = video.rate.standard();
     let (mut width, mut height) = (video.width, video.height);
@@ -277,6 +315,63 @@ pub fn place(spans: &[Span], rate: Rational) -> Vec<Placed> {
     placed
 }
 
+/// The pictures of the placed spans, with the overlays cut in on the same frame grid.
+pub fn pictures(placed: &[Placed], overlays: &[Overlay], rate: Rational) -> Vec<Picture> {
+    let frame_time = |frame: u64| frame as f64 * rate.den as f64 / rate.num as f64;
+    let frame_at = |seconds: f64| (seconds.max(0.0) * rate.num as f64 / rate.den as f64).round() as u64;
+    let total: u64 = placed.iter().map(|p| p.frames).sum();
+    let covers: Vec<(u64, u64, &Overlay)> = overlays
+        .iter()
+        .map(|overlay| (frame_at(overlay.out_start).min(total), frame_at(overlay.out_end).min(total), overlay))
+        .filter(|(first, end, _)| end > first)
+        .collect();
+    let mut out: Vec<Picture> = Vec::new();
+    let mut first = 0u64;
+    for item in placed {
+        let end = first + item.frames;
+        let mut cursor = first;
+        while cursor < end {
+            let (stop, picture) = match covers.iter().find(|(from, to, _)| *from <= cursor && cursor < *to) {
+                Some((from, to, overlay)) => {
+                    let stop = (*to).min(end);
+                    let picture = Picture {
+                        take: overlay.take.clone(),
+                        start: overlay.source_start + frame_time(cursor - from),
+                        frames: stop - cursor,
+                        framing: overlay.framing,
+                        out_start: frame_time(cursor),
+                        overlay: Some(overlay.index),
+                    };
+                    (stop, picture)
+                }
+                None => {
+                    let next = covers.iter().map(|(from, _, _)| *from).filter(|from| *from > cursor).min();
+                    let stop = next.unwrap_or(end).min(end);
+                    let picture = Picture {
+                        take: item.span.take.clone(),
+                        start: item.span.start + frame_time(cursor - first),
+                        frames: stop - cursor,
+                        framing: item.span.framing,
+                        out_start: frame_time(cursor),
+                        overlay: None,
+                    };
+                    (stop, picture)
+                }
+            };
+            // An overlay running on across a join of the spans under it stays one clip.
+            match out.last_mut() {
+                Some(last) if picture.overlay.is_some() && last.overlay == picture.overlay => {
+                    last.frames += picture.frames;
+                }
+                _ => out.push(picture),
+            }
+            cursor = stop;
+        }
+        first = end;
+    }
+    out
+}
+
 struct Encoder {
     final_args: Vec<String>,
     preview_args: Vec<String>,
@@ -309,10 +404,11 @@ fn encoder(ffmpeg: &Path) -> &'static Encoder {
 }
 
 struct Job<'a> {
-    placed: &'a Placed,
+    picture: &'a Picture,
     take: Take,
     video_filter: String,
     clip: PathBuf,
+    rate: Rational,
 }
 
 /// Renders `cut` to `edit/preview.mp4` or `edit/final.mp4`.
@@ -367,27 +463,30 @@ pub fn render(
         Quality::Preview => &encoder.preview_args,
         Quality::Final => &encoder.final_args,
     };
+    let pictures = pictures(&placed, &cut.overlays, format.rate);
     let mut jobs = Vec::new();
-    for item in &placed {
-        let take = session.take(&item.span.take)?.clone();
-        let video_filter = video_filter(&take, &format, grade, ass.as_deref(), item);
+    for picture in &pictures {
+        let take = session.take(&picture.take)?.clone();
+        let video_filter = video_filter(&take, &format, grade, ass.as_deref(), picture);
         let stamp = fs::metadata(&take.path)
             .and_then(|meta| meta.modified())
             .map(|time| time.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
             .unwrap_or(0);
         let key = short_hash(
             format!(
-                "{}|{}|{:.6}|{}|{}|{}",
+                "{}|{}|{:.6}|{}|{}|{}|{}",
                 take.path.display(),
                 stamp,
-                item.span.start,
-                item.frames,
+                picture.start,
+                picture.frames,
+                format.rate,
                 video_filter,
                 encoder_args.join(" ")
             )
             .as_bytes(),
         );
-        jobs.push(Job { placed: item, take, video_filter, clip: cache.join(format!("{key}.mp4")) });
+        let clip = cache.join(format!("{key}.mp4"));
+        jobs.push(Job { picture, take, video_filter, clip, rate: format.rate });
     }
 
     let todo: Vec<&Job> = jobs.iter().filter(|job| !job.clip.is_file()).collect();
@@ -482,6 +581,7 @@ pub fn render(
             .iter()
             .filter_map(|job| job.clip.file_name().map(|name| name.to_string_lossy().into_owned()))
             .collect(),
+        pictures: pictures.clone(),
     };
     write_atomic(&record_path(session, options.quality)?, &serde_json::to_vec_pretty(&record)?)?;
     write_edl(session, cut, &record)?;
@@ -508,23 +608,28 @@ fn prune_clips(session: &Session, cache: &Path) {
     }
 }
 
-fn video_filter(take: &Take, format: &Format, grade: &str, ass: Option<&str>, item: &Placed) -> String {
+fn video_filter(take: &Take, format: &Format, grade: &str, ass: Option<&str>, picture: &Picture) -> String {
     let mut parts = Vec::new();
     if take.media.video.as_ref().is_some_and(|video| video.hdr) {
         parts.push(TONEMAP.to_owned());
     }
-    // The clip is decoded from a little before the span (see `seek_lead`), so the frame
-    // nearest the span's start can be picked even when it comes just before it.
-    parts.push(format!(
-        "fps=fps={}:start_time={:.6}:round=near,setpts=PTS-STARTPTS",
-        format.rate,
-        seek_lead(item.span.start)
-    ));
+    if take.still() {
+        // An image looped at the output rate.
+        parts.push(format!("fps=fps={},setpts=PTS-STARTPTS", format.rate));
+    } else {
+        // The clip is decoded from a little before the span (see `seek_lead`), so the
+        // frame nearest the span's start can be picked even when it comes just before it.
+        parts.push(format!(
+            "fps=fps={}:start_time={:.6}:round=near,setpts=PTS-STARTPTS",
+            format.rate,
+            seek_lead(picture.start)
+        ));
+    }
     let (w, h) = (format.width, format.height);
     let same_shape = take.media.video.as_ref().is_none_or(|video| {
         (f64::from(video.width) / f64::from(video.height) - f64::from(w) / f64::from(h)).abs() < 0.01
     });
-    let framing = item.span.framing;
+    let framing = picture.framing;
     let zoom = framing.zoom.clamp(1.0, 3.0);
     parts.push(if same_shape && zoom == 1.0 {
         format!("scale={w}:{h}:force_original_aspect_ratio=decrease:flags=bicubic,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1")
@@ -537,9 +642,19 @@ fn video_filter(take: &Take, format: &Format, grade: &str, ass: Option<&str>, it
             fy = framing.focus_y
         )
     } else {
-        // The whole picture over a darkened, blurred copy that fills the frame.
+        // The whole picture (zoomed: the part around the focus) over a darkened, blurred
+        // copy that fills the frame.
+        let detail = if zoom > 1.0 {
+            format!(
+                "crop=iw/{zoom:.4}:ih/{zoom:.4}:(iw-ow)*{fx:.3}:(ih-oh)*{fy:.3},",
+                fx = framing.focus_x,
+                fy = framing.focus_y
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "split[bg][fg];[bg]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},boxblur=20:2,eq=brightness=-0.12[bg];\
+            "{detail}split[bg][fg];[bg]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},boxblur=20:2,eq=brightness=-0.12[bg];\
              [fg]scale={w}:{h}:force_original_aspect_ratio=decrease:flags=bicubic[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1"
         )
     });
@@ -551,8 +666,10 @@ fn video_filter(take: &Take, format: &Format, grade: &str, ass: Option<&str>, it
     }
     if let Some(ass) = ass {
         // Captions are timed on the output: shift this clip to its place, burn, shift back.
-        parts
-            .push(format!("setpts=PTS-STARTPTS+{:.6}/TB,subtitles=filename={ass},setpts=PTS-STARTPTS", item.out_start));
+        parts.push(format!(
+            "setpts=PTS-STARTPTS+{:.6}/TB,subtitles=filename={ass},setpts=PTS-STARTPTS",
+            picture.out_start
+        ));
     }
     parts.join(",")
 }
@@ -563,15 +680,15 @@ fn seek_lead(start: f64) -> f64 {
 }
 
 fn encode_clip(ffmpeg: &Path, job: &Job, encoder_args: &[String], threads: usize, cache: &Path) -> Result<()> {
-    let item = job.placed;
+    let picture = job.picture;
     let clip_tmp = job.clip.with_extension("tmp.mp4");
-    let mut args: Vec<String> = vec![
-        "-nostdin".into(),
-        "-y".into(),
-        "-v".into(),
-        "error".into(),
-        "-ss".into(),
-        tool::secs(item.span.start - seek_lead(item.span.start)),
+    let mut args: Vec<String> = vec!["-nostdin".into(), "-y".into(), "-v".into(), "error".into()];
+    if job.take.still() {
+        args.extend(["-loop".into(), "1".into(), "-framerate".into(), job.rate.to_string()]);
+    } else {
+        args.extend(["-ss".into(), tool::secs(picture.start - seek_lead(picture.start))]);
+    }
+    args.extend([
         "-i".into(),
         job.take.path.to_string_lossy().into_owned(),
         "-map".into(),
@@ -579,9 +696,9 @@ fn encode_clip(ffmpeg: &Path, job: &Job, encoder_args: &[String], threads: usize
         "-vf".into(),
         job.video_filter.clone(),
         "-frames:v".into(),
-        item.frames.to_string(),
+        picture.frames.to_string(),
         "-an".into(),
-    ];
+    ]);
     args.extend(encoder_args.iter().cloned());
     args.extend(["-pix_fmt".into(), "yuv420p".into(), "-threads".into(), threads.to_string()]);
     args.push(clip_tmp.to_string_lossy().into_owned());
@@ -792,10 +909,23 @@ fn write_edl(session: &Session, cut: &ResolvedCut, record: &RenderRecord) -> Res
             "out_start": item.out_start,
         }));
     }
+    let mut overlays = Vec::new();
+    for overlay in &cut.overlays {
+        let take = session.take(&overlay.take)?;
+        sources.insert(take.id.clone(), take.path.to_string_lossy().into_owned().into());
+        overlays.push(serde_json::json!({
+            "source": take.id,
+            "start": overlay.source_start,
+            "out_start": overlay.out_start,
+            "out_end": overlay.out_end,
+            "label": overlay.label,
+        }));
+    }
     let edl = serde_json::json!({
         "version": 1,
         "sources": sources,
         "ranges": ranges,
+        "overlays": overlays,
         "rendered": record.output,
         "total_duration_s": record.duration,
     });
@@ -827,6 +957,30 @@ mod tests {
         for pair in placed.windows(2) {
             assert!((pair[0].out_end() - pair[1].out_start).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn overlays_replace_the_picture_of_their_frames_across_spans() {
+        let rate = Rational::new(10, 1);
+        let placed = place(&[span(0.0, 2.0), span(5.0, 7.0)], rate);
+        let overlay = Overlay {
+            index: 0,
+            take: "B".into(),
+            source_start: 30.0,
+            out_start: 1.5,
+            out_end: 2.6,
+            framing: Framing::default(),
+            label: None,
+            source: String::new(),
+            text: String::new(),
+        };
+        let pictures = pictures(&placed, &[overlay], rate);
+        let summary: Vec<(&str, f64, u64)> =
+            pictures.iter().map(|p| (p.take.as_str(), (p.start * 100.0).round() / 100.0, p.frames)).collect();
+        // A 0-1.5, then B from 30 s over the join for 11 frames, then A again from 5.6.
+        assert_eq!(summary, [("A", 0.0, 15), ("B", 30.0, 11), ("A", 5.6, 14)]);
+        assert_eq!(pictures.iter().map(|p| p.frames).sum::<u64>(), 40);
+        assert!((pictures[2].out_start - 2.6).abs() < 1e-9);
     }
 
     #[test]
