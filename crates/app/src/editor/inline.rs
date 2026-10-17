@@ -303,10 +303,7 @@ pub fn toggle_marker(text: &str, selection: Range<usize>, marker: Marker) -> (St
     let selected = &text[start..end];
     let inner_before = selected.bytes().take_while(|b| *b == mark_char).count();
     let inner_after = selected.bytes().rev().take_while(|b| *b == mark_char).count();
-    if selected.len() >= 2 * len
-        && inner_before < selected.len()
-        && marker.is_applied(inner_before, inner_after)
-    {
+    if selected.len() >= 2 * len && inner_before < selected.len() && marker.is_applied(inner_before, inner_after) {
         let unwrapped = [&text[..start], &selected[len..selected.len() - len], &text[end..]].concat();
         return (unwrapped, start..end - 2 * len);
     }
@@ -320,10 +317,7 @@ mod tests {
     use super::*;
 
     fn styled(rich: &RichText) -> Vec<(&str, InlineStyle, Option<&str>)> {
-        rich.spans()
-            .iter()
-            .map(|span| (&rich.text()[span.range.clone()], span.style, span.link.as_deref()))
-            .collect()
+        rich.spans().iter().map(|span| (&rich.text()[span.range.clone()], span.style, span.link.as_deref())).collect()
     }
 
     const PLAIN: InlineStyle = InlineStyle { bold: false, italic: false, code: false };
@@ -397,8 +391,7 @@ mod tests {
 
     #[test]
     fn unmatched_markers_stay_literal() {
-        for source in
-            ["2 * 3 = 6", "**open", "a * b *", "`tick", "[label]", "[label](no url)", "[](x)", "** spaced**"]
+        for source in ["2 * 3 = 6", "**open", "a * b *", "`tick", "[label]", "[label](no url)", "[](x)", "** spaced**"]
         {
             let rich = RichText::parse(source);
             assert_eq!(rich.text(), source, "{source}");

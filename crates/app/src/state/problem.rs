@@ -9,10 +9,10 @@ use std::io;
 use std::path::Path;
 
 use gpui_kit::SharedString;
-use rusqlite::ErrorCode;
 use rushes_core::StoreError;
 use rushes_core::input::display_user_path;
 use rushes_core::media::MediaError;
+use rusqlite::ErrorCode;
 
 use crate::route::SettingsSection;
 

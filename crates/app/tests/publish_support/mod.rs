@@ -16,13 +16,13 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use gpui_kit::{AppContext as _, Entity, TestAppContext};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
 use rushes::publish::YoutubeService;
 use rushes::state::AppState;
 use rushes_core::settings::{AppSettings, YoutubeBackend};
 use rushes_core::{NewVideo, Store, UploadJob, Video, VideoId};
 use rushes_youtube::{CredentialStore, SavedLogin};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 /// YouTube marks uploads processed this long after they finish.
 const PROCESSING_MS: u64 = 300;

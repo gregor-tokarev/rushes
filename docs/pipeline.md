@@ -9,8 +9,10 @@ A pipeline turns a folder of raw takes into `edit/final.mp4` with a headless cod
 - `Harness::VideoUse { skill_dir }`: the [video-use](https://github.com/browser-use/video-use)
   skill, a prompt plus Python helpers the agent runs through its shell.
 
-The crate is synchronous and UI-free: the app calls it on a background thread with an event
-callback and a cancellation flag.
+The crate also has the agent write a video's YouTube details and Codex draw its thumbnails
+(see [YouTube details](#youtube-details) and [Thumbnails](#thumbnails)). It is synchronous
+and UI-free: the app calls it on a background thread with an event callback and a
+cancellation flag.
 
 ## Phases
 
@@ -138,6 +140,10 @@ claude -p <prompt> --output-format stream-json --verbose [--resume=<id>] [--mode
   `stop_leftover_agent`, which stops the group (`SIGTERM`, `SIGKILL` after a grace
   period) only while its leader is still that process (same boot, same start time),
   before it marks the run interrupted.
+- A prompt may come on stdin instead of after `-p` (`Invocation::prompt_on_stdin`), with
+  no limit on its length: the details prompt carries transcripts. The group leader hands
+  its own stdin to the agent through descriptor 3, since `sh` gives a background command
+  `/dev/null`; a thread writes the prompt and closes the pipe.
 
 ### Events
 
@@ -167,6 +173,63 @@ spawning), `Spawn`, `Cancelled`, `AgentFailed { message, stderr_tail, session_id
 (non-zero exit or no result event; the session id allows a retry with `--resume`;
 `no_result` when the agent never reported a result, which usually means the command is not
 Claude Code or could not start), `Io`.
+
+## YouTube details
+
+`write_details(&config, cwd, &DetailsRequest, on_event, cancel)` has the edit agent write
+a video's title, description and tags in one headless turn and returns `VideoDetails`:
+
+```text
+claude -p --output-format stream-json --verbose [--model <m>] --permission-mode acceptEdits
+       --tools= --json-schema=<DETAILS_SCHEMA> --no-session-persistence --strict-mcp-config
+       < prompt
+```
+
+- No tools and none of the creator's MCP servers: everything is in the prompt, on stdin.
+  The answer is the `result` text, JSON matching `DETAILS_SCHEMA`; `parse_details` also
+  takes JSON wrapped in prose or a code fence, and anything else is an `AgentFailed`.
+- The prompt (`details_prompt`) has YouTube's limits and the house rules (language of the
+  script, say only what the video says, no Markdown, no chapter list of its own, keep the
+  current description's chapter list, links and standing text, no `<` or `>`), the
+  creator's instructions first, what the form holds now, the script as Markdown (first
+  60,000 characters), the transcript and the edit notes.
+- `read_transcript(footage_dir)` is video-use's `edit/takes_packed.md`, or else the `text`
+  of each `edit/transcripts/*.json` under its take's name (both harnesses keep Scribe's
+  JSON there; the Rushes tools' `.rushes.json` cache records have no `text` and are skipped) (first 150,000 characters);
+  every take is in it, retakes included, which the prompt says. `has_transcript` only
+  checks. `read_edit_notes` is the end of `edit/project.md` (12,000 characters): the
+  strategy and what made the cut.
+- The app checks the answer against YouTube's limits again (`publish::rules::fit_details`).
+
+## Thumbnails
+
+`generate_thumbnails(&CodexConfig, &ThumbnailRequest, on_event, cancel)` has Codex draw
+`count` (1–4) thumbnails with its image generation and puts them in `request.dir` as
+`thumbnail-<n>.jpg`, numbered after the ones there (`list_thumbnails` lists them, newest
+first):
+
+```text
+codex exec --json --skip-git-repo-check --sandbox=workspace-write --cd=<thumbnails dir>
+           [--model=<m>] --config=model_reasoning_effort="medium" [--image=<frame>]... < prompt
+```
+
+- Codex works in the thumbnails folder and may write only there. The prompt
+  (`thumbnail_prompt`) names the video, the rules of a thumbnail that works (16:9, one
+  subject, at most four words of text), the creator's ideas, the start of the script, and
+  the draft paths: Codex copies each image its tool drew to the next one,
+  `.drafts/draft-<n>.png`. Reasoning effort is medium: drawing needs little, and the
+  creator's own default may be the slowest.
+- With `frames_from`, three frames of that video (at a quarter, half and three quarters,
+  ffmpeg) are attached with `--image`, so its people and set stay recognisable.
+- Afterwards ffmpeg scales and crops each draft to 1280 × 720 and saves it as a JPG
+  (`-q:v 3`, well under YouTube's 2 MB); without ffmpeg the draft is kept as it is. The
+  `.drafts` folder goes either way. Cancelling stops Codex's process group and keeps
+  nothing.
+- Codex's `--json` lines become the same `AgentEvent`s (`parse_codex_line`): the thread
+  is `Init`, messages `AssistantText`, shell commands `ToolUse`/`ToolResult`,
+  `turn.completed`/`turn.failed` the `Result`, `error` lines `Stderr`. Drawing fewer than
+  asked returns what was drawn with the reason (`ThumbnailOutcome::problem`); drawing
+  none is an `AgentFailed`.
 
 ## Requirements
 
@@ -235,6 +298,18 @@ cargo clippy -p rushes-pipeline --all-targets
   agent and its child die when the app is killed with `SIGKILL` (Linux; the test binary
   runs itself as the app).
 - `tests/doctor.rs` runs `doctor()` against a fake `PATH` of stub scripts.
+- `scripts/fake-agent` answers a details prompt (`--json-schema`, prompt on stdin) with a
+  title, description and tags made from it, keeping the current description's links;
+  `FAKE_AGENT_DETAILS=<text>` replaces the answer, `FAKE_AGENT_PROMPT_FILE=<path>` records
+  the prompt.
+- `scripts/fake-codex` (python3) reads the prompt from stdin, saves a test pattern PNG at
+  every draft path it names and prints Codex-shaped `--json` events. Switches:
+  `FAKE_CODEX_MODE=fail` (a usage limit), `FAKE_CODEX_DRAW=<n>` (draw only the first n,
+  then fail), `FAKE_CODEX_DELAY_MS=<ms>`, `FAKE_CODEX_ARGV_FILE`, `FAKE_CODEX_PROMPT_FILE`.
+- `tests/publish.rs` writes details from a prompt larger than an argument may be, refuses
+  answers that aren't details, and draws thumbnails with frames of a clip, checking they
+  are 1280 × 720 JPGs numbered after the existing ones; also a partial run and
+  cancelling.
 
 The tests never call a model. A real video-use run costs model and ElevenLabs credits;
 try it on short footage (`scripts/make-test-footage.sh <dir>`).

@@ -289,6 +289,7 @@ fn video_round_trips_every_field() {
             channel_id: "UC123".into(),
             privacy: Privacy::Unlisted,
             uploaded_at: Utc::now(),
+            thumbnail: None,
         }),
         properties: BTreeMap::from([
             (property, PropertyValue::Number(4.5)),
@@ -448,6 +449,7 @@ fn a_failed_retry_does_not_hide_a_finished_edit_or_a_live_video() {
         channel_id: "UC1".into(),
         privacy: Privacy::Public,
         uploaded_at: Utc::now(),
+        thumbnail: None,
     };
     video.youtube = Some(link.clone());
     store.update_video(&mut video).unwrap();
@@ -507,6 +509,7 @@ fn duplicate_copies_content_but_not_publishing_state() {
         channel_id: "UC".into(),
         privacy: Privacy::Public,
         uploaded_at: Utc::now(),
+        thumbnail: None,
     });
     store.update_video(&mut original).unwrap();
     let after = insert(&mut store, "After", original.position + 1.0);

@@ -21,6 +21,9 @@
 - **Edit with AI**: hand your raw takes and script to the built-in AI editor. It drops
   retakes, false starts, fillers and dead air, keeps the screen demos viewers need to see, and
   shows you its plan before it cuts. Long-form videos or vertical Shorts with captions.
+- **Publish** with AI help: have the agent write the title, description and tags from your
+  script and what you actually said on camera, and have Codex draw a few thumbnails to
+  pick from.
 - **Upload** to your YouTube channels from the video's page, with resumable uploads. Connect
   several accounts and pick, per video, the channel it goes to.
 
@@ -46,7 +49,8 @@ your videos, scripts, settings and YouTube sign-ins; footage stays in its folder
 
 AI editing also needs [Claude Code](https://claude.com/claude-code), ffmpeg and an
 [ElevenLabs](https://elevenlabs.io) API key for transcription; the app checks for them and
-says what's missing.
+says what's missing. Thumbnails need the [Codex CLI](https://github.com/openai/codex),
+signed in.
 
 ## Build from source
 

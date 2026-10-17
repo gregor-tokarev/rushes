@@ -274,6 +274,10 @@ pub struct YoutubeLink {
     pub channel_id: String,
     pub privacy: Privacy,
     pub uploaded_at: DateTime<Utc>,
+    /// The image YouTube's custom thumbnail of the video was last set from; `None`
+    /// until Rushes sets one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

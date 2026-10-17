@@ -118,9 +118,7 @@ pub fn hidden_archived(rows: &[VideoRow], filter: &FilterSpec) -> usize {
     }
     let shown = FilterSpec { hide_archived: false, ..filter.clone() };
     let terms = search_terms(&shown.search);
-    rows.iter()
-        .filter(|row| row.video.status == VideoStatus::Archived && matches_filter(row, &shown, &terms))
-        .count()
+    rows.iter().filter(|row| row.video.status == VideoStatus::Archived && matches_filter(row, &shown, &terms)).count()
 }
 
 /// Whether a video with `status` can pass `filter`'s status rules.

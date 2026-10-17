@@ -323,9 +323,7 @@ impl PathForm {
             PathInputError::Empty if self.kind.is_folder() => "Enter the path of a folder.".into(),
             PathInputError::Empty => "Enter the path of a file.".into(),
             PathInputError::Relative => format!("Use a full path, like {}.", self.example).into(),
-            PathInputError::NoHome => {
-                "Rushes couldn’t find your home folder. Type the full path instead of ~.".into()
-            }
+            PathInputError::NoHome => "Rushes couldn’t find your home folder. Type the full path instead of ~.".into(),
         }
     }
 }

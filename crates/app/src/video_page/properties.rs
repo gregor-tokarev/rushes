@@ -120,7 +120,8 @@ impl PropertiesPanel {
     /// Folds or unfolds the properties, here and on every video page from now on.
     fn set_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
         self.collapsed = collapsed;
-        self.state.update(cx, |state, cx| state.update_settings(cx, |settings| settings.properties_collapsed = collapsed));
+        self.state
+            .update(cx, |state, cx| state.update_settings(cx, |settings| settings.properties_collapsed = collapsed));
         cx.notify();
     }
 

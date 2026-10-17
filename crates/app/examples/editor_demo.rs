@@ -10,9 +10,9 @@
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, h_flex, v_flex};
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, px, rems, size,
+    App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, TitlebarOptions,
+    Window, WindowBounds, WindowOptions, div, px, rems, size,
 };
 use rushes::editor::{DocumentEditor, DocumentEditorEvent};
 use rushes_core::{Block, BlockKind, Document, DocumentId, DocumentKind, VideoId};
@@ -64,12 +64,7 @@ impl Render for Demo {
                 .max_w(rems(46.))
                 .gap_1()
                 .child(div().text_3xl().font_weight(FontWeight::BOLD).child(self.title.clone()))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("Script · Long-form · Scripting"),
-                ),
+                .child(div().text_sm().text_color(theme.muted_foreground).child("Script · Long-form · Scripting")),
         );
 
         v_flex()
@@ -84,9 +79,7 @@ impl Render for Demo {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
-                    .child(
-                        v_flex().w_full().pt_16().child(header).child(div().h_6()).child(self.editor.clone()),
-                    )
+                    .child(v_flex().w_full().pt_16().child(header).child(div().h_6()).child(self.editor.clone()))
                     .vertical_scrollbar(&self.scroll),
             )
             .child(
@@ -141,15 +134,9 @@ fn sample_script() -> Vec<Block> {
         Block { checked: true, ..block(BlockKind::Todo, "Film A-roll") },
         block(BlockKind::Todo, "Capture screen recordings for B-roll"),
         block(BlockKind::Todo, "Design the thumbnail"),
-        block(
-            BlockKind::Code,
-            "claude -p \"edit footage/ with video-use\" \\\n  --output-format stream-json",
-        ),
+        block(BlockKind::Code, "claude -p \"edit footage/ with video-use\" \\\n  --output-format stream-json"),
         block(BlockKind::Heading2, "Outro"),
-        block(
-            BlockKind::Paragraph,
-            "If this saved you an hour, **subscribe**. Next week I'm automating thumbnails.",
-        ),
+        block(BlockKind::Paragraph, "If this saved you an hour, **subscribe**. Next week I'm automating thumbnails."),
         block(BlockKind::OnScreen, "Subscribe for part 2 →"),
     ]
 }
@@ -157,9 +144,7 @@ fn sample_script() -> Vec<Block> {
 /// A long document for checking that editing stays smooth.
 fn long_document(count: usize) -> Vec<Block> {
     let script = sample_script();
-    (0..count)
-        .map(|ix| Block { id: rushes_core::BlockId::new(), ..script[ix % script.len()].clone() })
-        .collect()
+    (0..count).map(|ix| Block { id: rushes_core::BlockId::new(), ..script[ix % script.len()].clone() }).collect()
 }
 
 fn main() {

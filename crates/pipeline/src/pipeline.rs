@@ -151,7 +151,7 @@ pub fn run_phase(
                 prompt: build_rushes_prompt(&phase, &footage),
                 resume: resume.clone(),
                 mcp_config: Some(mcp_config),
-                builtin_tools: Some(builtin),
+                tools: Some(builtin),
                 allowed_tools: Some(allowed),
                 system_prompt: Some(rushes_edit::INSTRUCTIONS.to_owned()),
                 env: vec![("MCP_TOOL_TIMEOUT".to_owned(), TOOL_TIMEOUT_MS.to_owned())],

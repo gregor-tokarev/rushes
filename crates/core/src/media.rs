@@ -18,6 +18,7 @@ use thiserror::Error;
 use crate::model::Video;
 
 const FOOTAGE_DIR: &str = "footage";
+const THUMBNAILS_DIR: &str = "thumbnails";
 const EDIT_DIR: &str = "edit";
 const MAX_SLUG_LEN: usize = 48;
 
@@ -85,6 +86,12 @@ pub fn ensure_video_folder(root: &Path, video: &mut Video) -> Result<PathBuf, Me
 /// `<folder>/footage`, or `None` while the video has no media folder.
 pub fn footage_dir(video: &Video) -> Option<PathBuf> {
     video.folder.as_ref().map(|folder| folder.join(FOOTAGE_DIR))
+}
+
+/// `<folder>/thumbnails`, where the thumbnails drawn for the video go, or `None`
+/// while the video has no media folder.
+pub fn thumbnails_dir(video: &Video) -> Option<PathBuf> {
+    video.folder.as_ref().map(|folder| folder.join(THUMBNAILS_DIR))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

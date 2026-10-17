@@ -36,10 +36,14 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// it on to the whole group: the agent and every ffmpeg or python process it started.
 /// It waits for the agent itself, so the group keeps the leader that identifies it
 /// ([`AgentProcess`]) until the agent is gone, and exits with the agent's status.
+/// A background command's stdin would be `/dev/null`; the agent gets the script's
+/// own (the prompt, when it comes that way) through descriptor 3.
 #[cfg(target_os = "linux")]
 const GROUP_LEADER: &str = r#"trap 'trap "" TERM; kill -TERM 0' TERM
-"$0" "$@" &
+exec 3<&0
+"$0" "$@" <&3 3<&- &
 agent=$!
+exec 3<&-
 while :; do
   wait "$agent"
   status=$?
@@ -123,16 +127,15 @@ impl AgentConfig {
 
     fn args(&self, invocation: &Invocation) -> Vec<OsString> {
         // The prompt directly follows `-p`, and the variadic options (`--allowedTools`,
-        // `--add-dir`) use the `--flag=value` form, so no option can swallow an argument.
-        // `--resume` takes an optional value, so its id is attached the same way: a
-        // separate argument starting with `-` would be parsed as an option instead.
-        let mut args: Vec<OsString> = vec![
-            "-p".into(),
-            invocation.prompt.clone().into(),
-            "--output-format".into(),
-            "stream-json".into(),
-            "--verbose".into(),
-        ];
+        // `--add-dir`, `--tools`) use the `--flag=value` form, so no option can swallow
+        // an argument. `--resume` takes an optional value, so its id is attached the
+        // same way: a separate argument starting with `-` would be parsed as an option
+        // instead. A prompt sent on stdin leaves `-p` on its own.
+        let mut args: Vec<OsString> = vec!["-p".into()];
+        if !invocation.prompt_on_stdin {
+            args.push(invocation.prompt.clone().into());
+        }
+        args.extend(["--output-format".into(), "stream-json".into(), "--verbose".into()]);
         if let Some(session_id) = &invocation.resume {
             args.push(format!("--resume={session_id}").into());
         }
@@ -140,16 +143,25 @@ impl AgentConfig {
             args.extend(["--model".into(), model.into()]);
         }
         args.extend(["--permission-mode".into(), self.permission_mode.clone().into()]);
-        if let Some(tools) = &invocation.builtin_tools {
-            args.push(format!("--tools={}", tools.join(",")).into());
-        }
         let allowed = invocation.allowed_tools.as_ref().unwrap_or(&self.allowed_tools);
         if !allowed.is_empty() {
             args.push(format!("--allowedTools={}", allowed.join(",")).into());
         }
+        if let Some(tools) = &invocation.tools {
+            args.push(format!("--tools={}", tools.join(",")).into());
+        }
         if let Some(config) = &invocation.mcp_config {
             args.push(format!("--mcp-config={config}").into());
             args.push("--strict-mcp-config".into());
+        }
+        if let Some(schema) = &invocation.json_schema {
+            args.push(format!("--json-schema={schema}").into());
+        }
+        if invocation.one_off {
+            args.push("--no-session-persistence".into());
+            if invocation.mcp_config.is_none() {
+                args.push("--strict-mcp-config".into());
+            }
         }
         for dir in &invocation.add_dirs {
             let mut arg = OsString::from("--add-dir=");
@@ -174,18 +186,26 @@ impl AgentConfig {
 pub(crate) struct Invocation {
     pub cwd: PathBuf,
     pub prompt: String,
+    /// Sends the prompt on stdin rather than as an argument, which the system
+    /// limits in length (128 KiB on Linux): for prompts that carry transcripts.
+    pub prompt_on_stdin: bool,
     pub resume: Option<String>,
     pub add_dirs: Vec<PathBuf>,
     /// `--mcp-config` (JSON); only these MCP servers are loaded.
     pub mcp_config: Option<String>,
-    /// `--tools`: the built-in tools the agent has at all.
-    pub builtin_tools: Option<Vec<String>>,
     /// Replaces [`AgentConfig::allowed_tools`].
     pub allowed_tools: Option<Vec<String>>,
     /// Goes before [`AgentConfig::append_system_prompt`].
     pub system_prompt: Option<String>,
     /// Environment for the agent, under [`AgentConfig::env`] (which wins).
     pub env: Vec<(String, String)>,
+    /// `--tools`: the only built-in tools the agent has; `None` keeps them all.
+    pub tools: Option<Vec<String>>,
+    /// `--json-schema`: the final answer is JSON matching this schema.
+    pub json_schema: Option<String>,
+    /// A one-off answer: no session to resume later (`--no-session-persistence`)
+    /// and none of the creator's MCP servers (`--strict-mcp-config`).
+    pub one_off: bool,
 }
 
 /// What the agent reported while it ran.
@@ -237,6 +257,40 @@ pub(crate) fn run_agent(
     on_event: &mut dyn FnMut(&AgentEvent),
     cancel: &AtomicBool,
 ) -> Result<(ExitStatus, AgentRun), PipelineError> {
+    // The config's environment comes last, so it wins over the invocation's.
+    let env: Vec<(String, String)> = invocation.env.iter().chain(&config.env).cloned().collect();
+    let spec = ProcessSpec {
+        program,
+        args: config.args(invocation),
+        cwd: &invocation.cwd,
+        env: &env,
+        stdin: invocation.prompt_on_stdin.then(|| invocation.prompt.clone()),
+        kill_grace: config.kill_grace,
+        parse: parse_line,
+    };
+    run_process(&spec, on_event, cancel)
+}
+
+/// How to start an agent CLI and read what it prints.
+pub(crate) struct ProcessSpec<'a> {
+    pub program: &'a Path,
+    pub args: Vec<OsString>,
+    pub cwd: &'a Path,
+    pub env: &'a [(String, String)],
+    /// Written to the agent's stdin, which is then closed; `None` closes it at once.
+    pub stdin: Option<String>,
+    pub kill_grace: Duration,
+    /// Turns one stdout line into events.
+    pub parse: fn(&str) -> Vec<AgentEvent>,
+}
+
+/// [`run_agent`] for any agent CLI that prints one event per stdout line.
+pub(crate) fn run_process(
+    spec: &ProcessSpec<'_>,
+    on_event: &mut dyn FnMut(&AgentEvent),
+    cancel: &AtomicBool,
+) -> Result<(ExitStatus, AgentRun), PipelineError> {
+    let program = spec.program;
     #[cfg(target_os = "linux")]
     let mut command = {
         let mut command = Command::new("/bin/sh");
@@ -249,19 +303,21 @@ pub(crate) fn run_agent(
     #[cfg(not(target_os = "linux"))]
     let mut command = Command::new(program);
     command
-        .args(config.args(invocation))
-        .current_dir(&invocation.cwd)
-        .envs(invocation.env.iter().map(|(key, value)| (key, value)))
-        .envs(config.env.iter().map(|(key, value)| (key, value)))
-        .stdin(Stdio::null())
+        .args(&spec.args)
+        .current_dir(spec.cwd)
+        .envs(spec.env.iter().map(|(key, value)| (key, value)))
+        .stdin(if spec.stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // Own process group, so cancelling reaches ffmpeg/python grandchildren too.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let child = command.spawn().map_err(|source| PipelineError::Spawn { command: program.to_owned(), source })?;
-    let mut agent = RunningAgent { child, kill_grace: config.kill_grace };
+    let mut agent = RunningAgent { child, kill_grace: spec.kill_grace };
 
+    if let (Some(input), Some(stdin)) = (spec.stdin.clone(), agent.child.stdin.take()) {
+        spawn_writer(stdin, input)?;
+    }
     let (tx, rx) = mpsc::channel();
     let readers = [
         agent.child.stdout.take().map(|out| spawn_reader(out, tx.clone(), Line::Stdout)),
@@ -275,7 +331,7 @@ pub(crate) fn run_agent(
     let mut run = AgentRun::default();
     let mut handle = |line: Line, run: &mut AgentRun| {
         let events = match line {
-            Line::Stdout(line) => parse_line(&line),
+            Line::Stdout(line) => (spec.parse)(&line),
             Line::Stderr(line) => vec![AgentEvent::Stderr { line }],
         };
         for event in &events {
@@ -314,6 +370,18 @@ pub(crate) fn run_agent(
         }
     }
     Ok((status, run))
+}
+
+/// Writes `input` to the agent's stdin on a thread of its own, so a prompt larger
+/// than the pipe never blocks reading the agent's output, then closes it. An agent
+/// that exits without reading it all ends the write.
+fn spawn_writer(mut stdin: impl std::io::Write + Send + 'static, input: String) -> std::io::Result<()> {
+    thread::Builder::new()
+        .name("agent-input".to_owned())
+        .spawn(move || {
+            _ = stdin.write_all(input.as_bytes());
+        })
+        .map(drop)
 }
 
 fn spawn_reader(stream: impl Read + Send + 'static, tx: Sender<Line>, wrap: fn(String) -> Line) -> std::io::Result<()> {
@@ -479,7 +547,7 @@ mod tests {
             cwd: PathBuf::from("/videos/footage"),
             prompt: "Edit this".to_owned(),
             mcp_config: Some(r#"{"mcpServers":{}}"#.to_owned()),
-            builtin_tools: Some(vec!["Read".to_owned(), "Write".to_owned()]),
+            tools: Some(vec!["Read".to_owned(), "Write".to_owned()]),
             allowed_tools: Some(vec!["mcp__rushes".to_owned(), "Read".to_owned()]),
             system_prompt: Some("Use the tools.".to_owned()),
             ..Invocation::default()
@@ -490,11 +558,40 @@ mod tests {
             [
                 "--permission-mode",
                 "acceptEdits",
-                "--tools=Read,Write",
                 "--allowedTools=mcp__rushes,Read",
+                "--tools=Read,Write",
                 r#"--mcp-config={"mcpServers":{}}"#,
                 "--strict-mcp-config",
                 "--append-system-prompt=Use the tools.\n\nHouse style.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_one_off_answer_reads_its_prompt_from_stdin() {
+        let invocation = Invocation {
+            prompt_on_stdin: true,
+            tools: Some(Vec::new()),
+            json_schema: Some(r#"{"type":"object"}"#.to_owned()),
+            one_off: true,
+            ..invocation(None)
+        };
+        let config = AgentConfig { allowed_tools: Vec::new(), ..AgentConfig::default() };
+        let args = strings(config.args(&invocation));
+        assert_eq!(
+            args,
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--permission-mode",
+                "acceptEdits",
+                "--tools=",
+                r#"--json-schema={"type":"object"}"#,
+                "--no-session-persistence",
+                "--strict-mcp-config",
+                "--add-dir=/skills/video-use",
             ]
         );
     }

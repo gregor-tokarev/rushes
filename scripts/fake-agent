@@ -8,7 +8,9 @@ not call any model; it imitates a video-use session:
 - planning prompt: writes edit/project.md and replies with a strategy;
 - render / revision / single-pass prompts: renders edit/final.mp4 and
   edit/preview.mp4 with ffmpeg from the footage in the working directory (or a
-  synthetic clip when there is none) and replies with a summary.
+  synthetic clip when there is none) and replies with a summary;
+- YouTube details prompts (`--json-schema`, prompt on stdin): answers with a title,
+  description and tags made from the prompt, keeping links in the current description.
 
 Environment:
   FAKE_AGENT_MODE=fail     emit an error result, write to stderr, exit 1
@@ -18,11 +20,14 @@ Environment:
                            ffmpeg (it inherits stdout/stderr and is in the agent's group)
   FAKE_AGENT_PID_FILE=path append "<pid>" of this process and of each delay child
   FAKE_AGENT_ARGV_FILE=path write the received argv as JSON
+  FAKE_AGENT_PROMPT_FILE=path write the prompt (argument or stdin)
+  FAKE_AGENT_DETAILS=json  the details answer, verbatim (not even checked to be JSON)
 """
 
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -46,6 +51,7 @@ def parse_args(argv):
     parser.add_argument("--add-dir", dest="add_dirs", action="append", default=[])
     parser.add_argument("--append-system-prompt")
     parser.add_argument("--max-turns", type=int)
+    parser.add_argument("--json-schema", dest="json_schema")
     parser.add_argument("prompt", nargs="?")
     args, _unknown = parser.parse_known_args(argv)
     return args
@@ -300,6 +306,30 @@ def produce(session, skill, phase):
     return 0
 
 
+def details(session, prompt):
+    """Answers a details prompt the way Claude Code answers with --json-schema."""
+    answer = os.environ.get("FAKE_AGENT_DETAILS")
+    if answer is None:
+        title = re.search(r"titled “([^”]*)”", prompt)
+        source = "the transcript" if "<transcript>" in prompt else "the script"
+        current = re.search(r"<current_description>\n(.*?)\n</current_description>", prompt, re.S)
+        links = re.findall(r"https?://\S+", current.group(1)) if current else []
+        tags = ["fake", "rushes"]
+        if "<instructions>" in prompt:
+            tags.append("as instructed")
+        answer = json.dumps(
+            {
+                "title": f"{title.group(1) if title else 'Untitled'}, explained",
+                "description": "\n\n".join([f"Written from {source}.", *links]),
+                "tags": tags,
+            },
+            ensure_ascii=False,
+        )
+    session.tool("StructuredOutput", {"answer": answer}, "Structured output provided successfully")
+    session.result(answer)
+    return 0
+
+
 def main():
     args = parse_args(sys.argv[1:])
     if args.version:
@@ -310,9 +340,14 @@ def main():
     if os.environ.get("FAKE_AGENT_ARGV_FILE"):
         with open(os.environ["FAKE_AGENT_ARGV_FILE"], "w") as f:
             json.dump(sys.argv[1:], f)
+    if args.print and args.prompt is None and not sys.stdin.isatty():
+        args.prompt = sys.stdin.read()
     if not args.print or not args.prompt:
         print("fake-agent: expected -p <prompt>", file=sys.stderr)
         return 2
+    if os.environ.get("FAKE_AGENT_PROMPT_FILE"):
+        with open(os.environ["FAKE_AGENT_PROMPT_FILE"], "w") as f:
+            f.write(args.prompt)
 
     session = Session(args)
     session.record_pid(os.getpid())
@@ -327,6 +362,8 @@ def main():
         session.result("API Error: simulated failure", is_error=True)
         return 1
 
+    if args.json_schema:
+        return details(session, args.prompt)
     phase = phase_of(args.prompt)
     skill = skill_dir(args)
     if phase == "plan":

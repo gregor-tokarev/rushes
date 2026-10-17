@@ -119,10 +119,8 @@ pub const BLOCK_TYPES: [BlockType; 14] = [
 /// come first; otherwise catalog order is kept.
 pub fn filter(query: &str) -> Vec<&'static BlockType> {
     let query = normalize(query);
-    let (mut prefix, rest): (Vec<_>, Vec<_>) = BLOCK_TYPES
-        .iter()
-        .filter(|ty| ty.matches(&query))
-        .partition(|ty| normalize(ty.label()).starts_with(&query));
+    let (mut prefix, rest): (Vec<_>, Vec<_>) =
+        BLOCK_TYPES.iter().filter(|ty| ty.matches(&query)).partition(|ty| normalize(ty.label()).starts_with(&query));
     prefix.extend(rest);
     prefix
 }
@@ -131,13 +129,10 @@ pub fn filter(query: &str) -> Vec<&'static BlockType> {
 /// start of a word, which opens the slash menu.
 pub fn typed_slash(previous: &str, text: &str, cursor: usize) -> Option<usize> {
     let slash = cursor.checked_sub(1)?;
-    if text.as_bytes().get(slash) != Some(&b'/')
-        || !text[..slash].chars().next_back().is_none_or(char::is_whitespace)
-    {
+    if text.as_bytes().get(slash) != Some(&b'/') || !text[..slash].chars().next_back().is_none_or(char::is_whitespace) {
         return None;
     }
-    let prefix: usize =
-        previous.chars().zip(text.chars()).take_while(|(a, b)| a == b).map(|(c, _)| c.len_utf8()).sum();
+    let prefix: usize = previous.chars().zip(text.chars()).take_while(|(a, b)| a == b).map(|(c, _)| c.len_utf8()).sum();
     let suffix: usize = previous[prefix..]
         .chars()
         .rev()

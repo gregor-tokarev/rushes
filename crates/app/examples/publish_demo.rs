@@ -16,7 +16,7 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, WindowBounds, WindowOptions, div,
     point, px, rems, size,
 };
-use rushes::publish::{AccountBadge, PublishPanel, UploadsPage, YoutubeService, YoutubeSettings};
+use rushes::publish::{AccountBadge, PublishAssistant, PublishPanel, UploadsPage, YoutubeService, YoutubeSettings};
 use rushes::route::{Route, SettingsSection, VideoTab};
 use rushes::state::AppState;
 use rushes_core::Store;
@@ -195,6 +195,7 @@ fn main() {
         let state = cx.new(|_| state);
         AppState::set_global(state.clone(), cx);
         YoutubeService::init(state.clone(), cx);
+        PublishAssistant::init(state.clone(), cx);
         state.update(cx, |state, cx| {
             let video = state
                 .rows()

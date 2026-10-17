@@ -24,8 +24,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use gpui_kit::{AppContext as _, Context, Subscription, Task};
-use rusqlite::ErrorCode;
-use serde::{Deserialize, Serialize};
 use rushes_core::document::{DEFAULT_WPM, runtime_secs_for_words, spoken_word_count};
 use rushes_core::settings::AppSettings;
 use rushes_core::store::{forget_property, reconcile_property_value};
@@ -33,6 +31,8 @@ use rushes_core::{
     DatabaseView, Document, DocumentId, DocumentKind, PipelineRun, PropertyDef, PropertyId, RunEvent, RunId, Store,
     StoreError, UploadId, UploadJob, Video, VideoId, VideoRow, ViewId,
 };
+use rusqlite::ErrorCode;
+use serde::{Deserialize, Serialize};
 
 use super::{AppEvent, AppState, Problem, Severity, SharedStore};
 
