@@ -143,25 +143,35 @@ impl AgentConfig {
             args.extend(["--model".into(), model.into()]);
         }
         args.extend(["--permission-mode".into(), self.permission_mode.clone().into()]);
-        if !self.allowed_tools.is_empty() {
-            args.push(format!("--allowedTools={}", self.allowed_tools.join(",")).into());
+        let allowed = invocation.allowed_tools.as_ref().unwrap_or(&self.allowed_tools);
+        if !allowed.is_empty() {
+            args.push(format!("--allowedTools={}", allowed.join(",")).into());
         }
         if let Some(tools) = &invocation.tools {
             args.push(format!("--tools={}", tools.join(",")).into());
+        }
+        if let Some(config) = &invocation.mcp_config {
+            args.push(format!("--mcp-config={config}").into());
+            args.push("--strict-mcp-config".into());
         }
         if let Some(schema) = &invocation.json_schema {
             args.push(format!("--json-schema={schema}").into());
         }
         if invocation.one_off {
-            args.extend(["--no-session-persistence".into(), "--strict-mcp-config".into()]);
+            args.push("--no-session-persistence".into());
+            if invocation.mcp_config.is_none() {
+                args.push("--strict-mcp-config".into());
+            }
         }
         for dir in &invocation.add_dirs {
             let mut arg = OsString::from("--add-dir=");
             arg.push(dir);
             args.push(arg);
         }
-        if let Some(prompt) = &self.append_system_prompt {
-            args.push(format!("--append-system-prompt={prompt}").into());
+        let system_prompt: Vec<&str> =
+            [invocation.system_prompt.as_deref(), self.append_system_prompt.as_deref()].into_iter().flatten().collect();
+        if !system_prompt.is_empty() {
+            args.push(format!("--append-system-prompt={}", system_prompt.join("\n\n")).into());
         }
         if let Some(turns) = self.max_turns {
             args.extend(["--max-turns".into(), turns.to_string().into()]);
@@ -181,6 +191,14 @@ pub(crate) struct Invocation {
     pub prompt_on_stdin: bool,
     pub resume: Option<String>,
     pub add_dirs: Vec<PathBuf>,
+    /// `--mcp-config` (JSON); only these MCP servers are loaded.
+    pub mcp_config: Option<String>,
+    /// Replaces [`AgentConfig::allowed_tools`].
+    pub allowed_tools: Option<Vec<String>>,
+    /// Goes before [`AgentConfig::append_system_prompt`].
+    pub system_prompt: Option<String>,
+    /// Environment for the agent, under [`AgentConfig::env`] (which wins).
+    pub env: Vec<(String, String)>,
     /// `--tools`: the only built-in tools the agent has; `None` keeps them all.
     pub tools: Option<Vec<String>>,
     /// `--json-schema`: the final answer is JSON matching this schema.
@@ -239,11 +257,13 @@ pub(crate) fn run_agent(
     on_event: &mut dyn FnMut(&AgentEvent),
     cancel: &AtomicBool,
 ) -> Result<(ExitStatus, AgentRun), PipelineError> {
+    // The config's environment comes last, so it wins over the invocation's.
+    let env: Vec<(String, String)> = invocation.env.iter().chain(&config.env).cloned().collect();
     let spec = ProcessSpec {
         program,
         args: config.args(invocation),
         cwd: &invocation.cwd,
-        env: &config.env,
+        env: &env,
         stdin: invocation.prompt_on_stdin.then(|| invocation.prompt.clone()),
         kill_grace: config.kill_grace,
         parse: parse_line,
@@ -516,6 +536,33 @@ mod tests {
                 "40",
                 "--effort",
                 "high",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tool_server_replaces_the_tools_and_leads_the_system_prompt() {
+        let config = AgentConfig { append_system_prompt: Some("House style.".to_owned()), ..AgentConfig::default() };
+        let invocation = Invocation {
+            cwd: PathBuf::from("/videos/footage"),
+            prompt: "Edit this".to_owned(),
+            mcp_config: Some(r#"{"mcpServers":{}}"#.to_owned()),
+            tools: Some(vec!["Read".to_owned(), "Write".to_owned()]),
+            allowed_tools: Some(vec!["mcp__rushes".to_owned(), "Read".to_owned()]),
+            system_prompt: Some("Use the tools.".to_owned()),
+            ..Invocation::default()
+        };
+        let args = strings(config.args(&invocation));
+        assert_eq!(
+            args[5..],
+            [
+                "--permission-mode",
+                "acceptEdits",
+                "--allowedTools=mcp__rushes,Read",
+                "--tools=Read,Write",
+                r#"--mcp-config={"mcpServers":{}}"#,
+                "--strict-mcp-config",
+                "--append-system-prompt=Use the tools.\n\nHouse style.",
             ]
         );
     }

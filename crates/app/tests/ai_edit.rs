@@ -758,7 +758,8 @@ fn the_requirement_check_passes_with_the_fake_agent(cx: &mut TestAppContext) {
     wait_until(cx, "requirement check", |cx| !service.read(cx).is_checking());
     let doctor = cx.read(|cx| service.read(cx).doctor().cloned()).expect("doctor result");
     assert!(doctor.agent.ok, "{:?}", doctor.agent);
-    assert!(doctor.skill.ok, "{:?}", doctor.skill);
+    // Rushes' own tools by default: no skill and no Python to check.
+    assert_eq!((doctor.skill.as_ref(), doctor.python.as_ref()), (None, None), "{doctor:?}");
     assert!(doctor.elevenlabs.ok, "{:?}", doctor.elevenlabs);
     if tools_available() {
         assert!(doctor.ready(), "{doctor:?}");

@@ -71,10 +71,7 @@ pub struct CredentialStore {
 
 impl CredentialStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-            lock: Arc::default(),
-        }
+        Self { path: path.into(), lock: Arc::default() }
     }
 
     pub fn path(&self) -> &Path {
@@ -99,10 +96,7 @@ impl CredentialStore {
     pub fn save_credentials(&self, credentials: &Credentials) -> Result<()> {
         let _guard = self.locked();
         let account = self.load()?.and_then(|login| login.account);
-        self.write(&SavedLogin {
-            credentials: credentials.clone(),
-            account,
-        })
+        self.write(&SavedLogin { credentials: credentials.clone(), account })
     }
 
     /// Signs out locally. Missing file is fine.
@@ -122,8 +116,7 @@ impl CredentialStore {
 
     fn write(&self, login: &SavedLogin) -> Result<()> {
         let json = serde_json::to_vec_pretty(login)?;
-        write_private(&self.path, &json)
-            .map_err(|e| Error::io(format!("writing {}", self.path.display()), e))
+        write_private(&self.path, &json).map_err(|e| Error::io(format!("writing {}", self.path.display()), e))
     }
 }
 
@@ -191,10 +184,7 @@ mod tests {
             video_count: Some(7),
             backend: "Google".into(),
         };
-        let login = SavedLogin {
-            credentials: credentials("first"),
-            account: Some(account.clone()),
-        };
+        let login = SavedLogin { credentials: credentials("first"), account: Some(account.clone()) };
         store.save(&login).unwrap();
         assert_eq!(store.load().unwrap(), Some(login));
 
@@ -218,10 +208,7 @@ mod tests {
         let store = CredentialStore::new(&path);
         store.save_credentials(&credentials("token")).unwrap();
         store.save_credentials(&credentials("again")).unwrap();
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
@@ -234,9 +221,7 @@ mod tests {
                 let store = store.clone();
                 std::thread::spawn(move || {
                     for j in 0..2 {
-                        store
-                            .save_credentials(&credentials(&format!("{i}-{j}")))
-                            .unwrap();
+                        store.save_credentials(&credentials(&format!("{i}-{j}"))).unwrap();
                     }
                 })
             })
@@ -268,9 +253,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials.json");
         fs::write(&path, b"{not json").unwrap();
-        assert!(matches!(
-            CredentialStore::new(path).load(),
-            Err(Error::Json(_))
-        ));
+        assert!(matches!(CredentialStore::new(path).load(), Err(Error::Json(_))));
     }
 }

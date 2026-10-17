@@ -15,7 +15,6 @@ use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, ElementId, Entity, Focusable as _, TestAppContext, Window,
     WindowBounds, WindowOptions, px, size,
 };
-use rusqlite::Connection;
 use rushes::ai_edit::{LogEvent, PipelineService, RunMarker, TimelineEntry};
 use rushes::publish::{Retired, YoutubeEvent, YoutubeService};
 use rushes::route::VideoTab;
@@ -28,6 +27,7 @@ use rushes_core::{
     BlockId, DocumentKind, NewVideo, PipelineRun, PropertyDef, PropertyId, PropertyKind, PropertyValue, RunId,
     RunStatus, SelectOption, Store, TagColor, UploadId, UploadJob, UploadStatus, VideoId,
 };
+use rusqlite::Connection;
 
 /// A bound on any UI-thread call while the database is locked, generous for a
 /// debug build on a busy machine, yet below the 5 s the services' connection

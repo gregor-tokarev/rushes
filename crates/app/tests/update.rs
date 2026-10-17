@@ -16,7 +16,6 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, Bounds, ElementId, Entity, Focusable as _, TestAppContext, WindowBounds,
     WindowOptions, px, size,
 };
-use sha2::{Digest as _, Sha256};
 use rushes::ai_edit::PipelineService;
 use rushes::publish::YoutubeService;
 use rushes::route::{Route, SettingsSection};
@@ -26,6 +25,7 @@ use rushes::update::{UpdateService, UpdateStatus};
 use rushes_core::Store;
 use rushes_core::settings::AppSettings;
 use rushes_update::{Installation, ManualReason, Updater, Version};
+use sha2::{Digest as _, Sha256};
 
 /// Status and body by request path.
 type Routes = Arc<Mutex<HashMap<String, (u16, Vec<u8>)>>>;

@@ -1630,13 +1630,14 @@ impl PublishPanel {
                 button
                     .dropdown_menu(move |menu, window, _| {
                         let panel = panel.clone();
-                        choices.menu(scrolling_menu(menu, window).check_side(Side::Right), choose.clone()).separator().item(
-                            menu_item("Add account…").icon(IconName::Plus).disabled(signing_in).on_click(
+                        choices
+                            .menu(scrolling_menu(menu, window).check_side(Side::Right), choose.clone())
+                            .separator()
+                            .item(menu_item("Add account…").icon(IconName::Plus).disabled(signing_in).on_click(
                                 move |_, _, cx| {
                                     panel.update(cx, |panel, cx| panel.add_account(cx)).ok();
                                 },
-                            ),
-                        )
+                            ))
                     })
                     .into_any_element()
             };

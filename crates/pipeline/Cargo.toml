@@ -1,12 +1,13 @@
 [package]
 name = "rushes-pipeline"
-description = "AI video-editing pipelines: drives a headless coding agent with the video-use skill"
+description = "AI video-editing pipelines: drives a headless coding agent with Rushes' editing tools or the video-use skill"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
+rushes-edit = { path = "../edit" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

@@ -12,15 +12,15 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui_kit::{App, AppContext as _, Context, Entity, Global, SharedString, Subscription, Task};
-use serde::{Deserialize, Serialize};
 use rushes_core::input::expand_user_path;
 use rushes_core::media::{self, MediaKind};
-use rushes_core::settings::PipelineSettings;
+use rushes_core::settings::{EditHarness, PipelineSettings, data_dir, read_elevenlabs_key};
 use rushes_core::{PipelineRun, RunEvent, RunId, RunStatus, StoreError, VideoId, VideoStatus};
 use rushes_pipeline::{
-    AgentConfig, AgentEvent, AgentProcess, Doctor, Phase, PhaseOutcome, PipelineError, RunContext, default_skill_dir,
-    doctor, keep_final_cut, run_phase, set_aside_final_cut, stop_leftover_agent,
+    AgentConfig, AgentEvent, AgentProcess, Doctor, Harness, Phase, PhaseOutcome, PipelineError, RunContext, ToolServer,
+    default_skill_dir, doctor, doctor_rushes, keep_final_cut, run_phase, set_aside_final_cut, stop_leftover_agent,
 };
+use serde::{Deserialize, Serialize};
 
 use super::brief::BriefDraft;
 use super::footage::FootageImports;
@@ -624,10 +624,14 @@ impl PipelineService {
         let (phase, text) = (started.phase, started.text.clone());
         let run = self.run(id).ok_or(RunError::RunNotFound)?.clone();
         let settings = self.state.read(cx).settings().pipeline.clone();
-        let skill_dir = skill_dir(&settings).or_else(default_skill_dir).ok_or(RunError::NoSkillFolder)?;
+        let harness = match settings.harness {
+            EditHarness::Rushes => Harness::Rushes { tools: tool_server() },
+            EditHarness::VideoUse => Harness::VideoUse {
+                skill_dir: skill_dir(&settings).or_else(default_skill_dir).ok_or(RunError::NoSkillFolder)?,
+            },
+        };
         let config = self.agent_config(&settings);
-        let context =
-            RunContext { footage_dir: run.footage_dir.clone(), skill_dir, session_id: run.session_id.clone() };
+        let context = RunContext { footage_dir: run.footage_dir.clone(), harness, session_id: run.session_id.clone() };
         let pipeline_phase = match phase {
             PhaseKind::Plan => Phase::Plan { brief: run.brief.clone() },
             PhaseKind::Auto => Phase::Auto { brief: run.brief.clone() },
@@ -1058,15 +1062,23 @@ impl PipelineService {
         self.doctor_task.is_some()
     }
 
-    /// Checks the agent, the skill, ffmpeg, the ElevenLabs key and Python again on a
-    /// background thread.
+    /// Checks the agent, ffmpeg, the ElevenLabs key and, for video-use, the skill and
+    /// Python again on a background thread.
     pub fn refresh_doctor(&mut self, cx: &mut Context<Self>) {
         let settings = self.state.read(cx).settings().pipeline.clone();
         let config = self.agent_config(&settings);
         let skill_dir = skill_dir(&settings);
+        let harness = settings.harness;
         self.checked = Some(settings);
         self.doctor_task = Some(cx.spawn(async move |this, cx| {
-            let result = cx.background_spawn(async move { doctor(&config, skill_dir.as_deref()) }).await;
+            let result = cx
+                .background_spawn(async move {
+                    match harness {
+                        EditHarness::Rushes => doctor_rushes(&config),
+                        EditHarness::VideoUse => doctor(&config, skill_dir.as_deref()),
+                    }
+                })
+                .await;
             _ = this.update(cx, |this, cx| {
                 this.doctor = Some(result);
                 this.doctor_task = None;
@@ -1079,7 +1091,9 @@ impl PipelineService {
     fn on_settings_changed(&mut self, cx: &mut Context<Self>) {
         let settings = &self.state.read(cx).settings().pipeline;
         let changed = self.checked.as_ref().is_none_or(|checked| {
-            checked.agent_command != settings.agent_command || checked.skill_dir != settings.skill_dir
+            checked.agent_command != settings.agent_command
+                || checked.skill_dir != settings.skill_dir
+                || checked.harness != settings.harness
         });
         if changed {
             self.refresh_doctor(cx);
@@ -1087,7 +1101,29 @@ impl PipelineService {
     }
 
     fn agent_config(&self, settings: &PipelineSettings) -> AgentConfig {
-        agent_config(settings, self.agent_env.clone())
+        agent_config(settings, self.agent_env_with_key(settings))
+    }
+
+    /// The agent's extra environment plus the ElevenLabs key the edit transcribes with:
+    /// the one saved in Rushes, else (for Rushes' tools) the one a video-use install
+    /// keeps in its `.env`. A key the environment already has is left alone.
+    fn agent_env_with_key(&self, settings: &PipelineSettings) -> Vec<(String, String)> {
+        let mut env = self.agent_env.clone();
+        let has = env.iter().any(|(name, value)| name == ELEVENLABS_KEY && !value.trim().is_empty())
+            || std::env::var(ELEVENLABS_KEY).is_ok_and(|value| !value.trim().is_empty());
+        if has {
+            return env;
+        }
+        let key = read_elevenlabs_key(&data_dir()).or_else(|| match settings.harness {
+            EditHarness::Rushes => {
+                skill_dir(settings).or_else(default_skill_dir).and_then(|dir| dotenv_key(&dir.join(".env")))
+            }
+            EditHarness::VideoUse => None,
+        });
+        if let Some(key) = key {
+            env.push((ELEVENLABS_KEY.to_owned(), key));
+        }
+        env
     }
 
     fn report(&self, error: impl fmt::Display, cx: &mut Context<Self>) {
@@ -1202,6 +1238,32 @@ fn pipeline_problem(error: &PipelineError) -> String {
             "Something went wrong while the agent worked. Try again.".to_owned()
         }
     }
+}
+
+const ELEVENLABS_KEY: &str = "ELEVENLABS_API_KEY";
+
+/// The program that serves Rushes' editing tools to the agent: this app's own binary,
+/// started as `rushes edit-tools --footage <dir>`.
+fn tool_server() -> ToolServer {
+    let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rushes"));
+    ToolServer { program, args: vec![super::EDIT_TOOLS_COMMAND.to_owned()] }
+}
+
+/// The value of `ELEVENLABS_API_KEY=` in a `.env` file (quotes stripped), if set.
+fn dotenv_key(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .find(|(name, _)| name.trim() == ELEVENLABS_KEY)?
+        .1
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_owned();
+    (!value.is_empty()).then_some(value)
 }
 
 /// The configured skill folder, `~` expanded (settings saved before the field expanded

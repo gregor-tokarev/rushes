@@ -1,9 +1,10 @@
 //! AI video-editing pipelines for Rushes.
 //!
-//! Drives the [video-use](https://github.com/browser-use/video-use) skill through a
-//! headless coding agent (Claude Code: `claude -p --output-format stream-json`).
-//! The same agent writes a video's YouTube details ([`write_details`]), and Codex
-//! draws its thumbnails ([`generate_thumbnails`]).
+//! Drives a headless coding agent (Claude Code: `claude -p --output-format
+//! stream-json`) that edits with Rushes' own tools (`rushes-edit`, over MCP) or with
+//! the [video-use](https://github.com/browser-use/video-use) skill. The same agent
+//! writes a video's YouTube details ([`write_details`]), and Codex draws its
+//! thumbnails ([`generate_thumbnails`]).
 //! Synchronous and blocking: run it on a background thread with an event callback and
 //! a cancellation flag. See `docs/pipeline.md`.
 
@@ -23,12 +24,13 @@ pub use details::{
     DETAILS_SCHEMA, DetailsRequest, VideoDetails, WrittenDetails, details_prompt, has_transcript, parse_details,
     read_edit_notes, read_transcript, write_details,
 };
-pub use doctor::{Check, Doctor, default_skill_dir, doctor};
+pub use doctor::{Check, Doctor, default_skill_dir, doctor, doctor_rushes};
 pub use error::PipelineError;
-pub use event::{AgentEvent, parse_codex_line, parse_line};
+pub use event::{AgentEvent, RUSHES_TOOL_PREFIX, parse_codex_line, parse_line};
 pub use media::{FOOTAGE_EXTENSIONS, FootageFile, MediaInfo, list_footage, probe_media};
 pub use pipeline::{
-    Phase, PhaseOutcome, RunContext, build_prompt, keep_final_cut, kept_cuts, run_phase, set_aside_final_cut,
+    Harness, Phase, PhaseOutcome, RunContext, ToolServer, build_prompt, build_rushes_prompt, keep_final_cut, kept_cuts,
+    run_phase, set_aside_final_cut,
 };
 pub use process::{AgentProcess, stop_leftover_agent};
 pub use thumbnails::{

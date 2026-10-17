@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use rushes_pipeline::{FootageFile, MediaInfo, Phase, build_prompt};
+use rushes_pipeline::{FootageFile, MediaInfo, Phase, build_prompt, build_rushes_prompt};
 
 const SKILL_MD: &str = "/opt/video-use/SKILL.md";
 
@@ -136,4 +136,34 @@ fn prompts_are_never_mistaken_for_cli_flags() {
     ] {
         assert!(!prompt_for(phase).starts_with('-'));
     }
+}
+
+#[test]
+fn rushes_prompts_follow_the_same_phases_with_the_tools() {
+    let plan = build_rushes_prompt(&Phase::Plan { brief: BRIEF.to_owned() }, &footage());
+    assert!(plan.starts_with("Rushes edit request (planning phase)."));
+    for expected in [
+        "rushes tools",
+        "- take1.mp4 (1:02, 1920x1080)\n",
+        BRIEF,
+        "plan_cut",
+        "./edit/project.md",
+        "STOP. Do not render",
+        "headless",
+        "End with the strategy only",
+    ] {
+        assert!(plan.contains(expected), "missing {expected:?} in:\n{plan}");
+    }
+    assert!(!plan.contains("SKILL.md") && !plan.contains("final.mp4"), "{plan}");
+
+    let approve = build_rushes_prompt(&Phase::Approve { notes: Some("Shorter intro.".to_owned()) }, &[]);
+    assert!(approve.starts_with("Rushes edit: strategy approved (render phase)."));
+    assert!(approve.contains("Shorter intro.") && approve.contains("./edit/final.mp4"), "{approve}");
+
+    let feedback = build_rushes_prompt(&Phase::Feedback { message: " Cut the outro. ".to_owned() }, &[]);
+    assert!(feedback.contains("(revision phase)") && feedback.contains("\n\nCut the outro.\n\n"), "{feedback}");
+
+    let auto = build_rushes_prompt(&Phase::Auto { brief: String::new() }, &[]);
+    assert!(auto.starts_with("Rushes edit request (single pass, pre-approved)."));
+    assert!(auto.contains("No media files were found") && auto.contains("infer the kind of video"), "{auto}");
 }

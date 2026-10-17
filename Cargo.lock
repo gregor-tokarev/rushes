@@ -5772,6 +5772,7 @@ dependencies = [
  "futures",
  "gpui-kit",
  "rushes-core",
+ "rushes-edit",
  "rushes-pipeline",
  "rushes-update",
  "rushes-youtube",
@@ -5799,10 +5800,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rushes-edit"
+version = "0.1.12"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "ureq",
+]
+
+[[package]]
 name = "rushes-pipeline"
 version = "0.1.12"
 dependencies = [
  "libc",
+ "rushes-edit",
  "serde",
  "serde_json",
  "tempfile",

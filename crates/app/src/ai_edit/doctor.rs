@@ -16,8 +16,8 @@ use rushes_pipeline::{Check, Doctor, default_skill_dir};
 
 use super::service::PipelineService;
 
-/// Requirement checklist (agent CLI, video-use skill, ffmpeg, ElevenLabs key, Python)
-/// with fix hints. Used by onboarding and settings, and inline (compact) by the
+/// Requirement checklist (agent CLI, ffmpeg, ElevenLabs key; for video-use also the
+/// skill and Python) with fix hints. Used by onboarding and settings, and inline (compact) by the
 /// AI edit panel when something is missing.
 ///
 /// Reads the cached check of [`PipelineService`]; "Re-check" runs it again.
@@ -59,7 +59,7 @@ impl DoctorChecklist {
             Some(_) if missing == 0 => (
                 Some(Icon::new(IconName::CircleCheck).small().text_color(theme.success)),
                 "Ready for AI edits".into(),
-                "Everything video-use needs is installed.".into(),
+                "Everything AI edits need is installed.".into(),
             ),
             Some(_) => (
                 Some(Icon::new(IconName::TriangleAlert).small().text_color(theme.warning)),
@@ -155,6 +155,8 @@ fn requirements<'a>(doctor: &'a Doctor, cx: &App) -> Vec<Requirement<'a>> {
         .or_else(default_skill_dir)
         .unwrap_or_else(|| PathBuf::from("~/.claude/skills/video-use"));
     let skill = skill_dir.display();
+    // Editing with video-use: its own skill check is there.
+    let video_use = doctor.skill.is_some();
     let install_ffmpeg = if cfg!(target_os = "macos") {
         "Install ffmpeg with `brew install ffmpeg`"
     } else if cfg!(windows) {
@@ -162,29 +164,31 @@ fn requirements<'a>(doctor: &'a Doctor, cx: &App) -> Vec<Requirement<'a>> {
     } else {
         "Install ffmpeg with your package manager, for example `sudo apt install ffmpeg`"
     };
-    vec![
-        Requirement {
-            key: "agent",
-            name: "Claude Code",
-            check: &doctor.agent,
-            fix: "Install it with `npm install -g @anthropic-ai/claude-code` and run `claude` once to sign in, \
-                  or set the agent command in Settings > AI editing."
-                .to_owned(),
-        },
-        Requirement {
+    let mut requirements = vec![Requirement {
+        key: "agent",
+        name: "Claude Code",
+        check: &doctor.agent,
+        fix: "Install it with `npm install -g @anthropic-ai/claude-code` and run `claude` once to sign in, \
+              or set the agent command in Settings > AI editing."
+            .to_owned(),
+    }];
+    if let Some(check) = &doctor.skill {
+        requirements.push(Requirement {
             key: "skill",
             name: "video-use skill",
-            check: &doctor.skill,
+            check,
             fix: format!(
                 "Install it with `git clone https://github.com/browser-use/video-use ~/.claude/skills/video-use`, \
                  or choose the folder you cloned it to. Currently looking in `{skill}`."
             ),
-        },
+        });
+    }
+    requirements.extend([
         Requirement {
             key: "ffmpeg",
             name: "ffmpeg",
             check: &doctor.ffmpeg,
-            fix: format!("{install_ffmpeg}; video-use cuts and renders with it."),
+            fix: format!("{install_ffmpeg}; AI edits cut and render with it."),
         },
         Requirement {
             key: "ffprobe",
@@ -196,18 +200,28 @@ fn requirements<'a>(doctor: &'a Doctor, cx: &App) -> Vec<Requirement<'a>> {
             key: "elevenlabs",
             name: "ElevenLabs API key",
             check: &doctor.elevenlabs,
-            fix: format!(
-                "video-use transcribes the footage with ElevenLabs. Add a line `ELEVENLABS_API_KEY=<your key>` to \
-                 `{skill}/.env`, or set `ELEVENLABS_API_KEY` in the environment Rushes starts from."
-            ),
+            fix: if video_use {
+                format!(
+                    "video-use transcribes the footage with ElevenLabs. Add a line `ELEVENLABS_API_KEY=<your key>` to \
+                     `{skill}/.env`, or set `ELEVENLABS_API_KEY` in the environment Rushes starts from."
+                )
+            } else {
+                "AI edits transcribe the footage with ElevenLabs. Paste a key from \
+                 [elevenlabs.io/app/settings/api-keys](https://elevenlabs.io/app/settings/api-keys) into \
+                 ElevenLabs API key in Settings > AI editing."
+                    .to_owned()
+            },
         },
-        Requirement {
+    ]);
+    if let Some(check) = &doctor.python {
+        requirements.push(Requirement {
             key: "python",
             name: "Python",
-            check: &doctor.python,
+            check,
             fix: format!(
                 "Install uv (`curl -LsSf https://astral.sh/uv/install.sh | sh`), then run `uv sync` in `{skill}`."
             ),
-        },
-    ]
+        });
+    }
+    requirements
 }

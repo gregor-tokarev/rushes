@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 use chrono::{Local, Utc};
 use gpui_kit::{Entity, TestAppContext};
 use publish_support::{Emulators, Workspace, wait_until};
-use serde_json::json;
 use rushes::publish::BlockingReason;
 use rushes::publish::{
     Connection, INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, Retired, UploadError, YoutubeEvent,
@@ -23,6 +22,7 @@ use rushes::state::{AppEvent, SAVE_RETRY_DELAY};
 use rushes_core::settings::YoutubeBackend;
 use rushes_core::{Privacy, PublishChannel, UploadId, UploadJob, UploadStatus, VideoId, VideoStatus};
 use rushes_youtube::{Account, CredentialStore, Credentials, SavedLogin};
+use serde_json::json;
 
 #[gpui_kit::test]
 fn connects_through_the_browser_and_keeps_the_account(cx: &mut TestAppContext) {

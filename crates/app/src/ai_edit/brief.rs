@@ -2,9 +2,9 @@
 
 use std::ops::Range;
 
-use serde::{Deserialize, Serialize};
 use rushes_core::settings::EditPreferences;
 use rushes_core::{Block, BlockKind, Video, VideoFormat};
+use serde::{Deserialize, Serialize};
 
 /// The state of a video's brief form, kept while its tab is closed and across restarts.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -312,11 +312,8 @@ fn cap(text: &str, max: usize) -> String {
         return text.to_owned();
     };
     let head = &text[..cut];
-    let boundary = head
-        .rfind("\n\n")
-        .filter(|&at| at > head.len() / 2)
-        .or_else(|| head.rfind(char::is_whitespace))
-        .unwrap_or(cut);
+    let boundary =
+        head.rfind("\n\n").filter(|&at| at > head.len() / 2).or_else(|| head.rfind(char::is_whitespace)).unwrap_or(cut);
     format!("{}\n\n[The script continues; the rest is omitted here.]", head[..boundary].trim_end())
 }
 

@@ -16,13 +16,13 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{TimeDelta, Utc};
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use rushes_youtube::{
     Account, CredentialStore, Credentials, Error, Privacy, ProcessingStatus, RetryCause, SavedLogin,
     UPLOAD_GRANULARITY, UploadOptions, UploadProgress, UploadStatus, VideoMetadata, YoutubeClient, YoutubeConfig,
     begin_authorization, check_client, refresh,
 };
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 const PROCESSING_MS: u64 = 1500;
 /// A 1×1 PNG.

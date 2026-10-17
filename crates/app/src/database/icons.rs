@@ -110,8 +110,6 @@ pub(crate) fn column_icon(column: Column, properties: &[PropertyDef]) -> IconNam
         Column::Custom(id) => properties
             .iter()
             .find(|property| property.id == id)
-            .map_or(IconName::TextAlignStart, |property| {
-                kind_icon(&property.kind)
-            }),
+            .map_or(IconName::TextAlignStart, |property| kind_icon(&property.kind)),
     }
 }

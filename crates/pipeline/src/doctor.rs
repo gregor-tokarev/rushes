@@ -31,23 +31,31 @@ impl Check {
 pub struct Doctor {
     /// The agent CLI.
     pub agent: Check,
-    /// The video-use skill (`SKILL.md`).
-    pub skill: Check,
+    /// The video-use skill (`SKILL.md`); `None` when editing with Rushes' own tools.
+    pub skill: Option<Check>,
     pub ffmpeg: Check,
     pub ffprobe: Check,
-    /// The ElevenLabs API key video-use transcribes with. The key itself is never read out.
+    /// The ElevenLabs API key the takes are transcribed with. The key itself is never read out.
     pub elevenlabs: Check,
-    /// A Python able to run the skill's helpers.
-    pub python: Check,
+    /// A Python able to run the skill's helpers; `None` when editing with Rushes' own tools.
+    pub python: Option<Check>,
     /// The resolved (symlink-free) skill folder, when `SKILL.md` was found.
     pub skill_dir: Option<PathBuf>,
 }
 
 impl Doctor {
     pub fn ready(&self) -> bool {
-        [&self.agent, &self.skill, &self.ffmpeg, &self.ffprobe, &self.elevenlabs, &self.python]
-            .iter()
-            .all(|check| check.ok)
+        [
+            Some(&self.agent),
+            self.skill.as_ref(),
+            Some(&self.ffmpeg),
+            Some(&self.ffprobe),
+            Some(&self.elevenlabs),
+            self.python.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .all(|check| check.ok)
     }
 }
 
@@ -69,9 +77,27 @@ pub fn doctor(config: &AgentConfig, skill_dir: Option<&Path>) -> Doctor {
         ffmpeg: check_ffmpeg_tool(find("ffmpeg"), "ffmpeg"),
         ffprobe: check_ffmpeg_tool(find("ffprobe"), "ffprobe"),
         elevenlabs: check_elevenlabs(config, resolved_skill_dir.as_deref()),
-        python: check_python(resolved_skill_dir.as_deref(), find("uv"), find("python3")),
-        skill,
+        python: Some(check_python(resolved_skill_dir.as_deref(), find("uv"), find("python3"))),
+        skill: Some(skill),
         skill_dir: resolved_skill_dir,
+    }
+}
+
+/// Checks what editing with Rushes' own tools needs: the agent CLI, ffmpeg/ffprobe on
+/// the agent's `PATH` and an ElevenLabs key in its environment ([`AgentConfig::env`]
+/// or the app's). No skill and no Python.
+pub fn doctor_rushes(config: &AgentConfig) -> Doctor {
+    let path_var = config.env_var("PATH");
+    let find = |name: &str| find_executable(Path::new(name), path_var.as_deref());
+    let key = config.env_var(ELEVENLABS_KEY).is_some_and(|key| !key.to_string_lossy().trim().is_empty());
+    Doctor {
+        agent: check_agent(config),
+        skill: None,
+        ffmpeg: check_ffmpeg_tool(find("ffmpeg"), "ffmpeg"),
+        ffprobe: check_ffmpeg_tool(find("ffprobe"), "ffprobe"),
+        elevenlabs: if key { Check::pass("ElevenLabs API key is set") } else { Check::fail("no ElevenLabs API key") },
+        python: None,
+        skill_dir: None,
     }
 }
 

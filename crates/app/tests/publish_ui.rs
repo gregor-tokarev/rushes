@@ -17,7 +17,6 @@ use gpui_kit::{
     SharedString, TestAppContext, Window, WindowBounds, WindowOptions, px, size,
 };
 use publish_support::{Emulators, Workspace, wait_until};
-use serde_json::json;
 use rushes::ai_edit::{AiEditPanel, PipelineService};
 use rushes::publish::{
     AccountBadge, BlockingReason, CHAPTERS_HEADING, Connection, PublishPanel, ThumbnailSync, UploadsPage,
@@ -31,6 +30,7 @@ use rushes_core::{
     UploadStatus, VideoId, YoutubeLink,
 };
 use rushes_youtube::{CredentialStore, RetryCause};
+use serde_json::json;
 
 /// Longer than the views' save delay.
 const SAVED: Duration = Duration::from_secs(1);

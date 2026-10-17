@@ -68,12 +68,8 @@ impl YoutubeConfig {
     /// Emulator config when `RUSHES_GOOGLE_URL` or `RUSHES_YOUTUBE_URL` is set; the
     /// other one falls back to its default port.
     pub fn emulator_from_env() -> Option<Self> {
-        let google = std::env::var("RUSHES_GOOGLE_URL")
-            .ok()
-            .filter(|v| !v.is_empty());
-        let youtube = std::env::var("RUSHES_YOUTUBE_URL")
-            .ok()
-            .filter(|v| !v.is_empty());
+        let google = std::env::var("RUSHES_GOOGLE_URL").ok().filter(|v| !v.is_empty());
+        let youtube = std::env::var("RUSHES_YOUTUBE_URL").ok().filter(|v| !v.is_empty());
         if google.is_none() && youtube.is_none() {
             return None;
         }
@@ -92,13 +88,9 @@ impl YoutubeConfig {
         if self.is_google() {
             return "Google".to_owned();
         }
-        let host = url::Url::parse(&self.auth_url).ok().and_then(|url| {
-            Some(format!(
-                "{}:{}",
-                url.host_str()?,
-                url.port_or_known_default()?
-            ))
-        });
+        let host = url::Url::parse(&self.auth_url)
+            .ok()
+            .and_then(|url| Some(format!("{}:{}", url.host_str()?, url.port_or_known_default()?)));
         match host {
             Some(host) => format!("Emulator ({host})"),
             None => "Emulator".to_owned(),
@@ -116,10 +108,7 @@ impl fmt::Debug for YoutubeConfig {
             .field("api_base", &self.api_base)
             .field("upload_base", &self.upload_base)
             .field("client_id", &self.client_id)
-            .field(
-                "client_secret",
-                &self.client_secret.as_ref().map(|_| "<redacted>"),
-            )
+            .field("client_secret", &self.client_secret.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }
@@ -133,30 +122,18 @@ mod tests {
         let config = YoutubeConfig::emulator("http://127.0.0.1:4002/", "http://127.0.0.1:4020");
         assert_eq!(config.auth_url, "http://127.0.0.1:4002/o/oauth2/v2/auth");
         assert_eq!(config.token_url, "http://127.0.0.1:4002/oauth2/token");
-        assert_eq!(
-            config.userinfo_url,
-            "http://127.0.0.1:4002/oauth2/v2/userinfo"
-        );
+        assert_eq!(config.userinfo_url, "http://127.0.0.1:4002/oauth2/v2/userinfo");
         assert_eq!(config.revoke_url, "http://127.0.0.1:4002/oauth2/revoke");
         assert_eq!(config.api_base, "http://127.0.0.1:4020/youtube/v3");
-        assert_eq!(
-            config.upload_base,
-            "http://127.0.0.1:4020/upload/youtube/v3"
-        );
+        assert_eq!(config.upload_base, "http://127.0.0.1:4020/upload/youtube/v3");
         assert!(!config.is_google());
         assert_eq!(config.backend_label(), "Emulator (127.0.0.1:4002)");
     }
 
     #[test]
     fn google_config_drops_empty_secret_and_redacts_it() {
-        assert_eq!(
-            YoutubeConfig::google("id", Some(String::new())).client_secret,
-            None
-        );
-        let config = YoutubeConfig::google(
-            "id.apps.googleusercontent.com",
-            Some("GOCSPX-secret".into()),
-        );
+        assert_eq!(YoutubeConfig::google("id", Some(String::new())).client_secret, None);
+        let config = YoutubeConfig::google("id.apps.googleusercontent.com", Some("GOCSPX-secret".into()));
         assert!(config.is_google());
         assert_eq!(config.backend_label(), "Google");
         assert!(!format!("{config:?}").contains("GOCSPX"));
