@@ -10,6 +10,7 @@
 //! that changed. Overlays replace the picture of the frames they cover (an image, or
 //! another take's picture) and leave the sound alone.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
@@ -33,6 +34,10 @@ use crate::transcribe::write_atomic;
 pub const SAMPLE_RATE: u64 = 48_000;
 /// Fade at every cut, so no cut clicks.
 const FADE_SECONDS: f64 = 0.010;
+/// Most a take's sound is raised or lowered to match the main take's speech.
+const MAX_MATCH_DB: f64 = 20.0;
+/// Speech a take needs in the cut for its level to be measured and matched.
+const MIN_MATCH_SPEECH: f64 = 2.0;
 pub const LOUDNESS_TARGET: f64 = -14.0;
 const TRUE_PEAK: f64 = -1.5;
 /// Gentle speech compression before normalising (2.5:1 above -20 dBFS): speech is peaky,
@@ -164,6 +169,10 @@ pub struct RenderRecord {
     /// Where the picture of each run of frames comes from.
     #[serde(default)]
     pub pictures: Vec<Picture>,
+    /// Gain in dB that brought each take's speech to the main take's level, where it
+    /// differed by a decibel or more.
+    #[serde(default)]
+    pub gains: BTreeMap<String, f64>,
 }
 
 impl RenderRecord {
@@ -185,6 +194,10 @@ impl RenderRecord {
                 " Sound lightly compressed ({:.1} LUFS, peak {:.1} dBTP) and normalised to {LOUDNESS_TARGET} LUFS.",
                 loudness.integrated, loudness.true_peak
             ));
+        }
+        if !self.gains.is_empty() {
+            let gains: Vec<String> = self.gains.iter().map(|(take, gain)| format!("{take} {gain:+.1} dB")).collect();
+            out.push_str(&format!(" Speech levels matched to the main take: {}.", gains.join(", ")));
         }
         if let Some(subtitles) = &self.subtitles {
             out.push_str(&format!(" Captions: {}.", subtitles.display()));
@@ -532,7 +545,8 @@ pub fn render(
     fs::write(&list, text)?;
     on_progress("cutting the sound");
     let wav = cache.join(format!("audio-{}.wav", short_hash(output.as_os_str().as_encoded_bytes())));
-    assemble_audio(session, &placed, &wav)?;
+    let gains = speech_gains(session, &placed)?;
+    assemble_audio(session, &placed, &gains, &wav)?;
 
     let total_samples: u64 = placed.iter().map(|p| p.samples).sum();
     let measured = if options.normalize_loudness { measure_loudness(&ffmpeg, &wav).ok() } else { None };
@@ -582,6 +596,7 @@ pub fn render(
             .filter_map(|job| job.clip.file_name().map(|name| name.to_string_lossy().into_owned()))
             .collect(),
         pictures: pictures.clone(),
+        gains,
     };
     write_atomic(&record_path(session, options.quality)?, &serde_json::to_vec_pretty(&record)?)?;
     write_edl(session, cut, &record)?;
@@ -787,24 +802,69 @@ pub(crate) fn true_peak(ffmpeg: &Path, file: &Path) -> Option<f64> {
         .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
 }
 
-/// Writes the sound of the placed spans as one 48 kHz stereo 16-bit WAV: each span's
-/// samples cut from its take's decoded audio, with a short fade at every cut.
-fn assemble_audio(session: &Session, placed: &[Placed], wav: &Path) -> Result<()> {
+/// Gain in dB per take that brings its speech to the level of the take with the most
+/// speech in the cut, so an insert from another recording plays as loud as the rest.
+/// Measured on the kept words (from the analysis envelope); takes without at least
+/// [`MIN_MATCH_SPEECH`] of kept words (a silent demo, music) stay as they are.
+fn speech_gains(session: &mut Session, placed: &[Placed]) -> Result<BTreeMap<String, f64>> {
+    let takes: std::collections::BTreeSet<String> = placed.iter().map(|p| p.span.take.clone()).collect();
+    let takes: Vec<String> = takes.into_iter().filter(|take| session.view(take).is_some()).collect();
+    for take in &takes {
+        session.load_envelope(take)?;
+    }
+    let hop = audio::Envelope::hop_seconds();
+    let mut levels: Vec<(String, f64, f64)> = Vec::new();
+    for take in takes {
+        let (view, envelope) = (session.view(&take).expect("loaded"), session.envelope(&take).expect("loaded"));
+        let (mut power, mut windows) = (0.0, 0usize);
+        for item in placed.iter().filter(|p| p.span.take == take) {
+            for word in view.transcript.words.iter().filter(|w| !w.event && !w.is_filler()) {
+                let (from, to) = (word.start.max(item.span.start), word.end.min(item.span.end));
+                if to <= from {
+                    continue;
+                }
+                let last = ((to / hop) as usize).min(envelope.db.len());
+                for db in &envelope.db[((from / hop) as usize).min(last)..last] {
+                    power += 10f64.powf(f64::from(*db) / 10.0);
+                    windows += 1;
+                }
+            }
+        }
+        let seconds = windows as f64 * hop;
+        if seconds >= MIN_MATCH_SPEECH && power > 0.0 {
+            levels.push((take, seconds, 10.0 * (power / windows as f64).log10()));
+        }
+    }
+    let Some((_, _, reference)) = levels.iter().max_by(|a, b| a.1.total_cmp(&b.1)).cloned() else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(levels
+        .into_iter()
+        .map(|(take, _, level)| (take, (reference - level).clamp(-MAX_MATCH_DB, MAX_MATCH_DB)))
+        .filter(|(_, gain)| gain.abs() >= 1.0)
+        .collect())
+}
+
+/// Writes the sound of the placed spans as one 48 kHz stereo 32-bit float WAV: each
+/// span's samples cut from its take's decoded audio, with its take's gain (in dB, see
+/// [`speech_gains`]; float keeps the peaks a gain raises for the limiter) and a short
+/// fade at every cut.
+fn assemble_audio(session: &Session, placed: &[Placed], gains: &BTreeMap<String, f64>, wav: &Path) -> Result<()> {
     use std::io::{Read as _, Seek as _, SeekFrom};
-    let total: u64 = placed.iter().map(|p| p.samples * 4).sum();
+    let total: u64 = placed.iter().map(|p| p.samples * 8).sum();
     let data_len =
-        u32::try_from(total).map_err(|_| EditError::invalid("the cut is too long for one WAV file (over 6 hours)"))?;
+        u32::try_from(total).map_err(|_| EditError::invalid("the cut is too long for one WAV file (over 3 hours)"))?;
     let mut out = BufWriter::new(fs::File::create(wav)?);
     out.write_all(b"RIFF")?;
     out.write_all(&(36 + data_len).to_le_bytes())?;
     out.write_all(b"WAVEfmt ")?;
     out.write_all(&16u32.to_le_bytes())?;
-    out.write_all(&1u16.to_le_bytes())?; // PCM
+    out.write_all(&3u16.to_le_bytes())?; // IEEE float
     out.write_all(&2u16.to_le_bytes())?; // stereo
     out.write_all(&(SAMPLE_RATE as u32).to_le_bytes())?;
-    out.write_all(&(SAMPLE_RATE as u32 * 4).to_le_bytes())?;
-    out.write_all(&4u16.to_le_bytes())?;
-    out.write_all(&16u16.to_le_bytes())?;
+    out.write_all(&(SAMPLE_RATE as u32 * 8).to_le_bytes())?;
+    out.write_all(&8u16.to_le_bytes())?;
+    out.write_all(&32u16.to_le_bytes())?;
     out.write_all(b"data")?;
     out.write_all(&data_len.to_le_bytes())?;
     let mut sources: std::collections::HashMap<String, Option<fs::File>> = std::collections::HashMap::new();
@@ -834,20 +894,20 @@ fn assemble_audio(session: &Session, placed: &[Placed], wav: &Path) -> Result<()
                 filled += n;
             }
         }
-        let mut samples: Vec<i16> = bytes.as_chunks::<2>().0.iter().map(|pair| i16::from_le_bytes(*pair)).collect();
+        let level = gains.get(&item.span.take).map_or(1.0, |db| 10f32.powf(*db as f32 / 20.0)) / 32768.0;
+        let mut samples: Vec<f32> =
+            bytes.as_chunks::<2>().0.iter().map(|pair| f32::from(i16::from_le_bytes(*pair)) * level).collect();
         let ramp = fade.min(count / 4);
         for frame in 0..ramp {
             let gain = (frame as f32 + 0.5) / ramp as f32;
             if item.fade_in {
                 for channel in 0..2 {
-                    let at = frame * 2 + channel;
-                    samples[at] = (f32::from(samples[at]) * gain) as i16;
+                    samples[frame * 2 + channel] *= gain;
                 }
             }
             if item.fade_out {
                 for channel in 0..2 {
-                    let at = (count - 1 - frame) * 2 + channel;
-                    samples[at] = (f32::from(samples[at]) * gain) as i16;
+                    samples[(count - 1 - frame) * 2 + channel] *= gain;
                 }
             }
         }

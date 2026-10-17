@@ -163,11 +163,12 @@ fn vertical_output_crops_and_fits() {
     assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "180,320");
 }
 
-/// `seconds` of a solid `colour` picture at 25 fps with white noise.
-fn make_clip(path: &Path, colour: &str, seconds: f64) {
+/// `seconds` of a solid `colour` picture at 25 fps with pink noise of `amplitude`.
+fn make_clip(path: &Path, colour: &str, seconds: f64, amplitude: f64) {
     let status = Command::new("ffmpeg")
         .args(["-v", "error", "-y", "-f", "lavfi", "-i", &format!("color=c={colour}:size=320x240:rate=25"), "-f"])
-        .args(["lavfi", "-i", "anoisesrc=color=white:seed=7:amplitude=0.3", "-t", &seconds.to_string()])
+        .args(["lavfi", "-i", &format!("anoisesrc=color=pink:seed=7:amplitude={amplitude}")])
+        .args(["-t", &seconds.to_string()])
         .args(["-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest"])
         .arg(path)
         .status()
@@ -196,6 +197,23 @@ fn colour_at(file: &Path, seconds: f64) -> (u8, u8, u8) {
     (out.stdout[0], out.stdout[1], out.stdout[2])
 }
 
+/// Integrated loudness (LUFS) of `file` between `from` and `to` seconds.
+fn loudness(file: &Path, (from, to): (f64, f64)) -> f64 {
+    let out = Command::new("ffmpeg")
+        .args(["-nostdin", "-v", "info", "-ss", &format!("{from:.3}"), "-to", &format!("{to:.3}"), "-i"])
+        .arg(file)
+        .args(["-map", "0:a", "-af", "ebur128", "-f", "null", "-"])
+        .output()
+        .expect("run ffmpeg");
+    let text = String::from_utf8_lossy(&out.stderr);
+    let summary = text.rsplit("Summary:").next().unwrap();
+    summary
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("I:"))
+        .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
+        .expect("integrated loudness")
+}
+
 #[test]
 fn outside_material_comes_in_as_takes_and_shows_over_the_speech() {
     if !ffmpeg_available() {
@@ -209,7 +227,8 @@ fn outside_material_comes_in_as_takes_and_shows_over_the_speech() {
     make_take(&footage.join("take.mp4"));
     write_transcript(&footage.join("edit"));
     make_image(&outside.join("chart.png"), "red");
-    make_clip(&outside.join("quote.mp4"), "blue", 4.0);
+    // Recorded much quieter than the take it goes into.
+    make_clip(&outside.join("quote.mp4"), "blue", 4.0, 0.05);
     let mut tools = Tools::new(&footage);
 
     let added = call(&mut tools, "add_footage", json!({"path": outside.join("chart.png")}));
@@ -221,7 +240,7 @@ fn outside_material_comes_in_as_takes_and_shows_over_the_speech() {
     assert!(inventory.contains("A: take.mp4") && inventory.contains("B: chart.png (image"), "{inventory}");
 
     // The quote's words, as if transcribed.
-    let words: Vec<Value> = (0..6)
+    let words: Vec<Value> = (0..8)
         .map(|n| {
             let start = 0.5 + n as f64 * 0.45;
             json!({"text": format!("quote{n}"), "start": start, "end": start + 0.3, "type": "word"})
@@ -274,6 +293,18 @@ fn outside_material_comes_in_as_takes_and_shows_over_the_speech() {
     assert!((seconds - 1.9).abs() < 0.2, "{seconds}");
     let edl: Value = serde_json::from_slice(&fs::read(footage.join("edit/edl.json")).unwrap()).unwrap();
     assert_eq!(edl["overlays"][0]["source"], "B", "{edl}");
+
+    // The quote is raised to the level of the take around it.
+    assert!(record["gains"]["C"].as_f64().is_some_and(|gain| gain > 6.0), "{}", record["gains"]);
+    assert!(report.contains("Speech levels matched to the main take: C +"), "{report}");
+    let placed = record["placed"].as_array().unwrap();
+    let stretch = |take: &str| {
+        let item = placed.iter().find(|p| p["span"]["take"] == take).unwrap();
+        let start = item["out_start"].as_f64().unwrap();
+        (start + 0.5, start + item["samples"].as_f64().unwrap() / 48_000.0 - 0.5)
+    };
+    let (quote, main) = (loudness(&preview, stretch("C")), loudness(&preview, stretch("A")));
+    assert!((quote - main).abs() < 4.0, "quote {quote:.1} LUFS, main {main:.1} LUFS");
 
     // An overlay must sit on words the cut keeps.
     let error = tools.call(

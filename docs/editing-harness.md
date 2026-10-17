@@ -163,7 +163,11 @@ frames, so sound and picture end every span together.
   cut re-encodes only what changed; clips no render uses any more are deleted. Up to six
   encodes run at once.
 - Sound: each take is decoded once to `edit/.cache/audio/<stem>.<clock>.48k.pcm`; spans are
-  cut from it by sample index, with 10 ms fades at cuts, into one WAV. Seeking AAC with
+  cut from it by sample index, with 10 ms fades at cuts, into one 32-bit float WAV. Each
+  take's speech is brought to the level of the take with the most speech in the cut
+  (measured on its kept words; up to ±20 dB; takes with under 2 s of kept words, such as a
+  silent demo, stay as they are), so a line from another recording plays as loud as the
+  rest; the render report lists the gains. Seeking AAC with
   ffmpeg instead shifts the sound by the encoder delay, and joining per-span AAC files
   drifts by the priming of every file (the video-use bug: about 20 ms per cut, 0.84 s late
   after 42 cuts in the benchmark).
