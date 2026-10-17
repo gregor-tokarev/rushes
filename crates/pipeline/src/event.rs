@@ -96,7 +96,8 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
         "assistant" => parse_assistant(&value),
         "user" => parse_user(&value),
         "result" => vec![parse_result(&value)],
-        "rate_limit_event" => Vec::new(),
+        // Bookkeeping: rate limits, and heartbeats while a long tool call (a render) runs.
+        "rate_limit_event" | "tool_progress" => Vec::new(),
         "" => vec![unknown("untyped", line)],
         kind => vec![unknown(kind, line)],
     }
@@ -185,6 +186,43 @@ fn content_blocks(value: &Value) -> impl Iterator<Item = &Value> {
 }
 
 /// One line describing what a tool call does, picked per well-known tool.
+/// Rushes' editing tools as Claude Code names them.
+pub const RUSHES_TOOL_PREFIX: &str = "mcp__rushes__";
+
+/// A short line for a call of one of Rushes' editing tools.
+fn rushes_tool_summary(tool: &str, input: &Value) -> Option<String> {
+    let number = |key: &str| input.get(key).and_then(Value::as_f64);
+    let text = |key: &str| non_empty(str_field(input, key)).map(str::to_owned);
+    match tool {
+        "inventory" => Some(String::new()),
+        "transcribe" => Some(text("language").map(|language| format!("language {language}")).unwrap_or_default()),
+        "read_transcript" => Some(match (text("take"), text("from")) {
+            (_, Some(from)) => format!("from {from}"),
+            (Some(take), None) => format!("take {take}"),
+            (None, None) => String::new(),
+        }),
+        "phrase_words" => input
+            .get("phrases")
+            .and_then(Value::as_array)
+            .map(|phrases| phrases.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")),
+        "silences" => Some(text("take").map(|take| format!("take {take}")).unwrap_or_default()),
+        "look" => {
+            let what = text("output").or_else(|| text("take").map(|take| format!("take {take}"))).unwrap_or_default();
+            match (number("start"), number("end")) {
+                (Some(start), Some(end)) => Some(format!("{what} {start:.1}-{end:.1} s").trim().to_owned()),
+                _ => Some(what),
+            }
+        }
+        "plan_cut" => input.get("segments").and_then(Value::as_array).map(|segments| match segments.len() {
+            1 => "1 segment".to_owned(),
+            n => format!("{n} segments"),
+        }),
+        "render" => Some(text("quality").unwrap_or_default()),
+        "check" => Some(text("output").unwrap_or_default()),
+        _ => None,
+    }
+}
+
 fn tool_use_summary(name: &str, input: &Value) -> String {
     let field = |key: &str| non_empty(str_field(input, key));
     let summary = match name {
@@ -201,7 +239,7 @@ fn tool_use_summary(name: &str, input: &Value) -> String {
         "WebFetch" => field("url").map(str::to_owned),
         "WebSearch" | "ToolSearch" => field("query").map(str::to_owned),
         "TaskCreate" => field("subject").map(str::to_owned),
-        _ => None,
+        _ => name.strip_prefix(RUSHES_TOOL_PREFIX).and_then(|tool| rushes_tool_summary(tool, input)),
     };
     let summary = summary.unwrap_or_else(|| match input {
         Value::Null => String::new(),
@@ -268,6 +306,23 @@ mod tests {
     fn bash_summary_is_first_command_line() {
         let input = serde_json::json!({ "command": "\ncd edit\nffmpeg -i a.mp4 b.mp4" });
         assert_eq!(tool_use_summary("Bash", &input), "cd edit …");
+    }
+
+    #[test]
+    fn rushes_tool_calls_get_short_summaries() {
+        let plan = serde_json::json!({"segments": [{"from": "A1"}, {"from": "A4", "to": "A9"}]});
+        assert_eq!(tool_use_summary("mcp__rushes__plan_cut", &plan), "2 segments");
+        let look = serde_json::json!({"take": "A", "start": 390, "end": 522.25, "frames": 16});
+        assert_eq!(tool_use_summary("mcp__rushes__look", &look), "take A 390.0-522.2 s");
+        assert_eq!(tool_use_summary("mcp__rushes__render", &serde_json::json!({"quality": "final"})), "final");
+        assert_eq!(tool_use_summary("mcp__rushes__inventory", &serde_json::json!({})), "");
+        assert_eq!(tool_use_summary("mcp__rushes__read_transcript", &serde_json::json!({"from": "A251"})), "from A251");
+    }
+
+    #[test]
+    fn heartbeats_of_long_tool_calls_are_bookkeeping() {
+        let line = r#"{"type":"tool_progress","tool_use_id":"toolu_1-heartbeat-0","tool_name":"mcp__rushes__render","elapsed_time_seconds":30}"#;
+        assert_eq!(parse_line(line), Vec::new());
     }
 
     #[test]

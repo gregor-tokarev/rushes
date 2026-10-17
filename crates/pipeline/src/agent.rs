@@ -140,16 +140,26 @@ impl AgentConfig {
             args.extend(["--model".into(), model.into()]);
         }
         args.extend(["--permission-mode".into(), self.permission_mode.clone().into()]);
-        if !self.allowed_tools.is_empty() {
-            args.push(format!("--allowedTools={}", self.allowed_tools.join(",")).into());
+        if let Some(tools) = &invocation.builtin_tools {
+            args.push(format!("--tools={}", tools.join(",")).into());
+        }
+        let allowed = invocation.allowed_tools.as_ref().unwrap_or(&self.allowed_tools);
+        if !allowed.is_empty() {
+            args.push(format!("--allowedTools={}", allowed.join(",")).into());
+        }
+        if let Some(config) = &invocation.mcp_config {
+            args.push(format!("--mcp-config={config}").into());
+            args.push("--strict-mcp-config".into());
         }
         for dir in &invocation.add_dirs {
             let mut arg = OsString::from("--add-dir=");
             arg.push(dir);
             args.push(arg);
         }
-        if let Some(prompt) = &self.append_system_prompt {
-            args.push(format!("--append-system-prompt={prompt}").into());
+        let system_prompt: Vec<&str> =
+            [invocation.system_prompt.as_deref(), self.append_system_prompt.as_deref()].into_iter().flatten().collect();
+        if !system_prompt.is_empty() {
+            args.push(format!("--append-system-prompt={}", system_prompt.join("\n\n")).into());
         }
         if let Some(turns) = self.max_turns {
             args.extend(["--max-turns".into(), turns.to_string().into()]);
@@ -160,11 +170,22 @@ impl AgentConfig {
 }
 
 /// One agent process: a prompt run in a working directory.
+#[derive(Default)]
 pub(crate) struct Invocation {
     pub cwd: PathBuf,
     pub prompt: String,
     pub resume: Option<String>,
     pub add_dirs: Vec<PathBuf>,
+    /// `--mcp-config` (JSON); only these MCP servers are loaded.
+    pub mcp_config: Option<String>,
+    /// `--tools`: the built-in tools the agent has at all.
+    pub builtin_tools: Option<Vec<String>>,
+    /// Replaces [`AgentConfig::allowed_tools`].
+    pub allowed_tools: Option<Vec<String>>,
+    /// Goes before [`AgentConfig::append_system_prompt`].
+    pub system_prompt: Option<String>,
+    /// Environment for the agent, under [`AgentConfig::env`] (which wins).
+    pub env: Vec<(String, String)>,
 }
 
 /// What the agent reported while it ran.
@@ -230,6 +251,7 @@ pub(crate) fn run_agent(
     command
         .args(config.args(invocation))
         .current_dir(&invocation.cwd)
+        .envs(invocation.env.iter().map(|(key, value)| (key, value)))
         .envs(config.env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -394,6 +416,7 @@ mod tests {
             prompt: "Edit this".to_owned(),
             resume: resume.map(str::to_owned),
             add_dirs: vec![PathBuf::from("/skills/video-use")],
+            ..Invocation::default()
         }
     }
 
@@ -445,6 +468,33 @@ mod tests {
                 "40",
                 "--effort",
                 "high",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tool_server_replaces_the_tools_and_leads_the_system_prompt() {
+        let config = AgentConfig { append_system_prompt: Some("House style.".to_owned()), ..AgentConfig::default() };
+        let invocation = Invocation {
+            cwd: PathBuf::from("/videos/footage"),
+            prompt: "Edit this".to_owned(),
+            mcp_config: Some(r#"{"mcpServers":{}}"#.to_owned()),
+            builtin_tools: Some(vec!["Read".to_owned(), "Write".to_owned()]),
+            allowed_tools: Some(vec!["mcp__rushes".to_owned(), "Read".to_owned()]),
+            system_prompt: Some("Use the tools.".to_owned()),
+            ..Invocation::default()
+        };
+        let args = strings(config.args(&invocation));
+        assert_eq!(
+            args[5..],
+            [
+                "--permission-mode",
+                "acceptEdits",
+                "--tools=Read,Write",
+                "--allowedTools=mcp__rushes,Read",
+                r#"--mcp-config={"mcpServers":{}}"#,
+                "--strict-mcp-config",
+                "--append-system-prompt=Use the tools.\n\nHouse style.",
             ]
         );
     }

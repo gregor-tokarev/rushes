@@ -7,8 +7,8 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rushes_pipeline::{AgentConfig, doctor, doctor_rushes};
 use tempfile::TempDir;
-use rushes_pipeline::{AgentConfig, doctor};
 
 const SECRET: &str = "sk_test_do_not_leak_123";
 
@@ -74,12 +74,12 @@ fn everything_installed_is_ready() {
 
     assert!(report.ready(), "{report:#?}");
     assert_eq!(report.agent.detail, format!("Claude Code 9.9.9 · {}", machine.bin.join("claude").display()));
-    assert_eq!(report.skill.detail, real.display().to_string());
+    assert_eq!(report.skill.as_ref().unwrap().detail, real.display().to_string());
     assert_eq!(report.skill_dir.as_deref(), Some(real.as_path()));
     assert_eq!(report.ffmpeg.detail, format!("ffmpeg 9.9 · {}", machine.bin.join("ffmpeg").display()));
     assert_eq!(report.ffprobe.detail, format!("ffprobe 9.9 · {}", machine.bin.join("ffprobe").display()));
     assert_eq!(report.elevenlabs.detail, format!("ELEVENLABS_API_KEY is set in {}", real.join(".env").display()));
-    assert!(report.python.detail.starts_with("video-use virtualenv"));
+    assert!(report.python.as_ref().unwrap().detail.starts_with("video-use virtualenv"));
     assert!(!format!("{report:?}").contains(SECRET), "the key must never leave the .env file");
 }
 
@@ -91,18 +91,24 @@ fn nothing_installed_is_not_ready() {
     assert!(!report.ready());
     for (name, check) in [
         ("agent", &report.agent),
-        ("skill", &report.skill),
+        ("skill", report.skill.as_ref().unwrap()),
         ("ffmpeg", &report.ffmpeg),
         ("ffprobe", &report.ffprobe),
         ("elevenlabs", &report.elevenlabs),
-        ("python", &report.python),
+        ("python", report.python.as_ref().unwrap()),
     ] {
         assert!(!check.ok, "{name} should fail: {check:?}");
     }
     assert_eq!(report.agent.detail, "claude not found");
-    assert!(report.skill.detail.contains("missing-skill/SKILL.md not found"));
+    assert!(report.skill.as_ref().unwrap().detail.contains("missing-skill/SKILL.md not found"));
     assert_eq!(report.ffmpeg.detail, "ffmpeg not found on PATH");
-    for check in [&report.agent, &report.skill, &report.ffmpeg, &report.elevenlabs, &report.python] {
+    for check in [
+        &report.agent,
+        report.skill.as_ref().unwrap(),
+        &report.ffmpeg,
+        &report.elevenlabs,
+        report.python.as_ref().unwrap(),
+    ] {
         assert!(!check.detail.contains('`'), "details are plain text: {}", check.detail);
     }
     assert_eq!(report.skill_dir, None);
@@ -120,7 +126,7 @@ fn empty_key_and_broken_agent_are_reported() {
     assert!(report.agent.detail.contains("does not run"));
     assert!(!report.elevenlabs.ok);
     assert!(report.elevenlabs.detail.contains("is empty in"));
-    assert!(report.skill.ok && report.ffmpeg.ok && report.python.ok);
+    assert!(report.skill.as_ref().unwrap().ok && report.ffmpeg.ok && report.python.as_ref().unwrap().ok);
 }
 
 /// video-use's helpers read the skill's `.env` before the environment, so an empty
@@ -168,17 +174,17 @@ fn key_from_the_environment_and_python_fallbacks() {
 
     let without_python = doctor(&config, Some(&skill));
     assert_eq!(without_python.elevenlabs.detail, "ELEVENLABS_API_KEY is set in the environment");
-    assert!(!without_python.python.ok);
+    assert!(!without_python.python.as_ref().unwrap().ok);
 
     machine.stub("python3", "exit 0");
     let python3 = doctor(&config, Some(&skill));
-    assert!(python3.python.ok);
-    assert!(python3.python.detail.contains("dependencies are not verified"));
+    assert!(python3.python.as_ref().unwrap().ok);
+    assert!(python3.python.as_ref().unwrap().detail.contains("dependencies are not verified"));
 
     machine.stub("uv", "exit 0");
     let uv = doctor(&config, Some(&skill));
     assert!(uv.ready(), "{uv:#?}");
-    assert!(uv.python.detail.starts_with("uv ("));
+    assert!(uv.python.as_ref().unwrap().detail.starts_with("uv ("));
     assert!(!format!("{uv:?}").contains(SECRET));
 }
 
@@ -204,4 +210,19 @@ fn an_agent_that_is_not_claude_code_is_refused() {
         report.agent.detail,
         format!("{} is not Claude Code: --version printed “true (GNU coreutils) 9.7”", other.display())
     );
+}
+
+#[test]
+fn rushes_tools_need_no_skill_and_no_python() {
+    let machine = Machine::new().with_tools();
+    let report = doctor_rushes(&machine.config());
+    assert_eq!((report.skill.as_ref(), report.python.as_ref()), (None, None));
+    assert!(!report.elevenlabs.ok, "{report:#?}");
+    assert!(!report.ready());
+
+    let mut config = machine.config();
+    config.env.push(("ELEVENLABS_API_KEY".to_owned(), SECRET.to_owned()));
+    let report = doctor_rushes(&config);
+    assert!(report.ready(), "{report:#?}");
+    assert!(!format!("{report:?}").contains(SECRET));
 }

@@ -1,9 +1,13 @@
 //! Pipeline phases: what to ask the agent, and what came out of it.
 //!
-//! video-use never cuts before the creator approved its plain-English strategy, so an
-//! edit runs as a [`Phase::Plan`] followed by [`Phase::Approve`] (and any number of
+//! An edit never cuts before the creator approved its plain-English strategy, so it
+//! runs as a [`Phase::Plan`] followed by [`Phase::Approve`] (and any number of
 //! [`Phase::Feedback`] rounds), each resuming the same agent session. [`Phase::Auto`]
 //! does everything in one go for creators who pre-approve.
+//!
+//! The agent edits with one of two [`Harness`]es: Rushes' own editing tools, served
+//! to it over MCP, or the video-use skill (a prompt plus Python helpers it runs
+//! through its shell).
 
 use std::fs;
 use std::io;
@@ -41,16 +45,38 @@ pub enum Phase {
     Auto { brief: String },
 }
 
+/// What the agent edits with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Harness {
+    /// Rushes' editing tools (`rushes-edit`), served over MCP by `tools`. The agent
+    /// gets no shell: it works only through the tools and the file tools.
+    Rushes { tools: ToolServer },
+    /// The video-use skill: the folder holding its `SKILL.md` and `helpers/`.
+    VideoUse { skill_dir: PathBuf },
+}
+
+/// A program that serves Rushes' editing tools over MCP on stdio when started with
+/// `args` followed by `--footage <dir>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolServer {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+}
+
 /// Where a phase runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunContext {
     /// Raw footage; the agent's working directory. Outputs go to `<footage_dir>/edit/`.
     pub footage_dir: PathBuf,
-    /// Folder holding the video-use `SKILL.md` and its `helpers/`.
-    pub skill_dir: PathBuf,
+    pub harness: Harness,
     /// Agent session to resume (the previous phase's [`PhaseOutcome::session_id`]).
     pub session_id: Option<String>,
 }
+
+/// Built-in tools the agent keeps with Rushes' tools: reading and noting, no shell.
+const RUSHES_BUILTIN_TOOLS: [&str; 6] = ["Read", "Write", "Edit", "Glob", "Grep", "TodoWrite"];
+/// How long one tool call may take (a final render of a long video takes minutes).
+const TOOL_TIMEOUT_MS: &str = "3600000";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhaseOutcome {
@@ -83,12 +109,6 @@ pub fn run_phase(
     if !ctx.footage_dir.is_dir() {
         return Err(PipelineError::FootageNotFound(ctx.footage_dir.clone()));
     }
-    let skill_md = ctx.skill_dir.join(SKILL_FILE);
-    if !skill_md.is_file() {
-        return Err(PipelineError::SkillNotFound(skill_md));
-    }
-    // The skill is usually a symlink; `--add-dir` and the agent work with real paths.
-    let skill_dir = fs::canonicalize(&ctx.skill_dir)?;
     let program = config.resolve_command().ok_or_else(|| PipelineError::AgentNotFound(config.command.clone()))?;
     let footage = match phase {
         Phase::Plan { .. } | Phase::Auto { .. } => list_footage(&ctx.footage_dir)?,
@@ -101,11 +121,43 @@ pub fn run_phase(
     let edit_dir = ctx.footage_dir.join(EDIT_DIR);
     let final_cut = edit_dir.join(FINAL_CUT);
     let before = file_stamp(&final_cut);
-    let invocation = Invocation {
-        cwd: ctx.footage_dir.clone(),
-        prompt: build_prompt(&phase, &skill_dir.join(SKILL_FILE), &footage),
-        resume: resume.clone(),
-        add_dirs: vec![skill_dir],
+    let invocation = match &ctx.harness {
+        Harness::VideoUse { skill_dir } => {
+            let skill_md = skill_dir.join(SKILL_FILE);
+            if !skill_md.is_file() {
+                return Err(PipelineError::SkillNotFound(skill_md));
+            }
+            // The skill is usually a symlink; `--add-dir` and the agent work with real paths.
+            let skill_dir = fs::canonicalize(skill_dir)?;
+            Invocation {
+                cwd: ctx.footage_dir.clone(),
+                prompt: build_prompt(&phase, &skill_dir.join(SKILL_FILE), &footage),
+                resume: resume.clone(),
+                add_dirs: vec![skill_dir],
+                ..Invocation::default()
+            }
+        }
+        Harness::Rushes { tools } => {
+            let footage_dir = std::path::absolute(&ctx.footage_dir)?;
+            let mut args = tools.args.clone();
+            args.extend(["--footage".to_owned(), footage_dir.to_string_lossy().into_owned()]);
+            let server = serde_json::json!({"type": "stdio", "command": tools.program, "args": args});
+            let mcp_config = serde_json::json!({"mcpServers": {rushes_edit::SERVER_NAME: server}}).to_string();
+            let builtin: Vec<String> = RUSHES_BUILTIN_TOOLS.map(str::to_owned).to_vec();
+            let mut allowed = vec![format!("mcp__{}", rushes_edit::SERVER_NAME)];
+            allowed.extend(builtin.iter().cloned());
+            Invocation {
+                cwd: ctx.footage_dir.clone(),
+                prompt: build_rushes_prompt(&phase, &footage),
+                resume: resume.clone(),
+                mcp_config: Some(mcp_config),
+                builtin_tools: Some(builtin),
+                allowed_tools: Some(allowed),
+                system_prompt: Some(rushes_edit::INSTRUCTIONS.to_owned()),
+                env: vec![("MCP_TOOL_TIMEOUT".to_owned(), TOOL_TIMEOUT_MS.to_owned())],
+                ..Invocation::default()
+            }
+        }
     };
     let (status, run) = run_agent(config, &program, &invocation, on_event, cancel)?;
 
@@ -270,6 +322,93 @@ pub fn build_prompt(phase: &Phase, skill_md: &Path, footage: &[FootageFile]) -> 
             brief = brief_section(brief),
         ),
     }
+}
+
+/// The prompt for `phase` when the agent edits with Rushes' tools (see [`Harness::Rushes`]).
+pub fn build_rushes_prompt(phase: &Phase, footage: &[FootageFile]) -> String {
+    match phase {
+        Phase::Plan { brief } => format!(
+            "Rushes edit request (planning phase).\n\n\
+             {intro}{brief}\
+             This phase is planning only:\n\
+             1. inventory, transcribe and read every transcript; check the silences and look at \
+             what matters, as your instructions describe.\n\
+             2. Set the cut with plan_cut and fix the warnings that matter. The plan is kept for \
+             the render phase.\n\
+             3. Write the strategy in plain English, 4-8 sentences: structure, which takes, what \
+             is cut and why, what is kept on screen without speech, estimated length (from the \
+             receipt). Append it to ./edit/project.md as a new session.\n\
+             4. Then STOP. Do not render anything. The creator reviews the strategy in Rushes and \
+             approves it or sends feedback in a follow-up message.\n\n\
+             {HEADLESS_NOTE}\
+             End with the strategy only: your final message must be the strategy in Markdown, \
+             without preamble, with any open questions for the creator at the end.",
+            intro = rushes_intro(footage),
+            brief = brief_section(brief),
+        ),
+        Phase::Approve { notes } => format!(
+            "Rushes edit: strategy approved (render phase).\n\n\
+             The creator approved the edit strategy you proposed (recorded in \
+             ./edit/project.md; the cut is the current plan).{notes}\n\n\
+             Continue with the rushes tools:\n\
+             1. If the notes ask for changes, plan the cut again.\n\
+             2. Render a preview, read its checks, look at the joins that could go wrong, fix and \
+             render again where needed.\n\
+             3. Render final (./edit/final.mp4) and append this session to ./edit/project.md.\n\n\
+             {HEADLESS_NOTE}\
+             Reply with a short summary of what was produced: final length, structure, notable \
+             decisions and anything the creator should check.",
+            notes = match notes.as_deref().map(str::trim) {
+                Some(notes) if !notes.is_empty() => {
+                    format!(" Their notes, to take into account:\n\n{notes}")
+                }
+                _ => String::new(),
+            },
+        ),
+        Phase::Feedback { message } => format!(
+            "Rushes edit: feedback from the creator (revision phase).\n\n\
+             The creator reviewed your work and asks for these changes:\n\n\
+             {message}\n\n\
+             Continue with the rushes tools; the decisions so far are in ./edit/project.md:\n\
+             1. Apply the feedback: plan the cut again.\n\
+             2. Render a preview, check it and fix, then render final (./edit/final.mp4).\n\
+             3. Append the decisions to ./edit/project.md.\n\n\
+             {HEADLESS_NOTE}\
+             Reply with a short summary of what changed.",
+            message = message.trim(),
+        ),
+        Phase::Auto { brief } => format!(
+            "Rushes edit request (single pass, pre-approved).\n\n\
+             {intro}{brief}\
+             The creator pre-approved this edit, so do not stop to confirm the strategy:\n\
+             1. inventory, transcribe and read every transcript; check the silences and look at \
+             what matters.\n\
+             2. Set the cut with plan_cut and fix the warnings that matter.\n\
+             3. Render a preview, read its checks, look at the joins that could go wrong, fix.\n\
+             4. Render final (./edit/final.mp4) and append the session to ./edit/project.md.\n\n\
+             {HEADLESS_NOTE}\
+             Reply with a short summary: the strategy you chose and what was produced.",
+            intro = rushes_intro(footage),
+            brief = brief_section(brief),
+        ),
+    }
+}
+
+fn rushes_intro(footage: &[FootageFile]) -> String {
+    let files = if footage.is_empty() {
+        "No media files were found in the current directory: call inventory, and if there is \
+         nothing to edit, say so and stop."
+            .to_owned()
+    } else {
+        let lines: Vec<String> = footage.iter().map(describe).collect();
+        format!("Raw footage in the current directory:\n{}", lines.join("\n"))
+    };
+    format!(
+        "Edit the raw footage in the current directory with the rushes tools, as your \
+         instructions describe.\n\n\
+         {files}\n\n\
+         The tools write every output to ./edit/. Never modify the source files.\n\n"
+    )
 }
 
 fn intro(skill_md: &Path, footage: &[FootageFile]) -> String {

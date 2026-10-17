@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
-use tempfile::TempDir;
 use rushes_pipeline::{
-    AgentConfig, AgentEvent, Phase, PhaseOutcome, PipelineError, RunContext, list_footage, probe_media, run_phase,
+    AgentConfig, AgentEvent, Harness, Phase, PhaseOutcome, PipelineError, RunContext, ToolServer, list_footage,
+    probe_media, run_phase,
 };
+use tempfile::TempDir;
 
 /// The fake agent needs python3 and renders with ffmpeg.
 fn tools_available() -> bool {
@@ -59,7 +60,11 @@ impl Workspace {
     }
 
     fn context(&self, session_id: Option<String>) -> RunContext {
-        RunContext { footage_dir: self.footage.clone(), skill_dir: self.skill_link.clone(), session_id }
+        RunContext {
+            footage_dir: self.footage.clone(),
+            harness: Harness::VideoUse { skill_dir: self.skill_link.clone() },
+            session_id,
+        }
     }
 
     fn argv(&self) -> Vec<String> {
@@ -116,6 +121,41 @@ fn footage_is_listed_and_probed() {
     assert!((media.duration_secs - 3.0).abs() < 0.2, "{media:?}");
     assert_eq!((media.width, media.height, media.has_audio), (Some(320), Some(240), true));
     assert_eq!(probe_media(&ws.footage.join("notes.txt")), None);
+}
+
+#[test]
+fn rushes_tools_replace_the_shell_and_the_skill() {
+    if !tools_available() {
+        return;
+    }
+    let ws = Workspace::new(1);
+    let argv_file = ws.argv_file.to_str().unwrap();
+    let config = fake_agent(&[("FAKE_AGENT_ARGV_FILE", argv_file)]);
+    let tools = ToolServer { program: PathBuf::from("/opt/rushes/rushes"), args: vec!["edit-tools".to_owned()] };
+    let ctx = RunContext { harness: Harness::Rushes { tools }, ..ws.context(None) };
+    let (plan, _) = run(&config, &ctx, Phase::Plan { brief: "Budget studio tutorial".to_owned() });
+    plan.expect("plan succeeds");
+
+    let argv = ws.argv();
+    assert!(argv[1].starts_with("Rushes edit request (planning phase)."));
+    assert!(argv[1].contains("rushes tools") && !argv[1].contains("SKILL.md"), "{}", argv[1]);
+    assert!(argv.iter().any(|arg| arg == "--tools=Read,Write,Edit,Glob,Grep,TodoWrite"), "{argv:?}");
+    assert!(argv.iter().any(|arg| arg == "--allowedTools=mcp__rushes,Read,Write,Edit,Glob,Grep,TodoWrite"), "{argv:?}");
+    assert!(argv.iter().any(|arg| arg == "--strict-mcp-config"), "{argv:?}");
+    assert!(!argv.iter().any(|arg| arg.starts_with("--add-dir")), "{argv:?}");
+    let config = argv.iter().find_map(|arg| arg.strip_prefix("--mcp-config=")).expect("mcp config");
+    let config: serde_json::Value = serde_json::from_str(config).unwrap();
+    let server = &config["mcpServers"]["rushes"];
+    assert_eq!(server["command"], "/opt/rushes/rushes");
+    let footage = std::path::absolute(&ws.footage).unwrap().display().to_string();
+    assert_eq!(server["args"], serde_json::json!(["edit-tools", "--footage", footage]));
+    let system = argv.iter().find_map(|arg| arg.strip_prefix("--append-system-prompt=")).expect("instructions");
+    assert!(system.starts_with("# Editing with the Rushes tools"), "{system}");
+}
+
+#[test]
+fn both_harnesses_list_the_same_takes() {
+    assert_eq!(rushes_pipeline::FOOTAGE_EXTENSIONS, rushes_edit::FOOTAGE_EXTENSIONS);
 }
 
 #[test]
@@ -265,7 +305,7 @@ fn missing_prerequisites_are_reported_before_spawning() {
     assert!(matches!(result, Err(PipelineError::AgentNotFound(command)) if command == Path::new("no-such-agent-cli")));
     assert!(events.is_empty());
 
-    let ctx = RunContext { skill_dir: ws.footage.clone(), ..ws.context(None) };
+    let ctx = RunContext { harness: Harness::VideoUse { skill_dir: ws.footage.clone() }, ..ws.context(None) };
     let (result, _) = run(&config, &ctx, phase());
     assert!(matches!(result, Err(PipelineError::SkillNotFound(path)) if path == ws.footage.join("SKILL.md")));
 
@@ -396,8 +436,11 @@ mod cancel {
         const APP_DIR: &str = "RUSHES_TEST_KILLED_APP_DIR";
         if let Some(dir) = std::env::var_os(APP_DIR) {
             let dir = PathBuf::from(dir);
-            let ctx =
-                RunContext { footage_dir: dir.join("footage"), skill_dir: dir.join("video-use"), session_id: None };
+            let ctx = RunContext {
+                footage_dir: dir.join("footage"),
+                harness: Harness::VideoUse { skill_dir: dir.join("video-use") },
+                session_id: None,
+            };
             let config = AgentConfig {
                 command: dir.join("waiting-agent"),
                 env: vec![("PID_FILE".to_owned(), dir.join("pids").display().to_string())],
