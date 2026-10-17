@@ -1,14 +1,21 @@
 # AI edit pipelines (`rushes-pipeline`)
 
-A pipeline turns a folder of raw takes into `edit/final.mp4` by running the
-[video-use](https://github.com/browser-use/video-use) skill inside a headless coding agent
-(Claude Code in print mode). The crate is synchronous and UI-free: the app calls it on a
-background thread with an event callback and a cancellation flag.
+A pipeline turns a folder of raw takes into `edit/final.mp4` with a headless coding agent
+(Claude Code in print mode) that edits with one of two harnesses (`RunContext::harness`):
+
+- `Harness::Rushes { tools }`: Rushes' own editing tools ([editing-harness.md](editing-harness.md)),
+  served over MCP by `tools` (the app's binary: `rushes edit-tools --footage <dir>`). The
+  agent has no shell. The default.
+- `Harness::VideoUse { skill_dir }`: the [video-use](https://github.com/browser-use/video-use)
+  skill, a prompt plus Python helpers the agent runs through its shell.
+
+The crate is synchronous and UI-free: the app calls it on a background thread with an event
+callback and a cancellation flag.
 
 ## Phases
 
-video-use is conversational and has a hard rule: never touch the cut before the creator
-approved the plain-English strategy. A headless agent cannot wait for a reply, so the
+Both harnesses have the same rule: never touch the cut before the creator approved the
+plain-English strategy. A headless agent cannot wait for a reply, so the
 conversation is split into phases. Each phase is one agent process; follow-up phases
 resume the same agent session (`--resume <session_id>`), so transcripts and context carry
 over.
@@ -28,7 +35,8 @@ strategy or the cut, with a retry; only a run with neither ends `Failed` or
 `Cancelled`. The app's "Agent time" is the sum of the phases (the agent's reported
 `duration_ms`, or a phase's first to last event), so waiting for approval does not count.
 
-`Plan` and `Auto` prompts give the absolute `SKILL.md` path, list the footage with
+Each harness has its own prompts (`build_rushes_prompt`, `build_prompt`) with the same
+phase markers. `Plan` and `Auto` prompts (for video-use, with the absolute `SKILL.md` path) list the footage with
 duration and frame size (when `ffprobe` is available; the takes are the files with a
 `FOOTAGE_EXTENSIONS` extension, the same list the app's footage card shows, which a
 test keeps in agreement), include the creator's brief and
@@ -39,11 +47,12 @@ and put open questions at the end of the strategy. All outputs go to `<footage>/
 
 ```rust
 use std::sync::atomic::AtomicBool;
-use rushes_pipeline::{AgentConfig, Phase, RunContext, run_phase};
+use rushes_pipeline::{AgentConfig, Harness, Phase, RunContext, ToolServer, run_phase};
 
 let config = AgentConfig::default();
 let cancel = AtomicBool::new(false);
-let mut ctx = RunContext { footage_dir, skill_dir, session_id: None };
+let tools = ToolServer { program: std::env::current_exe()?, args: vec!["edit-tools".into()] };
+let mut ctx = RunContext { footage_dir, harness: Harness::Rushes { tools }, session_id: None };
 
 let plan = run_phase(&config, &ctx, Phase::Plan { brief }, &mut |event| { /* timeline */ }, &cancel)?;
 // show plan.summary_text (the strategy); wait for the creator
@@ -86,6 +95,15 @@ for the footage.
 ## Agent invocation
 
 ```text
+# Rushes' tools
+claude -p <prompt> --output-format stream-json --verbose [--resume=<id>] [--model <m>]
+       --permission-mode acceptEdits --tools=Read,Write,Edit,Glob,Grep,TodoWrite
+       --allowedTools=mcp__rushes,Read,Write,Edit,Glob,Grep,TodoWrite
+       --mcp-config=<rushes server JSON> --strict-mcp-config
+       --append-system-prompt=<rushes-edit instructions>[\n\n<text>] [--max-turns <n>] [extra args]
+       (environment: MCP_TOOL_TIMEOUT=3600000)
+
+# video-use
 claude -p <prompt> --output-format stream-json --verbose [--resume=<id>] [--model <m>]
        --permission-mode acceptEdits
        --allowedTools=Bash,Read,Write,Edit,Glob,Grep,Skill,Agent,TodoWrite
@@ -95,8 +113,10 @@ claude -p <prompt> --output-format stream-json --verbose [--resume=<id>] [--mode
 - Working directory is the footage folder; stdin is closed; stdout is parsed line by line;
   stderr is streamed as `Stderr` events and its last 20 lines are kept for errors.
 - Nobody can answer a permission prompt in print mode, so anything not allowed is denied
-  (reported as a `PermissionDenied` event). `acceptEdits` plus the allowed tools above is
-  what video-use needs: shell for ffmpeg and its Python helpers, file tools, the skill
+  (reported as a `PermissionDenied` event). With Rushes' tools the agent only has the file
+  tools and the `rushes` MCP server (`--tools` removes the shell entirely,
+  `--strict-mcp-config` ignores the creator's other MCP servers). `acceptEdits` plus the
+  allowed tools above is what video-use needs: shell for ffmpeg and its Python helpers, file tools, the skill
   loader, sub-agents for animations. `bypassPermissions` is never used implicitly; set
   `permission_mode` explicitly if you want it.
 - `--add-dir` gets the symlink-resolved skill folder so the agent may read the helpers.
@@ -136,8 +156,9 @@ app can persist them as run events):
 | `Stderr { line }` | stderr |
 | `Unknown { kind, excerpt }` | anything else: new event types, new block types, non-JSON lines |
 
-Bookkeeping lines (`rate_limit_event`, `system/thinking_tokens`, injected skill text) yield
-nothing. Parsing never fails a run.
+Bookkeeping lines (`rate_limit_event`, `tool_progress` heartbeats of long tool calls,
+`system/thinking_tokens`, injected skill text) yield nothing. Calls of Rushes' tools
+(`mcp__rushes__<tool>`) get short summaries (`3 segments`, `take A 390.0-522.0 s`, `final`). Parsing never fails a run.
 
 ### Errors
 
@@ -149,9 +170,14 @@ Claude Code or could not start), `Io`.
 
 ## Requirements
 
-`doctor(&config, skill_dir)` reports each with a plain-text detail for people (version and
-path, or what is missing); `Doctor::ready()` is true when all pass. Tools are looked up on
-the agent's `PATH` (`config.env` first).
+`doctor_rushes(&config)` (Rushes' tools) checks the agent, ffmpeg, ffprobe and an
+ElevenLabs key in the agent's environment; `Doctor::skill` and `Doctor::python` are `None`.
+`doctor(&config, skill_dir)` (video-use) checks everything below. Each check has a
+plain-text detail for people (version and path, or what is missing); `Doctor::ready()` is
+true when all present checks pass. Tools are looked up on the agent's `PATH` (`config.env`
+first). The app passes the ElevenLabs key saved in Settings (`<data dir>/elevenlabs-key`,
+mode 0600) in the agent's environment; with Rushes' tools and no saved key it uses the one
+in video-use's `.env`.
 
 - **Agent**: Claude Code CLI; `--version` must print `Claude Code` (any other program
   answers `--version` too, but cannot run an edit). Login is not checked.

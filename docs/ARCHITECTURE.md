@@ -10,7 +10,8 @@ a media folder per video.
 crates/
   core/       rushes-core      domain model, SQLite store, documents, templates, media folders
   youtube/    rushes-youtube   Google OAuth (loopback + PKCE), YouTube Data API v3 client, resumable upload
-  pipeline/   rushes-pipeline  AI edit pipelines: drives a coding agent (Claude Code) with the video-use skill
+  edit/       rushes-edit      Rushes' editing tools (transcribe, cut plans, render, checks), served to the agent over MCP
+  pipeline/   rushes-pipeline  AI edit pipelines: drives a coding agent (Claude Code) with rushes-edit or the video-use skill
   update/     rushes-update    self-update: newest GitHub release, verified download, install in place, relaunch
   app/        rushes           GPUI Kit desktop app (the only crate that depends on gpui-kit)
 emulators/    local API emulation for dev/tests: vercel-labs/emulate (Google OAuth) + custom YouTube emulator
@@ -18,13 +19,14 @@ scripts/      dev helpers (run emulators, fake agent for pipeline tests, Xvfb sc
 docs/         technical docs (README.md stays product-only)
 ```
 
-Dependency direction: `app -> core, youtube, pipeline, update`. `youtube`, `pipeline` and
-`update` do NOT depend on `core`; they expose their own small types and the app maps between them. This
-keeps them independently testable and lets them be built in parallel.
+Dependency direction: `app -> core, youtube, pipeline, edit, update` and `pipeline -> edit`.
+`youtube`, `pipeline`, `edit` and `update` do NOT depend on `core`; they expose their own small
+types and the app maps between them. This keeps them independently testable and lets them be
+built in parallel.
 
 ## Threading model
 
-`core`, `youtube` and `pipeline` are synchronous, blocking libraries (std threads, `ureq`
+`core`, `youtube`, `pipeline` and `edit` are synchronous, blocking libraries (std threads, `ureq`
 for HTTP, `std::process` for child processes). They never require an async runtime.
 The app runs them on GPUI's background executor (`cx.background_spawn`) and streams
 progress back to the UI through channels (`smol::channel` / `futures::channel::mpsc`),
@@ -78,7 +80,10 @@ database's write lock for seconds. The UI thread never waits for it:
   kept the database locked; the next start writes it to the database and removes it.
 - Media root (default `dirs::video_dir()/Rushes`, fallback `~/Videos/Rushes`):
   one folder per video `<slug>-<short id>/` containing `footage/` (raw takes).
-  video-use writes all outputs to `footage/edit/` (`final.mp4`, `project.md`, ...).
+  AI edits write all outputs to `footage/edit/` (`final.mp4`, `project.md`, `cut.json`, ...;
+  caches under `edit/.cache/`).
+- ElevenLabs key for AI edits: `elevenlabs-key` in the data folder, mode 0600, never in the
+  database.
 - OAuth credentials: one file per signed-in YouTube account in `youtube-accounts/`, file
   mode 0600. Never logged. A `credentials.json` left by a release that kept one account
   moves there at the next start.
@@ -115,7 +120,8 @@ database's write lock for seconds. The UI thread never waits for it:
   extensions, size, mtime), finding edit outputs (`footage/edit/final.mp4`, `preview.mp4`).
 - `settings.rs` — typed `AppSettings` stored in the settings table: media root,
   YouTube backend (`Google { client_id, client_secret }` | `Emulator { google_url, youtube_url }`),
-  pipeline config (agent command, video-use skill dir, extra instructions, auto-approve),
+  pipeline config (agent command, editing harness: Rushes' tools or video-use, video-use
+  skill dir, extra instructions, auto-approve),
   `onboarding_completed`, theme, zoom, week start, updates, and whether video pages open
   with their properties folded (`properties_collapsed`).
 
@@ -138,11 +144,20 @@ database's write lock for seconds. The UI thread never waits for it:
   `resume_upload(session_url, path, ...)`, `set_thumbnail(video_id, path)`,
   `get_video(id)`, `list_my_uploads(max)`, `revoke()`.
 
+## edit (`rushes-edit`)
+
+Rushes' own editing harness: tools the agent edits with (inventory, transcribe,
+read_transcript, phrase_words, silences, look, plan_cut, render, check), an MCP server for
+them, and the agent's instructions. The agent picks phrases by id; the crate does all
+timing, renders frame- and sample-exact, and measures the result. The app binary serves it
+as `rushes edit-tools --footage <dir>`. See [editing-harness.md](editing-harness.md).
+
 ## pipeline (`rushes-pipeline`)
 
-Drives [video-use](https://github.com/browser-use/video-use) through a headless coding
-agent (`claude -p --output-format stream-json --verbose`). video-use is conversational:
-it proposes a strategy and waits for approval, so a run has two phases:
+Drives a headless coding agent (`claude -p --output-format stream-json --verbose`) that
+edits with Rushes' tools (`Harness::Rushes`, over MCP, no shell) or with
+[video-use](https://github.com/browser-use/video-use) (`Harness::VideoUse`). An edit
+proposes a strategy and waits for approval, so a run has two phases:
 
 1. **Plan** — agent inventories footage, transcribes, proposes a strategy, stops.
    Run status `Planning -> AwaitingApproval`; the strategy text is the run summary.
@@ -150,8 +165,9 @@ it proposes a strategy and waits for approval, so a run has two phases:
    the same agent session (`--resume <session_id>`). Status `Rendering -> Succeeded`
    once `footage/edit/final.mp4` exists. Further feedback resumes again.
 
-`auto_approve` collapses both phases into one prompt. `doctor()` reports whether the agent
-CLI, the video-use skill, ffmpeg/ffprobe and the ElevenLabs key are available.
+`auto_approve` collapses both phases into one prompt. `doctor_rushes()` reports whether the
+agent CLI, ffmpeg/ffprobe and the ElevenLabs key are available; `doctor()` checks the same
+plus the video-use skill and Python.
 `scripts/fake-agent` imitates the agent's stream-json output for tests.
 
 ## app (`rushes`)
