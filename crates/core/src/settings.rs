@@ -36,6 +36,37 @@ pub fn database_path() -> PathBuf {
     data_dir().join(DATABASE_FILE)
 }
 
+/// File holding the ElevenLabs API key AI edits transcribe with: `<data_dir>/elevenlabs-key`.
+/// Kept out of the database, readable by the owner only.
+pub const ELEVENLABS_KEY_FILE: &str = "elevenlabs-key";
+
+/// The saved ElevenLabs API key, if any.
+pub fn read_elevenlabs_key(data_dir: &std::path::Path) -> Option<String> {
+    let key = std::fs::read_to_string(data_dir.join(ELEVENLABS_KEY_FILE)).ok()?;
+    let key = key.trim();
+    (!key.is_empty()).then(|| key.to_owned())
+}
+
+/// Saves the ElevenLabs API key (owner-only file); an empty key removes it.
+pub fn write_elevenlabs_key(data_dir: &std::path::Path, key: &str) -> std::io::Result<()> {
+    let path = data_dir.join(ELEVENLABS_KEY_FILE);
+    let key = key.trim();
+    if key.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        };
+    }
+    std::fs::create_dir_all(data_dir)?;
+    let tmp = path.with_extension("tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    std::io::Write::write_all(&mut options.open(&tmp)?, key.as_bytes())?;
+    std::fs::rename(&tmp, &path)
+}
+
 /// Where VideoCRM, as the app was called before the rename, kept its data:
 /// `<platform data dir>/videocrm`. `None` while `$RUSHES_DATA_DIR` picks the folder.
 pub fn legacy_data_dir() -> Option<PathBuf> {
@@ -116,12 +147,24 @@ impl Default for YoutubeBackend {
     }
 }
 
-/// How AI edit pipelines launch the coding agent that runs video-use.
+/// What the AI edit agent edits with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditHarness {
+    /// Rushes' own editing tools, built in.
+    #[default]
+    Rushes,
+    /// The video-use skill, installed separately.
+    VideoUse,
+}
+
+/// How AI edit pipelines launch the coding agent and what it edits with.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PipelineSettings {
     /// Executable of the headless coding agent.
     pub agent_command: String,
+    pub harness: EditHarness,
     /// video-use skill directory. `None` lets the pipeline look in its default locations.
     pub skill_dir: Option<PathBuf>,
     /// Model passed to the agent. `None` uses the agent's default.
@@ -137,6 +180,7 @@ impl Default for PipelineSettings {
     fn default() -> Self {
         Self {
             agent_command: DEFAULT_AGENT_COMMAND.to_string(),
+            harness: EditHarness::default(),
             skill_dir: None,
             model: None,
             extra_instructions: String::new(),
@@ -317,10 +361,28 @@ mod tests {
     }
 
     #[test]
+    fn the_elevenlabs_key_is_saved_privately_and_removed_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_elevenlabs_key(dir.path()), None);
+        write_elevenlabs_key(dir.path(), " sk_test \n").unwrap();
+        assert_eq!(read_elevenlabs_key(dir.path()).as_deref(), Some("sk_test"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join(ELEVENLABS_KEY_FILE)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        write_elevenlabs_key(dir.path(), "").unwrap();
+        assert_eq!(read_elevenlabs_key(dir.path()), None);
+        write_elevenlabs_key(dir.path(), "").unwrap();
+    }
+
+    #[test]
     fn defaults_point_at_google_and_claude() {
         let settings = AppSettings::default();
         assert_eq!(settings.youtube, YoutubeBackend::Google { client_id: String::new(), client_secret: String::new() });
         assert_eq!(settings.pipeline.agent_command, "claude");
+        assert_eq!(settings.pipeline.harness, EditHarness::Rushes);
         assert!(settings.pipeline.default_preferences.remove_fillers);
         assert_eq!(settings.theme, ThemeMode::System);
         assert_eq!(settings.week_start, WeekStart::Sunday);

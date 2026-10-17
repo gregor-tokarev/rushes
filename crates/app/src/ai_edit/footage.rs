@@ -185,7 +185,7 @@ impl FootageImports {
     }
 }
 
-/// Lists, probes and imports the raw takes video-use edits.
+/// Lists, probes and imports the raw takes AI edits work on.
 pub(crate) struct FootageCard {
     video_id: VideoId,
     state: Entity<AppState>,
@@ -447,7 +447,7 @@ impl FootageCard {
         let durations: Vec<f64> =
             self.takes.iter().filter_map(|take| take.info.as_ref()).map(|info| info.duration_secs).collect();
         let summary = match self.takes.len() {
-            0 => "video-use reads the raw takes in this folder and never changes them.".to_owned(),
+            0 => "The AI edit reads the raw takes in this folder and never changes them.".to_owned(),
             count => {
                 let files = if count == 1 { "1 file".to_owned() } else { format!("{count} files") };
                 if durations.is_empty() {

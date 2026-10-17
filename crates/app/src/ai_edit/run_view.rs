@@ -27,7 +27,7 @@ use rushes_core::{PipelineRun, RunId, RunStatus, VideoId};
 use rushes_pipeline::{MediaInfo, probe_media};
 
 use super::format;
-use super::icons::tool_icon;
+use super::icons::{tool_icon, tool_label};
 use super::service::{INTERRUPTED, LivePhase, PipelineService, RENDERED_WITH_ERROR, Setback, split_failure};
 use super::timeline::{LogEvent, MarkerKind, PhaseKind, TimelineItem, fold_timeline};
 use crate::publish::{UPLOAD_FILE_LOCKED, YoutubeService};
@@ -928,7 +928,12 @@ impl RunView {
                                 h_flex()
                                     .gap_2()
                                     .text_sm()
-                                    .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).child(name.clone()))
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(SharedString::from(tool_label(name).to_owned())),
+                                    )
                                     .child(
                                         div()
                                             .flex_1()

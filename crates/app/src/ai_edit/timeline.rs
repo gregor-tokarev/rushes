@@ -11,9 +11,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use rushes_core::RunEvent;
 use rushes_pipeline::AgentEvent;
+use serde::{Deserialize, Serialize};
 
 /// Which kind of agent phase the app started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

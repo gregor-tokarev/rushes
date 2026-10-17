@@ -14,6 +14,10 @@ use rushes_core::settings::{data_dir, database_path, legacy_data_dir};
 fn main() {
     // Before anything else: it sets PATH, which is only safe while no other thread runs.
     shell::extend_tool_path();
+    // Started by an AI edit's agent to serve the editing tools: no window, no database.
+    if let Some(code) = serve_edit_tools() {
+        std::process::exit(code);
+    }
     if shell::adopt_rushes_app_name() {
         return;
     }
@@ -37,6 +41,20 @@ fn main() {
             }
         }
     });
+}
+
+/// `rushes edit-tools --footage <dir>`: serves Rushes' editing tools over MCP on stdio
+/// until the agent closes it, and returns the exit code. `None` for a normal start.
+fn serve_edit_tools() -> Option<i32> {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if args.first().and_then(|arg| arg.to_str()) != Some(rushes::ai_edit::EDIT_TOOLS_COMMAND) {
+        return None;
+    }
+    let footage = args.windows(2).find(|pair| pair[0] == "--footage").map(|pair| std::path::PathBuf::from(&pair[1]))?;
+    match rushes_edit::mcp::serve(&footage, std::io::stdin().lock(), std::io::stdout()) {
+        Ok(()) => Some(0),
+        Err(_) => Some(1),
+    }
 }
 
 /// Takes the data folder for this process and loads the workspace from it;

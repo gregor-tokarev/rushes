@@ -1,4 +1,5 @@
-//! AI edit pipelines: video-use driven through a headless coding agent.
+//! AI edit pipelines: a headless coding agent editing with Rushes' own tools (or the
+//! video-use skill).
 //!
 //! [`PipelineService`] (a global entity) runs and records edits; the views read it:
 //! [`AiEditPanel`] is the "Footage & AI edit" tab of a video, [`PipelinesPage`] lists
@@ -31,6 +32,10 @@ pub use timeline::{
 
 use gpui_kit::App;
 use rushes_core::VideoId;
+
+/// First argument that makes the app serve its editing tools to the agent over MCP
+/// on stdio instead of opening a window: `rushes edit-tools --footage <dir>`.
+pub const EDIT_TOOLS_COMMAND: &str = "edit-tools";
 
 /// A sentence for delete confirmations when an AI edit of one of `video_ids` is
 /// running: deleting a video stops its agent. `None` when none is.

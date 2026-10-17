@@ -15,7 +15,9 @@ use gpui_kit::{
     TestSupportExt as _, Window, div,
 };
 use rushes_core::input::{PathInputError, display_user_path, expand_user_path};
-use rushes_core::settings::{DEFAULT_AGENT_COMMAND, PipelineSettings};
+use rushes_core::settings::{
+    DEFAULT_AGENT_COMMAND, EditHarness, PipelineSettings, data_dir, read_elevenlabs_key, write_elevenlabs_key,
+};
 use rushes_pipeline::default_skill_dir;
 
 use super::brief::{COLOR_GRADES, color_grade_label};
@@ -86,6 +88,8 @@ pub struct AiSettings {
     agent_command: Entity<InputState>,
     custom_model: Entity<InputState>,
     skill_dir: Entity<InputState>,
+    /// Saved to its own owner-only file, not with the settings.
+    elevenlabs_key: Entity<InputState>,
     extra_instructions: Entity<TextareaState>,
     target_length: Entity<InputState>,
     model: ModelChoice,
@@ -118,6 +122,12 @@ impl AiSettings {
             cx,
         );
         let target_length = input(settings.default_preferences.target_length.clone(), "Natural length", window, cx);
+        let elevenlabs_key = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("Paste your key")
+                .default_value(read_elevenlabs_key(&data_dir()).unwrap_or_default())
+        });
         let extra_instructions = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 10)
@@ -141,7 +151,7 @@ impl AiSettings {
                 }
             }),
         ];
-        for input in [&agent_command, &custom_model, &skill_dir, &target_length] {
+        for input in [&agent_command, &custom_model, &skill_dir, &target_length, &elevenlabs_key] {
             subscriptions.push(cx.subscribe(input, |this, _, event: &InputEvent, cx| this.on_text_event(event, cx)));
         }
         subscriptions
@@ -158,6 +168,7 @@ impl AiSettings {
             agent_command,
             custom_model,
             skill_dir,
+            elevenlabs_key,
             extra_instructions,
             target_length,
             model,
@@ -195,6 +206,16 @@ impl AiSettings {
         let extra_instructions = self.extra_instructions.read(cx).value().to_string();
         let target_length = self.target_length.read(cx).value().trim().to_string();
         let model = self.model_value(cx);
+        let key = self.elevenlabs_key.read(cx).value().trim().to_string();
+        if read_elevenlabs_key(&data_dir()).unwrap_or_default() != key {
+            match write_elevenlabs_key(&data_dir(), &key) {
+                Ok(()) => PipelineService::global(cx).update(cx, |service, cx| service.refresh_doctor(cx)),
+                Err(error) => {
+                    let message = SharedString::from(format!("Couldn’t save the ElevenLabs key: {error}"));
+                    self.state.update(cx, |_, cx| cx.emit(AppEvent::Error(message)));
+                }
+            }
+        }
         self.state.update(cx, |state, cx| {
             state.update_settings(cx, |settings| {
                 let pipeline = &mut settings.pipeline;
@@ -314,7 +335,8 @@ impl AiSettings {
         } else {
             let service = PipelineService::global(cx);
             let service = service.read(cx);
-            let missing = !service.is_checking() && service.doctor().is_some_and(|doctor| !doctor.skill.ok);
+            let missing = !service.is_checking()
+                && service.doctor().is_some_and(|doctor| doctor.skill.as_ref().is_some_and(|check| !check.ok));
             let folder = self.state.read(cx).settings().pipeline.skill_dir.clone().or_else(default_skill_dir)?;
             if !missing {
                 return None;
@@ -355,6 +377,24 @@ impl AiSettings {
                     }),
             )
             .when(custom, |this| this.child(Input::new(&self.custom_model).id("ai-settings-custom-model")))
+    }
+
+    fn render_harness(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let settings = cx.weak_entity();
+        let current = self.state.read(cx).settings().pipeline.harness;
+        Button::new("ai-settings-harness").outline().label(harness_label(current)).dropdown_caret(true).dropdown_menu(
+            move |mut menu, _, _| {
+                for harness in [EditHarness::Rushes, EditHarness::VideoUse] {
+                    let settings = settings.clone();
+                    menu = menu.item(menu_item(harness_label(harness)).checked(harness == current).on_click(
+                        move |_, _, cx| {
+                            _ = settings.update(cx, |this, cx| this.update(cx, |pipeline| pipeline.harness = harness));
+                        },
+                    ));
+                }
+                menu
+            },
+        )
     }
 
     fn render_skill_dir(&self, cx: &mut Context<Self>) -> Div {
@@ -426,8 +466,27 @@ impl AiSettings {
                         .description("Agent default is the model Claude Code is set to use."),
                 )
                 .field(
+                    SettingsField::new("Editing tools", |this: &mut Self, _, cx| this.render_harness(cx)).description(
+                        "What the agent edits with. Rushes’ built-in tools need only ffmpeg and an ElevenLabs key; \
+                         the video-use skill is installed separately.",
+                    ),
+                )
+                .field(
+                    SettingsField::new("ElevenLabs API key", |this: &mut Self, _, _| {
+                        Input::new(&this.elevenlabs_key).mask_toggle().id("ai-settings-elevenlabs-key")
+                    })
+                    .description(
+                        "Transcribes the footage. Kept on this computer in a file only you can read. Empty uses \
+                         the key in the environment or in video-use’s .env.",
+                    )
+                    .stacked(),
+                )
+                .field(
                     SettingsField::new("video-use skill folder", |this: &mut Self, _, cx| this.render_skill_dir(cx))
-                        .description("The folder with video-use’s SKILL.md. Empty looks in ~/.claude/skills/video-use.")
+                        .description(
+                            "For the video-use skill only: the folder with its SKILL.md. Empty looks in \
+                             ~/.claude/skills/video-use.",
+                        )
                         .stacked(),
                 ),
             SettingsSection::new()
@@ -483,10 +542,10 @@ impl AiSettings {
             SettingsSection::new()
                 .title("Requirements")
                 .description(
-                    "AI edits run video-use inside Claude Code on this computer. The key and the tools stay local.",
+                    "AI edits run Claude Code on this computer with Rushes’ editing tools or video-use. The footage, the key and the tools stay local.",
                 )
                 // The checklist's rows, which the search can't see.
-                .keywords(["claude", "video-use", "ffmpeg", "ffprobe", "elevenlabs", "python", "re-check"])
+                .keywords(["claude", "video-use", "editing tools", "ffmpeg", "ffprobe", "elevenlabs", "python", "re-check"])
                 .element(|this: &mut Self, _, _| this.doctor.clone()),
         ]
     }
@@ -513,6 +572,13 @@ fn display_command(command: &str) -> String {
 
 /// The skill folder typed in the field: `None` (empty) is the default folder; `~` is
 /// expanded; a relative path is refused, with the reason to show.
+fn harness_label(harness: EditHarness) -> &'static str {
+    match harness {
+        EditHarness::Rushes => "Rushes (built in)",
+        EditHarness::VideoUse => "video-use skill",
+    }
+}
+
 fn skill_dir_input(text: &str) -> Result<Option<PathBuf>, String> {
     match expand_user_path(text) {
         Ok(path) => Ok(Some(path)),
