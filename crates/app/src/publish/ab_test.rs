@@ -269,11 +269,12 @@ impl AbTests {
             .map(|row| row.video.id)
             .collect();
         for video_id in running {
-            let Some(test) = self.follow_video(video_id, now, cx) else { continue };
-            let work = self.work.entry(video_id).or_default();
-            if work.switching.is_some() {
+            // A change on its way settles first: the test it belongs to must not end under it.
+            if self.switching(video_id).is_some() {
                 continue;
             }
+            let Some(test) = self.follow_video(video_id, now, cx) else { continue };
+            let work = self.work.entry(video_id).or_default();
             let retry_due = work.retry_at.is_none_or(|at| now >= at);
             // An ending test puts its kept version up before anything else.
             if let Some((version, finish)) = work.finish {
@@ -407,9 +408,19 @@ impl AbTests {
         let Some(link) = video.youtube.as_mut() else { return };
         let channel = link.channel_id.clone();
         let linked = link.clone();
-        let Some(test) = link.ab_test.as_mut().filter(|test| test.created_at == created_at && !test.is_over()) else {
+        let Some(test) = link.ab_test.as_mut().filter(|test| test.created_at == created_at) else { return };
+        if test.is_over() {
+            // Ended meanwhile: YouTube has the image all the same, and the link says so.
+            if matches!(result, Ok(None))
+                && test.subject.has_thumbnail()
+                && let Some(image) = test.versions.get(version).and_then(|version| version.thumbnail.clone())
+                && link.thumbnail.as_ref() != Some(&image)
+            {
+                link.thumbnail = Some(image);
+                self.state.update(cx, |state, cx| state.update_video(video, cx));
+            }
             return;
-        };
+        }
         let announcement = match result {
             Ok(None) => {
                 // Ending on the version that is up changes nothing on YouTube.

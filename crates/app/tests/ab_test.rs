@@ -403,6 +403,40 @@ fn a_scheduled_test_follows_the_video_schedule(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_switch_on_its_way_settles_before_the_test_stops(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    let (video_id, youtube_id) = upload_public(&workspace, cx, "Race");
+    let runner = Runner::start(&workspace, cx, on("2026-08-01", 9));
+    let images: Vec<PathBuf> =
+        ["a.png", "b.png"].iter().map(|name| publish_support::png_file(workspace.dir.path(), name)).collect();
+    std::fs::write(&images[1], [std::fs::read(&images[1]).unwrap(), vec![0]].concat()).unwrap();
+    let versions = images.iter().map(|path| TestVersion { title: None, thumbnail: Some(path.clone()) }).collect();
+    runner.runner.update(cx, |runner, cx| runner.start(video_id, TestSubject::Thumbnail, versions, 14, cx)).unwrap();
+    wait_for_showings(&workspace, cx, video_id, 1);
+
+    // B is on its way when the video goes unlisted.
+    runner.at(cx, on("2026-08-02", 0) + TimeDelta::minutes(1));
+    assert_eq!(runner.runner.read_with(cx, |runner, _| runner.switching(video_id)), Some(1));
+    let mut video = workspace.video(cx, video_id);
+    video.youtube.as_mut().unwrap().privacy = Privacy::Unlisted;
+    workspace.state.update(cx, |state, cx| state.update_video(video, cx));
+    runner.at(cx, on("2026-08-02", 0) + TimeDelta::minutes(2));
+    assert!(!test_of(&workspace, cx, video_id).is_over(), "the test waits for its switch");
+
+    // B is up and recorded; then the test stops, and the link names the image YouTube has.
+    let test = wait_for_showings(&workspace, cx, video_id, 2);
+    assert_eq!(test.live_version(), Some(1));
+    runner.at(cx, on("2026-08-02", 0) + TimeDelta::minutes(3));
+    let video = workspace.video(cx, video_id);
+    let link = video.youtube.unwrap();
+    assert!(matches!(link.ab_test.unwrap().outcome, Some(TestOutcome::Stopped { reason: StopReason::NotPublic, .. })));
+    assert_eq!(link.thumbnail.as_ref(), Some(&images[1]));
+    let sha = emulators.youtube_video(&youtube_id)["thumbnail"]["sha256"].as_str().map(str::to_owned);
+    assert_eq!(sha, Some(publish_support::sha256(&images[1])));
+}
+
+#[gpui_kit::test]
 fn private_videos_and_missing_permissions_say_why(cx: &mut TestAppContext) {
     let Some(emulators) = Emulators::start() else { return };
     let workspace = Workspace::open(cx, emulators.backend());
