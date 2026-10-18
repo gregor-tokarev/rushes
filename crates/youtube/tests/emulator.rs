@@ -17,9 +17,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{TimeDelta, Timelike as _, Utc};
 use rushes_youtube::{
-    Account, CredentialStore, Credentials, Error, MANAGE_SCOPE, Privacy, ProcessingStatus, RetryCause, SavedLogin,
-    UPLOAD_GRANULARITY, UploadOptions, UploadProgress, UploadStatus, VideoMetadata, Visibility, YoutubeClient,
-    YoutubeConfig, begin_authorization, check_client, refresh,
+    Account, CredentialStore, Credentials, Details, DetailsChange, Error, MANAGE_SCOPE, Privacy, ProcessingStatus,
+    RetryCause, SavedLogin, UPLOAD_GRANULARITY, UploadOptions, UploadProgress, UploadStatus, VideoMetadata, Visibility,
+    YoutubeClient, YoutubeConfig, begin_authorization, check_client, refresh,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -622,6 +622,76 @@ fn changes_who_can_watch_an_uploaded_video() {
     let (other, _) = sign_in(&emulators, "editor@example.com");
     let other = self::client(&emulators, other);
     assert_eq!(other.set_visibility(&id, public).unwrap_err().api_message(), None);
+}
+
+#[test]
+fn changes_the_details_of_an_uploaded_video() {
+    let Some(emulators) = Emulators::start() else {
+        return;
+    };
+    let (credentials, _) = sign_in(&emulators, "creator@example.com");
+    let client = client(&emulators, credentials);
+    let dir = tempfile::tempdir().unwrap();
+    let (path, _) = video_file(dir.path(), "short.mp4", 4096);
+    let metadata = VideoMetadata {
+        description: "First description".into(),
+        tags: vec!["rust".into()],
+        category_id: "28".into(),
+        default_language: Some("en".into()),
+        ..metadata("First title")
+    };
+    let uploaded = client.upload_video(&path, &metadata, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    let id = uploaded.id.clone();
+    let first = Details {
+        title: "First title".into(),
+        description: "First description".into(),
+        tags: vec!["rust".into()],
+        category_id: "28".into(),
+    };
+    assert_eq!(uploaded.details(), first);
+    let snippet = |client: &YoutubeClient| -> Value {
+        let url = format!("{}/youtube/v3/videos", emulators.youtube_url);
+        let token = format!("Bearer {}", client.credentials().access_token);
+        let mut response = plain_agent()
+            .get(&url)
+            .query("part", "snippet")
+            .query("id", &id)
+            .header("Authorization", &token)
+            .call()
+            .unwrap();
+        let body: Value = response.body_mut().read_json().unwrap();
+        body["items"][0]["snippet"].clone()
+    };
+
+    // Only the description: the rest stays as YouTube has it.
+    let description = DetailsChange { description: Some("Second description".into()), ..Default::default() };
+    let second = Details { description: "Second description".into(), ..first.clone() };
+    assert_eq!(client.set_details(&id, &description).unwrap(), Some(second.clone()));
+    assert_eq!(client.get_video(&id).unwrap().unwrap().details(), second);
+    assert_eq!(snippet(&client)["defaultLanguage"], "en", "the language stays");
+
+    let all = DetailsChange {
+        title: Some("Third title".into()),
+        description: Some(String::new()),
+        tags: Some(Vec::new()),
+        category_id: Some("27".into()),
+    };
+    let third =
+        Details { title: "Third title".into(), description: String::new(), tags: Vec::new(), category_id: "27".into() };
+    assert_eq!(client.set_details(&id, &all).unwrap(), Some(third.clone()));
+    assert_eq!(client.get_video(&id).unwrap().unwrap().details(), third);
+    // What YouTube has already sends nothing more.
+    assert_eq!(client.set_details(&id, &all).unwrap(), Some(third));
+
+    // Details YouTube would refuse cost no quota.
+    let long = DetailsChange { title: Some("x".repeat(101)), ..Default::default() };
+    assert!(matches!(client.set_details(&id, &long), Err(Error::InvalidInput(_))));
+    assert_eq!(client.set_details("doesNotExist", &description).unwrap(), None);
+
+    // Only the channel's owner changes its videos.
+    let (other, _) = sign_in(&emulators, "editor@example.com");
+    let other = self::client(&emulators, other);
+    assert!(other.set_details(&id, &description).is_err());
 }
 
 #[test]

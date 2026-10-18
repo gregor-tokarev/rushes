@@ -5,10 +5,10 @@
 use chrono::{DateTime, Local, Utc};
 use gpui_kit::{AppContext as _, Context};
 use rushes_core::{Privacy, Video, VideoId, VideoStatus};
-use rushes_youtube::{Error as YoutubeError, MANAGE_SCOPE, VideoInfo, Visibility};
+use rushes_youtube::{Error as YoutubeError, VideoInfo, Visibility};
 
 use super::rules::{core_privacy, youtube_privacy};
-use super::service::{YoutubeAccount, YoutubeService, describe_error};
+use super::service::{Changes, YoutubeService, describe_error};
 
 /// Changing who can watch a video on YouTube, for this run of the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,27 +110,9 @@ impl YoutubeService {
         }
         let channel = link.channel_id;
         let client = self.client_for(&channel);
-        let name = self.find_account(&channel).map(YoutubeAccount::name);
-        let failed = |problem: String, reconnect: bool| VisibilitySync::Failed {
-            problem,
-            reconnect: reconnect.then(|| channel.clone()),
-        };
-        let refused = match (&client, name) {
-            // Sign-ins from before Rushes changed videos on YouTube didn't allow it.
-            (Some(client), Some(name)) if !client.credentials().has_scope(MANAGE_SCOPE) => Some(failed(
-                format!(
-                    "Reconnect {name} to let Rushes change videos on YouTube, and leave every permission box ticked."
-                ),
-                true,
-            )),
-            (Some(_), _) => None,
-            (None, Some(name)) => Some(failed(format!("Reconnect {name} to send the change."), true)),
-            (None, None) => {
-                Some(failed("Connect the YouTube account the video is on, then try again.".to_owned(), false))
-            }
-        };
-        if let Some(refused) = refused {
-            self.visibility.insert(youtube_id, refused);
+        if let Some((problem, reconnect)) = self.change_refused(client.as_deref(), &channel) {
+            self.visibility
+                .insert(youtube_id, VisibilitySync::Failed { problem, reconnect: reconnect.then_some(channel) });
             cx.notify();
             return;
         }
@@ -246,14 +228,14 @@ impl YoutubeService {
         self.visibility_changes.get(youtube_id).copied().unwrap_or_default()
     }
 
-    /// Keeps what YouTube said about a video, asked after `changes` visibility
-    /// changes, and records its visibility (published in Studio, or at its
-    /// scheduled time) on the videos linked to it. An answer asked before the last
-    /// change, or while one is on its way, may predate it: the visibility that
-    /// change left stays.
-    pub(super) fn on_youtube_video(&mut self, mut info: VideoInfo, changes: u64, cx: &mut Context<Self>) {
+    /// Keeps what YouTube said about a video, asked after `changes`, and records
+    /// its visibility (published in Studio, or at its scheduled time) on the
+    /// videos linked to it. An answer asked before the last change, or while one
+    /// is on its way, may predate it: what that change left stays.
+    pub(super) fn on_youtube_video(&mut self, mut info: VideoInfo, changes: Changes, cx: &mut Context<Self>) {
         let youtube_id = info.id.clone();
-        let current = self.visibility_changes(&youtube_id) == changes
+        self.keep_sent_details(&mut info, changes.details);
+        let current = self.visibility_changes(&youtube_id) == changes.visibility
             && self.visibility.get(&youtube_id) != Some(&VisibilitySync::Sending);
         if !current && let Some(known) = self.remote.get(&youtube_id) {
             info.privacy = known.privacy;

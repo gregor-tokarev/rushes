@@ -20,5 +20,8 @@ pub use config::{
 pub use credentials::{Account, CredentialStore, SavedLogin};
 pub use error::{Error, Result, RetryCause};
 pub use oauth::{Credentials, PendingAuthorization, begin_authorization, check_client, refresh, revoke};
-pub use types::{Channel, GoogleUser, Privacy, ProcessingStatus, UploadStatus, VideoInfo, Visibility, watch_url};
+pub use types::{
+    Channel, Details, DetailsChange, GoogleUser, Privacy, ProcessingStatus, UploadStatus, VideoInfo, Visibility,
+    watch_url,
+};
 pub use upload::{DEFAULT_CHUNK_SIZE, UPLOAD_GRANULARITY, UploadOptions, UploadProgress, UploadedVideo, VideoMetadata};

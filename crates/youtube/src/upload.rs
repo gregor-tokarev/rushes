@@ -17,7 +17,10 @@ use url::Url;
 use crate::client::{YoutubeClient, extension};
 use crate::error::{Error, Result, RetryCause, api_error};
 use crate::http::{self, HttpResponse, bearer, body_text};
-use crate::types::{Privacy, UploadStatus, VideoResource, watch_url};
+use crate::types::{
+    Details, Privacy, UploadStatus, VideoResource, check_category, check_description, check_tags, check_title,
+    watch_url,
+};
 
 /// Chunk sizes must be multiples of this, except for the last chunk.
 pub const UPLOAD_GRANULARITY: u64 = 256 * 1024;
@@ -48,31 +51,11 @@ impl VideoMetadata {
     /// Checks YouTube's documented limits before any quota is spent.
     pub fn validate(&self) -> Result<()> {
         let invalid = |message: &str| Err(Error::InvalidInput(message.to_owned()));
-        let has_brackets = |text: &str| text.contains(['<', '>']);
-        if self.title.trim().is_empty() {
-            return invalid("the title is empty");
-        }
-        if self.title.chars().count() > 100 {
-            return invalid("the title is longer than 100 characters");
-        }
-        if has_brackets(&self.title) || has_brackets(&self.description) {
-            return invalid("the title and description cannot contain < or >");
-        }
-        if self.description.len() > 5000 {
-            return invalid("the description is longer than 5000 bytes");
-        }
-        if self.tags.iter().any(|tag| has_brackets(tag)) {
-            return invalid("tags cannot contain < or >");
-        }
-        // YouTube counts separators and the quotes around tags with spaces.
-        let tags_length =
-            self.tags.iter().map(|tag| tag.chars().count() + if tag.contains(' ') { 2 } else { 0 }).sum::<usize>()
-                + self.tags.len().saturating_sub(1);
-        if tags_length > 500 {
-            return invalid("the tags are longer than 500 characters in total");
-        }
-        if !self.category_id.is_empty() && !self.category_id.bytes().all(|b| b.is_ascii_digit()) {
-            return invalid("the category id must be numeric");
+        check_title(&self.title)?;
+        check_description(&self.description)?;
+        check_tags(&self.tags)?;
+        if !self.category_id.is_empty() {
+            check_category(&self.category_id)?;
         }
         if let Some(publish_at) = self.publish_at {
             if self.privacy != Privacy::Private {
@@ -160,10 +143,25 @@ pub struct UploadedVideo {
     pub url: String,
     pub channel_id: String,
     pub title: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub category_id: String,
     pub privacy: Privacy,
     /// Scheduled publish time of a private video.
     pub publish_at: Option<DateTime<Utc>>,
     pub upload_status: UploadStatus,
+}
+
+impl UploadedVideo {
+    /// The details YouTube has for the video.
+    pub fn details(&self) -> Details {
+        Details {
+            title: self.title.clone(),
+            description: self.description.clone(),
+            tags: self.tags.clone(),
+            category_id: self.category_id.clone(),
+        }
+    }
 }
 
 /// Chunking and retry behaviour of uploads.
@@ -466,6 +464,9 @@ fn upload_step(mut response: HttpResponse) -> Result<Step> {
                 id: video.id,
                 channel_id: snippet.channel_id,
                 title: snippet.title,
+                description: snippet.description,
+                tags: snippet.tags,
+                category_id: snippet.category_id,
                 privacy: status.privacy_status,
                 publish_at: status.publish_at,
                 upload_status: status.upload_status,

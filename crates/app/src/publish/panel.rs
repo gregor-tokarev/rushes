@@ -40,6 +40,7 @@ use super::assist_dialogs::open_details_dialog;
 use super::assistant::{AssistEvent, DetailSources, DetailsJob, PublishAssistant, ThumbnailJob};
 use super::channel::{ChannelChoices, ChooseChannel};
 use super::chapters::{MIN_CHAPTERS, chapters, chapters_text, insert_chapters, timestamp};
+use super::details::{DetailFields, DetailsSync};
 use super::rules::{
     self, AccountAccess, BlockingReason, CATEGORIES, Category, DESCRIPTION_MAX_BYTES, TAGS_MAX_CHARS,
     THUMBNAIL_MAX_BYTES, TITLE_MAX_CHARS, tags_length,
@@ -177,6 +178,10 @@ impl Edited {
 
     fn contains(self, field: Field) -> bool {
         self.0 & (1 << field as u8) != 0
+    }
+
+    fn remove(&mut self, field: Field) {
+        self.0 &= !(1 << field as u8);
     }
 
     fn is_empty(self) -> bool {
@@ -471,13 +476,18 @@ impl PublishPanel {
         }
         let visibility_changed =
             (video.publish.privacy, video.publish.publish_at) != (publish.privacy, publish.publish_at);
+        let details = rules::details(&video);
         video.publish = publish;
+        let details_changed = DetailFields::between(&details, &rules::details(&video));
         self.state.update(cx, |state, cx| state.update_video(video, cx));
         // Who can watch the video changes on YouTube too, or on the video an upload
-        // under way puts there.
+        // under way puts there; so do the details, once the creator stops changing them.
+        let video_id = self.video_id;
         if visibility_changed {
-            let video_id = self.video_id;
             self.service.update(cx, |service, cx| service.set_youtube_visibility(video_id, cx));
+        }
+        if !details_changed.is_empty() {
+            self.service.update(cx, |service, cx| service.change_youtube_details(video_id, details_changed, cx));
         }
         visibility_changed
     }
@@ -491,6 +501,31 @@ impl PublishPanel {
         }
     }
 
+    /// Sends the details to YouTube now, `fields` with those waiting: after they
+    /// didn't get there, or YouTube has others.
+    fn send_details(&mut self, fields: DetailFields, cx: &mut Context<Self>) {
+        self.save_pending(cx);
+        let video_id = self.video_id;
+        self.service.update(cx, |service, cx| service.send_youtube_details(video_id, fields, cx));
+    }
+
+    /// Takes the details YouTube has into the form where they differ. Edits of the
+    /// form's own to those, waiting to be saved, go: the creator chose YouTube's.
+    fn use_youtube_details(&mut self, cx: &mut Context<Self>) {
+        let video_id = self.video_id;
+        let taken = self.service.update(cx, |service, cx| service.use_youtube_details(video_id, cx));
+        for (taken, field) in [
+            (taken.title, Field::Title),
+            (taken.description, Field::Description),
+            (taken.tags, Field::Tags),
+            (taken.category, Field::Category),
+        ] {
+            if taken {
+                self.edited.remove(field);
+            }
+        }
+    }
+
     fn schedule_save(&mut self, field: Field, cx: &mut Context<Self>) {
         // Once the creator changes what the agent wrote, Undo would throw that away.
         if matches!(field, Field::Title | Field::Description | Field::Tags)
@@ -499,6 +534,11 @@ impl PublishPanel {
         {
             let video_id = self.video_id;
             assistant.update(cx, |assistant, cx| assistant.dismiss_details(video_id, cx));
+        }
+        // Details waiting to go to YouTube wait for this change too.
+        if matches!(field, Field::Title | Field::Description | Field::Tags | Field::Category) {
+            let video_id = self.video_id;
+            self.service.update(cx, |service, cx| service.postpone_youtube_details(video_id, cx));
         }
         self.edited.insert(field);
         self.save_task = Some(cx.spawn(async move |this, cx| {
@@ -1028,21 +1068,28 @@ impl PublishPanel {
         }
         // Tests check which note is on screen.
         .test_support();
-        let uploaded = self.state.read(cx).video(self.video_id).is_some_and(|video| video.youtube.is_some());
+        let video = self.state.read(cx).video(self.video_id);
+        let link = video.and_then(|video| video.youtube.clone());
+        let sync = link.as_ref().and_then(|link| self.service.read(cx).details_sync(&link.video_id).cloned());
+        // An upload under way takes the form's details to its new video.
+        let other = video
+            .filter(|_| !self.is_uploading(cx))
+            .and_then(|video| self.service.read(cx).other_details_on_youtube(video));
+        let status = match (sync, other) {
+            (Some(sync), _) => Some(self.render_details_sync(sync, cx)),
+            (None, Some((fields, _))) => Some(self.render_other_details(fields, writing, cx)),
+            (None, None) => None,
+        };
         v_flex()
             .gap_5()
-            .child(v_flex().gap_0p5().child(heading).when(uploaded, |this| {
-                // The form doesn't reach the uploaded video; saying so avoids edits that go nowhere.
+            .child(v_flex().gap_0p5().child(heading).when(link.is_some(), |this| {
                 // It reads as the section's description.
                 this.child(
                     div()
-                        .id("publish-next-upload-note")
+                        .id("publish-details-note")
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child(
-                            "This video is on YouTube. Changes here apply to the next upload; change the \
-                             uploaded one in YouTube Studio.",
-                        )
+                        .child("Changes here go to the video on YouTube.")
                         .test_support(),
                 )
             }))
@@ -1054,9 +1101,13 @@ impl PublishPanel {
                     .control(Input::new(&self.title).id("publish-title").disabled(writing)),
             )
             .child(
-                FieldRow::new("Description")
-                    .counter(self.draft.description.len(), DESCRIPTION_MAX_BYTES)
-                    .control(Textarea::new(&self.description).aria_label("Description").disabled(writing)),
+                FieldRow::new("Description").counter(self.draft.description.len(), DESCRIPTION_MAX_BYTES).control(
+                    // Tests type into it.
+                    div()
+                        .id("publish-description")
+                        .child(Textarea::new(&self.description).aria_label("Description").disabled(writing))
+                        .test_support(),
+                ),
             )
             .child(h_flex().gap_3().child(chapters_button).child(chapters_help.flex_1().min_w_0()))
             .child(
@@ -1072,6 +1123,99 @@ impl PublishPanel {
                         .child(Select::new(&self.category).id("publish-category").placeholder("Category")),
                 ),
             )
+            .children(status)
+    }
+
+    /// YouTube has other details than the form: they didn't get there, or the
+    /// video changed in YouTube Studio. The form's go on request, or YouTube's
+    /// come into the form.
+    fn render_other_details(&self, fields: DetailFields, writing: bool, cx: &mut Context<Self>) -> AnyElement {
+        let detail = format!("On YouTube {} different.", fields.sentence_subject());
+        let body = v_flex()
+            .gap_2()
+            .child(status_line(
+                IconName::TriangleAlert,
+                cx.theme().warning,
+                "Not on YouTube yet",
+                Some(detail.into()),
+                cx,
+            ))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("details-send")
+                            .label("Change on YouTube")
+                            .small()
+                            .outline()
+                            .disabled(writing)
+                            .on_click(cx.listener(move |this, _, _, cx| this.send_details(fields, cx))),
+                    )
+                    .child(
+                        Button::new("details-use-youtube")
+                            .label("Use YouTube’s")
+                            .small()
+                            .outline()
+                            .disabled(writing)
+                            .on_click(cx.listener(|this, _, _, cx| this.use_youtube_details(cx))),
+                    ),
+            );
+        // Tests check what the section says.
+        div().id("youtube-details-sync").child(body).test_support().into_any_element()
+    }
+
+    /// Where changing the details of the uploaded video stands, with the way on
+    /// when the change didn't get there.
+    fn render_details_sync(&self, sync: DetailsSync, cx: &mut Context<Self>) -> AnyElement {
+        let body = match sync {
+            DetailsSync::Sending => sending_to_youtube(cx),
+            DetailsSync::Failed { problem, reconnect } => self.render_change_failed(
+                "details",
+                problem,
+                reconnect,
+                |this, cx| this.send_details(DetailFields::default(), cx),
+                cx,
+            ),
+        };
+        // Tests check what the section says.
+        div().id("youtube-details-sync").child(body).test_support().into_any_element()
+    }
+
+    /// A change that didn't reach the uploaded video, and why: Reconnect when
+    /// signing in again is the way on, else Try again, which runs `try_again`.
+    /// Button ids start with `id`.
+    fn render_change_failed(
+        &self,
+        id: &str,
+        problem: String,
+        reconnect: Option<String>,
+        try_again: fn(&mut Self, &mut Context<Self>),
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let button = match reconnect {
+            Some(key) => {
+                // One browser sign-in at a time: another one must end first.
+                let busy = self.service.read(cx).is_signing_in();
+                let service = self.service.clone();
+                Button::new(SharedString::from(format!("{id}-reconnect")))
+                    .label("Reconnect")
+                    .disabled(busy)
+                    .on_click(move |_, _, cx| service.update(cx, |service, cx| service.reconnect(&key, cx)))
+            }
+            None => Button::new(SharedString::from(format!("{id}-try-again")))
+                .label("Try again")
+                .on_click(cx.listener(move |this, _, _, cx| try_again(this, cx))),
+        };
+        v_flex()
+            .gap_2()
+            .child(status_line(
+                IconName::TriangleAlert,
+                cx.theme().warning,
+                "Not changed on YouTube",
+                Some(problem.into()),
+                cx,
+            ))
+            .child(h_flex().child(button.small().outline()))
     }
 
     /// "Write with AI…", unless the app has no assistant. Without a script or a
@@ -1207,8 +1351,7 @@ impl PublishPanel {
         v_flex()
             .gap_5()
             .child(v_flex().gap_0p5().child(section_heading("Visibility")).when(link.is_some(), |this| {
-                // Unlike the details, these reach the uploaded video. It reads as the
-                // section's description.
+                // It reads as the section's description.
                 this.child(
                     div()
                         .id("publish-visibility-note")
@@ -1314,41 +1457,14 @@ impl PublishPanel {
     /// Where changing who can watch the uploaded video stands, with the way on when
     /// the change didn't get there.
     fn render_visibility_sync(&self, sync: VisibilitySync, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
         let body = match sync {
-            VisibilitySync::Sending => h_flex()
-                .gap_2()
-                .child(Spinner::new().small().color(theme.muted_foreground))
-                .child(div().text_sm().child("Sending to YouTube…")),
+            VisibilitySync::Sending => sending_to_youtube(cx),
             VisibilitySync::Failed { problem, reconnect } => {
-                let button = match reconnect {
-                    Some(key) => {
-                        // One browser sign-in at a time: another one must end first.
-                        let busy = self.service.read(cx).is_signing_in();
-                        let service = self.service.clone();
-                        Button::new("visibility-reconnect")
-                            .label("Reconnect")
-                            .disabled(busy)
-                            .on_click(move |_, _, cx| service.update(cx, |service, cx| service.reconnect(&key, cx)))
-                    }
-                    None => Button::new("visibility-try-again")
-                        .label("Try again")
-                        .on_click(cx.listener(|this, _, _, cx| this.send_visibility(cx))),
-                };
-                v_flex()
-                    .gap_2()
-                    .child(status_line(
-                        IconName::TriangleAlert,
-                        theme.warning,
-                        "Not changed on YouTube",
-                        Some(problem.into()),
-                        cx,
-                    ))
-                    .child(h_flex().child(button.small().outline()))
+                self.render_change_failed("visibility", problem, reconnect, Self::send_visibility, cx)
             }
             VisibilitySync::Kept(privacy) => status_line(
                 IconName::TriangleAlert,
-                theme.warning,
+                cx.theme().warning,
                 format!("YouTube kept the video {}", privacy.api_value()),
                 Some("YouTube Studio shows why.".into()),
                 cx,
@@ -1359,7 +1475,20 @@ impl PublishPanel {
     }
 
     fn render_audience(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex().gap_5().child(section_heading("Audience")).child(
+        let uploaded = self.uploaded_before(cx);
+        let heading = v_flex().gap_0p5().child(section_heading("Audience")).when(uploaded, |this| {
+            // The answer doesn't reach the uploaded video; saying so avoids a change that
+            // goes nowhere. It reads as the section's description.
+            this.child(
+                div()
+                    .id("publish-next-upload-note")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Changes here apply to the next upload; change the uploaded video in YouTube Studio.")
+                    .test_support(),
+            )
+        });
+        v_flex().gap_5().child(heading).child(
             FieldRow::new("Is this video made for kids?")
                 .help("YouTube requires an answer for every video. Videos made for kids have comments and personalized ads turned off.")
                 .control(
@@ -2392,6 +2521,14 @@ fn add_tags(tags: &mut Vec<String>, text: &str) -> bool {
         }
     }
     added
+}
+
+/// A change on its way to the uploaded video.
+fn sending_to_youtube(cx: &App) -> Div {
+    h_flex()
+        .gap_2()
+        .child(Spinner::new().small().color(cx.theme().muted_foreground))
+        .child(div().text_sm().child("Sending to YouTube…"))
 }
 
 fn category_index(id: &str) -> usize {
