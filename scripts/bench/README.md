@@ -3,7 +3,8 @@
 `evaluate.py` measures one edited video against the raw source footage, a word-level reference
 transcript (Scribe JSON) and a gold annotation. It works only from the files: if the harness
 wrote an EDL, that EDL seeds the search and is reported next to the measured cuts, but it is
-never trusted. `compare.py` turns many result files into markdown tables.
+never trusted. `compare.py` turns many result files into markdown tables. `doubles.py` counts
+the double takes a viewer hears in each edit (see `docs/benchmarks.md`).
 
 Requirements: Python 3, numpy, ffmpeg/ffprobe (tested with 8.0). No other packages.
 

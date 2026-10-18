@@ -2,8 +2,8 @@
 //! turns that into exact source spans. All timing arithmetic lives here, so the model
 //! never adds up durations or types a cut time for speech.
 //!
-//! Inside a kept segment, fillers are cut out and pauses longer than the limits are
-//! tightened; every cut edge is padded and moved to the quietest moment nearby, never
+//! Inside a kept segment, fillers and abandoned attempts the speaker restarts are cut
+//! out and pauses longer than the limits are tightened; every cut edge is padded and moved to the quietest moment nearby, never
 //! into a word.
 
 use std::collections::{HashMap, HashSet};
@@ -31,6 +31,10 @@ const PAD_AFTER: f64 = 0.14;
 const SNAP: f64 = 0.04;
 /// Spans shorter than this are dropped.
 const MIN_SPAN: f64 = 0.04;
+/// Share of the silence next to a cut-out word (a filler, an abandoned attempt) a cut may
+/// keep: transcripts place word edges a few tens of ms off, and the rest of the word must
+/// not leak in.
+const NEXT_TO_REMOVED: f64 = 0.8;
 /// A pause this long inside a segment is worth a word in the receipt.
 const LONG_PAUSE: f64 = 3.0;
 /// A silent time segment this long may hold preparation around the demo.
@@ -57,6 +61,10 @@ pub struct CutPlan {
     /// Cut fillers (um, uh, э-э-э) inside kept segments.
     #[serde(default = "default_true")]
     pub remove_fillers: bool,
+    /// Cut an attempt the speaker abandons and says again at once (“I was go-- I was
+    /// going”) inside kept segments that keep the restart.
+    #[serde(default = "default_true")]
+    pub remove_restarts: bool,
     /// Pauses longer than this (seconds) are tightened; shorter ones stay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_pause: Option<f64>,
@@ -125,6 +133,10 @@ pub struct SegmentSpec {
     /// The last words to keep in `to` (drops what comes after them).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ends_with: Option<String>,
+    /// Words to cut inside the segment, each a run of words said once in it: a corrected
+    /// word, a phrase the speaker restates, an aside.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cut: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -239,6 +251,9 @@ pub struct ResolvedCut {
     pub overlays: Vec<Overlay>,
     pub duration: f64,
     pub fillers_removed: usize,
+    /// The abandoned attempts cut, for the receipt: `S3: “was go--” before “I was going…”`.
+    #[serde(default)]
+    pub restarts_cut: Vec<String>,
     pub pauses_tightened: usize,
     pub seconds_tightened: f64,
     pub warnings: Vec<String>,
@@ -251,6 +266,10 @@ struct Selection {
     kept: Vec<usize>,
     /// The first and last word index of the selected range (fillers included).
     range: (usize, usize),
+    /// Restarts whose abandoned attempt is cut: (its first word cut, the restart).
+    restarts: Vec<(usize, usize)>,
+    /// Spoken words cut other than fillers: abandoned attempts and the segment's `cut`.
+    not_fillers: usize,
 }
 
 pub fn resolve(session: &mut Session, plan: &CutPlan) -> Result<ResolvedCut> {
@@ -289,6 +308,7 @@ pub fn resolve(session: &mut Session, plan: &CutPlan) -> Result<ResolvedCut> {
     let mut warnings = Vec::new();
     let mut selections: Vec<Option<Selection>> = Vec::new();
     let (mut fillers_removed, mut pauses_tightened, mut seconds_tightened) = (0, 0, 0.0);
+    let mut restarts_cut = Vec::new();
 
     for (index, segment) in plan.segments.iter().enumerate() {
         let name = format!("S{}", index + 1);
@@ -298,11 +318,27 @@ pub fn resolve(session: &mut Session, plan: &CutPlan) -> Result<ResolvedCut> {
         let first_span = spans.len();
         if segment.from.is_some() {
             let view = session.view(&take).expect("loaded");
-            let selection = select(view, segment, plan.remove_fillers, &name)?;
+            let selection = select(view, segment, plan.remove_fillers, plan.remove_restarts, &name)?;
             let words = &view.transcript.words;
             let kept = &selection.kept;
             fillers_removed +=
-                (selection.range.0..=selection.range.1).filter(|i| !words[*i].event && !kept.contains(i)).count();
+                (selection.range.0..=selection.range.1).filter(|i| !words[*i].event && !kept.contains(i)).count()
+                    - selection.not_fillers;
+            for &(dropped, restart) in &selection.restarts {
+                let said = |range: std::ops::Range<usize>| {
+                    words[range]
+                        .iter()
+                        .filter(|w| !w.event && !w.is_filler())
+                        .map(|w| w.text.as_str())
+                        .collect::<Vec<_>>()
+                };
+                let again = said(restart..words.len());
+                restarts_cut.push(format!(
+                    "{name}: “{}” before “{}…”",
+                    said(dropped..restart).join(" "),
+                    again[..again.len().min(4)].join(" ")
+                ));
+            }
 
             let first = &words[kept[0]];
             let previous_end = previous_word(words, kept[0]).map_or(0.0, |w| w.end);
@@ -321,6 +357,11 @@ pub fn resolve(session: &mut Session, plan: &CutPlan) -> Result<ResolvedCut> {
                 let before = removed.last().map_or(gap, |w| (b.start - w.end).max(0.0));
                 let natural = if removed.is_empty() { gap } else { after + before };
                 let target = if segment.keep_pauses { natural } else { natural.min(limit) };
+                let (after, before) = if removed.is_empty() {
+                    (after, before)
+                } else {
+                    (after * NEXT_TO_REMOVED, before * NEXT_TO_REMOVED)
+                };
                 let (keep_after, keep_before) = if removed.is_empty() {
                     (target * 0.55, target * 0.45)
                 } else {
@@ -381,7 +422,7 @@ pub fn resolve(session: &mut Session, plan: &CutPlan) -> Result<ResolvedCut> {
                 source,
                 out_start: 0.0,
                 out_end: 0.0,
-                text: view.text(selection.range.0..selection.range.1 + 1),
+                text: view.text(selection.kept.iter().copied()),
             });
             selections.push(Some(selection));
         } else {
@@ -482,6 +523,7 @@ pub fn resolve(session: &mut Session, plan: &CutPlan) -> Result<ResolvedCut> {
     warnings.extend(overlaps(&spans));
     warnings.extend(duplicates(session, &selections));
     warnings.extend(mid_sentence_joins(session, &selections));
+    warnings.extend(repeated_joins(session, &selections));
     for (index, info) in infos.iter().enumerate() {
         if info.out_end - info.out_start < 0.6 {
             warnings.push(format!("S{} is only {:.2} s long", index + 1, info.out_end - info.out_start));
@@ -512,6 +554,7 @@ pub fn resolve(session: &mut Session, plan: &CutPlan) -> Result<ResolvedCut> {
         overlays,
         duration,
         fillers_removed,
+        restarts_cut,
         pauses_tightened,
         seconds_tightened,
         warnings,
@@ -574,7 +617,7 @@ fn overlays(
             ends_with: spec.ends_with.clone(),
             ..SegmentSpec::default()
         };
-        let selection = select(view, &words, true, &name)?;
+        let selection = select(view, &words, plan.remove_fillers, plan.remove_restarts, &name)?;
         let all = &view.transcript.words;
         let (first, last) = (&all[selection.kept[0]], &all[*selection.kept.last().expect("non-empty")]);
         let not_kept = |word: &Word| {
@@ -637,7 +680,7 @@ fn overlays(
                 } else {
                     format!("{} ({}) from {source_start:.2}", source.id, source.file)
                 },
-                text: view.text(selection.range.0..selection.range.1 + 1),
+                text: view.text(selection.kept.iter().copied()),
             },
         ));
     }
@@ -716,7 +759,13 @@ fn take_of(id: &str) -> Option<String> {
         .then(|| letters.to_ascii_uppercase())
 }
 
-fn select(view: &TakeView, segment: &SegmentSpec, remove_fillers: bool, name: &str) -> Result<Selection> {
+fn select(
+    view: &TakeView,
+    segment: &SegmentSpec,
+    remove_fillers: bool,
+    remove_restarts: bool,
+    name: &str,
+) -> Result<Selection> {
     let from = view.phrase_index(segment.from.as_deref().unwrap_or_default())?;
     let to = match &segment.to {
         Some(to) => view.phrase_index(to)?,
@@ -748,12 +797,56 @@ fn select(view: &TakeView, segment: &SegmentSpec, remove_fillers: bool, name: &s
     if last < first {
         return Err(EditError::invalid(format!("{name}: ends_with comes before starts_with")));
     }
-    let kept: Vec<usize> =
-        (first..=last).filter(|i| !words[*i].event && !(remove_fillers && words[*i].is_filler())).collect();
+    // An abandoned attempt goes when the segment keeps the restart.
+    let mut removed = HashSet::new();
+    let mut restarts = Vec::new();
+    for restart in view.restarts.iter().filter(|restart| remove_restarts && (first..=last).contains(&restart.restart)) {
+        let dropped = restart.dropped.start.max(first)..restart.dropped.end;
+        if !dropped.is_empty() {
+            restarts.push((dropped.start, restart.restart));
+            removed.extend(dropped);
+        }
+    }
+    for needle in segment.cut.iter().filter(|needle| !needle.trim().is_empty()) {
+        removed.extend(find_cut(view, first, last, needle, name)?);
+    }
+    let kept: Vec<usize> = (first..=last)
+        .filter(|i| !words[*i].event && !(remove_fillers && words[*i].is_filler()) && !removed.contains(i))
+        .collect();
     if kept.is_empty() {
         return Err(EditError::invalid(format!("{name} keeps no words")));
     }
-    Ok(Selection { take: view.take.clone(), kept, range: (first, last) })
+    let not_fillers = removed.iter().filter(|i| !words[**i].event).count();
+    Ok(Selection { take: view.take.clone(), kept, range: (first, last), restarts, not_fillers })
+}
+
+/// The words of `needle` between words `first` and `last`, where they are said exactly
+/// once (fillers between them do not count).
+fn find_cut(view: &TakeView, first: usize, last: usize, needle: &str, name: &str) -> Result<std::ops::Range<usize>> {
+    let words = &view.transcript.words;
+    let wanted: Vec<String> = needle.split_whitespace().map(token).filter(|t| !t.is_empty()).collect();
+    let spoken: Vec<(usize, String)> = (first..=last)
+        .filter(|i| !words[*i].event && !words[*i].is_filler())
+        .map(|i| (i, token(&words[i].text)))
+        .filter(|(_, t)| !t.is_empty())
+        .collect();
+    let found: Vec<usize> = if wanted.is_empty() || wanted.len() > spoken.len() {
+        Vec::new()
+    } else {
+        (0..=spoken.len() - wanted.len())
+            .filter(|s| wanted.iter().enumerate().all(|(k, t)| spoken[s + k].1 == *t))
+            .collect()
+    };
+    match found.as_slice() {
+        [s] => Ok(spoken[*s].0..spoken[s + wanted.len() - 1].0 + 1),
+        [] => Err(EditError::invalid(format!(
+            "{name}: cut “{needle}” is not in the segment's words: write it as in the transcript"
+        ))),
+        many => Err(EditError::invalid(format!(
+            "{name}: cut “{needle}” is said {} times in the segment: give enough words to name one",
+            many.len()
+        ))),
+    }
 }
 
 /// Index of the first (or, with `last`, the final) word of `needle` in a phrase.
@@ -776,11 +869,7 @@ fn find_words(view: &TakeView, phrase: usize, needle: &str, last: bool) -> Optio
 }
 
 fn token(text: &str) -> String {
-    text.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .map(|c| if c == 'ё' { 'е' } else { c })
-        .collect()
+    crate::transcript::normalise(text)
 }
 
 fn previous_word(words: &[Word], index: usize) -> Option<&Word> {
@@ -950,6 +1039,34 @@ fn mid_sentence_joins(session: &Session, selections: &[Option<Selection>]) -> Ve
     warnings
 }
 
+/// Joins where the words before the cut are said again right after it (“…Дальше. ‖
+/// Дальше. Все мы знаем…”): an attempt and its restart kept on both sides.
+fn repeated_joins(session: &Session, selections: &[Option<Selection>]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let spoken = |selection: &Selection| -> Vec<String> {
+        let words = &session.view(&selection.take).expect("loaded").transcript.words;
+        selection.kept.iter().map(|i| token(&words[*i].text)).filter(|t| !t.is_empty()).collect()
+    };
+    for (index, pair) in selections.windows(2).enumerate() {
+        let (Some(a), Some(b)) = (&pair[0], &pair[1]) else { continue };
+        let (before, after) = (spoken(a), spoken(b));
+        let longest = (1..=before.len().min(after.len()).min(4)).rev().find(|&n| {
+            before[before.len() - n..] == after[..n] && before[before.len() - n..].concat().chars().count() >= 3
+        });
+        if let Some(n) = longest {
+            let words = &session.view(&a.take).expect("loaded").transcript.words;
+            let said: Vec<&str> = a.kept[a.kept.len() - n..].iter().map(|i| words[*i].text.as_str()).collect();
+            warnings.push(format!(
+                "S{} ends with “{}” and S{} starts with the same words: keep them once (ends_with or starts_with)",
+                index + 1,
+                said.join(" "),
+                index + 2
+            ));
+        }
+    }
+    warnings
+}
+
 /// `m:ss.cc` (or `h:mm:ss.cc`).
 pub fn clock(seconds: f64) -> String {
     let seconds = seconds.max(0.0);
@@ -972,9 +1089,19 @@ impl ResolvedCut {
         );
         let _ = writeln!(
             out,
-            "Inside segments: {} fillers cut, {} long pauses tightened, {:.1} s of pauses and fillers removed.",
-            self.fillers_removed, self.pauses_tightened, self.seconds_tightened
+            "Inside segments: {} fillers and {} restarts cut, {} long pauses tightened, {:.1} s of pauses, fillers and \
+             restarts removed.",
+            self.fillers_removed,
+            self.restarts_cut.len(),
+            self.pauses_tightened,
+            self.seconds_tightened
         );
+        if !self.restarts_cut.is_empty() {
+            let _ = writeln!(out, "Restarts cut (the abandoned attempt goes, the restart stays):");
+            for restart in &self.restarts_cut {
+                let _ = writeln!(out, "- {restart}");
+            }
+        }
         if self.warnings.is_empty() {
             out.push_str("Warnings: none.\n");
         } else {

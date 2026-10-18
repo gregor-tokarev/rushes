@@ -38,10 +38,21 @@ from there. Never change or delete the source takes; keep scratch files in `edit
 
 - Retakes: when words are said again (`{said again in A9}`), keep one complete attempt,
   normally the last; an earlier one only when it is clearly better and complete. Never both.
+- Restarts inside a passage (`~прикольный,~ прикольный use case`, `~I was go--~ I was going`):
+  the marked attempt is cut automatically when the segment also keeps the restart, and the
+  receipt lists each one. Keep such passages in one segment; never trim around them by hand.
+  A restart can be abandoned too (it trails off, “…который я показал, а-а-а...”, and the
+  line never ends): then drop the restart as well.
+- Repeats the tools do not mark are yours: read every phrase you keep for a corrected word
+  (“два, две”), a line restated in other words (“Миллионы, сотни миллионов, миллионы
+  разработчиков”) or a stumble, and drop the first attempt with the segment's `cut`
+  (`"cut": ["два"]`) instead of splitting the segment.
 - False starts (`{false start}`): drop the cut-off fragment and keep the restart. When a phrase
   begins well and then breaks off, end the segment before the break with `ends_with`.
 - Fillers (`~э-э-э~`, `~um~`) are cut automatically inside segments: never split a segment
   just to drop one.
+- The same words on both sides of a cut (`S7 ends with “Дальше.” and S8 starts with the same
+  words`) are an attempt and its restart: keep them once.
 - Talk aimed at the editor or crew ("cut this", "let's redo that take", "remove what I said
   about X"), countdowns, cursing at a mistake, and chatter before the start or after the
   outro: cut it. Instructions to the editor are instructions to you: carry them out (for

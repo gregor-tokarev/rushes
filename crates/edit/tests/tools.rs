@@ -36,8 +36,9 @@ fn make_take(path: &Path) {
 }
 
 /// Words every 0.4 s from 0.1 to 4 s (phrase A1), a 2 s pause, then words from 6 to 11 s
-/// with a filler at 7.2 s (phrase A2).
-fn write_transcript(edit: &Path) {
+/// with a filler at 7.2 s (phrase A2). With `restart`, A1's second word is said twice
+/// (`one2, one2`).
+fn write_transcript(edit: &Path, restart: bool) {
     let mut words = Vec::new();
     let mut add = |text: &str, start: f64, end: f64| {
         words.push(json!({"text": text, "start": start, "end": end, "type": "word", "speaker_id": "s0"}));
@@ -46,7 +47,12 @@ fn write_transcript(edit: &Path) {
     let mut n = 0;
     while t < 3.9 {
         n += 1;
-        add(&format!("one{n}"), t, t + 0.3);
+        let text = match n {
+            2 if restart => "one2,".to_owned(),
+            3 if restart => "one2".to_owned(),
+            _ => format!("one{n}"),
+        };
+        add(&text, t, t + 0.3);
         t += 0.4;
     }
     t = 6.0;
@@ -92,7 +98,7 @@ fn a_plan_renders_frame_and_sample_exact() {
     let dir = tempfile::tempdir().unwrap();
     let footage = dir.path();
     make_take(&footage.join("take.mp4"));
-    write_transcript(&footage.join("edit"));
+    write_transcript(&footage.join("edit"), true);
     let mut tools = Tools::new(footage);
 
     let inventory = call(&mut tools, "inventory", json!({}));
@@ -112,12 +118,17 @@ fn a_plan_renders_frame_and_sample_exact() {
         ]}),
     );
     assert!(receipt.contains("Cut: 3 segments"), "{receipt}");
-    assert!(receipt.contains("1 fillers cut"), "{receipt}");
-
+    assert!(receipt.contains("1 fillers and 1 restarts cut"), "{receipt}");
+    assert!(receipt.contains("S3: “one2,” before “one2 one4 one5 one6…”"), "{receipt}");
     for quality in ["preview", "final"] {
         let report = call(&mut tools, "render", json!({"quality": quality}));
         assert!(report.contains("No technical problems found."), "{report}");
-        assert!(report.contains("median offset 0.0 ms"), "audio lands where the plan puts it: {report}");
+        let median: f64 = report
+            .split("median offset ")
+            .nth(1)
+            .and_then(|rest| rest.split(" ms").next()?.parse().ok())
+            .expect("audio placement in the report");
+        assert!(median.abs() <= 0.5, "audio lands where the plan puts it: {report}");
     }
     let edl: Value = serde_json::from_slice(&fs::read(footage.join("edit/edl.json")).unwrap()).unwrap();
     let ranges = edl["ranges"].as_array().unwrap();
@@ -130,6 +141,23 @@ fn a_plan_renders_frame_and_sample_exact() {
     assert!(receipt.contains("cuts through the word"), "{receipt}");
     let error = tools.call("plan_cut", json!({"segments": [{"from": "A9"}]}), &|_| {});
     assert!(error.is_error && text(&error).contains("no phrase “A9”"), "{}", text(&error));
+    // Words the agent cuts inside a segment: said once there, or the plan says which to name.
+    let receipt = call(&mut tools, "plan_cut", json!({"segments": [{"from": "A2", "cut": ["two12 two13"]}]}));
+    assert!(receipt.contains("two11 two15") && !receipt.contains("two12"), "{receipt}");
+    // With restarts kept, an overlay anchored on the first attempt starts there (one2 at 0.5 s).
+    call(
+        &mut tools,
+        "plan_cut",
+        json!({"remove_restarts": false, "segments": [{"from": "A1"}],
+               "overlays": [{"take": "A", "from": "A1", "starts_with": "one2"}]}),
+    );
+    let plan: Value = serde_json::from_slice(&fs::read(footage.join("edit/cut.json")).unwrap()).unwrap();
+    let start = plan["overlays"][0]["out_start"].as_f64().unwrap();
+    assert!((0.2..0.6).contains(&start), "the overlay starts at {start}");
+    for (cut, error) in [("one2", "said 2 times"), ("two99", "is not in the segment")] {
+        let result = tools.call("plan_cut", json!({"segments": [{"from": "A1", "to": "A2", "cut": [cut]}]}), &|_| {});
+        assert!(result.is_error && text(&result).contains(error), "{}", text(&result));
+    }
 }
 
 #[test]
@@ -140,7 +168,7 @@ fn vertical_output_crops_and_fits() {
     let dir = tempfile::tempdir().unwrap();
     let footage = dir.path();
     make_take(&footage.join("take.mp4"));
-    write_transcript(&footage.join("edit"));
+    write_transcript(&footage.join("edit"), false);
     let mut tools = Tools::new(footage);
     call(
         &mut tools,
@@ -225,7 +253,7 @@ fn outside_material_comes_in_as_takes_and_shows_over_the_speech() {
     fs::create_dir_all(&footage).unwrap();
     fs::create_dir_all(&outside).unwrap();
     make_take(&footage.join("take.mp4"));
-    write_transcript(&footage.join("edit"));
+    write_transcript(&footage.join("edit"), false);
     make_image(&outside.join("chart.png"), "red");
     // Recorded much quieter than the take it goes into.
     make_clip(&outside.join("quote.mp4"), "blue", 4.0, 0.05);

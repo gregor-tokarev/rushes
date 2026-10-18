@@ -52,7 +52,8 @@ order swapped.
 ## Running
 
 ```sh
-cargo build --release -p rushes-edit -p rushes-pipeline --example bench_run
+cargo build --release -p rushes-edit --bins   # --example alone would leave a stale rushes-edit
+cargo build --release -p rushes-pipeline --example bench_run
 python3 scripts/bench/run_edits.py --bench <bench dir> --tasks excerpt-longform --runs 3 --parallel 2
 python3 scripts/bench/evaluate.py --source … --reference … --gold … --output … --edl … --run-meta … --out result.json
 python3 scripts/bench/compare.py <bench dir>/runs/*/*/*/result.json
@@ -159,6 +160,47 @@ recording is 15 dB quieter at the source); takes' speech levels are matched sinc
 plain edits before the changes measured as before or better (more of the demo kept: 97%
 against 75%); they cost $0.42 and $0.49 against $0.29, since the shell and web tools add to
 every turn's prompt.
+
+### Double takes
+
+The creator noticed that Rushes' cuts left more double takes than video-use's: a line, or its
+start, heard twice because the speaker tried it again. The annotation's retake units were all
+handled (both 100% above), but they are whole retakes; a restart inside a phrase ("А, еще
+один прикольный, э-э-э, прикольный use case", "Мне, мне, мне лень считать", "стану--
+станет") has no pause long enough to split the phrase, so the phrase hints never pointed at
+it, and cutting the middle of a phrase took two segments. The agent kept them.
+
+`scripts/bench/doubles.py` counts them: a fresh model reads what the viewer hears (the
+reference words inside each range of the edit list) and lists every double take, twice per
+edit. The edit list is used rather than the evaluator's audio mapping, which cannot place
+sub-second segments, so a repeat removed with a short cut would still read as heard. Full
+recording, mean over runs and reads:
+
+| | Rushes before | Rushes now | video-use |
+| --- | --- | --- | --- |
+| double takes heard per edit | 6.0 (5.0-7.5) | 0.7 (0-1) | 1.0 (0-2) |
+| restarts cut by the tools | – | 22-26 | – |
+
+On the 9:20 clip every edit of every harness had none.
+
+The fix ([editing-harness.md](editing-harness.md#restarts)): the tools find restarts in the
+transcript and cut the abandoned attempt inside any segment that keeps the restart, like
+fillers, and list each in the receipt; a segment's `cut` drops exact words the agent picks
+(a corrected word form, a line restated in other words), which the agents used once or
+twice per edit; words compare with a held sound counted once ("Ониии," is "они"). What is
+left is a restatement both harnesses keep ("И я на это всё смотрел и решил попробовать.
+Решил тоже попробовать…", in 2 of 3 runs).
+
+The rest measured as before (3 runs, same tasks): core lines kept 99%, junk removed 100%
+(false starts 100%, from 96%), false-start tokens kept 0 (from 2.0), sync within 13 ms,
+$0.82 per edit (from $0.71); wall time 25 min with three runs at a time instead of two.
+"Normal content kept" reads 95% against 96%, and the passages it misses are cuts that should
+happen ("А," before a sentence, a restated clause): a passage counts as kept only when nearly
+all its words are. The evaluator counts more clipped words (15.7 against 13.0) and cut edges
+inside words (21 against 16), but the edit lists checked against the reference word times
+have the same 3-4 edges inside words per edit before and after: its audio mapping misplaces
+some of the new short segments, and confuses a word with the identical one said a second
+earlier.
 
 ## Two more harnesses: kinocut and RankCut (October 2026)
 
