@@ -5,7 +5,7 @@ use std::fmt;
 use chrono::{DateTime, Utc};
 use rushes_core::{Privacy, Video};
 use rushes_pipeline::VideoDetails;
-use rushes_youtube::VideoMetadata;
+use rushes_youtube::{Details, VideoMetadata};
 
 pub const TITLE_MAX_CHARS: usize = 100;
 pub const DESCRIPTION_MAX_BYTES: usize = 5000;
@@ -218,10 +218,10 @@ fn cut_at_word(text: &str, fits: impl Fn(&str) -> bool) -> String {
     cut
 }
 
-/// The `videos.insert` metadata for `video`.
-pub fn metadata(video: &Video) -> VideoMetadata {
+/// The title, description, tags and category `video` gives YouTube.
+pub fn details(video: &Video) -> Details {
     let publish = &video.publish;
-    VideoMetadata {
+    Details {
         title: video.upload_title().trim().to_owned(),
         description: publish.description.clone(),
         tags: publish.tags.clone(),
@@ -230,6 +230,18 @@ pub fn metadata(video: &Video) -> VideoMetadata {
         } else {
             publish.category_id.clone()
         },
+    }
+}
+
+/// The `videos.insert` metadata for `video`.
+pub fn metadata(video: &Video) -> VideoMetadata {
+    let publish = &video.publish;
+    let Details { title, description, tags, category_id } = details(video);
+    VideoMetadata {
+        title,
+        description,
+        tags,
+        category_id,
         privacy: youtube_privacy(publish.privacy),
         publish_at: publish.publish_at,
         made_for_kids: publish.made_for_kids,

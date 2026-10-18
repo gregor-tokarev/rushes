@@ -14,6 +14,7 @@ mod assistant;
 mod badge;
 mod channel;
 mod chapters;
+mod details;
 mod panel;
 mod rules;
 mod service;
@@ -33,6 +34,7 @@ pub use assistant::{
 pub use badge::AccountBadge;
 pub use channel::{ChannelChoices, ChooseChannel};
 pub use chapters::{CHAPTERS_HEADING, Chapter, chapters, chapters_text, insert_chapters};
+pub use details::{DETAILS_SEND_DELAY, DetailFields, DetailsSync};
 pub use panel::PublishPanel;
 pub use rules::{AccountAccess, BlockingReason, CATEGORIES, Category, blocking_reasons, tags_length};
 pub use service::{Connection, EmulatorCheck, YoutubeAccount, YoutubeEvent, YoutubeService, backend_config};

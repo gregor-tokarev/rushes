@@ -14,8 +14,9 @@ use crate::error::{Error, Result};
 use crate::http::{self, HttpResponse, bearer};
 use crate::oauth::{self, Credentials};
 use crate::types::{
-    Channel, ChannelResource, GoogleUser, ListResponse, PlaylistItemResource, Privacy, StatusPart,
-    ThumbnailSetResponse, Thumbnails, VideoInfo, VideoResource, Visibility, VisibilityStatus,
+    Channel, ChannelResource, Details, DetailsChange, DetailsSnippet, GoogleUser, ListResponse, PlaylistItemResource,
+    Privacy, SnippetPart, StatusPart, ThumbnailSetResponse, Thumbnails, VideoInfo, VideoResource, Visibility,
+    VisibilityStatus,
 };
 use crate::upload::UploadOptions;
 
@@ -183,6 +184,38 @@ impl YoutubeClient {
         Ok(Some(updated.status.into()))
     }
 
+    /// Changes the video's title, description, tags and category to what `change`
+    /// gives; the rest of its snippet, such as its language, stays as it is.
+    /// Returns what YouTube has afterwards. A change to what YouTube has already
+    /// sends nothing more. `None` when the video doesn't exist or this account
+    /// can't see it. The sign-in needs [`MANAGE_SCOPE`](crate::MANAGE_SCOPE).
+    pub fn set_details(&self, video_id: &str, change: &DetailsChange) -> Result<Option<Details>> {
+        change.validate()?;
+        let url = format!("{}/videos", self.config.api_base);
+        // `videos.update` clears whatever the request leaves out, so the rest of the
+        // snippet is sent back as YouTube has it.
+        let list: ListResponse<SnippetPart<Map<String, Value>>> =
+            self.get_json(&url, &[("part", "snippet"), ("id", video_id)])?;
+        let Some(current) = list.items.into_iter().next() else { return Ok(None) };
+        let current = writable_snippet(current.snippet);
+        let snippet = snippet_update(current.clone(), change);
+        if snippet == current {
+            let unchanged: DetailsSnippet = serde_json::from_value(Value::Object(snippet))?;
+            return Ok(Some(unchanged.into()));
+        }
+        let body = serde_json::to_vec(&json!({"id": video_id, "snippet": snippet}))?;
+        let response = self.authorized(|token| {
+            self.agent
+                .put(&url)
+                .query("part", "snippet")
+                .header("Authorization", bearer(token))
+                .header("Content-Type", "application/json; charset=UTF-8")
+                .send(&body[..])
+        })?;
+        let updated: SnippetPart<DetailsSnippet> = http::json(response)?;
+        Ok(Some(updated.snippet.into()))
+    }
+
     /// Signs the account out at Google. The caller should also clear the stored credentials.
     pub fn revoke(&self) -> Result<()> {
         oauth::revoke_with(&self.agent, &self.config, &self.credentials())
@@ -273,6 +306,34 @@ fn status_update(mut status: Map<String, Value>, visibility: Visibility) -> Map<
     status
 }
 
+/// `snippet` without what YouTube works out itself.
+fn writable_snippet(mut snippet: Map<String, Value>) -> Map<String, Value> {
+    for key in ["publishedAt", "channelId", "channelTitle", "thumbnails", "liveBroadcastContent", "localized"] {
+        snippet.remove(key);
+    }
+    snippet
+}
+
+/// The `snippet` part to send for `change`, from the writable one YouTube has.
+fn snippet_update(mut snippet: Map<String, Value>, change: &DetailsChange) -> Map<String, Value> {
+    if let Some(title) = &change.title {
+        snippet.insert("title".to_owned(), title.as_str().into());
+    }
+    if let Some(description) = &change.description {
+        snippet.insert("description".to_owned(), description.as_str().into());
+    }
+    match &change.tags {
+        // No tags is no `tags`, as YouTube answers it.
+        Some(tags) if tags.is_empty() => snippet.remove("tags"),
+        Some(tags) => snippet.insert("tags".to_owned(), tags.clone().into()),
+        None => None,
+    };
+    if let Some(category_id) = &change.category_id {
+        snippet.insert("categoryId".to_owned(), category_id.as_str().into());
+    }
+    snippet
+}
+
 pub(crate) fn extension(path: &Path) -> Option<String> {
     path.extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase)
 }
@@ -301,6 +362,38 @@ mod tests {
         let scheduled = status_update(status, Visibility { privacy: Privacy::Private, publish_at: Some(at) });
         assert_eq!(scheduled["privacyStatus"], "private");
         assert_eq!(scheduled["publishAt"], "2031-05-06T07:08:09Z");
+    }
+
+    #[test]
+    fn details_updates_keep_the_rest_of_the_snippet() {
+        let snippet = json!({
+            "publishedAt": "2030-01-02T03:04:05Z", "channelId": "UC1", "channelTitle": "Demo",
+            "title": "Old", "description": "Old description", "tags": ["old"], "categoryId": "22",
+            "thumbnails": {"default": {"url": "small"}}, "liveBroadcastContent": "none",
+            "defaultLanguage": "en", "defaultAudioLanguage": "en-US",
+            "localized": {"title": "Old", "description": "Old description"},
+        });
+        let Value::Object(snippet) = snippet else { unreachable!() };
+        let snippet = writable_snippet(snippet);
+        let change = DetailsChange { description: Some("New description".into()), ..Default::default() };
+        assert_eq!(
+            Value::Object(snippet_update(snippet.clone(), &change)),
+            json!({
+                "title": "Old", "description": "New description", "tags": ["old"], "categoryId": "22",
+                "defaultLanguage": "en", "defaultAudioLanguage": "en-US",
+            })
+        );
+        let change = DetailsChange {
+            title: Some("New".into()),
+            tags: Some(Vec::new()),
+            category_id: Some("28".into()),
+            ..Default::default()
+        };
+        let updated = snippet_update(snippet.clone(), &change);
+        assert_eq!((&updated["title"], &updated["categoryId"]), (&json!("New"), &json!("28")));
+        assert_eq!(updated.get("tags"), None, "no tags");
+        // Nothing to change.
+        assert_eq!(snippet_update(snippet.clone(), &DetailsChange::default()), snippet);
     }
 
     #[test]

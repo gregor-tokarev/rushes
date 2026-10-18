@@ -4,6 +4,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::error::{Error, Result};
+
 /// `status.privacyStatus` of a video.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -78,6 +80,10 @@ pub struct Channel {
 pub struct VideoInfo {
     pub id: String,
     pub title: String,
+    pub description: String,
+    /// Only the channel's owner sees them.
+    pub tags: Vec<String>,
+    pub category_id: String,
     pub privacy: Privacy,
     /// Scheduled publish time of a private video.
     pub publish_at: Option<DateTime<Utc>>,
@@ -86,6 +92,113 @@ pub struct VideoInfo {
     pub processing_status: Option<ProcessingStatus>,
     pub url: String,
     pub thumbnail: Option<String>,
+}
+
+impl VideoInfo {
+    pub fn details(&self) -> Details {
+        Details {
+            title: self.title.clone(),
+            description: self.description.clone(),
+            tags: self.tags.clone(),
+            category_id: self.category_id.clone(),
+        }
+    }
+
+    pub fn set_details(&mut self, details: Details) {
+        self.title = details.title;
+        self.description = details.description;
+        self.tags = details.tags;
+        self.category_id = details.category_id;
+    }
+}
+
+/// What viewers read about a video, and where YouTube files it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Details {
+    pub title: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    /// Category id such as "22" (People & Blogs).
+    pub category_id: String,
+}
+
+/// New details for a video on YouTube; what is `None` stays as YouTube has it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DetailsChange {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub category_id: Option<String>,
+}
+
+impl DetailsChange {
+    /// Checks YouTube's documented limits before any quota is spent.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(title) = &self.title {
+            check_title(title)?;
+        }
+        if let Some(description) = &self.description {
+            check_description(description)?;
+        }
+        if let Some(tags) = &self.tags {
+            check_tags(tags)?;
+        }
+        if let Some(category_id) = &self.category_id {
+            check_category(category_id)?;
+        }
+        Ok(())
+    }
+}
+
+fn invalid(message: &str) -> Result<()> {
+    Err(Error::InvalidInput(message.to_owned()))
+}
+
+fn has_brackets(text: &str) -> bool {
+    text.contains(['<', '>'])
+}
+
+pub(crate) fn check_title(title: &str) -> Result<()> {
+    if title.trim().is_empty() {
+        return invalid("the title is empty");
+    }
+    if title.chars().count() > 100 {
+        return invalid("the title is longer than 100 characters");
+    }
+    if has_brackets(title) {
+        return invalid("the title cannot contain < or >");
+    }
+    Ok(())
+}
+
+pub(crate) fn check_description(description: &str) -> Result<()> {
+    if description.len() > 5000 {
+        return invalid("the description is longer than 5000 bytes");
+    }
+    if has_brackets(description) {
+        return invalid("the description cannot contain < or >");
+    }
+    Ok(())
+}
+
+pub(crate) fn check_tags(tags: &[String]) -> Result<()> {
+    if tags.iter().any(|tag| has_brackets(tag)) {
+        return invalid("tags cannot contain < or >");
+    }
+    // YouTube counts separators and the quotes around tags with spaces.
+    let length = tags.iter().map(|tag| tag.chars().count() + if tag.contains(' ') { 2 } else { 0 }).sum::<usize>()
+        + tags.len().saturating_sub(1);
+    if length > 500 {
+        return invalid("the tags are longer than 500 characters in total");
+    }
+    Ok(())
+}
+
+pub(crate) fn check_category(category_id: &str) -> Result<()> {
+    if category_id.is_empty() || !category_id.bytes().all(|b| b.is_ascii_digit()) {
+        return invalid("the category id must be numeric");
+    }
+    Ok(())
 }
 
 /// Who can watch a video, and when a private one goes public.
@@ -205,6 +318,12 @@ pub(crate) struct VideoResource {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VideoSnippet {
     pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub category_id: String,
     pub channel_id: String,
     published_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -230,6 +349,9 @@ impl From<VideoResource> for VideoInfo {
         let url = watch_url(&resource.id);
         VideoInfo {
             title: resource.snippet.as_ref().map(|s| s.title.clone()).unwrap_or_default(),
+            description: resource.snippet.as_ref().map(|s| s.description.clone()).unwrap_or_default(),
+            tags: resource.snippet.as_ref().map(|s| s.tags.clone()).unwrap_or_default(),
+            category_id: resource.snippet.as_ref().map(|s| s.category_id.clone()).unwrap_or_default(),
             privacy: resource.status.as_ref().map(|s| s.privacy_status).unwrap_or_default(),
             publish_at: resource.status.as_ref().and_then(|s| s.publish_at),
             published_at: resource.snippet.as_ref().and_then(|s| s.published_at),
@@ -259,6 +381,36 @@ pub(crate) struct VisibilityStatus {
 impl From<VisibilityStatus> for Visibility {
     fn from(status: VisibilityStatus) -> Self {
         Visibility { privacy: status.privacy_status, publish_at: status.publish_at }
+    }
+}
+
+/// A video resource with only its `snippet` part.
+#[derive(Deserialize)]
+pub(crate) struct SnippetPart<T> {
+    pub snippet: T,
+}
+
+/// The details in a `snippet` part.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DetailsSnippet {
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    category_id: String,
+}
+
+impl From<DetailsSnippet> for Details {
+    fn from(snippet: DetailsSnippet) -> Self {
+        Details {
+            title: snippet.title,
+            description: snippet.description,
+            tags: snippet.tags,
+            category_id: snippet.category_id,
+        }
     }
 }
 
@@ -313,7 +465,8 @@ mod tests {
 
     #[test]
     fn parses_video_resource_with_unknown_enum_values() {
-        let json = r#"{"id":"abc","snippet":{"title":"T","channelId":"UC1","publishedAt":"2026-01-02T03:04:05Z"},
+        let json = r#"{"id":"abc","snippet":{"title":"T","channelId":"UC1","publishedAt":"2026-01-02T03:04:05Z",
+            "description":"D","tags":["a","b"],"categoryId":"28"},
             "status":{"uploadStatus":"somethingNew","privacyStatus":"private","publishAt":"2026-02-01T00:00:00Z"},
             "processingDetails":{"processingStatus":"processing"}}"#;
         let video = VideoInfo::from(serde_json::from_str::<VideoResource>(json).unwrap());
@@ -323,6 +476,31 @@ mod tests {
         assert_eq!(video.url, "https://www.youtube.com/watch?v=abc");
         assert_eq!(video.publish_at.unwrap().to_rfc3339(), "2026-02-01T00:00:00+00:00");
         assert_eq!(video.thumbnail, None);
+        let details = Details {
+            title: "T".into(),
+            description: "D".into(),
+            tags: vec!["a".into(), "b".into()],
+            category_id: "28".into(),
+        };
+        assert_eq!(video.details(), details);
+    }
+
+    #[test]
+    fn details_changes_are_checked_before_they_go() {
+        assert!(DetailsChange::default().validate().is_ok());
+        let check = |change: DetailsChange| change.validate();
+        assert!(check(DetailsChange { title: Some("  ".into()), ..Default::default() }).is_err());
+        assert!(check(DetailsChange { title: Some("é".repeat(100)), ..Default::default() }).is_ok());
+        assert!(check(DetailsChange { title: Some("x".repeat(101)), ..Default::default() }).is_err());
+        assert!(check(DetailsChange { description: Some(String::new()), ..Default::default() }).is_ok());
+        assert!(check(DetailsChange { description: Some("a <b>".into()), ..Default::default() }).is_err());
+        assert!(check(DetailsChange { description: Some("é".repeat(2501)), ..Default::default() }).is_err());
+        assert!(check(DetailsChange { tags: Some(Vec::new()), ..Default::default() }).is_ok());
+        assert!(
+            check(DetailsChange { tags: Some(vec!["x".repeat(250), "y".repeat(250)]), ..Default::default() }).is_err()
+        );
+        assert!(check(DetailsChange { category_id: Some("27".into()), ..Default::default() }).is_ok());
+        assert!(check(DetailsChange { category_id: Some(String::new()), ..Default::default() }).is_err());
     }
 
     #[test]

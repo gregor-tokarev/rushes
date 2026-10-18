@@ -15,14 +15,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt as _;
 use futures::channel::mpsc;
-use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Subscription};
+use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Subscription, Task};
 use rushes_core::settings::{self, YoutubeBackend};
 use rushes_core::{PublishChannel, UploadId, UploadJob, UploadStatus, Video, VideoId, YoutubeLink};
 use rushes_youtube::{
-    Account, CredentialStore, Credentials, Error as YoutubeError, SavedLogin, VideoInfo, YoutubeClient, YoutubeConfig,
-    begin_authorization, check_client,
+    Account, CredentialStore, Credentials, Error as YoutubeError, MANAGE_SCOPE, SavedLogin, VideoInfo, YoutubeClient,
+    YoutubeConfig, begin_authorization, check_client,
 };
 
+use super::details::{DetailFields, DetailsSync};
 use super::rules::AccountAccess;
 use super::thumbnail::ThumbnailSync;
 use super::ui::display_name;
@@ -168,6 +169,15 @@ pub struct YoutubeService {
     pub(super) visibility_after_upload: HashSet<VideoId>,
     /// How many visibility changes went to each YouTube video, by YouTube video id.
     pub(super) visibility_changes: HashMap<String, u64>,
+    /// Changes of videos' details on their way to YouTube, or that YouTube didn't
+    /// make, by YouTube video id, for this run of the app.
+    pub(super) details: HashMap<String, DetailsSync>,
+    /// The details of videos that changed and didn't go to YouTube yet, by video.
+    pub(super) details_waiting: HashMap<VideoId, DetailFields>,
+    /// The waits for the last change before details go, by video.
+    pub(super) details_timers: HashMap<VideoId, Task<()>>,
+    /// How many details changes went to each YouTube video, by YouTube video id.
+    pub(super) details_changes: HashMap<String, u64>,
     /// Why stopped uploads stopped offering Resume, for this run of the app.
     pub(super) retired: HashMap<UploadId, Retired>,
     /// A background check of the files of stopped uploads is running.
@@ -182,6 +192,14 @@ pub struct YoutubeService {
     /// When YouTube was last asked about an uploaded video, by YouTube video id.
     remote_asked: HashMap<String, Instant>,
     _subscription: Subscription,
+}
+
+/// How many changes had gone to a YouTube video when YouTube was asked about it:
+/// an answer asked before a change may predate it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Changes {
+    pub visibility: u64,
+    pub details: u64,
 }
 
 struct GlobalYoutubeService(Entity<YoutubeService>);
@@ -338,6 +356,10 @@ impl YoutubeService {
             visibility_changed_again: HashSet::new(),
             visibility_after_upload: HashSet::new(),
             visibility_changes: HashMap::new(),
+            details: HashMap::new(),
+            details_waiting: HashMap::new(),
+            details_timers: HashMap::new(),
+            details_changes: HashMap::new(),
             retired: HashMap::new(),
             checking_files: false,
             remote: HashMap::new(),
@@ -491,6 +513,29 @@ impl YoutubeService {
     /// Client for the account `key`, while uploads can use it.
     pub(super) fn client_for(&self, key: &str) -> Option<Arc<YoutubeClient>> {
         self.find_account(key).and_then(|account| account.client.clone())
+    }
+
+    /// Why `client` can't change a video the account `channel` uploaded, as the
+    /// creator should read it, and whether signing in again is the way on.
+    pub(super) fn change_refused(&self, client: Option<&YoutubeClient>, channel: &str) -> Option<(String, bool)> {
+        let name = self.find_account(channel).map(YoutubeAccount::name);
+        match (client, name) {
+            // Sign-ins from before Rushes changed videos on YouTube didn't allow it.
+            (Some(client), Some(name)) if !client.credentials().has_scope(MANAGE_SCOPE) => Some((
+                format!(
+                    "Reconnect {name} to let Rushes change videos on YouTube, and leave every permission box ticked."
+                ),
+                true,
+            )),
+            (Some(_), _) => None,
+            (None, Some(name)) => Some((format!("Reconnect {name} to send the change."), true)),
+            (None, None) => Some(("Connect the YouTube account the video is on, then try again.".to_owned(), false)),
+        }
+    }
+
+    /// How many changes went to the YouTube video `youtube_id` so far.
+    pub(super) fn changes_to(&self, youtube_id: &str) -> Changes {
+        Changes { visibility: self.visibility_changes(youtube_id), details: self.details_changes(youtube_id) }
     }
 
     /// Adds an account: opens the consent page in the browser and waits for the
@@ -767,6 +812,7 @@ impl YoutubeService {
         self.connection_changed(cx);
         self.refresh_avatar(&key, cx);
         self.send_visibility_after_sign_in(&key, cx);
+        self.send_details_after_sign_in(&key, cx);
     }
 
     fn sort_accounts(&mut self) {
@@ -1035,7 +1081,7 @@ impl YoutubeService {
         }
         self.remote_asked.insert(youtube_id.clone(), now);
         let channel = link.channel_id.clone();
-        let changes = self.visibility_changes(&youtube_id);
+        let changes = self.changes_to(&youtube_id);
         cx.spawn(async move |this, cx| {
             let lookup = youtube_id.clone();
             let info = cx.background_spawn(async move { client.get_video(&lookup) }).await;

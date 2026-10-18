@@ -283,15 +283,15 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   (`refresh_youtube_video`, one `videos.list` when the tab opens, is shown again, the
   window is activated while it shows, or the account connects, at most every 30 s per
   video; and every processing poll): "Private · goes public Mon, 12 Oct at 09:00", "Unlisted", ... It links
-  to the video and to YouTube Studio, and the form says that its changes apply to the next
-  upload. When YouTube answers that it has no such video (deleted in YouTube Studio, or
+  to the video and to YouTube Studio. The Details and Visibility sections say that their
+  changes go to the video on YouTube; Audience says its answer applies to the next upload.
+  When YouTube answers that it has no such video (deleted in YouTube Studio, or
   removed by YouTube) and the connected channel is the one it was uploaded to, the video's
   link is dropped (`is_off_youtube`): the card says "Not on YouTube anymore" and offers a
   plain **Upload to YouTube**, the Uploads row stops linking to it and the videos table
   shows no YouTube state. The YouTube ids of the uploads that are gone are kept in the
   settings table (`youtube.gone_videos`), so an earlier upload of a video uploaded again
-  still reads "Not on YouTube" after a restart. A failed lookup (offline) keeps the stored link. There is no "update on YouTube": `videos.update` needs the broader `youtube`
-  scope, which Rushes does not ask for.
+  still reads "Not on YouTube" after a restart. A failed lookup (offline) keeps the stored link.
 - While the worker retries a passing failure, the Upload card and the Uploads page say so
   ("YouTube isn’t responding · Retrying (2 of 5)…", or "Can’t reach YouTube" when offline)
   and the sidebar badge reads "Retrying the upload…", until the upload gets further than
@@ -337,6 +337,24 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   three chapters and Shorts have none, so the button is disabled then and says why; when
   the chosen file is shorter than the list (its last chapter needs 10 s before the end),
   a warning says so.
+- **Changes after the upload** (`publish/visibility.rs`, `publish/details.rs`) go to the
+  video on YouTube with `videos.update`, which needs `MANAGE_SCOPE`
+  (`youtube.force-ssl`); older sign-ins get "Reconnect" first, and the change goes once
+  signed in again. Who can watch and the schedule go when the form saves them. The title,
+  description, tags and category go `DETAILS_SEND_DELAY` (3 s) after the form last saved
+  one of them, so a description typed in bursts costs one update (50 quota units, plus 1
+  to read the snippet), and only the fields that changed go: `set_details` reads the
+  video's snippet and sends it back with those fields, so a description changed in
+  YouTube Studio stays when only the tags change in Rushes. **Write with AI…** and its
+  **Undo** go the same way. A change made while the video uploads goes to the video the
+  upload puts there, also after a resume. While a change is on its way the section shows
+  "Sending to YouTube…"; one that fails says why with **Try again** (or **Reconnect**),
+  and goes along with the next change. When YouTube has other details than the form (a
+  change that didn't get there, also in an earlier run, or one made in YouTube Studio;
+  trailing spaces and line breaks of the description don't count), the Details section
+  says which ("Not on YouTube yet · On YouTube the description is different.") and offers
+  **Change on YouTube** (sends the form's) and **Use YouTube’s** (takes YouTube's into the
+  form). The form keeps the creator's choice until then.
 - **Schedule** forces private (YouTube makes the video public at the publish time) and
   restores the earlier visibility when turned off.
 - The Upload card lists what blocks an upload in every state, so a disabled **Upload to

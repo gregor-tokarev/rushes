@@ -147,6 +147,8 @@ database's write lock for seconds. The UI thread never waits for it:
   `resume_upload(session_url, path, ...)`, `set_thumbnail(video_id, path)`,
   `set_visibility(video_id, Visibility)` (reads the video's status and sends it back with
   the new privacy and schedule, since `videos.update` clears what it isn't sent),
+  `set_details(video_id, &DetailsChange)` (the same with the snippet: the title,
+  description, tags or category the change gives, the rest as YouTube has it),
   `get_video(id)`, `list_my_uploads(max)`, `revoke()`.
 
 ## edit (`rushes-edit`)
@@ -223,7 +225,11 @@ GPUI Kit app. Main pieces:
   what YouTube last had, and the planner status follows them. The form keeps the
   creator's choice: when YouTube reports another (a change that didn't get there, also
   in an earlier run, or one made in YouTube Studio), the section says so and offers to
-  send it, unless the form's schedule is over. Sign-ins from
+  send it, unless the form's schedule is over. The title, description, tags and
+  category go the same way (`publish/details.rs`), `DETAILS_SEND_DELAY` after the last
+  change and only the fields that changed, so typing costs one update and edits made in
+  YouTube Studio to the others stay; when YouTube has other details, the section offers
+  to send the form's or take YouTube's. Sign-ins from
   before `MANAGE_SCOPE` get "Reconnect" first. `PublishAssistant`
   has the agent write the title, description and tags (with Undo) and Codex draw
   thumbnails to choose from in a chat (`publish/thumbnail_chat.rs`, a sheet over the

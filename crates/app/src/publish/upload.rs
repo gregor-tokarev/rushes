@@ -394,8 +394,9 @@ impl YoutubeService {
             self.retire(id, Retired::Replaced, cx);
         }
         self.jobs_changed(cx);
-        // The upload takes the visibility the video chooses now.
+        // The upload takes the visibility and the details the video chooses now.
         self.visibility_after_upload.remove(&video_id);
+        self.details_taken_by_upload(video_id);
         self.spawn_transfer(job.id, client, file, stamp.size, Request::Upload(Box::new(rules::metadata(&video))), cx);
         Ok(job.id)
     }
@@ -591,12 +592,15 @@ impl YoutubeService {
                 self.thumbnails_chosen_again.remove(&video_id);
                 self.visibility.remove(&video_id);
                 self.visibility_changed_again.remove(&video_id);
+                self.details.remove(&video_id);
             }
             self.retired.remove(id);
         }
         self.jobs.retain(|job| !gone.contains(&job.id));
         let state = self.state.read(cx);
         self.visibility_after_upload.retain(|video_id| state.video(*video_id).is_some());
+        self.details_waiting.retain(|video_id, _| state.video(*video_id).is_some());
+        self.details_timers.retain(|video_id, _| state.video(*video_id).is_some());
         cx.emit(YoutubeEvent::UploadsChanged);
         cx.notify();
     }
@@ -690,6 +694,7 @@ impl YoutubeService {
                 .autohide(true)
         });
 
+        let details = uploaded.details();
         if let Some(thumbnail) = thumbnail {
             let target = ThumbnailTarget { video_id, youtube_id: youtube_id.clone(), channel: uploaded.channel_id };
             self.send_thumbnail(target, client.clone(), thumbnail, true, cx);
@@ -699,6 +704,7 @@ impl YoutubeService {
             Visibility { privacy: uploaded.privacy, publish_at: uploaded.publish_at },
             cx,
         );
+        self.send_details_after_upload(video_id, &details, cx);
         self.follow_processing(id, client, youtube_id, cx);
     }
 
@@ -714,7 +720,7 @@ impl YoutubeService {
         cx.spawn(async move |this, cx| {
             for _ in 0..PROCESSING_POLLS {
                 cx.background_executor().timer(PROCESSING_POLL_INTERVAL).await;
-                let Ok(changes) = this.read_with(cx, |this, _| this.visibility_changes(&youtube_id)) else { return };
+                let Ok(changes) = this.read_with(cx, |this, _| this.changes_to(&youtube_id)) else { return };
                 let (client, lookup) = (client.clone(), youtube_id.clone());
                 // Errors are retried at the next poll: processing goes on without the app.
                 let state = cx.background_spawn(async move { client.get_video(&lookup) }).await;
@@ -878,6 +884,9 @@ mod tests {
         VideoInfo {
             id: "abc".into(),
             title: "T".into(),
+            description: String::new(),
+            tags: Vec::new(),
+            category_id: "22".into(),
             privacy: YoutubePrivacy::Private,
             publish_at: None,
             published_at: None,

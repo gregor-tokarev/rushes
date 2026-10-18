@@ -15,8 +15,8 @@ use gpui_kit::{Entity, TestAppContext};
 use publish_support::{Emulators, Workspace, wait_until};
 use rushes::publish::BlockingReason;
 use rushes::publish::{
-    Connection, INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, Retired, UploadError, YoutubeEvent,
-    YoutubeService, delete_upload_notice,
+    Connection, DetailFields, INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, Retired, UploadError,
+    YoutubeEvent, YoutubeService, delete_upload_notice,
 };
 use rushes::state::{AppEvent, SAVE_RETRY_DELAY};
 use rushes_core::settings::YoutubeBackend;
@@ -325,6 +325,58 @@ fn a_visibility_chosen_during_a_cancelled_upload_waits_for_its_resume(cx: &mut T
         (privacy == rushes_youtube::Privacy::Public).then_some(())
     });
     assert_eq!(client.get_video(&first).unwrap().unwrap().privacy, rushes_youtube::Privacy::Private);
+}
+
+#[gpui_kit::test]
+fn details_changed_while_the_video_uploads_go_to_the_video_it_puts_there(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.description = "First words.".into();
+    });
+    let upload_done = |cx: &mut TestAppContext, upload: UploadId| {
+        wait_until(cx, "the upload", |cx| {
+            cx.executor().advance_clock(Duration::from_secs(5));
+            match service.read_with(cx, |s, _| s.job(upload).map(|job| job.status.clone())) {
+                Some(UploadStatus::Done { video_id }) => Some(video_id),
+                Some(UploadStatus::Failed { error }) => panic!("upload failed: {error}"),
+                _ => None,
+            }
+        })
+    };
+    let description_of = |cx: &mut TestAppContext, youtube_id: &str| {
+        let client = service.read_with(cx, |s, _| s.client()).unwrap();
+        client.get_video(youtube_id).unwrap().unwrap().description
+    };
+
+    // During the first upload: the upload sent the description it started with.
+    let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    write_description(cx, &workspace, video_id, "Second words.");
+    let first = upload_done(cx, upload);
+    wait_until(cx, "the description on YouTube", |cx| (description_of(cx, &first) == "Second words.").then_some(()));
+
+    // During another upload: it goes to the new video, not the first.
+    let again = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    write_description(cx, &workspace, video_id, "Third words.");
+    let second = upload_done(cx, again);
+    assert_ne!(first, second);
+    wait_until(cx, "the new video’s description", |cx| (description_of(cx, &second) == "Third words.").then_some(()));
+    assert_eq!(description_of(cx, &first), "Second words.");
+}
+
+/// Writes `description` for `video_id` the way the Publish tab saves it.
+fn write_description(cx: &mut TestAppContext, workspace: &Workspace, video_id: VideoId, description: &str) {
+    workspace.state.update(cx, |state, cx| {
+        let mut video = state.video(video_id).cloned().unwrap();
+        video.publish.description = description.into();
+        state.update_video(video, cx);
+    });
+    let fields = DetailFields { description: true, ..DetailFields::default() };
+    workspace.service.update(cx, |service, cx| service.change_youtube_details(video_id, fields, cx));
 }
 
 #[gpui_kit::test]

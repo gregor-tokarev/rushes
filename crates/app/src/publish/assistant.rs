@@ -29,7 +29,9 @@ use rushes_pipeline::{
 use serde::{Deserialize, Serialize};
 
 use super::chapters::{CHAPTERS_HEADING, MIN_CHAPTERS};
-use super::rules::{DESCRIPTION_MAX_BYTES, fit_details};
+use super::details::DetailFields;
+use super::rules::{self, DESCRIPTION_MAX_BYTES, fit_details};
+use super::service::YoutubeService;
 use crate::ai_edit::{agent_config, command_path, sentence};
 use crate::state::{AppEvent, AppState};
 
@@ -452,24 +454,30 @@ impl PublishAssistant {
             description: video.publish.description.clone(),
             tags: video.publish.tags.clone(),
         };
+        let before = rules::details(&video);
         let details = apply_details(&mut video, written.details);
         log_line!(
             "rushes: wrote the details of {video_id} ({} tags){}",
             details.tags.len(),
             written.cost_usd.map(|cost| format!(", ${cost:.4}")).unwrap_or_default()
         );
+        let changed = DetailFields::between(&before, &rules::details(&video));
         self.state.update(cx, |state, cx| state.update_video(video, cx));
         self.details.insert(video_id, DetailsJob::Written(previous));
+        send_to_youtube(video_id, changed, cx);
     }
 
     /// Puts back the title, description and tags the agent replaced.
     pub fn undo_details(&mut self, video_id: VideoId, cx: &mut Context<Self>) {
         let Some(DetailsJob::Written(previous)) = self.details.remove(&video_id) else { return };
         if let Some(mut video) = self.state.read(cx).video(video_id).cloned() {
+            let before = rules::details(&video);
             video.publish.title = previous.title;
             video.publish.description = previous.description;
             video.publish.tags = previous.tags;
+            let changed = DetailFields::between(&before, &rules::details(&video));
             self.state.update(cx, |state, cx| state.update_video(video, cx));
+            send_to_youtube(video_id, changed, cx);
         }
         cx.notify();
     }
@@ -706,6 +714,13 @@ fn frame_source(file: Option<PathBuf>, footage_dir: Option<PathBuf>) -> Option<P
         let footage = media::list_footage(&footage_dir?).ok()?;
         footage.into_iter().find(|file| file.kind == MediaKind::Video).map(|file| file.path)
     })
+}
+
+/// The details of `video_id` changed: on YouTube too, as when they are typed.
+fn send_to_youtube(video_id: VideoId, changed: DetailFields, cx: &mut App) {
+    if let Some(service) = YoutubeService::try_global(cx) {
+        service.update(cx, |service, cx| service.change_youtube_details(video_id, changed, cx));
+    }
 }
 
 /// Puts `written` into the video's publish settings, made to fit YouTube, keeping

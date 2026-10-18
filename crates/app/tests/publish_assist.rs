@@ -15,10 +15,12 @@ use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Entity, TestAppContext, Window, WindowBounds, WindowOptions, px,
     size,
 };
-use publish_support::{Workspace, wait_until};
-use rushes::publish::{ChatMessage, ChatRole, DetailsJob, PublishAssistant, PublishPanel, ThumbnailChat, ThumbnailJob};
+use publish_support::{Emulators, Workspace, wait_until};
+use rushes::publish::{
+    ChatMessage, ChatRole, DETAILS_SEND_DELAY, DetailsJob, PublishAssistant, PublishPanel, ThumbnailChat, ThumbnailJob,
+};
 use rushes_core::settings::YoutubeBackend;
-use rushes_core::{Block, BlockKind, DocumentKind, VideoId};
+use rushes_core::{Block, BlockKind, DocumentKind, UploadStatus, VideoId};
 
 /// The fakes need python3; the fake Codex draws and Rushes converts with ffmpeg.
 fn tools_available() -> bool {
@@ -38,7 +40,16 @@ fn script(name: &str) -> String {
 
 /// A workspace whose agent and Codex are the fakes, and the assistant that runs them.
 fn workspace(cx: &mut TestAppContext, env: &[(&str, &str)]) -> (Workspace, Entity<PublishAssistant>) {
-    let workspace = Workspace::open(cx, YoutubeBackend::default());
+    workspace_on(cx, YoutubeBackend::default(), env)
+}
+
+/// [`workspace`] uploading to `backend`.
+fn workspace_on(
+    cx: &mut TestAppContext,
+    backend: YoutubeBackend,
+    env: &[(&str, &str)],
+) -> (Workspace, Entity<PublishAssistant>) {
+    let workspace = Workspace::open(cx, backend);
     workspace.state.update(cx, |state, cx| {
         state.update_settings(cx, |settings| {
             settings.pipeline.agent_command = script("fake-agent");
@@ -150,6 +161,70 @@ fn the_agent_writes_the_details_and_undo_puts_them_back(cx: &mut TestAppContext)
     });
 }
 
+#[gpui_kit::test]
+fn details_the_agent_writes_go_to_the_video_on_youtube(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let Some(emulators) = Emulators::start() else { return };
+    let (workspace, assistant) = workspace_on(cx, emulators.backend(), &[]);
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Sourdough in 24 hours", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.tags = vec!["bread".into()];
+    });
+    set_script(&workspace, cx, video_id, vec![Block::paragraph("Feed the starter.")]);
+    let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    let youtube_id = wait_until(cx, "the upload", |cx| {
+        match service.read_with(cx, |s, _| s.job(upload).map(|job| job.status.clone())) {
+            Some(UploadStatus::Processing { video_id } | UploadStatus::Done { video_id }) => Some(video_id),
+            Some(UploadStatus::Failed { error }) => panic!("upload failed: {error}"),
+            _ => None,
+        }
+    });
+    let on_youtube = |cx: &mut TestAppContext| {
+        let client = service.read_with(cx, |s, _| s.client()).unwrap();
+        client.get_video(&youtube_id).unwrap().unwrap().details()
+    };
+    let sent = |cx: &mut TestAppContext| {
+        cx.executor().advance_clock(DETAILS_SEND_DELAY);
+        wait_until(cx, "the details on YouTube", |cx| {
+            service.read_with(cx, |s, _| s.details_sync(&youtube_id).is_none()).then_some(())
+        });
+    };
+
+    let (handle, _panel) = open_panel(cx, video_id);
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("write-details", cx);
+    });
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("write-details-commit", cx);
+    });
+    wait_until(cx, "the details", |cx| {
+        matches!(details_job(cx, &assistant, video_id), Some(DetailsJob::Written(_))).then_some(())
+    });
+    sent(cx);
+    let written = on_youtube(cx);
+    assert_eq!(written.title, "Sourdough in 24 hours, explained");
+    assert_eq!(written.description, "Written from the script.");
+    assert_eq!(written.tags, ["fake", "rushes"]);
+
+    // Undo puts YouTube's back too.
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("undo-write-details", cx);
+    });
+    sent(cx);
+    let undone = on_youtube(cx);
+    assert_eq!(
+        (undone.title.as_str(), undone.description.as_str(), undone.tags.as_slice()),
+        ("Sourdough in 24 hours", "", ["bread".to_owned()].as_slice())
+    );
+}
 #[gpui_kit::test]
 fn typing_over_written_details_drops_the_undo(cx: &mut TestAppContext) {
     if !tools_available() {
