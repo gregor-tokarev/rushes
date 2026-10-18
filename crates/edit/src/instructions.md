@@ -41,6 +41,10 @@ from there. Never change or delete the source takes; keep scratch files in `edit
 - Restarts inside a passage (`~прикольный,~ прикольный use case`, `~I was go--~ I was going`):
   the marked attempt is cut automatically when the segment also keeps the restart, and the
   receipt lists each one. Keep such passages in one segment; never trim around them by hand.
+- Repeats the tools do not mark are yours: read every phrase you keep for a corrected word
+  (“два, две”), a line restated in other words (“Миллионы, сотни миллионов, миллионы
+  разработчиков”) or a stumble, and drop the first attempt with the segment's `cut`
+  (`"cut": ["два"]`) instead of splitting the segment.
 - False starts (`{false start}`): drop the cut-off fragment and keep the restart. When a phrase
   begins well and then breaks off, end the segment before the break with `ends_with`.
 - Fillers (`~э-э-э~`, `~um~`) are cut automatically inside segments: never split a segment

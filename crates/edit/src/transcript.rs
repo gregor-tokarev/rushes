@@ -379,12 +379,22 @@ fn restart_after(words: &[Word], tokens: &[Token], p: usize) -> Option<usize> {
     None
 }
 
-fn normalise(text: &str) -> String {
-    text.chars()
+/// Lower-case letters and digits; a sound held out (`ониии`, `чтооо`) counts once.
+pub(crate) fn normalise(text: &str) -> String {
+    let letters: Vec<char> = text
+        .chars()
         .filter(|c| c.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .map(|c| if c == 'ё' { 'е' } else { c })
-        .collect()
+        .collect();
+    let mut out = String::with_capacity(letters.len());
+    let mut at = 0;
+    while at < letters.len() {
+        let run = letters[at..].iter().take_while(|c| **c == letters[at]).count();
+        out.extend(std::iter::repeat_n(letters[at], if run >= 3 { 1 } else { run }));
+        at += run;
+    }
+    out
 }
 
 /// Everything the phrase view says about one take.
@@ -486,10 +496,10 @@ impl TakeView {
         out
     }
 
-    /// Spoken text of phrases `range`, fillers dropped.
-    pub fn text(&self, words: Range<usize>) -> String {
+    /// Spoken text of `words` (indices), fillers dropped.
+    pub fn text(&self, words: impl IntoIterator<Item = usize>) -> String {
         let mut text = String::new();
-        for word in &self.transcript.words[words] {
+        for word in words.into_iter().map(|index| &self.transcript.words[index]) {
             if word.event || word.is_filler() {
                 continue;
             }
@@ -626,6 +636,8 @@ mod tests {
             "они патчат систему, на которой исполняют код"
         );
         assert_eq!(cut("I was go-- I was going to say"), "I was going to say");
+        // A sound held out is the same word.
+        assert_eq!(cut("вас превосходят. Ониии, они способны"), "вас превосходят. они способны");
         // Said twice on purpose, or a sentence that ends: kept as said.
         for text in [
             "вам дали очень, очень активного мидла",

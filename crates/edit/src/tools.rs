@@ -659,6 +659,7 @@ pub fn definitions() -> Value {
                     "to": {"type": "string", "description": "Last phrase id (same take); default = from."},
                     "starts_with": {"type": "string", "description": "First words to keep in `from`."},
                     "ends_with": {"type": "string", "description": "Last words to keep in `to`."},
+                    "cut": {"type": "array", "items": {"type": "string"}, "description": "Words to cut inside the segment, each written as in the transcript and said once in it: a corrected word (\"два\" before \"две\"), a phrase the speaker says again in other words, an aside. The segment stays one piece."},
                     "take": {"type": "string", "description": "Time segment: take id."},
                     "start": {"type": "number", "description": "Time segment: start, take seconds."},
                     "end": {"type": "number", "description": "Time segment: end, take seconds."},

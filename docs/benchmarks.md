@@ -52,7 +52,8 @@ order swapped.
 ## Running
 
 ```sh
-cargo build --release -p rushes-edit -p rushes-pipeline --example bench_run
+cargo build --release -p rushes-edit --bins   # --example alone would leave a stale rushes-edit
+cargo build --release -p rushes-pipeline --example bench_run
 python3 scripts/bench/run_edits.py --bench <bench dir> --tasks excerpt-longform --runs 3 --parallel 2
 python3 scripts/bench/evaluate.py --source … --reference … --gold … --output … --edl … --run-meta … --out result.json
 python3 scripts/bench/compare.py <bench dir>/runs/*/*/*/result.json

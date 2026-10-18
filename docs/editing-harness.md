@@ -138,6 +138,11 @@ finds them per take and `select` cuts them like fillers:
 - An attempt is cut only inside a segment that also keeps the restart, from its first word
   (or the segment's) to the restart. `read_transcript` marks it `~…~`; `remove_restarts:
   false` keeps every repeat.
+- Words are compared lower-cased, letters and digits only, a sound held out counting once
+  (`Ониии,` is `они`).
+- What takes judgement (a corrected word form, "два, две"; a line restated in other words)
+  is the agent's: a segment's `cut` drops exact words inside it (each run must be said
+  once in the segment) without splitting it in two.
 
 On the benchmark's 33-minute recording it finds 35 restarts, every one a real restart.
 

@@ -129,6 +129,10 @@ pub struct SegmentSpec {
     /// The last words to keep in `to` (drops what comes after them).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ends_with: Option<String>,
+    /// Words to cut inside the segment, each a run of words said once in it: a corrected
+    /// word, a phrase the speaker restates, an aside.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cut: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -260,8 +264,8 @@ struct Selection {
     range: (usize, usize),
     /// Restarts whose abandoned attempt is cut: (its first word cut, the restart).
     restarts: Vec<(usize, usize)>,
-    /// Spoken words cut as abandoned attempts.
-    abandoned: usize,
+    /// Spoken words cut other than fillers: abandoned attempts and the segment's `cut`.
+    not_fillers: usize,
 }
 
 pub fn resolve(session: &mut Session, plan: &CutPlan) -> Result<ResolvedCut> {
@@ -315,7 +319,7 @@ pub fn resolve(session: &mut Session, plan: &CutPlan) -> Result<ResolvedCut> {
             let kept = &selection.kept;
             fillers_removed +=
                 (selection.range.0..=selection.range.1).filter(|i| !words[*i].event && !kept.contains(i)).count()
-                    - selection.abandoned;
+                    - selection.not_fillers;
             for &(dropped, restart) in &selection.restarts {
                 let said = |range: std::ops::Range<usize>| {
                     words[range]
@@ -409,7 +413,7 @@ pub fn resolve(session: &mut Session, plan: &CutPlan) -> Result<ResolvedCut> {
                 source,
                 out_start: 0.0,
                 out_end: 0.0,
-                text: view.text(selection.range.0..selection.range.1 + 1),
+                text: view.text(selection.kept.iter().copied()),
             });
             selections.push(Some(selection));
         } else {
@@ -667,7 +671,7 @@ fn overlays(
                 } else {
                     format!("{} ({}) from {source_start:.2}", source.id, source.file)
                 },
-                text: view.text(selection.range.0..selection.range.1 + 1),
+                text: view.text(selection.kept.iter().copied()),
             },
         ));
     }
@@ -785,23 +789,55 @@ fn select(
         return Err(EditError::invalid(format!("{name}: ends_with comes before starts_with")));
     }
     // An abandoned attempt goes when the segment keeps the restart.
-    let mut abandoned = HashSet::new();
+    let mut removed = HashSet::new();
     let mut restarts = Vec::new();
     for restart in view.restarts.iter().filter(|restart| remove_restarts && (first..=last).contains(&restart.restart)) {
         let dropped = restart.dropped.start.max(first)..restart.dropped.end;
         if !dropped.is_empty() {
             restarts.push((dropped.start, restart.restart));
-            abandoned.extend(dropped);
+            removed.extend(dropped);
         }
     }
+    for needle in segment.cut.iter().filter(|needle| !needle.trim().is_empty()) {
+        removed.extend(find_cut(view, first, last, needle, name)?);
+    }
     let kept: Vec<usize> = (first..=last)
-        .filter(|i| !words[*i].event && !(remove_fillers && words[*i].is_filler()) && !abandoned.contains(i))
+        .filter(|i| !words[*i].event && !(remove_fillers && words[*i].is_filler()) && !removed.contains(i))
         .collect();
     if kept.is_empty() {
         return Err(EditError::invalid(format!("{name} keeps no words")));
     }
-    let abandoned = abandoned.iter().filter(|i| !words[**i].event).count();
-    Ok(Selection { take: view.take.clone(), kept, range: (first, last), restarts, abandoned })
+    let not_fillers = removed.iter().filter(|i| !words[**i].event).count();
+    Ok(Selection { take: view.take.clone(), kept, range: (first, last), restarts, not_fillers })
+}
+
+/// The words of `needle` between words `first` and `last`, where they are said exactly
+/// once (fillers between them do not count).
+fn find_cut(view: &TakeView, first: usize, last: usize, needle: &str, name: &str) -> Result<std::ops::Range<usize>> {
+    let words = &view.transcript.words;
+    let wanted: Vec<String> = needle.split_whitespace().map(token).filter(|t| !t.is_empty()).collect();
+    let spoken: Vec<(usize, String)> = (first..=last)
+        .filter(|i| !words[*i].event && !words[*i].is_filler())
+        .map(|i| (i, token(&words[i].text)))
+        .filter(|(_, t)| !t.is_empty())
+        .collect();
+    let found: Vec<usize> = if wanted.is_empty() || wanted.len() > spoken.len() {
+        Vec::new()
+    } else {
+        (0..=spoken.len() - wanted.len())
+            .filter(|s| wanted.iter().enumerate().all(|(k, t)| spoken[s + k].1 == *t))
+            .collect()
+    };
+    match found.as_slice() {
+        [s] => Ok(spoken[*s].0..spoken[s + wanted.len() - 1].0 + 1),
+        [] => Err(EditError::invalid(format!(
+            "{name}: cut “{needle}” is not in the segment's words: write it as in the transcript"
+        ))),
+        many => Err(EditError::invalid(format!(
+            "{name}: cut “{needle}” is said {} times in the segment: give enough words to name one",
+            many.len()
+        ))),
+    }
 }
 
 /// Index of the first (or, with `last`, the final) word of `needle` in a phrase.
@@ -824,11 +860,7 @@ fn find_words(view: &TakeView, phrase: usize, needle: &str, last: bool) -> Optio
 }
 
 fn token(text: &str) -> String {
-    text.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .map(|c| if c == 'ё' { 'е' } else { c })
-        .collect()
+    crate::transcript::normalise(text)
 }
 
 fn previous_word(words: &[Word], index: usize) -> Option<&Word> {

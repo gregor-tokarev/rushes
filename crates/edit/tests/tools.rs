@@ -116,7 +116,6 @@ fn a_plan_renders_frame_and_sample_exact() {
     assert!(receipt.contains("Cut: 3 segments"), "{receipt}");
     assert!(receipt.contains("1 fillers and 1 restarts cut"), "{receipt}");
     assert!(receipt.contains("S3: “one2” before “one2 one4 one5 one6…”"), "{receipt}");
-
     for quality in ["preview", "final"] {
         let report = call(&mut tools, "render", json!({"quality": quality}));
         assert!(report.contains("No technical problems found."), "{report}");
@@ -133,6 +132,13 @@ fn a_plan_renders_frame_and_sample_exact() {
     assert!(receipt.contains("cuts through the word"), "{receipt}");
     let error = tools.call("plan_cut", json!({"segments": [{"from": "A9"}]}), &|_| {});
     assert!(error.is_error && text(&error).contains("no phrase “A9”"), "{}", text(&error));
+    // Words the agent cuts inside a segment: said once there, or the plan says which to name.
+    let receipt = call(&mut tools, "plan_cut", json!({"segments": [{"from": "A2", "cut": ["two12 two13"]}]}));
+    assert!(receipt.contains("two11 two15") && !receipt.contains("two12"), "{receipt}");
+    for (cut, error) in [("one2", "said 2 times"), ("two99", "is not in the segment")] {
+        let result = tools.call("plan_cut", json!({"segments": [{"from": "A1", "to": "A2", "cut": [cut]}]}), &|_| {});
+        assert!(result.is_error && text(&result).contains(error), "{}", text(&result));
+    }
 }
 
 #[test]
