@@ -24,8 +24,9 @@
   from your older video or a screenshot and show it over what you say. Long-form videos or
   vertical Shorts with captions.
 - **Publish** with AI help: have the agent write the title, description and tags from your
-  script and what you actually said on camera, and have Codex draw a few thumbnails to
-  pick from.
+  script and what you actually said on camera, and chat with Codex about your thumbnail.
+  It remembers the chat, so you can ask for a change to one it drew, a few more ideas, or
+  which one works best.
 - **Upload** to your YouTube channels from the video's page, with resumable uploads. Connect
   several accounts and pick, per video, the channel it goes to.
 - **A/B test** titles and thumbnails of your uploaded videos: give two or three versions,

@@ -27,6 +27,7 @@ use super::rules::AccountAccess;
 use super::thumbnail::ThumbnailSync;
 use super::ui::display_name;
 use super::upload::{ActiveUpload, ProcessingOutcome, Retired};
+use super::visibility::VisibilitySync;
 use crate::state::{AppEvent, AppState, Problem, Severity};
 
 /// One credentials file per account, in this folder of the data directory.
@@ -174,6 +175,15 @@ pub struct YoutubeService {
     /// YouTube videos whose thumbnail was chosen again while one was on its way, maybe
     /// the same file with new contents: it goes once that one is done.
     pub(super) thumbnails_chosen_again: HashSet<String>,
+    /// Changes of who can watch videos on their way to YouTube, or that YouTube didn't
+    /// make, by YouTube video id, for this run of the app.
+    pub(super) visibility: HashMap<String, VisibilitySync>,
+    /// YouTube videos whose visibility changed again while a change was on its way.
+    pub(super) visibility_changed_again: HashSet<String>,
+    /// Videos whose visibility changed while they uploaded again.
+    pub(super) visibility_after_upload: HashSet<VideoId>,
+    /// How many visibility changes went to each YouTube video, by YouTube video id.
+    pub(super) visibility_changes: HashMap<String, u64>,
     /// Why stopped uploads stopped offering Resume, for this run of the app.
     pub(super) retired: HashMap<UploadId, Retired>,
     /// A background check of the files of stopped uploads is running.
@@ -342,6 +352,10 @@ impl YoutubeService {
             outcomes: HashMap::new(),
             thumbnails: HashMap::new(),
             thumbnails_chosen_again: HashSet::new(),
+            visibility: HashMap::new(),
+            visibility_changed_again: HashSet::new(),
+            visibility_after_upload: HashSet::new(),
+            visibility_changes: HashMap::new(),
             retired: HashMap::new(),
             checking_files: false,
             remote: HashMap::new(),
@@ -574,7 +588,7 @@ impl YoutubeService {
         let (sender, mut steps) = mpsc::unbounded();
         let mut scopes = SCOPES.to_vec();
         if for_tests {
-            scopes.extend(TEST_SCOPES);
+            scopes.extend(TEST_SCOPES.iter().filter(|scope| !SCOPES.contains(scope)));
         }
         let spawned = thread::Builder::new()
             .name("youtube-sign-in".into())
@@ -824,6 +838,7 @@ impl YoutubeService {
         }
         self.connection_changed(cx);
         self.refresh_avatar(&key, cx);
+        self.send_visibility_after_sign_in(&key, cx);
     }
 
     fn sort_accounts(&mut self) {
@@ -1092,16 +1107,14 @@ impl YoutubeService {
         }
         self.remote_asked.insert(youtube_id.clone(), now);
         let channel = link.channel_id.clone();
+        let changes = self.visibility_changes(&youtube_id);
         cx.spawn(async move |this, cx| {
             let lookup = youtube_id.clone();
             let info = cx.background_spawn(async move { client.get_video(&lookup) }).await;
             this.update(cx, |this, cx| {
                 this.remote_requests.remove(&youtube_id);
                 match info {
-                    Ok(Some(info)) => {
-                        this.remote.insert(youtube_id, info);
-                        cx.notify();
-                    }
+                    Ok(Some(info)) => this.on_youtube_video(info, changes, cx),
                     Ok(None) => this.on_video_gone(&youtube_id, &channel, cx),
                     // Offline, the stored link is what the tab shows.
                     Err(_) => {}
@@ -1138,7 +1151,7 @@ impl YoutubeService {
 
     /// The channel `channel` has no video `youtube_id`: the videos uploaded there
     /// stop pointing at a dead page.
-    fn on_video_gone(&mut self, youtube_id: &str, channel: &str, cx: &mut Context<Self>) {
+    pub(super) fn on_video_gone(&mut self, youtube_id: &str, channel: &str, cx: &mut Context<Self>) {
         let linked: Vec<Video> = self
             .state
             .read(cx)

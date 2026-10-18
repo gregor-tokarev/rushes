@@ -2,21 +2,25 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// Lets Rushes change videos already on YouTube (`videos.update`), such as who can
+/// watch them. Uploading and reading don't need it.
+pub const MANAGE_SCOPE: &str = "https://www.googleapis.com/auth/youtube.force-ssl";
+
 /// OAuth scopes requested at sign-in: identity for the account chip, upload and
-/// read access for the channel.
-pub const SCOPES: [&str; 5] = [
+/// read access for the channel, and changes to uploaded videos.
+pub const SCOPES: [&str; 6] = [
     "openid",
     "email",
     "profile",
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
+    MANAGE_SCOPE,
 ];
 
-/// Asked for only when the creator lets Rushes run A/B tests: changing the title of
-/// an uploaded video (`videos.update` needs the broad `youtube` scope) and reading its
-/// analytics and reach reports.
-pub const TEST_SCOPES: [&str; 2] =
-    ["https://www.googleapis.com/auth/youtube", "https://www.googleapis.com/auth/yt-analytics.readonly"];
+/// What A/B tests need: changing the title of an uploaded video ([`MANAGE_SCOPE`],
+/// which sign-ins from before Rushes changed videos lack) and reading its analytics
+/// and reach reports, which only tests ask for.
+pub const TEST_SCOPES: [&str; 2] = [MANAGE_SCOPE, "https://www.googleapis.com/auth/yt-analytics.readonly"];
 
 pub const DEFAULT_GOOGLE_EMULATOR_URL: &str = "http://127.0.0.1:4002";
 pub const DEFAULT_YOUTUBE_EMULATOR_URL: &str = "http://127.0.0.1:4020";

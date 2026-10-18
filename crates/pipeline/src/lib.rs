@@ -4,7 +4,7 @@
 //! stream-json`) that edits with Rushes' own tools (`rushes-edit`, over MCP) or with
 //! the [video-use](https://github.com/browser-use/video-use) skill. The same agent
 //! writes a video's YouTube details ([`write_details`]), and Codex draws its
-//! thumbnails ([`generate_thumbnails`]).
+//! thumbnails in a chat that remembers earlier turns ([`generate_thumbnails`]).
 //! Synchronous and blocking: run it on a background thread with an event callback and
 //! a cancellation flag. See `docs/pipeline.md`.
 
@@ -34,6 +34,6 @@ pub use pipeline::{
 };
 pub use process::{AgentProcess, stop_leftover_agent};
 pub use thumbnails::{
-    CodexConfig, DEFAULT_CODEX_COMMAND, MAX_THUMBNAILS, THUMBNAIL_HEIGHT, THUMBNAIL_WIDTH, ThumbnailOutcome,
-    ThumbnailRequest, generate_thumbnails, list_thumbnails, thumbnail_prompt,
+    CodexConfig, DEFAULT_CODEX_COMMAND, DEFAULT_IDEAS, MAX_THUMBNAILS, THUMBNAIL_HEIGHT, THUMBNAIL_WIDTH,
+    ThumbnailOutcome, ThumbnailRequest, follow_up_prompt, generate_thumbnails, list_thumbnails, thumbnail_prompt,
 };

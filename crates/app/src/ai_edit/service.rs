@@ -1241,9 +1241,10 @@ fn pipeline_problem(error: &PipelineError) -> String {
         PipelineError::Spawn { .. } => {
             "Couldn’t start the agent. Check the agent command in Settings > AI editing.".to_owned()
         }
-        PipelineError::Cancelled | PipelineError::AgentFailed { .. } | PipelineError::Io(_) => {
-            "Something went wrong while the agent worked. Try again.".to_owned()
-        }
+        PipelineError::Cancelled
+        | PipelineError::SessionNotFound(_)
+        | PipelineError::AgentFailed { .. }
+        | PipelineError::Io(_) => "Something went wrong while the agent worked. Try again.".to_owned(),
     }
 }
 

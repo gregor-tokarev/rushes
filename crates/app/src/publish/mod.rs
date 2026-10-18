@@ -2,8 +2,8 @@
 //!
 //! [`YoutubeService`] is the one owner of the connection and of upload jobs; the
 //! views read it and call its methods. [`PublishAssistant`] has the agent write a
-//! video's details and Codex draw its thumbnails. [`AbTests`] runs the A/B tests of
-//! titles and thumbnails on YouTube. Blocking network work runs on worker
+//! video's details and Codex draw its thumbnails in a chat that remembers. [`AbTests`]
+//! runs the A/B tests of titles and thumbnails on YouTube. Blocking network work runs on worker
 //! threads (sign-in, uploads) or the background executor (short API calls).
 //!
 //! The views draw Lucide icons beyond GPUI Kit's default bundle (`Film`, `Image`,
@@ -23,15 +23,17 @@ mod rules;
 mod service;
 mod settings;
 mod thumbnail;
+mod thumbnail_chat;
 mod transfer;
 mod ui;
 mod upload;
 mod uploads_page;
+mod visibility;
 
 pub use ab_test::{AbTests, version_problems};
 pub use assistant::{
-    AssistError, AssistEvent, DEFAULT_THUMBNAILS, DetailSources, DetailsJob, PublishAssistant, ThumbnailJob,
-    ThumbnailOptions,
+    AssistError, AssistEvent, CHAT_FORGOTTEN, ChatMessage, ChatRole, DetailSources, DetailsJob, PublishAssistant,
+    ThumbnailChat, ThumbnailJob,
 };
 pub use badge::AccountBadge;
 pub use channel::{ChannelChoices, ChooseChannel};
@@ -48,6 +50,7 @@ pub use upload::{
     INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, Retired, Retry, UPLOAD_FILE_LOCKED, UploadError,
 };
 pub use uploads_page::UploadsPage;
+pub use visibility::VisibilitySync;
 
 use gpui_kit::App;
 use rushes_core::VideoId;

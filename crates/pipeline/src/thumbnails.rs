@@ -1,5 +1,6 @@
 //! YouTube thumbnails drawn by Codex (`codex exec`), whose image generation tool
-//! makes the pictures.
+//! makes the pictures, in a chat: every turn after the first resumes Codex's session
+//! (`codex exec resume`), so it remembers what the creator asked and what it drew.
 //!
 //! Codex only draws and saves drafts as it is told; this module numbers them and
 //! turns them into what YouTube takes (1280 × 720 JPG, well under 2 MB) with ffmpeg.
@@ -20,8 +21,10 @@ use crate::exec::{find_executable, run_captured};
 use crate::media::probe_media;
 
 pub const DEFAULT_CODEX_COMMAND: &str = "codex";
-/// How many thumbnails one request may ask for.
+/// How many thumbnails one turn of the chat may draw.
 pub const MAX_THUMBNAILS: usize = 4;
+/// How many ideas Codex draws when the creator doesn't say.
+pub const DEFAULT_IDEAS: usize = 3;
 /// The size YouTube recommends for thumbnails.
 pub const THUMBNAIL_WIDTH: u32 = 1280;
 pub const THUMBNAIL_HEIGHT: u32 = 720;
@@ -31,6 +34,10 @@ const DRAFTS_DIR: &str = ".drafts";
 const THUMBNAIL_PREFIX: &str = "thumbnail-";
 /// The images the thumbnails folder lists, by extension.
 const IMAGE_EXTENSIONS: [&str; 3] = ["jpg", "jpeg", "png"];
+/// How many of the newest thumbnails a later turn names.
+const LISTED_THUMBNAILS: usize = 12;
+/// What `codex exec resume` says when it has no session with the id.
+const SESSION_NOT_FOUND: &str = "no rollout found";
 /// Frames of the video Codex sees, so the people and the set stay recognisable.
 const REFERENCE_FRAMES: usize = 3;
 /// Longest stretch of the script Codex reads, in characters: enough to get the idea.
@@ -97,9 +104,11 @@ impl CodexConfig {
     }
 
     /// `codex exec` in `cwd`, writing only there, with `images` attached to the
-    /// prompt, which comes on stdin. The options with a value use the `--flag=value`
-    /// form, and `--image` comes last, so none can take another argument as its value.
-    fn args(&self, cwd: &Path, images: &[PathBuf]) -> Vec<OsString> {
+    /// prompt, which comes on stdin; with `resume`, `codex exec resume` of that
+    /// session. The options with a value use the `--flag=value` form, and `--image`
+    /// comes after them, so none can take another argument as its value; `--` keeps
+    /// the session id from being read as an option.
+    fn args(&self, cwd: &Path, images: &[PathBuf], resume: Option<&str>) -> Vec<OsString> {
         let mut args: Vec<OsString> =
             ["exec", "--json", "--skip-git-repo-check", "--sandbox=workspace-write"].map(OsString::from).to_vec();
         let mut cd = OsString::from("--cd=");
@@ -116,45 +125,57 @@ impl CodexConfig {
             arg.push(image);
             args.push(arg);
         }
+        if let Some(session_id) = resume {
+            args.extend(["resume", "--", session_id, "-"].map(OsString::from));
+        }
         args
     }
 }
 
-/// What to draw.
+/// One turn of a chat with Codex about a video's thumbnails: what the creator says.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ThumbnailRequest {
     /// The video's thumbnails folder, created when missing. Codex works and writes
     /// only there.
     pub dir: PathBuf,
-    /// How many different thumbnails, 1 to [`MAX_THUMBNAILS`].
-    pub count: usize,
+    /// Codex's session of the chat, from the outcome of its last turn. `None` starts
+    /// a new chat, which Codex begins with the video's title, script and frames.
+    pub session_id: Option<String>,
     pub video_title: String,
     /// A YouTube Short rather than a long-form video.
     pub short: bool,
     /// The script as Markdown, for what the video is about; may be empty.
     pub script: String,
-    /// The creator's ideas; may be empty.
-    pub ideas: String,
-    /// A video file to show Codex a few frames of.
+    /// What the creator says; empty asks for a few ideas.
+    pub message: String,
+    /// A video file to show Codex a few frames of when a chat starts.
     pub frames_from: Option<PathBuf>,
+    /// The thumbnails Codex drew in the chat's last turn, as Rushes saved them, in
+    /// the order it drew them.
+    pub last_drawn: Vec<PathBuf>,
 }
 
-/// The thumbnails drawn.
+/// How a turn of the chat ended.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThumbnailOutcome {
-    /// The new thumbnails, in the order Codex drew them.
+    /// The new thumbnails, in the order Codex drew them; none when it only answered.
     pub made: Vec<PathBuf>,
-    /// Codex's last message: one line per idea.
-    pub summary: String,
-    /// Why Codex stopped before drawing them all, when it said.
+    /// Codex's last message: one line per thumbnail it drew, or its answer.
+    pub reply: String,
+    /// Why Codex stopped before it finished, when it said.
     pub problem: Option<String>,
+    /// Codex's session, for the chat's next turn.
+    pub session_id: Option<String>,
 }
 
-/// Has Codex draw `request.count` thumbnails and puts them in `request.dir` as
-/// `thumbnail-<n>.jpg`, numbered after the ones there. Codex keeps its own copies.
+/// Has Codex answer `request.message`, drawing as many thumbnails as it asks for (at
+/// most [`MAX_THUMBNAILS`]), and puts them in `request.dir` as `thumbnail-<n>.jpg`,
+/// numbered after the ones there. Codex keeps its own copies, and its session
+/// remembers the chat for the next turn.
 ///
 /// Blocks until Codex exits. Setting `cancel` stops it and every process it
 /// started, and returns [`PipelineError::Cancelled`]; what it drew so far is dropped.
+/// A session Codex no longer has is [`PipelineError::SessionNotFound`].
 pub fn generate_thumbnails(
     config: &CodexConfig,
     request: &ThumbnailRequest,
@@ -162,9 +183,9 @@ pub fn generate_thumbnails(
     cancel: &AtomicBool,
 ) -> Result<ThumbnailOutcome, PipelineError> {
     let program = config.resolve_command().ok_or_else(|| PipelineError::AgentNotFound(config.command.clone()))?;
-    let count = request.count.clamp(1, MAX_THUMBNAILS);
+    let session_id = request.session_id.as_deref().map(str::trim).filter(|id| !id.is_empty());
     let drafts_dir = request.dir.join(DRAFTS_DIR);
-    // Drafts of a run that never finished are of no use.
+    // Drafts of a turn that never finished are of no use.
     if drafts_dir.exists() {
         fs::remove_dir_all(&drafts_dir)?;
     }
@@ -174,17 +195,22 @@ pub fn generate_thumbnails(
     let drafts_dir = dir.join(DRAFTS_DIR);
     let ffmpeg = find_executable(Path::new("ffmpeg"), config.path_var().as_deref());
 
-    let frames = match (&request.frames_from, &ffmpeg) {
-        (Some(video), Some(ffmpeg)) => reference_frames(ffmpeg, video, &drafts_dir, &config.env),
+    // A resumed session has seen the frames already.
+    let frames = match (&request.frames_from, &ffmpeg, session_id) {
+        (Some(video), Some(ffmpeg), None) => reference_frames(ffmpeg, video, &drafts_dir, &config.env),
         _ => Vec::new(),
     };
-    let drafts: Vec<PathBuf> = (1..=count).map(|n| drafts_dir.join(format!("draft-{n}.png"))).collect();
+    let drafts: Vec<PathBuf> = (1..=MAX_THUMBNAILS).map(|n| drafts_dir.join(format!("draft-{n}.png"))).collect();
+    let prompt = match session_id {
+        None => thumbnail_prompt(request, &drafts, !frames.is_empty()),
+        Some(_) => follow_up_prompt(request, &list_thumbnails(&dir), &drafts),
+    };
     let spec = ProcessSpec {
         program: &program,
-        args: config.args(&dir, &frames),
+        args: config.args(&dir, &frames, session_id),
         cwd: &dir,
         env: &config.env,
-        stdin: Some(thumbnail_prompt(request, count, &drafts, !frames.is_empty())),
+        stdin: Some(prompt),
         kill_grace: config.kill_grace,
         parse: parse_codex_line,
     };
@@ -197,25 +223,35 @@ pub fn generate_thumbnails(
     _ = fs::remove_dir_all(&drafts_dir);
     let (status, run) = ran?;
 
-    let summary = run.last_text.clone().unwrap_or_default();
+    if let Some(session_id) = session_id
+        && run.result.is_none()
+        && run.stderr_tail.iter().any(|line| line.contains(SESSION_NOT_FOUND))
+    {
+        return Err(PipelineError::SessionNotFound(session_id.to_owned()));
+    }
+    let reply = run.last_text.clone().unwrap_or_default();
     let reported = match &run.result {
         Some(AgentEvent::Result { is_error: true, result_text, .. }) => Some(result_text.clone()),
         Some(_) if !status.success() => Some(format!("Codex stopped unexpectedly ({status})")),
         Some(_) => None,
         None => Some(format!("Codex stopped without finishing ({status})")),
     };
-    if made.is_empty() {
-        return Err(PipelineError::AgentFailed {
-            message: reported.unwrap_or_else(|| match summary.trim() {
-                "" => "Codex didn’t save any thumbnail".to_owned(),
-                said => format!("Codex didn’t save any thumbnail. It said: {said}"),
-            }),
+    let session_id = run.session_id.clone().or_else(|| session_id.map(str::to_owned));
+    // A turn that only answered draws nothing; one with nothing to show failed.
+    let failure = match &reported {
+        Some(message) if made.is_empty() => Some(message.clone()),
+        None if made.is_empty() && reply.trim().is_empty() => Some("Codex finished without answering".to_owned()),
+        _ => None,
+    };
+    match failure {
+        Some(message) => Err(PipelineError::AgentFailed {
+            message,
             stderr_tail: run.stderr_tail,
-            session_id: run.session_id,
+            session_id,
             no_result: run.result.is_none(),
-        });
+        }),
+        None => Ok(ThumbnailOutcome { made, reply, problem: reported, session_id }),
     }
-    Ok(ThumbnailOutcome { made, summary, problem: reported })
 }
 
 /// The thumbnails drawn for a video, `thumbnail-<n>` images in `dir`, newest first.
@@ -294,35 +330,32 @@ fn reference_frames(ffmpeg: &Path, video: &Path, dir: &Path, env: &[(String, Str
         .collect()
 }
 
-/// The prompt for `count` thumbnails, saved to `drafts` in order.
-pub fn thumbnail_prompt(request: &ThumbnailRequest, count: usize, drafts: &[PathBuf], frames: bool) -> String {
+/// The prompt that starts a chat: the video, what makes a thumbnail work, what the
+/// creator says, and where to save what Codex draws, in order of `drafts`.
+pub fn thumbnail_prompt(request: &ThumbnailRequest, drafts: &[PathBuf], frames: bool) -> String {
     let kind = if request.short { "a YouTube Short" } else { "a YouTube video" };
     let title = request.video_title.trim();
     let about = if title.is_empty() { String::new() } else { format!(" titled “{title}”") };
-    let what = if count == 1 { "one thumbnail".to_owned() } else { format!("{count} different thumbnails") };
     let mut prompt = format!(
-        "Draw {what} for {kind}{about} with your image generation tool.\n\n\
-         You run headless inside the Rushes app: nobody can answer questions, so make the most \
-         sensible choices yourself.\n\n\
+        "You draw thumbnails for {kind}{about} with your image generation tool, in a chat with \
+         its creator inside the Rushes app.\n\n\
+         You run headless: nobody can answer questions while you work, so make the most sensible \
+         choices yourself. The creator reads your last message and may come back in this chat to \
+         ask for changes, more ideas or your opinion, so remember what you drew.\n\n\
          What makes a thumbnail work:\n\
          - Landscape 16:9, made to read at phone size: one clear subject, big and close, strong \
          contrast and saturated color.\n\
          - Text is optional. If there is any: at most four words, huge and bold, in the language \
          of the video.\n\
-         - No YouTube logos, play buttons, borders, watermarks or made-up interface.\n"
+         - No YouTube logos, play buttons, borders, watermarks or made-up interface.\n\
+         - When you draw several, make each a different idea: another composition, emotion, text \
+         or palette.\n"
     );
-    if count > 1 {
-        prompt.push_str("- Make each one a different idea: another composition, emotion, text or palette.\n");
-    }
     if frames {
         prompt.push_str(
             "- The attached images are frames from the video. Keep its people, their look and the \
              setting recognisable; never invent other people in their place.\n",
         );
-    }
-    let ideas = request.ideas.trim();
-    if !ideas.is_empty() {
-        prompt.push_str(&format!("\nThe creator’s ideas, which come first:\n<ideas>\n{ideas}\n</ideas>\n"));
     }
     let script = request.script.trim();
     if !script.is_empty() {
@@ -332,15 +365,73 @@ pub fn thumbnail_prompt(request: &ThumbnailRequest, count: usize, drafts: &[Path
         };
         prompt.push_str(&format!("\nWhat the video is about, from its script:\n<script>\n{excerpt}\n</script>\n"));
     }
+    prompt.push('\n');
+    push_message(&mut prompt, &request.message);
+    push_drawing_rules(&mut prompt, drafts, true);
+    prompt
+}
+
+/// The prompt of a later turn: what the creator says, the thumbnails there are to
+/// talk about (`thumbnails`, as [`list_thumbnails`] gives them) and where to save
+/// what Codex draws.
+pub fn follow_up_prompt(request: &ThumbnailRequest, thumbnails: &[PathBuf], drafts: &[PathBuf]) -> String {
+    let mut prompt = String::new();
+    push_message(&mut prompt, &request.message);
+    let mut names: Vec<String> = thumbnails.iter().rev().map(|path| file_name(path)).collect();
+    if !names.is_empty() {
+        if names.len() > LISTED_THUMBNAILS {
+            names = names.split_off(names.len() - LISTED_THUMBNAILS);
+            names.insert(0, "…".to_owned());
+        }
+        prompt.push_str(&format!(
+            "\nThe thumbnails so far are in your working folder: {}. “Number 6” or “#6” means \
+             thumbnail-6.jpg. To change one, look at it and draw a new version; never edit or \
+             overwrite the files there.\n",
+            names.join(", "),
+        ));
+    }
+    let last: Vec<String> = request.last_drawn.iter().map(|path| file_name(path)).collect();
+    if !last.is_empty() {
+        prompt.push_str(&format!(
+            "Rushes saved what you drew in your last turn as {}, in the order you drew them.\n",
+            last.join(", ")
+        ));
+    }
+    push_drawing_rules(&mut prompt, drafts, false);
+    prompt
+}
+
+fn push_message(prompt: &mut String, message: &str) {
+    match message.trim() {
+        "" => prompt.push_str("The creator hasn’t said what they want: draw a few different ideas.\n"),
+        message => prompt.push_str(&format!("The creator says:\n<message>\n{message}\n</message>\n")),
+    }
+}
+
+/// How many to draw, where to save them and how to answer.
+fn push_drawing_rules(prompt: &mut String, drafts: &[PathBuf], first: bool) {
+    let default = if first {
+        format!("{DEFAULT_IDEAS} different ideas")
+    } else {
+        "one picture for each change they ask for".to_owned()
+    };
     let paths: Vec<String> = drafts.iter().map(|path| format!("- {}", path.display())).collect();
     prompt.push_str(&format!(
-        "\nSave each image as soon as it is drawn: copy the file your image tool saved to the next \
-         of these paths, in order:\n{}\n\
-         Don’t resize or convert them, Rushes does that, and don’t write anywhere else. End with \
-         one short line per thumbnail saying its idea.",
-        paths.join("\n"),
+        "\nDraw as many thumbnails as the creator asks for, at most {max}; when they don’t say how \
+         many, draw {default}. If they only ask a question or want your opinion, answer it and draw \
+         nothing.\n\n\
+         Save each image as soon as it is drawn: copy the file your image tool saved to the next \
+         of these paths, in order:\n{paths}\n\
+         Don’t resize or convert them, Rushes does that, and don’t write anywhere else. End with a \
+         short message to the creator: one line per thumbnail you drew saying its idea, or your \
+         answer.",
+        max = drafts.len(),
+        paths = paths.join("\n"),
     ));
-    prompt
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
@@ -354,7 +445,8 @@ mod tests {
     #[test]
     fn codex_runs_headless_and_writes_only_where_it_works() {
         let config = CodexConfig::default();
-        let args = strings(config.args(Path::new("/media/sourdough/thumbnails"), &[PathBuf::from("/tmp/frame-1.jpg")]));
+        let frames = [PathBuf::from("/tmp/frame-1.jpg")];
+        let args = strings(config.args(Path::new("/media/sourdough/thumbnails"), &frames, None));
         assert_eq!(
             args,
             [
@@ -368,8 +460,28 @@ mod tests {
             ]
         );
         let config = CodexConfig { model: Some("gpt-image".into()), reasoning_effort: None, ..config };
-        let args = strings(config.args(Path::new("/m"), &[]));
+        let args = strings(config.args(Path::new("/m"), &[], None));
         assert_eq!(args[4..], ["--cd=/m", "--model=gpt-image"]);
+    }
+
+    #[test]
+    fn a_later_turn_resumes_the_session_with_the_same_sandbox() {
+        let args = strings(CodexConfig::default().args(Path::new("/m"), &[], Some("0199-abc")));
+        assert_eq!(
+            args,
+            [
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "--sandbox=workspace-write",
+                "--cd=/m",
+                "--config=model_reasoning_effort=\"medium\"",
+                "resume",
+                "--",
+                "0199-abc",
+                "-",
+            ]
+        );
     }
 
     #[test]
@@ -380,28 +492,59 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_names_every_draft_and_the_creators_ideas() {
+    fn the_first_prompt_has_the_video_the_creators_words_and_every_draft() {
         let request = ThumbnailRequest {
             video_title: "Sourdough in 24 hours".into(),
             script: "## Starter\nFeed it.".into(),
-            ideas: "Me holding the loaf.".into(),
+            message: "Me holding the loaf.".into(),
             ..ThumbnailRequest::default()
         };
         let drafts = [PathBuf::from("/t/.drafts/draft-1.png"), PathBuf::from("/t/.drafts/draft-2.png")];
-        let prompt = thumbnail_prompt(&request, 2, &drafts, true);
+        let prompt = thumbnail_prompt(&request, &drafts, true);
         for part in [
-            "Draw 2 different thumbnails for a YouTube video titled “Sourdough in 24 hours”",
+            "You draw thumbnails for a YouTube video titled “Sourdough in 24 hours”",
+            "may come back in this chat",
             "a different idea",
             "frames from the video",
-            "<ideas>\nMe holding the loaf.\n</ideas>",
+            "<message>\nMe holding the loaf.\n</message>",
             "<script>\n## Starter\nFeed it.\n</script>",
+            "at most 2; when they don’t say how many, draw 3 different ideas",
             "- /t/.drafts/draft-1.png\n- /t/.drafts/draft-2.png",
         ] {
             assert!(prompt.contains(part), "missing {part:?} in:\n{prompt}");
         }
-        let one = thumbnail_prompt(&ThumbnailRequest::default(), 1, &drafts[..1], false);
-        assert!(one.starts_with("Draw one thumbnail for a YouTube video with"), "{one}");
-        assert!(!one.contains("different idea") && !one.contains("frames") && !one.contains("<script>"), "{one}");
+        let empty = thumbnail_prompt(&ThumbnailRequest::default(), &drafts, false);
+        assert!(empty.starts_with("You draw thumbnails for a YouTube video with"), "{empty}");
+        assert!(empty.contains("hasn’t said what they want: draw a few different ideas"), "{empty}");
+        assert!(!empty.contains("frames") && !empty.contains("<script>"), "{empty}");
+    }
+
+    #[test]
+    fn a_later_prompt_names_the_thumbnails_to_talk_about() {
+        let request = ThumbnailRequest {
+            message: "Make number 2 brighter".into(),
+            last_drawn: vec![PathBuf::from("/t/thumbnail-2.jpg"), PathBuf::from("/t/thumbnail-3.jpg")],
+            // A later turn has seen the video already.
+            script: "## Starter".into(),
+            ..ThumbnailRequest::default()
+        };
+        let listed: Vec<PathBuf> = (1..=3).rev().map(|n| PathBuf::from(format!("/t/thumbnail-{n}.jpg"))).collect();
+        let prompt = follow_up_prompt(&request, &listed, &[PathBuf::from("/t/.drafts/draft-1.png")]);
+        for part in [
+            "<message>\nMake number 2 brighter\n</message>",
+            "in your working folder: thumbnail-1.jpg, thumbnail-2.jpg, thumbnail-3.jpg.",
+            "your last turn as thumbnail-2.jpg, thumbnail-3.jpg, in the order",
+            "draw one picture for each change",
+            "answer it and draw nothing",
+            "- /t/.drafts/draft-1.png",
+        ] {
+            assert!(prompt.contains(part), "missing {part:?} in:\n{prompt}");
+        }
+        assert!(!prompt.contains("<script>"), "{prompt}");
+        let many: Vec<PathBuf> = (1..=20).rev().map(|n| PathBuf::from(format!("/t/thumbnail-{n}.jpg"))).collect();
+        let prompt = follow_up_prompt(&ThumbnailRequest::default(), &many, &[]);
+        assert!(prompt.contains("folder: …, thumbnail-9.jpg, thumbnail-10.jpg,"), "{prompt}");
+        assert!(prompt.contains("thumbnail-20.jpg."), "{prompt}");
     }
 
     #[test]

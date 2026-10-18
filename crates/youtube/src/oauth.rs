@@ -471,17 +471,17 @@ mod tests {
         assert_eq!(params["include_granted_scopes"], "true");
         assert_eq!(
             params["scope"],
-            "openid email profile https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly"
+            "openid email profile https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly \
+             https://www.googleapis.com/auth/youtube.force-ssl"
         );
 
         // Turning on A/B tests asks for more.
-        let scopes: Vec<&str> = SCOPES.iter().chain(&crate::TEST_SCOPES).copied().collect();
+        let mut scopes = SCOPES.to_vec();
+        scopes.extend(crate::TEST_SCOPES.iter().filter(|scope| !SCOPES.contains(scope)));
         let url = authorize_url(&config, &scopes, "http://127.0.0.1:5555", "s", "c").unwrap();
         let url = Url::parse(&url).unwrap();
         let scope = url.query_pairs().find(|(key, _)| key == "scope").unwrap().1.into_owned();
-        assert!(scope.ends_with(
-            "youtube.readonly https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/yt-analytics.readonly"
-        ));
+        assert!(scope.ends_with("youtube.force-ssl https://www.googleapis.com/auth/yt-analytics.readonly"), "{scope}");
     }
 
     fn emulator_config() -> YoutubeConfig {

@@ -168,6 +168,7 @@ mod tests {
             privacy: rushes_core::Privacy::Unlisted,
             uploaded_at: now,
             thumbnail: None,
+            publish_at: None,
             ab_test: None,
         };
         let live = YoutubeState::Live(&link);

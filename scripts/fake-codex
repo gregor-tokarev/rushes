@@ -2,14 +2,23 @@
 """Stand-in for `codex exec --json` in Rushes thumbnail tests.
 
 Accepts the flags rushes-pipeline passes to Codex, reads the prompt from stdin and
-prints `--json` events shaped like real Codex output. It calls no model: for every
-draft path the prompt lists (`- /…/draft-<n>.png`) it saves a 1536 × 1024 PNG test
-pattern with ffmpeg, as Codex copies what its image tool drew.
+prints `--json` events shaped like real Codex output. It calls no model: it saves a
+1536 × 1024 PNG test pattern at the draft paths the prompt lists (`- /…/draft-<n>.png`),
+as Codex copies what its image tool drew, as many as the creator's message asks for:
+"<n> more", "<n> ideas", "<n> versions"…; none for a question; else 3 in a new chat and
+1 in a resumed one.
+
+Like Codex it keeps its sessions, as files in FAKE_CODEX_HOME (default: a folder in
+the temp dir), so `exec resume -- <id> -` continues one and fails for an unknown id
+the way Codex does. A question is answered with the chat's first message, which shows
+that the session remembers it.
 
 Environment:
   FAKE_CODEX_MODE=fail     report a failed turn (a usage limit), exit 1
-  FAKE_CODEX_DRAW=N        draw only the first N drafts, then fail like a usage limit
+  FAKE_CODEX_MODE=silent   end the turn without a word or a picture
+  FAKE_CODEX_DRAW=N        draw only the first N, then fail like a usage limit
   FAKE_CODEX_DELAY_MS=N    sleep N ms (in a child `sleep` process) between events
+  FAKE_CODEX_HOME=path     where sessions are kept
   FAKE_CODEX_ARGV_FILE=path   write the received argv as JSON
   FAKE_CODEX_PROMPT_FILE=path write the prompt
 """
@@ -19,6 +28,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import uuid
 
 
@@ -50,6 +60,23 @@ def draw(path, n):
     return result.returncode == 0
 
 
+def session_file(thread_id):
+    home = os.environ.get("FAKE_CODEX_HOME") or os.path.join(tempfile.gettempdir(), "fake-codex-sessions")
+    os.makedirs(home, exist_ok=True)
+    return os.path.join(home, f"{thread_id}.json")
+
+
+def how_many(message, resumed):
+    if message is None:
+        return 3
+    digit = re.search(r"\b([0-9])\s+(?:more|new|ideas?|thumbnails?|versions?|variants?|options?)\b", message)
+    if digit:
+        return int(digit.group(1))
+    if message.rstrip().endswith("?"):
+        return 0
+    return 1 if resumed else 3
+
+
 def main():
     argv = sys.argv[1:]
     if argv[:1] == ["--version"]:
@@ -66,8 +93,34 @@ def main():
         with open(os.environ["FAKE_CODEX_PROMPT_FILE"], "w") as f:
             f.write(prompt)
 
-    emit({"type": "thread.started", "thread_id": str(uuid.uuid4())})
+    found = re.search(r"<message>\n(.*?)\n</message>", prompt, re.S)
+    message = found.group(1) if found else None
+    resumed = "resume" in argv
+    if resumed:
+        rest = argv[argv.index("resume") + 1:]
+        if rest[:1] == ["--"]:
+            rest = rest[1:]
+        thread_id = rest[0]
+        path = session_file(thread_id)
+        if not os.path.exists(path):
+            print(f"Error: thread/resume: thread/resume failed: no rollout found for thread id {thread_id} "
+                  "(code -32600)", file=sys.stderr)
+            return 1
+        with open(path) as f:
+            session = json.load(f)
+    else:
+        thread_id = str(uuid.uuid4())
+        path = session_file(thread_id)
+        session = {"messages": []}
+    session["messages"].append(message or "")
+    with open(path, "w") as f:
+        json.dump(session, f)
+
+    emit({"type": "thread.started", "thread_id": thread_id})
     emit({"type": "turn.started"})
+    if os.environ.get("FAKE_CODEX_MODE") == "silent":
+        emit({"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 0}})
+        return 0
     if os.environ.get("FAKE_CODEX_MODE") == "fail":
         print("ERROR: fake-codex: simulated failure", file=sys.stderr)
         emit({"type": "error", "message": "You've hit your usage limit."})
@@ -75,6 +128,14 @@ def main():
         return 1
 
     drafts = re.findall(r"^- (/.*\.png)$", prompt, re.M)
+    drafts = drafts[:how_many(message, resumed)]
+    if not drafts:
+        first = session["messages"][0]
+        answer = f"You first asked: {first}" if first else "You haven’t asked for anything yet."
+        emit({"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": answer}})
+        emit({"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 10}})
+        return 0
+
     limit = int(os.environ.get("FAKE_CODEX_DRAW", len(drafts)))
     emit({"type": "item.completed", "item": {"id": "item_0", "type": "agent_message",
                                              "text": f"Drawing {len(drafts)} thumbnail ideas."}})

@@ -152,10 +152,10 @@ All calls block; run them on a background thread and stream progress back to the
    reported before its wait as `UploadProgress::Retrying { attempt, max_retries, wait,
    cause }`, where `cause` is `Network`, `Server` or `RateLimited`. Cancel takes effect at
    the next read of the chunk being sent. `Error::SessionExpired` means start over.
-5. A/B tests need `TEST_SCOPES` on top of the sign-in's: `youtube` (only it lets
-   `videos.update` change a title) and `yt-analytics.readonly`. `begin_authorization_with
-   (&config, &scopes)` asks for them; Google adds the scopes granted before
-   (`include_granted_scopes`). Then `replace_title(id, from, to)` reads the snippet and sends it
+5. A/B tests need `TEST_SCOPES`: `MANAGE_SCOPE` (`youtube.force-ssl`, for `videos.update`;
+   sign-ins ask for it, but older ones lack it) and `yt-analytics.readonly`, which only tests
+   ask for. `begin_authorization_with(&config, &scopes)` asks for more than `SCOPES`; Google
+   adds the scopes granted before (`include_granted_scopes`). Then `replace_title(id, from, to)` reads the snippet and sends it
    back with only the title changed (`videos.update` clears what isn't sent), or returns
    `TitleChange::Changed(title)` without touching it when the title is no longer `from`;
    `daily_views(id, start, end)` reads views and watch time per Pacific day from YouTube
@@ -325,8 +325,8 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   plain **Upload to YouTube**, the Uploads row stops linking to it and the videos table
   shows no YouTube state. The YouTube ids of the uploads that are gone are kept in the
   settings table (`youtube.gone_videos`), so an earlier upload of a video uploaded again
-  still reads "Not on YouTube" after a restart. A failed lookup (offline) keeps the stored link. There is no "update on YouTube": `videos.update` needs the broader `youtube`
-  scope, which Rushes asks for only to run A/B tests.
+  still reads "Not on YouTube" after a restart. A failed lookup (offline) keeps the stored link. The details (title, description,
+  tags) don't go to the uploaded video; only an A/B test changes its title there.
 - While the worker retries a passing failure, the Upload card and the Uploads page say so
   ("YouTube isn’t responding · Retrying (2 of 5)…", or "Can’t reach YouTube" when offline)
   and the sidebar badge reads "Retrying the upload…", until the upload gets further than
@@ -519,8 +519,8 @@ client in Google Cloud (free) and pastes it into Rushes. It takes about ten minu
 4. **Add the scopes** (recommended). In **Data Access → Add or remove scopes**, add
    `https://www.googleapis.com/auth/youtube.upload` and
    `https://www.googleapis.com/auth/youtube.readonly` (`openid`, `email` and `profile` need
-   no setup), and for A/B tests `https://www.googleapis.com/auth/youtube` and
-   `https://www.googleapis.com/auth/yt-analytics.readonly`. Save.
+   no setup), `https://www.googleapis.com/auth/youtube.force-ssl` (changes to uploaded
+   videos), and for A/B tests `https://www.googleapis.com/auth/yt-analytics.readonly`. Save.
 5. **Add yourself as a test user.** In **Audience → Test users → Add users**, enter the
    Google account that owns your YouTube channel. Leave the publishing status on
    **Testing**: only test users can sign in, which is all you need.

@@ -400,6 +400,8 @@ fn window(cx: &mut TestAppContext, handle: AnyWindowHandle, f: impl FnOnce(&mut 
 fn step(cx: &mut TestAppContext, handle: AnyWindowHandle, f: impl FnOnce(&mut Window, &mut App)) {
     cx.executor().advance_clock(Duration::from_secs(1));
     cx.run_until_parked();
+    // A dialog slides in on the wall clock: a click while it moves misses its target.
+    std::thread::sleep(Duration::from_millis(400));
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         window.render_frame(cx);
@@ -475,7 +477,7 @@ fn the_publish_tab_allows_sets_up_and_ends_a_test(cx: &mut TestAppContext) {
     });
     step(cx, handle, |window, cx| window.click("ab-end-commit", cx));
     let test = wait_until(cx, "the end", |cx| Some(test_of(&workspace, cx, video_id)).filter(AbTest::is_over));
-    assert!(matches!(test.outcome, Some(TestOutcome::Finished { kept: 1, chosen: true, .. })));
+    assert!(matches!(test.outcome, Some(TestOutcome::Finished { kept: 1, chosen: true, .. })), "{:?}", test.outcome);
     assert_eq!(title_on_youtube(&emulators, &youtube_id), "My desk setup for 2026, finally done");
     window(cx, handle, |window, cx| {
         window.render_frame(cx);

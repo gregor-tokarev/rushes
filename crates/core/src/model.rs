@@ -281,6 +281,10 @@ pub struct YoutubeLink {
     /// until Rushes sets one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<PathBuf>,
+    /// When YouTube makes the private video public, as YouTube last had it; `None`
+    /// when it isn't scheduled, or before Rushes recorded schedules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_at: Option<DateTime<Utc>>,
     /// The video's A/B test of titles or thumbnails: the one running, or the last one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ab_test: Option<AbTest>,

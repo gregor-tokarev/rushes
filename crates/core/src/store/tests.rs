@@ -291,6 +291,7 @@ fn video_round_trips_every_field() {
             privacy: Privacy::Unlisted,
             uploaded_at: Utc::now(),
             thumbnail: None,
+            publish_at: None,
             ab_test: None,
         }),
         properties: BTreeMap::from([
@@ -452,6 +453,7 @@ fn a_failed_retry_does_not_hide_a_finished_edit_or_a_live_video() {
         privacy: Privacy::Public,
         uploaded_at: Utc::now(),
         thumbnail: None,
+        publish_at: None,
         ab_test: None,
     };
     video.youtube = Some(link.clone());
@@ -513,6 +515,7 @@ fn duplicate_copies_content_but_not_publishing_state() {
         privacy: Privacy::Public,
         uploaded_at: Utc::now(),
         thumbnail: None,
+        publish_at: None,
         ab_test: None,
     });
     store.update_video(&mut original).unwrap();

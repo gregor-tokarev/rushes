@@ -12,7 +12,7 @@ crates/
   youtube/    rushes-youtube   Google OAuth (loopback + PKCE), YouTube Data API v3 client, resumable upload
   edit/       rushes-edit      Rushes' editing tools (transcribe, cut plans, render, checks), served to the agent over MCP
   pipeline/   rushes-pipeline  AI edit pipelines: drives a coding agent (Claude Code) with rushes-edit or the video-use skill;
-                               writes YouTube details with it and draws thumbnails with Codex
+                               writes YouTube details with it and draws thumbnails with Codex in a chat
   update/     rushes-update    self-update: newest GitHub release, verified download, install in place, relaunch
   app/        rushes           GPUI Kit desktop app (the only crate that depends on gpui-kit)
 emulators/    local API emulation for dev/tests: vercel-labs/emulate (Google OAuth) + custom YouTube emulator
@@ -138,8 +138,9 @@ database's write lock for seconds. The UI thread never waits for it:
   local emulators. Env overrides: `RUSHES_GOOGLE_URL`, `RUSHES_YOUTUBE_URL`.
 - OAuth: installed-app flow. `begin_authorization(&config) -> PendingAuthorization`
   binds `127.0.0.1:0`, builds the consent URL (scopes: `openid email profile
-  https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly`,
-  `access_type=offline`, `prompt=consent`, PKCE S256, random `state`;
+  https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly
+  https://www.googleapis.com/auth/youtube.force-ssl`; the last, `MANAGE_SCOPE`, lets Rushes change
+  uploaded videos), `access_type=offline`, `prompt=consent`, PKCE S256, random `state`;
   `begin_authorization_with` adds more, such as `TEST_SCOPES`). The app opens the URL
   in the browser; `PendingAuthorization::wait(timeout, cancel)` serves the redirect, shows a
   small "you can close this tab" page, validates `state`, exchanges the code.
@@ -149,9 +150,11 @@ database's write lock for seconds. The UI thread never waits for it:
   `userinfo()`, `my_channel()`, `upload_video(path, &VideoMetadata, progress, cancel)`
   (resumable protocol, chunked, resumable after interruption via the session URL),
   `resume_upload(session_url, path, ...)`, `set_thumbnail(video_id, path)`,
-  `get_video(id)`, `list_my_uploads(max)`, `revoke()`. For A/B tests (they need
-  `TEST_SCOPES`, asked for separately): `replace_title`, `daily_views` (YouTube Analytics),
-  `reach_job` / `reach_reports` / `reach_of` (Reporting API reach reports).
+  `set_visibility(video_id, Visibility)` (reads the video's status and sends it back with
+  the new privacy and schedule, since `videos.update` clears what it isn't sent),
+  `get_video(id)`, `list_my_uploads(max)`, `revoke()`. For A/B tests (they also need
+  `yt-analytics.readonly`, asked for separately): `replace_title`, `daily_views` (YouTube
+  Analytics), `reach_job` / `reach_reports` / `reach_of` (Reporting API reach reports).
 
 ## edit (`rushes-edit`)
 
@@ -183,8 +186,9 @@ plus the video-use skill and Python.
 The same agent writes a video's YouTube title, description and tags in one turn without
 tools (`write_details`, JSON checked against a schema), from the script and the edit's
 transcript; Codex (`codex exec --json`) draws thumbnails with its image generation
-(`generate_thumbnails`), which ffmpeg turns into 1280 × 720 JPGs. `scripts/fake-codex`
-stands in for Codex in tests.
+(`generate_thumbnails`), which ffmpeg turns into 1280 × 720 JPGs, in a chat: each turn
+after the first resumes Codex's session (`codex exec resume`), so it remembers the chat.
+`scripts/fake-codex` stands in for Codex in tests.
 
 ## app (`rushes`)
 
@@ -219,11 +223,22 @@ GPUI Kit app. Main pieces:
   default one), metadata form, upload with progress, resume. The thumbnail goes up
   when the upload finishes, and at once when it's chosen for a video already on
   YouTube (`publish/thumbnail.rs`); `YoutubeLink.thumbnail` records the image YouTube
-  has, so the Thumbnail card can say whether the chosen one is there. `PublishAssistant`
+  has, so the Thumbnail card can say whether the chosen one is there. Who can watch and
+  the schedule go to a video already on YouTube when the form saves them
+  (`publish/visibility.rs`); one chosen while the video uploads goes to the video the
+  upload puts there, also after a resume. `YoutubeLink.privacy` and `publish_at` record
+  what YouTube last had, and the planner status follows them. The form keeps the
+  creator's choice: when YouTube reports another (a change that didn't get there, also
+  in an earlier run, or one made in YouTube Studio), the section says so and offers to
+  send it, unless the form's schedule is over. Sign-ins from
+  before `MANAGE_SCOPE` get "Reconnect" first. `PublishAssistant`
   has the agent write the title, description and tags (with Undo) and Codex draw
-  thumbnails to choose from; both keep running when the tab is left. `AbTests` runs A/B
-  tests of a video's titles and thumbnails: one version on YouTube a day, the numbers from
-  YouTube Analytics and reach reports, the winner kept (`publish/ab_test.rs`).
+  thumbnails to choose from in a chat (`publish/thumbnail_chat.rs`, a sheet over the
+  tab); both keep running when the tab is left. A video's chat, with the id of Codex's
+  session that remembers it, is kept in the settings table (`publish.thumbnail_chats`).
+  `AbTests` runs A/B tests of a video's titles and thumbnails: one version on YouTube a
+  day, the numbers from YouTube Analytics and reach reports, the winner kept
+  (`publish/ab_test.rs`).
 - AI edit: footage list, edit brief, run timeline (agent messages/tool calls), approve /
   feedback, output preview and "use for upload".
 - `update/` — `UpdateService`: automatic checks, background install, Settings › About ›

@@ -16,12 +16,10 @@ use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
-use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IndexPath, Selectable as _, Side, Sizable as _, WindowExt as _, h_flex,
-    v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IndexPath, Side, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -36,10 +34,11 @@ use rushes_core::{
     DocumentKind, Privacy, PublishSettings, UploadJob, UploadStatus, Video, VideoFormat, VideoId, VideoStatus,
 };
 use rushes_pipeline::{MediaInfo, has_transcript, kept_cuts, list_thumbnails};
+use rushes_youtube::Visibility;
 
 use super::ab_section::TestSection;
 use super::ab_test::AbTests;
-use super::assist_dialogs::{open_details_dialog, open_thumbnails_dialog};
+use super::assist_dialogs::open_details_dialog;
 use super::assistant::{AssistEvent, DetailSources, DetailsJob, PublishAssistant, ThumbnailJob};
 use super::channel::{ChannelChoices, ChooseChannel};
 use super::chapters::{MIN_CHAPTERS, chapters, chapters_text, insert_chapters, timestamp};
@@ -49,11 +48,14 @@ use super::rules::{
 };
 use super::service::{Connection, YoutubeAccount, YoutubeEvent, YoutubeService};
 use super::thumbnail::ThumbnailSync;
+use super::thumbnail_chat::open_thumbnail_chat;
 use super::transfer::{format_bytes, format_duration, format_eta, format_speed};
 use super::ui::{
-    ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, sign_in_progress, status_line, youtube_link,
+    ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, sign_in_progress, status_line,
+    thumbnail_tile, youtube_link,
 };
 use super::upload::{ProcessingOutcome, Retired, UPLOAD_ACCOUNT_LOCKED, UPLOAD_FILE_LOCKED, UploadError};
+use super::visibility::VisibilitySync;
 use crate::ai_edit::PipelineService;
 use crate::route::{Route, VideoTab};
 use crate::state::{AppEvent, AppState};
@@ -481,17 +483,40 @@ impl PublishPanel {
     /// Saves pending form edits now instead of after the delay. Only the fields the form
     /// changed are written, so a file chosen elsewhere meanwhile stays.
     pub fn save_pending(&mut self, cx: &mut App) {
+        self.save_edits(cx);
+    }
+
+    /// [`Self::save_pending`]; returns whether a new visibility went to YouTube with it.
+    fn save_edits(&mut self, cx: &mut App) -> bool {
         if self.edited.is_empty() {
-            return;
+            return false;
         }
         let edited = std::mem::take(&mut self.edited);
-        let Some(mut video) = self.state.read(cx).video(self.video_id).cloned() else { return };
+        let Some(mut video) = self.state.read(cx).video(self.video_id).cloned() else { return false };
         let publish = edited.merge(&video.publish, &self.draft);
         if video.publish == publish {
-            return;
+            return false;
         }
+        let visibility_changed =
+            (video.publish.privacy, video.publish.publish_at) != (publish.privacy, publish.publish_at);
         video.publish = publish;
         self.state.update(cx, |state, cx| state.update_video(video, cx));
+        // Who can watch the video changes on YouTube too, or on the video an upload
+        // under way puts there.
+        if visibility_changed {
+            let video_id = self.video_id;
+            self.service.update(cx, |service, cx| service.set_youtube_visibility(video_id, cx));
+        }
+        visibility_changed
+    }
+
+    /// Sends who can watch the video to YouTube, after it didn't get there or YouTube
+    /// has another.
+    fn send_visibility(&mut self, cx: &mut Context<Self>) {
+        if !self.save_edits(cx) {
+            let video_id = self.video_id;
+            self.service.update(cx, |service, cx| service.set_youtube_visibility(video_id, cx));
+        }
     }
 
     fn schedule_save(&mut self, field: Field, cx: &mut Context<Self>) {
@@ -677,9 +702,15 @@ impl PublishPanel {
         open_details_dialog(self.video_id, self.sources, window, cx);
     }
 
-    fn open_generate_thumbnails(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the chat with Codex about the video's thumbnails.
+    fn open_thumbnail_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let has_video = self.draft.file.is_some() || self.choices.iter().any(|choice| choice.source == "Footage");
-        open_thumbnails_dialog(self.video_id, has_video, window, cx);
+        open_thumbnail_chat(cx.entity().downgrade(), self.video_id, has_video, window, cx);
+    }
+
+    /// The image chosen as the video's thumbnail.
+    pub(super) fn chosen_thumbnail(&self) -> Option<&Path> {
+        self.draft.thumbnail.as_deref()
     }
 
     fn with_assistant(
@@ -744,7 +775,8 @@ impl PublishPanel {
         self.schedule_save(Field::File, cx);
     }
 
-    fn set_thumbnail(&mut self, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    /// Makes `path` the video's thumbnail, or none; the thumbnail chat chooses too.
+    pub(super) fn set_thumbnail(&mut self, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         if path.as_deref().is_some_and(|path| !is_thumbnail_image(path)) {
             window.push_notification(notification::warning(NOT_A_THUMBNAIL, cx), cx);
             return;
@@ -1191,9 +1223,32 @@ impl PublishPanel {
         let scheduled = self.draft.publish_at.is_some();
         let privacy_ix = Privacy::ALL.iter().position(|privacy| *privacy == self.draft.privacy).unwrap_or(0);
         let google = self.service.read(cx).config().is_ok_and(|config| config.is_google());
+        let video = self.state.read(cx).video(self.video_id);
+        let link = video.and_then(|video| video.youtube.clone());
+        let sync = link.as_ref().and_then(|link| self.service.read(cx).visibility_sync(&link.video_id).cloned());
+        // An upload under way takes the form's choice to its new video.
+        let other = video
+            .filter(|_| !self.is_uploading(cx))
+            .and_then(|video| self.service.read(cx).other_visibility_on_youtube(video));
+        let status = match (sync, other) {
+            (Some(sync), _) => Some(self.render_visibility_sync(sync, cx)),
+            (None, Some(other)) => Some(self.render_other_visibility(other, cx)),
+            (None, None) => None,
+        };
         v_flex()
             .gap_5()
-            .child(section_heading("Visibility"))
+            .child(v_flex().gap_0p5().child(section_heading("Visibility")).when(link.is_some(), |this| {
+                // Unlike the details, these reach the uploaded video. It reads as the
+                // section's description.
+                this.child(
+                    div()
+                        .id("publish-visibility-note")
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Changes here go to the video on YouTube.")
+                        .test_support(),
+                )
+            }))
             .child(
                 FieldRow::new("Who can watch")
                     .help(if scheduled {
@@ -1247,12 +1302,91 @@ impl PublishPanel {
                         )
                     }),
             )
+            .children(status)
             .when(google, |this| {
                 this.child(help_text(
                     "Until Google audits your API project, YouTube locks uploads from it to private.",
                     cx,
                 ))
             })
+    }
+
+    /// YouTube has `other` instead of the form's choice: it didn't get there, or the
+    /// video changed in YouTube Studio. The form's choice goes on request, unless
+    /// its schedule is over: YouTube takes no schedule in the past.
+    fn render_other_visibility(&self, other: Visibility, cx: &mut Context<Self>) -> AnyElement {
+        let text = visibility_text(rules::core_privacy(other.privacy), other.publish_at);
+        let mut chars = text.chars();
+        let text: String = chars.next().map(|first| first.to_lowercase().chain(chars).collect()).unwrap_or_default();
+        let over = self.draft.publish_at.is_some_and(|at| at <= Utc::now());
+        let (title, detail) = if over {
+            ("Changed on YouTube", format!("On YouTube it’s {text}. Turn off Schedule to choose who can watch it."))
+        } else {
+            ("Not on YouTube yet", format!("On YouTube it’s {text}."))
+        };
+        let body = v_flex()
+            .gap_2()
+            .child(status_line(IconName::TriangleAlert, cx.theme().warning, title, Some(detail.into()), cx))
+            .when(!over, |this| {
+                this.child(
+                    h_flex().child(
+                        Button::new("visibility-send")
+                            .label("Change on YouTube")
+                            .small()
+                            .outline()
+                            .on_click(cx.listener(|this, _, _, cx| this.send_visibility(cx))),
+                    ),
+                )
+            });
+        // Tests check what the section says.
+        div().id("youtube-visibility-sync").child(body).test_support().into_any_element()
+    }
+
+    /// Where changing who can watch the uploaded video stands, with the way on when
+    /// the change didn't get there.
+    fn render_visibility_sync(&self, sync: VisibilitySync, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let body = match sync {
+            VisibilitySync::Sending => h_flex()
+                .gap_2()
+                .child(Spinner::new().small().color(theme.muted_foreground))
+                .child(div().text_sm().child("Sending to YouTube…")),
+            VisibilitySync::Failed { problem, reconnect } => {
+                let button = match reconnect {
+                    Some(key) => {
+                        // One browser sign-in at a time: another one must end first.
+                        let busy = self.service.read(cx).is_signing_in();
+                        let service = self.service.clone();
+                        Button::new("visibility-reconnect")
+                            .label("Reconnect")
+                            .disabled(busy)
+                            .on_click(move |_, _, cx| service.update(cx, |service, cx| service.reconnect(&key, cx)))
+                    }
+                    None => Button::new("visibility-try-again")
+                        .label("Try again")
+                        .on_click(cx.listener(|this, _, _, cx| this.send_visibility(cx))),
+                };
+                v_flex()
+                    .gap_2()
+                    .child(status_line(
+                        IconName::TriangleAlert,
+                        theme.warning,
+                        "Not changed on YouTube",
+                        Some(problem.into()),
+                        cx,
+                    ))
+                    .child(h_flex().child(button.small().outline()))
+            }
+            VisibilitySync::Kept(privacy) => status_line(
+                IconName::TriangleAlert,
+                theme.warning,
+                format!("YouTube kept the video {}", privacy.api_value()),
+                Some("YouTube Studio shows why.".into()),
+                cx,
+            ),
+        };
+        // Tests check what the section says.
+        div().id("youtube-visibility-sync").child(body).test_support().into_any_element()
     }
 
     fn render_audience(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1861,14 +1995,9 @@ impl PublishPanel {
     }
 
     fn render_thumbnail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let job = self.thumbnail_job(cx);
-        let drawing = match &job {
-            Some(ThumbnailJob::Drawing { count, .. }) => *count,
-            _ => 0,
-        };
-        let job_line = job.and_then(|job| self.render_thumbnail_job(job, cx));
-        let drawn = self.render_drawn(drawing, cx);
-        let generated = self.render_generated(drawing, job_line, drawn, cx);
+        let job_line = self.thumbnail_job(cx).map(|job| self.render_thumbnail_job(job, cx));
+        let drawn = self.render_drawn(cx);
+        let generated = self.render_generated(job_line, drawn, cx);
         let theme = cx.theme();
         let current = self.draft.thumbnail.clone();
         let size =
@@ -1952,11 +2081,10 @@ impl PublishPanel {
         )
     }
 
-    /// Thumbnails Codex drew, and the button that asks for more: `None` without
-    /// an assistant.
+    /// Thumbnails Codex drew, and the button that opens the chat with it: `None`
+    /// without an assistant.
     fn render_generated(
         &self,
-        drawing: usize,
         job_line: Option<AnyElement>,
         drawn: Option<AnyElement>,
         cx: &mut Context<Self>,
@@ -1976,17 +2104,20 @@ impl PublishPanel {
                         .gap_2()
                         .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Generated"))
                         .child(
-                            Button::new("generate-thumbnails")
-                                .label("Generate…")
+                            Button::new("thumbnail-chat")
+                                .label("Chat with Codex…")
                                 .icon(IconName::Sparkles)
                                 .small()
                                 .outline()
-                                .disabled(drawing > 0)
-                                .on_click(cx.listener(|this, _, window, cx| this.open_generate_thumbnails(window, cx))),
+                                .on_click(cx.listener(|this, _, window, cx| this.open_thumbnail_chat(window, cx))),
                         ),
                 )
                 .when(empty, |this| {
-                    this.child(help_text("Codex can draw a few from the video’s title and script.", cx))
+                    this.child(help_text(
+                        "Codex draws them from the video’s title and script, and changes them as you ask: it \
+                         remembers the chat.",
+                        cx,
+                    ))
                 })
                 .children(job_line)
                 .children(drawn)
@@ -1994,13 +2125,13 @@ impl PublishPanel {
         )
     }
 
-    /// Where Codex drawing thumbnails stands, with what can be done about it; `None`
-    /// once it drew them all, which the grid shows.
-    fn render_thumbnail_job(&self, job: ThumbnailJob, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Where Codex answering in the thumbnail chat stands, with what can be done
+    /// about it.
+    fn render_thumbnail_job(&self, job: ThumbnailJob, cx: &mut Context<Self>) -> AnyElement {
         let cancelling = self.assistant.as_ref().is_some_and(|a| a.read(cx).is_cancelling_thumbnails(self.video_id));
         let theme = cx.theme();
         let (status, actions): (Div, Vec<Button>) = match job {
-            ThumbnailJob::Drawing { count, activity } => (
+            ThumbnailJob::Working { activity } => (
                 h_flex()
                     .gap_2()
                     .items_start()
@@ -2010,13 +2141,11 @@ impl PublishPanel {
                             .min_w_0()
                             .gap_0p5()
                             .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(if cancelling {
-                                "Stopping…".to_owned()
-                            } else if count == 1 {
-                                "Drawing a thumbnail…".to_owned()
+                                "Stopping…"
                             } else {
-                                format!("Drawing {count} thumbnails…")
+                                "Codex is working…"
                             }))
-                            .child(help_text(activity.unwrap_or_else(|| "Codex takes a few minutes.".into()), cx)),
+                            .child(help_text(activity.unwrap_or_else(|| "Drawing takes a few minutes.".into()), cx)),
                     ),
                 vec![Button::new("cancel-thumbnails").label("Cancel").small().ghost().disabled(cancelling).on_click(
                     cx.listener(|this, _, _, cx| {
@@ -2025,39 +2154,31 @@ impl PublishPanel {
                 )],
             ),
             ThumbnailJob::Failed(error) => (
-                status_line(IconName::CircleAlert, theme.danger, "Couldn’t generate thumbnails", Some(error), cx),
-                vec![
-                    Button::new("retry-thumbnails")
-                        .label("Try again…")
-                        .small()
-                        .outline()
-                        .on_click(cx.listener(|this, _, window, cx| this.open_generate_thumbnails(window, cx))),
-                    self.dismiss_thumbnails_button(cx),
-                ],
+                status_line(IconName::CircleAlert, theme.danger, "Codex couldn’t answer", Some(error), cx),
+                vec![self.open_chat_button(cx), self.dismiss_thumbnails_button(cx)],
             ),
-            ThumbnailJob::Drawn { made, asked, problem } if made < asked => (
-                status_line(
-                    IconName::TriangleAlert,
-                    theme.warning,
-                    format!("Codex drew {made} of {asked}"),
-                    problem,
-                    cx,
-                ),
-                vec![self.dismiss_thumbnails_button(cx)],
+            ThumbnailJob::StoppedEarly(problem) => (
+                status_line(IconName::TriangleAlert, theme.warning, "Codex stopped early", Some(problem), cx),
+                vec![self.open_chat_button(cx), self.dismiss_thumbnails_button(cx)],
             ),
-            ThumbnailJob::Drawn { .. } => return None,
         };
         // The side column is narrow: the actions go under the status.
-        Some(
-            v_flex()
-                .id("thumbnail-job")
-                .gap_2()
-                .child(status)
-                .child(h_flex().gap_1().children(actions))
-                // Tests check what the card says.
-                .test_support()
-                .into_any_element(),
-        )
+        v_flex()
+            .id("thumbnail-job")
+            .gap_2()
+            .child(status)
+            .child(h_flex().gap_1().children(actions))
+            // Tests check what the card says.
+            .test_support()
+            .into_any_element()
+    }
+
+    fn open_chat_button(&self, cx: &mut Context<Self>) -> Button {
+        Button::new("thumbnail-job-open-chat")
+            .label("Open chat…")
+            .small()
+            .outline()
+            .on_click(cx.listener(|this, _, window, cx| this.open_thumbnail_chat(window, cx)))
     }
 
     fn dismiss_thumbnails_button(&self, cx: &mut Context<Self>) -> Button {
@@ -2066,52 +2187,16 @@ impl PublishPanel {
         }))
     }
 
-    /// The thumbnails drawn for the video, newest first, after `drawing` places for
-    /// the ones on their way. Choosing one makes it the thumbnail.
-    fn render_drawn(&self, drawing: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.drawn.is_empty() && drawing == 0 {
+    /// The thumbnails drawn for the video, newest first. Choosing one makes it the
+    /// thumbnail.
+    fn render_drawn(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.drawn.is_empty() {
             return None;
         }
-        let (radius, ring, check_fg, check_bg) = {
-            let theme = cx.theme();
-            (theme.radius, theme.primary, theme.primary_foreground, theme.primary)
-        };
         let chosen = self.draft.thumbnail.as_ref();
-        let placeholders = (0..drawing)
-            .map(|_| Skeleton::new().w_full().h_auto().aspect_ratio(16. / 9.).rounded(radius).into_any_element());
         let tiles = self.drawn.iter().map(|path| {
-            let name = file_name(path);
             let target = path.clone();
-            let selected = chosen == Some(path);
-            Button::new(SharedString::from(format!("drawn-{name}")))
-                .outline()
-                .selected(selected)
-                .accessibility_label(format!("Use {name}"))
-                .w_full()
-                .h_auto()
-                .p_1()
-                .when(selected, |this| this.border_color(ring))
-                .child(
-                    div()
-                        .relative()
-                        .w_full()
-                        .aspect_ratio(16. / 9.)
-                        .overflow_hidden()
-                        .rounded(radius)
-                        .child(img(path.clone()).size_full().object_fit(ObjectFit::Cover))
-                        .when(selected, |this| {
-                            this.child(
-                                div()
-                                    .absolute()
-                                    .top_1()
-                                    .right_1()
-                                    .rounded_full()
-                                    .bg(check_bg)
-                                    .p_0p5()
-                                    .child(Icon::new(IconName::Check).xsmall().text_color(check_fg)),
-                            )
-                        }),
-                )
+            thumbnail_tile(SharedString::from(format!("drawn-{}", file_name(path))), path, chosen == Some(path), cx)
                 .on_click(cx.listener(move |this, _, window, cx| this.set_thumbnail(Some(target.clone()), window, cx)))
                 .into_any_element()
         });
@@ -2119,8 +2204,8 @@ impl PublishPanel {
         Some(
             v_flex()
                 .gap_2()
-                .child(div().id("drawn-thumbnails").grid().grid_cols(2).gap_2().children(placeholders).children(tiles))
-                .when(none_chosen && !self.drawn.is_empty(), |this| {
+                .child(div().id("drawn-thumbnails").grid().grid_cols(2).gap_2().children(tiles))
+                .when(none_chosen, |this| {
                     this.child(help_text("Choose one to use it. They’re in the video’s thumbnails folder.", cx))
                 })
                 .into_any_element(),

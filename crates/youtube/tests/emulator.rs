@@ -15,11 +15,11 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use chrono::{TimeDelta, Utc};
+use chrono::{TimeDelta, Timelike as _, Utc};
 use rushes_youtube::{
-    Account, CredentialStore, Credentials, DailyViews, Error, Privacy, ProcessingStatus, ReachReport, RetryCause,
-    SavedLogin, TitleChange, UPLOAD_GRANULARITY, UploadOptions, UploadProgress, UploadStatus, VideoMetadata,
-    YoutubeClient, YoutubeConfig, begin_authorization, check_client, refresh,
+    Account, CredentialStore, Credentials, DailyViews, Error, MANAGE_SCOPE, Privacy, ProcessingStatus, ReachReport,
+    RetryCause, SavedLogin, TitleChange, UPLOAD_GRANULARITY, UploadOptions, UploadProgress, UploadStatus,
+    VideoMetadata, Visibility, YoutubeClient, YoutubeConfig, begin_authorization, check_client, refresh,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -567,6 +567,61 @@ fn refreshes_expired_and_rejected_tokens() {
     let error = refresh(&emulators.config(), &client.credentials()).unwrap_err();
     assert!(matches!(&error, Error::OAuth { error, .. } if error == "invalid_grant"), "{error:?}");
     assert!(error.needs_sign_in());
+}
+
+#[test]
+fn changes_who_can_watch_an_uploaded_video() {
+    let Some(emulators) = Emulators::start() else {
+        return;
+    };
+    let (credentials, _) = sign_in(&emulators, "creator@example.com");
+    assert!(credentials.has_scope(MANAGE_SCOPE), "the sign-in asks to change videos: {}", credentials.scope);
+    let client = client(&emulators, credentials);
+    let dir = tempfile::tempdir().unwrap();
+    let (path, _) = video_file(dir.path(), "short.mp4", 4096);
+    let metadata = VideoMetadata { made_for_kids: true, ..metadata("Made for kids") };
+    let id = client.upload_video(&path, &metadata, &mut |_| {}, &AtomicBool::new(false)).unwrap().id;
+    let status = |client: &YoutubeClient| -> Value {
+        let url = format!("{}/youtube/v3/videos", emulators.youtube_url);
+        let token = format!("Bearer {}", client.credentials().access_token);
+        let mut response = plain_agent()
+            .get(&url)
+            .query("part", "status")
+            .query("id", &id)
+            .header("Authorization", &token)
+            .call()
+            .unwrap();
+        let body: Value = response.body_mut().read_json().unwrap();
+        body["items"][0]["status"].clone()
+    };
+
+    let public = Visibility { privacy: Privacy::Public, publish_at: None };
+    assert_eq!(client.set_visibility(&id, public).unwrap(), Some(public));
+    assert_eq!(client.get_video(&id).unwrap().unwrap().privacy, Privacy::Public);
+
+    let at = (Utc::now() + TimeDelta::days(2)).with_nanosecond(0).unwrap();
+    let scheduled = Visibility { privacy: Privacy::Private, publish_at: Some(at) };
+    assert_eq!(client.set_visibility(&id, scheduled).unwrap(), Some(scheduled));
+    let info = client.get_video(&id).unwrap().unwrap();
+    assert_eq!((info.privacy, info.publish_at), (Privacy::Private, Some(at)));
+    // The rest of the status stays as it was.
+    assert_eq!(status(&client)["selfDeclaredMadeForKids"], true);
+
+    let unlisted = Visibility { privacy: Privacy::Unlisted, publish_at: None };
+    assert_eq!(client.set_visibility(&id, unlisted).unwrap(), Some(unlisted));
+    assert_eq!(status(&client).get("publishAt"), None, "no longer scheduled");
+
+    // A schedule YouTube would refuse costs no quota.
+    let public_later = Visibility { privacy: Privacy::Public, publish_at: Some(at) };
+    assert!(matches!(client.set_visibility(&id, public_later), Err(Error::InvalidInput(_))));
+    let past = Visibility { privacy: Privacy::Private, publish_at: Some(Utc::now() - TimeDelta::hours(1)) };
+    assert!(matches!(client.set_visibility(&id, past), Err(Error::InvalidInput(_))));
+    assert_eq!(client.set_visibility("doesNotExist", public).unwrap(), None);
+
+    // Only the channel's owner changes its videos.
+    let (other, _) = sign_in(&emulators, "editor@example.com");
+    let other = self::client(&emulators, other);
+    assert_eq!(other.set_visibility(&id, public).unwrap_err().api_message(), None);
 }
 
 #[test]
