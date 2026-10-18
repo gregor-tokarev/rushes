@@ -84,10 +84,20 @@ fn allow_tests(workspace: &Workspace, cx: &mut TestAppContext) {
 /// Uploads a video titled `title`; the app's video and its YouTube id, once YouTube
 /// said how it stands.
 fn upload(workspace: &Workspace, cx: &mut TestAppContext, title: &str, privacy: Privacy) -> (VideoId, String) {
+    upload_with(workspace, cx, title, |video| video.publish.privacy = privacy)
+}
+
+/// [`upload`] with publish settings of the test's own.
+fn upload_with(
+    workspace: &Workspace,
+    cx: &mut TestAppContext,
+    title: &str,
+    edit: impl FnOnce(&mut rushes_core::Video),
+) -> (VideoId, String) {
     let service = workspace.service.clone();
     let file = publish_support::video_file(workspace.dir.path(), &format!("{title}.mp4"));
     let video_id = workspace.create_video(cx, title, |video| {
-        video.publish.privacy = privacy;
+        edit(video);
         video.publish.file = Some(file.clone());
     });
     let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
@@ -434,6 +444,41 @@ fn a_switch_on_its_way_settles_before_the_test_stops(cx: &mut TestAppContext) {
     assert_eq!(link.thumbnail.as_ref(), Some(&images[1]));
     let sha = emulators.youtube_video(&youtube_id)["thumbnail"]["sha256"].as_str().map(str::to_owned);
     assert_eq!(sha, Some(publish_support::sha256(&images[1])));
+}
+
+#[gpui_kit::test]
+fn a_schedule_moved_while_a_goes_up_moves_the_start(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    allow_tests(&workspace, cx);
+    // YouTube checks schedules against its own clock.
+    let now = Utc::now();
+    let publish_at = DateTime::from_timestamp(now.timestamp() + 2 * 86_400, 0).unwrap();
+    let (video_id, _) = upload_with(&workspace, cx, "Soon", |video| {
+        video.publish.privacy = Privacy::Private;
+        video.publish.publish_at = Some(publish_at);
+    });
+    let runner = Runner::start(&workspace, cx, now);
+    let images: Vec<PathBuf> =
+        ["a.png", "b.png"].iter().map(|name| publish_support::png_file(workspace.dir.path(), name)).collect();
+    std::fs::write(&images[1], [std::fs::read(&images[1]).unwrap(), vec![0]].concat()).unwrap();
+    let versions = images.iter().map(|path| TestVersion { title: None, thumbnail: Some(path.clone()) }).collect();
+    runner.runner.update(cx, |runner, cx| runner.start(video_id, TestSubject::Thumbnail, versions, 7, cx)).unwrap();
+    assert_eq!(test_of(&workspace, cx, video_id).starts_at, publish_at);
+    assert_eq!(runner.runner.read_with(cx, |runner, _| runner.switching(video_id)), Some(0));
+
+    // Postponed by a week in Visibility while A is on its way, past the start.
+    let later = publish_at + TimeDelta::days(7);
+    let mut video = workspace.video(cx, video_id);
+    video.youtube.as_mut().unwrap().publish_at = Some(later);
+    workspace.state.update(cx, |state, cx| state.update_video(video, cx));
+    runner.at(cx, publish_at + TimeDelta::minutes(1));
+    wait_for_showings(&workspace, cx, video_id, 1);
+    runner.at(cx, publish_at + TimeDelta::minutes(2));
+    let test = test_of(&workspace, cx, video_id);
+    assert_eq!((test.starts_at, test.is_over()), (later, false));
+    assert_eq!(test.version_at(publish_at + TimeDelta::days(3)), 0, "no turns while the video waits");
 }
 
 #[gpui_kit::test]

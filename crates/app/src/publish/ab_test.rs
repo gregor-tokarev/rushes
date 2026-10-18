@@ -269,11 +269,13 @@ impl AbTests {
             .map(|row| row.video.id)
             .collect();
         for video_id in running {
-            // A change on its way settles first: the test it belongs to must not end under it.
+            // A change on its way settles first: the test it belongs to must not end
+            // under it. Its schedule still follows the video's.
             if self.switching(video_id).is_some() {
+                self.follow_video(video_id, now, false, cx);
                 continue;
             }
-            let Some(test) = self.follow_video(video_id, now, cx) else { continue };
+            let Some(test) = self.follow_video(video_id, now, true, cx) else { continue };
             let work = self.work.entry(video_id).or_default();
             let retry_due = work.retry_at.is_none_or(|at| now >= at);
             // An ending test puts its kept version up before anything else.
@@ -317,8 +319,15 @@ impl AbTests {
 
     /// Keeps `video_id`'s test in step with when the video goes public, as YouTube
     /// last said: a schedule that moved moves the start of the turns, and a video
-    /// that is no longer public or scheduled stops the test. The test, while it goes on.
-    fn follow_video(&mut self, video_id: VideoId, now: DateTime<Utc>, cx: &mut Context<Self>) -> Option<AbTest> {
+    /// that is no longer public or scheduled stops the test, when it `may_stop`. The
+    /// test, while it goes on.
+    fn follow_video(
+        &mut self,
+        video_id: VideoId,
+        now: DateTime<Utc>,
+        may_stop: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AbTest> {
         let mut video = self.state.read(cx).video(video_id).cloned()?;
         let title = video.upload_title().to_owned();
         let link = video.youtube.as_mut()?;
@@ -327,6 +336,7 @@ impl AbTests {
         let going_on = match schedule {
             Some(publish_at) if !test.follow_schedule(publish_at, now) => return Some(test.clone()),
             Some(_) => Some(test.clone()),
+            None if !may_stop => return Some(test.clone()),
             None => {
                 test.outcome = Some(TestOutcome::Stopped { at: now, reason: StopReason::NotPublic });
                 let detail = "The video isn’t public or scheduled to go public anymore.";

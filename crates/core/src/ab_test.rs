@@ -266,14 +266,19 @@ impl AbTest {
         }
     }
 
-    /// Follows the video's schedule until the versions start taking turns: they
-    /// start when it goes public, at `publish_at`, or at once when it is public
-    /// (`None`). Whether the start moved.
+    /// Follows the video's schedule: the versions take turns once it is public. A
+    /// video that goes public at `publish_at`, later, starts them then, also when
+    /// they were due earlier; one that is public (`None`) starts them at once, unless
+    /// they started already. Whether the start moved.
     pub fn follow_schedule(&mut self, publish_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
-        if self.is_over() || now >= self.starts_at {
+        if self.is_over() {
             return false;
         }
-        let starts_at = publish_at.filter(|at| *at > now).unwrap_or(now);
+        let starts_at = match publish_at.filter(|at| *at > now) {
+            Some(at) => at,
+            None if self.starts_at > now => now,
+            None => return false,
+        };
         let moved = starts_at != self.starts_at;
         self.starts_at = starts_at;
         moved
@@ -722,9 +727,13 @@ mod tests {
         let early = at("2026-10-20T09:00:00Z");
         assert!(test.follow_schedule(None, early));
         assert_eq!(test.starts_at, early);
-        // Once they started, the schedule has nothing to move.
-        assert!(!test.follow_schedule(Some(later), early + TimeDelta::hours(1)));
+        // Public and started: nothing to move.
+        assert!(!test.follow_schedule(None, early + TimeDelta::hours(1)));
         assert_eq!(test.starts_at, early);
+        // Postponed past a start that came while YouTube didn't hear of it yet: the
+        // video isn't public, so the turns wait again.
+        assert!(test.follow_schedule(Some(later), early + TimeDelta::hours(2)));
+        assert_eq!(test.starts_at, later);
     }
 
     #[test]
