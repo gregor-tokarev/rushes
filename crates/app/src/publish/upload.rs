@@ -17,7 +17,7 @@ use gpui_kit::{App, AppContext as _, Context, SharedString};
 use rushes_core::{FileStamp, Privacy, UploadId, UploadJob, UploadStatus, Video, VideoId, VideoStatus, YoutubeLink};
 use rushes_youtube::{
     Error as YoutubeError, ProcessingStatus, RetryCause, UploadProgress, UploadStatus as YoutubeUploadStatus,
-    UploadedVideo, VideoInfo, VideoMetadata, YoutubeClient,
+    UploadedVideo, VideoInfo, VideoMetadata, Visibility, YoutubeClient,
 };
 
 use super::rules::{self, AccountAccess, BlockingReason};
@@ -394,6 +394,8 @@ impl YoutubeService {
             self.retire(id, Retired::Replaced, cx);
         }
         self.jobs_changed(cx);
+        // The upload takes the visibility the video chooses now.
+        self.visibility_after_upload.remove(&video_id);
         self.spawn_transfer(job.id, client, file, stamp.size, Request::Upload(Box::new(rules::metadata(&video))), cx);
         Ok(job.id)
     }
@@ -587,10 +589,14 @@ impl YoutubeService {
             {
                 self.thumbnails.remove(&video_id);
                 self.thumbnails_chosen_again.remove(&video_id);
+                self.visibility.remove(&video_id);
+                self.visibility_changed_again.remove(&video_id);
             }
             self.retired.remove(id);
         }
         self.jobs.retain(|job| !gone.contains(&job.id));
+        let state = self.state.read(cx);
+        self.visibility_after_upload.retain(|video_id| state.video(*video_id).is_some());
         cx.emit(YoutubeEvent::UploadsChanged);
         cx.notify();
     }
@@ -655,8 +661,9 @@ impl YoutubeService {
                 privacy,
                 uploaded_at: Utc::now(),
                 thumbnail: None,
+                publish_at: uploaded.publish_at,
             });
-            if let Some(publish_at) = video.publish.publish_at {
+            if let Some(publish_at) = uploaded.publish_at {
                 video.status = VideoStatus::Scheduled;
                 // YouTube publishes it then, whatever the planner said before.
                 video.publish_date = Some(publish_at.with_timezone(&Local).date_naive());
@@ -687,6 +694,11 @@ impl YoutubeService {
             let target = ThumbnailTarget { video_id, youtube_id: youtube_id.clone(), channel: uploaded.channel_id };
             self.send_thumbnail(target, client.clone(), thumbnail, true, cx);
         }
+        self.send_visibility_after_upload(
+            video_id,
+            Visibility { privacy: uploaded.privacy, publish_at: uploaded.publish_at },
+            cx,
+        );
         self.follow_processing(id, client, youtube_id, cx);
     }
 
@@ -702,16 +714,13 @@ impl YoutubeService {
         cx.spawn(async move |this, cx| {
             for _ in 0..PROCESSING_POLLS {
                 cx.background_executor().timer(PROCESSING_POLL_INTERVAL).await;
-                let (client, youtube_id) = (client.clone(), youtube_id.clone());
+                let Ok(changes) = this.read_with(cx, |this, _| this.visibility_changes(&youtube_id)) else { return };
+                let (client, lookup) = (client.clone(), youtube_id.clone());
                 // Errors are retried at the next poll: processing goes on without the app.
-                let state = cx.background_spawn(async move { client.get_video(&youtube_id) }).await;
+                let state = cx.background_spawn(async move { client.get_video(&lookup) }).await;
                 let Ok(Some(info)) = state else { continue };
                 let outcome = processed(&info);
-                this.update(cx, |this, cx| {
-                    this.remote.insert(info.id.clone(), info);
-                    cx.notify();
-                })
-                .ok();
+                this.update(cx, |this, cx| this.on_youtube_video(info, changes, cx)).ok();
                 if let Some(outcome) = outcome {
                     this.update(cx, |this, cx| this.finish_processing(id, outcome, cx)).ok();
                     return;

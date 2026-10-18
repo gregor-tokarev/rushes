@@ -195,6 +195,139 @@ fn a_scheduled_private_upload_marks_the_video_scheduled(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
+fn a_visibility_chosen_while_the_video_uploads_again_goes_to_the_new_video(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.privacy = Privacy::Private;
+    });
+    let upload_done = |cx: &mut TestAppContext, upload: UploadId| {
+        wait_until(cx, "the upload", |cx| {
+            cx.executor().advance_clock(Duration::from_secs(5));
+            match service.read_with(cx, |s, _| s.job(upload).map(|job| job.status.clone())) {
+                Some(UploadStatus::Done { video_id }) => Some(video_id),
+                Some(UploadStatus::Failed { error }) => panic!("upload failed: {error}"),
+                _ => None,
+            }
+        })
+    };
+    let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    let first = upload_done(cx, upload);
+
+    // Uploading again: the upload sent the settings it started with.
+    let again = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    choose_privacy(cx, &workspace, video_id, Privacy::Unlisted);
+    let second = upload_done(cx, again);
+    assert_ne!(first, second);
+    let client = service.read_with(cx, |s, _| s.client()).unwrap();
+    let unlisted = wait_until(cx, "the new video’s visibility", |_| {
+        let privacy = client.get_video(&second).unwrap().unwrap().privacy;
+        (privacy == rushes_youtube::Privacy::Unlisted).then_some(privacy)
+    });
+    assert_eq!(unlisted, rushes_youtube::Privacy::Unlisted);
+    assert_eq!(client.get_video(&first).unwrap().unwrap().privacy, rushes_youtube::Privacy::Private);
+    assert_eq!(workspace.video(cx, video_id).youtube.map(|link| link.privacy), Some(Privacy::Unlisted));
+}
+
+/// Chooses `privacy` for `video_id` the way the Publish tab saves it.
+fn choose_privacy(cx: &mut TestAppContext, workspace: &Workspace, video_id: VideoId, privacy: Privacy) {
+    workspace.state.update(cx, |state, cx| {
+        let mut video = state.video(video_id).cloned().unwrap();
+        video.publish.privacy = privacy;
+        state.update_video(video, cx);
+    });
+    workspace.service.update(cx, |service, cx| service.set_youtube_visibility(video_id, cx));
+}
+
+#[gpui_kit::test]
+fn a_visibility_chosen_during_the_first_upload_goes_to_the_video(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.privacy = Privacy::Private;
+    });
+    let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    choose_privacy(cx, &workspace, video_id, Privacy::Public);
+    let youtube_id = wait_until(cx, "the upload", |cx| {
+        match service.read_with(cx, |s, _| s.job(upload).map(|job| job.status.clone())) {
+            Some(UploadStatus::Processing { video_id } | UploadStatus::Done { video_id }) => Some(video_id),
+            Some(UploadStatus::Failed { error }) => panic!("upload failed: {error}"),
+            _ => None,
+        }
+    });
+    let client = service.read_with(cx, |s, _| s.client()).unwrap();
+    wait_until(cx, "the choice on YouTube", |cx| {
+        cx.executor().advance_clock(Duration::from_secs(5));
+        let privacy = client.get_video(&youtube_id).unwrap().unwrap().privacy;
+        (privacy == rushes_youtube::Privacy::Public).then_some(())
+    });
+    let video = workspace.video(cx, video_id);
+    assert_eq!(video.publish.privacy, Privacy::Public, "the choice stays");
+    assert_eq!(video.youtube.map(|link| link.privacy), Some(Privacy::Public));
+}
+
+#[gpui_kit::test]
+fn a_visibility_chosen_during_a_cancelled_upload_waits_for_its_resume(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.privacy = Privacy::Private;
+    });
+    let finished = |cx: &mut TestAppContext, upload: UploadId| {
+        wait_until(cx, "the upload", |cx| {
+            match service.read_with(cx, |s, _| s.job(upload).map(|job| job.status.clone())) {
+                Some(UploadStatus::Processing { video_id } | UploadStatus::Done { video_id }) => Some(video_id),
+                Some(UploadStatus::Failed { error }) => panic!("upload failed: {error}"),
+                _ => None,
+            }
+        })
+    };
+    let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    let first = finished(cx, upload);
+
+    // Uploading again, stopped after YouTube opened the session.
+    emulators.inject_fault(json!({"method": "PUT", "path": "/upload/youtube/v3/videos", "status": 503, "times": 1000}));
+    let again = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    wait_until(cx, "the upload session", |cx| {
+        service.read_with(cx, |s, _| s.job(again).and_then(|job| job.session_url.clone()))
+    });
+    choose_privacy(cx, &workspace, video_id, Privacy::Public);
+    service.update(cx, |service, cx| service.cancel_upload(again, cx));
+    wait_until(cx, "the cancellation", |cx| {
+        service.read_with(cx, |s, _| s.job(again).filter(|job| job.status == UploadStatus::Cancelled).map(drop))
+    });
+    cx.run_until_parked();
+    let client = service.read_with(cx, |s, _| s.client()).unwrap();
+    assert_eq!(
+        client.get_video(&first).unwrap().unwrap().privacy,
+        rushes_youtube::Privacy::Private,
+        "the choice was for the new video"
+    );
+
+    // The resumed session uploads what it started with; the choice follows.
+    emulators.clear_faults();
+    service.update(cx, |service, cx| service.resume_upload(again, cx)).unwrap();
+    let second = finished(cx, again);
+    wait_until(cx, "the choice on YouTube", |_| {
+        let privacy = client.get_video(&second).unwrap().unwrap().privacy;
+        (privacy == rushes_youtube::Privacy::Public).then_some(())
+    });
+    assert_eq!(client.get_video(&first).unwrap().unwrap().privacy, rushes_youtube::Privacy::Private);
+}
+
+#[gpui_kit::test]
 fn a_cancelled_upload_resumes_where_youtube_stopped(cx: &mut TestAppContext) {
     let Some(emulators) = Emulators::start() else { return };
     let workspace = Workspace::open(cx, emulators.backend());

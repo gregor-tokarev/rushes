@@ -23,6 +23,7 @@ mod transfer;
 mod ui;
 mod upload;
 mod uploads_page;
+mod visibility;
 
 pub use assistant::{
     AssistError, AssistEvent, DEFAULT_THUMBNAILS, DetailSources, DetailsJob, PublishAssistant, ThumbnailJob,
@@ -41,6 +42,7 @@ pub use upload::{
     INTERRUPTED, INTERRUPTED_RESUMABLE, ProcessingOutcome, Retired, Retry, UPLOAD_FILE_LOCKED, UploadError,
 };
 pub use uploads_page::UploadsPage;
+pub use visibility::VisibilitySync;
 
 use gpui_kit::App;
 use rushes_core::VideoId;

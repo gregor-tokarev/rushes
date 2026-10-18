@@ -2,14 +2,19 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// Lets Rushes change videos already on YouTube (`videos.update`), such as who can
+/// watch them. Uploading and reading don't need it.
+pub const MANAGE_SCOPE: &str = "https://www.googleapis.com/auth/youtube.force-ssl";
+
 /// OAuth scopes requested at sign-in: identity for the account chip, upload and
-/// read access for the channel.
-pub const SCOPES: [&str; 5] = [
+/// read access for the channel, and changes to uploaded videos.
+pub const SCOPES: [&str; 6] = [
     "openid",
     "email",
     "profile",
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
+    MANAGE_SCOPE,
 ];
 
 pub const DEFAULT_GOOGLE_EMULATOR_URL: &str = "http://127.0.0.1:4002";
