@@ -194,19 +194,40 @@ frames, so sound and picture end every span together.
   output time. Clips are cached in `edit/.cache/render/` by what they contain, so a revised
   cut re-encodes only what changed; clips no render uses any more are deleted. Up to six
   encodes run at once.
+- Voice: a take with speech (a transcript with words) is cleaned once, whole, before it
+  is cut (`voice.rs`), into `edit/.cache/audio/<stem>.<clock>.voice-dfn15.48k.pcm`:
+  DeepFilterNet lowers the noise in and between the words by at most 15 dB (some of the
+  room stays, so pauses don't sound dead), a 4th-order 80 Hz high-pass takes out rumble,
+  and both channels are joined into one centred voice (a microphone recorded on one
+  channel comes out of both). DeepFilterNet's command-line program (`deep-filter` on
+  `PATH`, or its 0.5.6 release build, downloaded once into the user's cache folder and
+  checked against its SHA-256) keeps the timing to the sample with `--compensate-delay`.
+  It runs on one thread, so a take is cleaned in 60 s pieces on half the processors, each
+  heard from a second early so the model has settled, joined with 20 ms fades (a 33-minute
+  take: about 50 s on 6 cores). Without DeepFilterNet (no build for the system, no network)
+  the voice is only filtered and centred (`voice-hp`), and the render report says why.
+  `render`'s `clean_voice: false` keeps the sound as recorded, for music or app sounds under
+  the voice that the noise remover would take out.
 - Sound: each take is decoded once to `edit/.cache/audio/<stem>.<clock>.48k.pcm`; spans are
-  cut from it by sample index, with 10 ms fades at cuts, into one 32-bit float WAV. Each
-  take's speech is brought to the level of the take with the most speech in the cut
+  cut from it (or from the cleaned voice) by sample index into one 32-bit float WAV. At a
+  cut the two sides overlap for 10 ms, centred on the cut and faded at equal power: the
+  outgoing span runs on 5 ms past its end and the next starts 5 ms early, so a cut neither
+  clicks nor drops the room's sound (fading each side to silence did: in the benchmark cut
+  half of the 89 cuts dipped more than 6 dB under the room's sound around them; now 10 do). Each take's speech is brought to the level of the take with the most speech in the cut
   (measured on its kept words; up to ±20 dB; takes with under 2 s of kept words, such as a
   silent demo, stay as they are), so a line from another recording plays as loud as the
   rest; the render report lists the gains. Seeking AAC with
   ffmpeg instead shifts the sound by the encoder delay, and joining per-span AAC files
   drifts by the priming of every file (the video-use bug: about 20 ms per cut, 0.84 s late
   after 42 cuts in the benchmark).
-- Mix: light speech compression (2.5:1 above −20 dBFS), two-pass `loudnorm` to −14 LUFS
-  (true peak −1.5), `alimiter` at −2.5 dBFS (latency-compensated; at 192 kHz for finals, so
-  peaks between samples are caught), trimmed to the exact sample count, AAC 192k,
-  `+faststart`. The encoded file's true peak is measured; over −1 dBTP (AAC adds up to about
+- Mix: measured with `ebur128`, brought to −24 LUFS so the compressor works the same on
+  any recording, compressed 4:1 from −28 dBFS (knee 8 dB, attack 2 ms, release 100 ms),
+  measured again and raised to −14 LUFS, then `alimiter` at −2.5 dBFS (latency-compensated;
+  at 192 kHz for finals, so peaks between samples are caught), trimmed to the exact sample
+  count, AAC 192k, `+faststart`. `loudnorm` isn't used: speech keeps peaks about 16 dB over
+  its loudness after compression, more than its linear mode allows at −14 LUFS and −1.5
+  dBTP, so it fell back to its dynamic mode, which rides the gain and raised the pauses'
+  noise about 11 dB. The encoded file's true peak is measured; over −1 dBTP (AAC adds up to about
   a decibel) the sound is encoded again that much quieter.
 - HDR (PQ/HLG) is tone-mapped to Rec.709; rotation is applied by ffmpeg; variable frame
   rates are read as the nearest broadcast rate (`Rational::standard`).
@@ -219,8 +240,11 @@ cargo clippy -p rushes-edit --all-targets
 ```
 
 Unit tests cover filler and false-start detection, phrase splitting, retake hints, cut
-times, frame/sample placement, overlay pictures, take ids, imports, captions, the MCP
-protocol and the sync measurement. `tests/tools.rs` renders generated footage end to end,
-with an image and a second clip brought in, an overlay, a held image and an insert. The
+times, frame/sample placement, crossfades at cuts, overlay pictures, take ids, imports,
+captions, the MCP protocol, the sync measurement, the voice's high-pass and how its pieces
+are cut and joined (with a stand-in noise remover). `tests/tools.rs` renders generated footage end to end,
+with an image and a second clip brought in, an overlay, a held image and an insert, and once
+with a stand-in `deep-filter` on `PATH` (the others keep the sound as recorded, so tests
+never download DeepFilterNet). The
 benchmark against video-use (real footage, agent runs, an independent evaluator) is in
 [benchmarks.md](benchmarks.md).

@@ -4,13 +4,14 @@
 //! frames; the clips are joined without re-encoding. The sound is cut from the take's
 //! audio decoded once from the start, by sample index, exactly the samples of the
 //! span's frames, and joined into one track that is loudness-normalised and encoded
-//! once. Picture and sound therefore cannot drift apart at the joins (joining AAC clips
-//! does: each carries encoder priming), and no span inherits ffmpeg's AAC seek offset.
+//! once (a take with speech is cut from its cleaned voice, see [`voice`]). Picture and
+//! sound therefore cannot drift apart at the joins (joining AAC clips does: each carries
+//! encoder priming), and no span inherits ffmpeg's AAC seek offset.
 //! Clips are cached by what they contain, so a revised cut re-encodes only the spans
 //! that changed. Overlays replace the picture of the frames they cover (an image, or
 //! another take's picture) and leave the sound alone.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
@@ -30,19 +31,30 @@ use crate::session::Session;
 use crate::subtitles::{self, Style};
 use crate::tool;
 use crate::transcribe::write_atomic;
+use crate::voice;
 
 pub const SAMPLE_RATE: u64 = 48_000;
-/// Fade at every cut, so no cut clicks.
+/// The sound on both sides of a cut overlaps this long, faded into each other at equal
+/// power, so a cut neither clicks nor drops the room's sound for a moment. Short, because
+/// each side runs on past its cut by half of it, towards words the cut leaves out.
+const CROSSFADE_SECONDS: f64 = 0.010;
+/// Fade in at the start and out at the end of the video.
 const FADE_SECONDS: f64 = 0.010;
 /// Most a take's sound is raised or lowered to match the main take's speech.
 const MAX_MATCH_DB: f64 = 20.0;
 /// Speech a take needs in the cut for its level to be measured and matched.
 const MIN_MATCH_SPEECH: f64 = 2.0;
 pub const LOUDNESS_TARGET: f64 = -14.0;
-const TRUE_PEAK: f64 = -1.5;
-/// Gentle speech compression before normalising (2.5:1 above -20 dBFS): speech is peaky,
-/// and without it -14 LUFS cannot be reached under the peak ceiling.
-const COMPRESSOR: &str = "acompressor=threshold=0.1:ratio=2.5:attack=8:release=150:knee=4";
+/// The sound is brought to this loudness before it is compressed, so the compressor does
+/// the same work on a quiet recording as on a loud one.
+const LEVEL_BEFORE_COMPRESSION: f64 = -24.0;
+/// Speech compression: 4:1 from 4 dB under the speech's loudness, with a soft knee and an
+/// attack fast enough for syllables. Loud and quiet words come closer together, so the
+/// voice reaches -14 LUFS without the limiter flattening it.
+const COMPRESSOR: &str = "acompressor=threshold=-28dB:ratio=4:attack=2:release=100:knee=8";
+/// Integrated loudness at or under which there is no sound to normalise (`ebur128` says
+/// -70 LUFS for silence).
+const SILENT_LUFS: f64 = -69.0;
 /// Highest true peak a render may have (YouTube and broadcast guidance: -1 dBTP).
 pub const MAX_TRUE_PEAK: f64 = -1.0;
 /// Peak ceiling after normalising (-2.5 dBFS), applied at 192 kHz so peaks between
@@ -89,6 +101,8 @@ pub struct RenderOptions {
     /// One of [`GRADES`].
     pub grade: String,
     pub normalize_loudness: bool,
+    /// Clean the voice of the takes with speech (see [`voice`]).
+    pub clean_voice: bool,
 }
 
 impl Default for RenderOptions {
@@ -99,6 +113,7 @@ impl Default for RenderOptions {
             subtitle_style: Style::Sentence,
             grade: "none".to_owned(),
             normalize_loudness: true,
+            clean_voice: true,
         }
     }
 }
@@ -173,6 +188,13 @@ pub struct RenderRecord {
     /// differed by a decibel or more.
     #[serde(default)]
     pub gains: BTreeMap<String, f64>,
+    /// Takes whose voice was cleaned, and whether its noise was lowered too (or only the
+    /// rumble filtered out).
+    #[serde(default)]
+    pub voice: BTreeMap<String, bool>,
+    /// Why some voice wasn't cleaned, or its noise not lowered.
+    #[serde(default)]
+    pub voice_note: Option<String>,
 }
 
 impl RenderRecord {
@@ -189,9 +211,32 @@ impl RenderRecord {
             self.clips_encoded,
             self.clips_reused
         );
+        let voices = |lowered: bool| {
+            let takes: Vec<&str> = self
+                .voice
+                .iter()
+                .filter(|(_, denoised)| **denoised == lowered)
+                .map(|(take, _)| take.as_str())
+                .collect();
+            takes.join(", ")
+        };
+        let (lowered, filtered) = (voices(true), voices(false));
+        if !lowered.is_empty() {
+            out.push_str(&format!(
+                " Voice cleaned in {lowered}: noise lowered up to {} dB (DeepFilterNet), rumble under {} Hz filtered.",
+                voice::NOISE_REDUCTION_DB,
+                voice::HIGH_PASS_HZ
+            ));
+        }
+        if !filtered.is_empty() {
+            out.push_str(&format!(" Rumble under {} Hz filtered from the voice in {filtered}.", voice::HIGH_PASS_HZ));
+        }
+        if let Some(note) = &self.voice_note {
+            out.push_str(&format!(" Voice not fully cleaned: {note}."));
+        }
         if let Some(loudness) = &self.measured_before {
             out.push_str(&format!(
-                " Sound lightly compressed ({:.1} LUFS, peak {:.1} dBTP) and normalised to {LOUDNESS_TARGET} LUFS.",
+                " Sound ({:.1} LUFS, peak {:.1} dBTP) compressed, brought to {LOUDNESS_TARGET} LUFS and its peaks limited.",
                 loudness.integrated, loudness.true_peak
             ));
         }
@@ -543,25 +588,39 @@ pub fn render(
         text.push_str(&format!("file '{}'\n", job.clip.file_name().expect("file name").to_string_lossy()));
     }
     fs::write(&list, text)?;
+    let (sources, voice, voice_note) =
+        if options.clean_voice { clean_voices(session, &placed, on_progress) } else { Default::default() };
     on_progress("cutting the sound");
     let wav = cache.join(format!("audio-{}.wav", short_hash(output.as_os_str().as_encoded_bytes())));
     let gains = speech_gains(session, &placed)?;
-    assemble_audio(session, &placed, &gains, &wav)?;
+    assemble_audio(session, &placed, &gains, &sources, &wav)?;
 
     let total_samples: u64 = placed.iter().map(|p| p.samples).sum();
-    let measured = if options.normalize_loudness { measure_loudness(&ffmpeg, &wav).ok() } else { None };
-    // Loudness to target, a limiter for the peaks the gain pushes up (oversampled for the
-    // final, to catch peaks between samples), then exactly the samples of the picture.
+    let measured = if options.normalize_loudness {
+        measure(&ffmpeg, &wav, "").ok().filter(|loudness| loudness.integrated > SILENT_LUFS)
+    } else {
+        None
+    };
+    // Levelled, compressed, raised to the target, a limiter for the peaks the gain pushes up
+    // (oversampled for the final, to catch peaks between samples), then exactly the samples
+    // of the picture.
     let limiter_rate = match options.quality {
         Quality::Preview => SAMPLE_RATE,
         Quality::Final => 4 * SAMPLE_RATE,
     };
+    let end = format!("aresample={SAMPLE_RATE},apad,atrim=end_sample={total_samples}");
     let audio_filter = match &measured {
-        Some(loudness) => format!(
-            "{COMPRESSOR},loudnorm=I={LOUDNESS_TARGET}:TP={TRUE_PEAK}:LRA=11:measured_I={:.2}:measured_TP={:.2}:measured_LRA={:.2}:measured_thresh={:.2}:offset={:.2}:linear=true,aresample={limiter_rate},alimiter=limit={LIMIT}:attack=5:release=50:level=false:latency=1,aresample={SAMPLE_RATE},apad,atrim=end_sample={total_samples}",
-            loudness.0.integrated, loudness.0.true_peak, loudness.0.range, loudness.1, loudness.2
-        ),
-        None => format!("aresample={SAMPLE_RATE},apad,atrim=end_sample={total_samples}"),
+        Some(loudness) => {
+            let compressed = format!(
+                "volume={:.2}dB,{COMPRESSOR}",
+                (LEVEL_BEFORE_COMPRESSION - loudness.integrated).clamp(-40.0, 40.0)
+            );
+            let gain = LOUDNESS_TARGET - measure(&ffmpeg, &wav, &compressed)?.integrated;
+            format!(
+                "{compressed},volume={gain:.2}dB,aresample={limiter_rate},alimiter=limit={LIMIT}:attack=5:release=50:level=false:latency=1,{end}"
+            )
+        }
+        None => end,
     };
     on_progress("joining clips");
     let tmp = output.with_extension("tmp.mp4");
@@ -586,7 +645,7 @@ pub fn render(
         placed: placed.clone(),
         frames,
         duration,
-        measured_before: measured.map(|m| m.0),
+        measured_before: measured,
         seconds_taken: started.elapsed().as_secs_f64(),
         clips_encoded: todo.len(),
         clips_reused: reused,
@@ -597,6 +656,8 @@ pub fn render(
             .collect(),
         pictures: pictures.clone(),
         gains,
+        voice,
+        voice_note,
     };
     write_atomic(&record_path(session, options.quality)?, &serde_json::to_vec_pretty(&record)?)?;
     write_edl(session, cut, &record)?;
@@ -798,11 +859,84 @@ pub(crate) fn true_peak(ffmpeg: &Path, file: &Path) -> Option<f64> {
         ],
     )
     .ok()?;
-    let summary = stderr.rsplit("Summary:").next()?;
-    summary
+    summary_value(&stderr, "Peak:")
+}
+
+/// Loudness of a WAV file's sound after `filter`, as `ebur128` measures it.
+fn measure(ffmpeg: &Path, wav: &Path, filter: &str) -> Result<Loudness> {
+    let filter = if filter.is_empty() { "ebur128=peak=true".to_owned() } else { format!("{filter},ebur128=peak=true") };
+    let (_, stderr) = tool::run_with_stderr(
+        ffmpeg,
+        [
+            "-nostdin".as_ref(),
+            "-v".as_ref(),
+            "info".as_ref(),
+            "-i".as_ref(),
+            wav.as_os_str(),
+            "-af".as_ref(),
+            filter.as_ref(),
+            "-f".as_ref(),
+            "null".as_ref(),
+            "-".as_ref(),
+        ],
+    )?;
+    let value = |label| summary_value(&stderr, label).ok_or_else(|| EditError::invalid("ebur128 printed no loudness"));
+    Ok(Loudness { integrated: value("I:")?, true_peak: value("Peak:")?, range: value("LRA:")? })
+}
+
+/// A value from the summary `ebur128` prints at the end (`I:`, `LRA:`, `Peak:`).
+fn summary_value(stderr: &str, label: &str) -> Option<f64> {
+    stderr
+        .rsplit("Summary:")
+        .next()?
         .lines()
-        .find_map(|line| line.trim().strip_prefix("Peak:"))
+        .find_map(|line| line.trim().strip_prefix(label))
         .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
+}
+
+/// The cleaned voice of every take in the cut that has speech (a transcript with words):
+/// the sound to cut from for each, whether its noise was lowered, and why it wasn't when
+/// it couldn't be. A take whose voice can't be cleaned at all keeps its sound as recorded.
+fn clean_voices(
+    session: &Session,
+    placed: &[Placed],
+    on_progress: &(dyn Fn(&str) + Sync),
+) -> (HashMap<String, PathBuf>, BTreeMap<String, bool>, Option<String>) {
+    let (mut sources, mut voice, mut note) = (HashMap::new(), BTreeMap::new(), None);
+    let speech: BTreeSet<&str> = placed
+        .iter()
+        .map(|item| item.span.take.as_str())
+        .filter(|take| session.view(take).is_some_and(|view| view.transcript.words.iter().any(|word| !word.event)))
+        .collect();
+    // DeepFilterNet is looked for (or downloaded) only when a take needs it.
+    let mut denoiser: Option<std::result::Result<PathBuf, String>> = None;
+    for id in speech {
+        let Ok(take) = session.take(id) else { continue };
+        let cleaned = match voice::denoised_audio(&session.project, take) {
+            Ok(Some(path)) => Ok((path, true)),
+            _ => {
+                let program =
+                    denoiser.get_or_insert_with(|| voice::deep_filter(on_progress).map_err(|error| error.to_string()));
+                let denoised = match program {
+                    Ok(program) => voice::cleaned_audio(&session.project, take, Some(program), on_progress)
+                        .map_err(|error| format!("DeepFilterNet failed on {}: {error}", take.file)),
+                    Err(error) => Err(error.clone()),
+                };
+                denoised.map(|path| (path, true)).or_else(|error| {
+                    note = Some(error);
+                    voice::cleaned_audio(&session.project, take, None, on_progress).map(|path| (path, false))
+                })
+            }
+        };
+        match cleaned {
+            Ok((path, denoised)) => {
+                sources.insert(take.id.clone(), path);
+                voice.insert(take.id.clone(), denoised);
+            }
+            Err(error) => note = Some(format!("{}: {error}", take.file)),
+        }
+    }
+    (sources, voice, note)
 }
 
 /// Gain in dB per take that brings its speech to the level of the take with the most
@@ -849,10 +983,18 @@ fn speech_gains(session: &mut Session, placed: &[Placed]) -> Result<BTreeMap<Str
 }
 
 /// Writes the sound of the placed spans as one 48 kHz stereo 32-bit float WAV: each
-/// span's samples cut from its take's decoded audio, with its take's gain (in dB, see
-/// [`speech_gains`]; float keeps the peaks a gain raises for the limiter) and a short
-/// fade at every cut.
-fn assemble_audio(session: &Session, placed: &[Placed], gains: &BTreeMap<String, f64>, wav: &Path) -> Result<()> {
+/// span's samples cut from its take's decoded audio (or its cleaned voice, from
+/// `sources`), with its take's gain (in dB, see [`speech_gains`]; float keeps the peaks a
+/// gain raises for the limiter). At a cut the sound of both sides overlaps for
+/// [`CROSSFADE_SECONDS`], centred on the cut: the outgoing span runs on past its end while
+/// the next one starts a little before its own, faded into each other at equal power.
+fn assemble_audio(
+    session: &Session,
+    placed: &[Placed],
+    gains: &BTreeMap<String, f64>,
+    sources: &HashMap<String, PathBuf>,
+    wav: &Path,
+) -> Result<()> {
     use std::io::{Read as _, Seek as _, SeekFrom};
     let total: u64 = placed.iter().map(|p| p.samples * 8).sum();
     let data_len =
@@ -870,25 +1012,34 @@ fn assemble_audio(session: &Session, placed: &[Placed], gains: &BTreeMap<String,
     out.write_all(&32u16.to_le_bytes())?;
     out.write_all(b"data")?;
     out.write_all(&data_len.to_le_bytes())?;
-    let mut sources: std::collections::HashMap<String, Option<fs::File>> = std::collections::HashMap::new();
+    let mut files: HashMap<String, Option<fs::File>> = HashMap::new();
     let fade = (FADE_SECONDS * SAMPLE_RATE as f64) as usize;
-    for item in placed {
-        if !sources.contains_key(&item.span.take) {
+    let overlaps = overlaps(placed);
+    // The outgoing side of the next crossfade: the last frames of the span before and its
+    // sound past its end.
+    let mut outgoing: Vec<f32> = Vec::new();
+    for (index, item) in placed.iter().enumerate() {
+        if !files.contains_key(&item.span.take) {
             let take = session.take(&item.span.take)?;
-            let file = if take.media.audio.is_empty() {
-                None
-            } else {
-                Some(fs::File::open(audio::render_audio(&session.project, take)?)?)
+            let file = match sources.get(&take.id) {
+                Some(path) => Some(fs::File::open(path)?),
+                None if take.media.audio.is_empty() => None,
+                None => Some(fs::File::open(audio::render_audio(&session.project, take)?)?),
             };
-            sources.insert(item.span.take.clone(), file);
+            files.insert(item.span.take.clone(), file);
         }
+        let before = if index > 0 { overlaps[index - 1] } else { 0 };
+        let after = overlaps.get(index).copied().unwrap_or(0);
         let count = item.samples as usize;
-        let mut bytes = vec![0u8; count * 4];
-        if let Some(Some(file)) = sources.get_mut(&item.span.take) {
-            let first = (item.span.start * SAMPLE_RATE as f64).round() as u64;
-            file.seek(SeekFrom::Start(first * 4))?;
+        let frames = before + count + after;
+        let mut samples = vec![0f32; frames * 2];
+        if let Some(Some(file)) = files.get_mut(&item.span.take) {
+            let first = (item.span.start * SAMPLE_RATE as f64).round() as i64 - before as i64;
+            // Before the start and past the end of the take: silence.
+            let skip = if first < 0 { (first.unsigned_abs() as usize).min(frames) } else { 0 };
+            file.seek(SeekFrom::Start(first.max(0) as u64 * 4))?;
+            let mut bytes = vec![0u8; (frames - skip) * 4];
             let mut filled = 0;
-            // Past the end of the take: silence.
             while filled < bytes.len() {
                 let n = file.read(&mut bytes[filled..])?;
                 if n == 0 {
@@ -896,63 +1047,69 @@ fn assemble_audio(session: &Session, placed: &[Placed], gains: &BTreeMap<String,
                 }
                 filled += n;
             }
-        }
-        let level = gains.get(&item.span.take).map_or(1.0, |db| 10f32.powf(*db as f32 / 20.0)) / 32768.0;
-        let mut samples: Vec<f32> =
-            bytes.as_chunks::<2>().0.iter().map(|pair| f32::from(i16::from_le_bytes(*pair)) * level).collect();
-        let ramp = fade.min(count / 4);
-        for frame in 0..ramp {
-            let gain = (frame as f32 + 0.5) / ramp as f32;
-            if item.fade_in {
-                for channel in 0..2 {
-                    samples[frame * 2 + channel] *= gain;
-                }
-            }
-            if item.fade_out {
-                for channel in 0..2 {
-                    samples[(count - 1 - frame) * 2 + channel] *= gain;
-                }
+            let level = gains.get(&item.span.take).map_or(1.0, |db| 10f32.powf(*db as f32 / 20.0)) / 32768.0;
+            for (sample, pair) in samples[skip * 2..].iter_mut().zip(bytes.as_chunks::<2>().0) {
+                *sample = f32::from(i16::from_le_bytes(*pair)) * level;
             }
         }
-        for sample in samples {
+        if before > 0 {
+            crossfade(&outgoing, &mut samples[..before * 4]);
+        } else if item.fade_in {
+            let ramp = fade.min(count / 4);
+            for frame in 0..ramp {
+                let gain = (frame as f32 + 0.5) / ramp as f32;
+                samples[frame * 2] *= gain;
+                samples[frame * 2 + 1] *= gain;
+            }
+        }
+        if after == 0 && item.fade_out {
+            let ramp = fade.min(count / 4);
+            for frame in 0..ramp {
+                let gain = (frame as f32 + 0.5) / ramp as f32;
+                let at = (before + count - 1 - frame) * 2;
+                samples[at] *= gain;
+                samples[at + 1] *= gain;
+            }
+        }
+        // What is left of this span's crossfade into the next waits for the next span.
+        let keep = (before + count - after) * 2;
+        for sample in &samples[..keep] {
             out.write_all(&sample.to_le_bytes())?;
         }
+        outgoing = samples[keep..].to_vec();
     }
     out.flush()?;
     Ok(())
 }
 
-/// First loudnorm pass: (loudness, threshold, target offset).
-fn measure_loudness(ffmpeg: &Path, wav: &Path) -> Result<(Loudness, f64, f64)> {
-    let (_, stderr) = tool::run_with_stderr(
-        ffmpeg,
-        [
-            "-nostdin".as_ref(),
-            "-v".as_ref(),
-            "info".as_ref(),
-            "-i".as_ref(),
-            wav.as_os_str(),
-            "-af".as_ref(),
-            format!("{COMPRESSOR},loudnorm=I={LOUDNESS_TARGET}:TP={TRUE_PEAK}:LRA=11:print_format=json").as_ref(),
-            "-f".as_ref(),
-            "null".as_ref(),
-            "-".as_ref(),
-        ],
-    )?;
-    let json = stderr.rfind('{').and_then(|start| stderr[start..].find('}').map(|end| &stderr[start..=start + end]));
-    let value: serde_json::Value =
-        serde_json::from_str(json.ok_or_else(|| EditError::invalid("loudnorm printed no measurement"))?)?;
-    let number = |key: &str| value[key].as_str().and_then(|text| text.parse::<f64>().ok()).filter(|v| v.is_finite());
-    let missing = || EditError::invalid("loudnorm measurement incomplete (silent audio?)");
-    Ok((
-        Loudness {
-            integrated: number("input_i").ok_or_else(missing)?,
-            true_peak: number("input_tp").ok_or_else(missing)?,
-            range: number("input_lra").ok_or_else(missing)?,
-        },
-        number("input_thresh").ok_or_else(missing)?,
-        number("target_offset").ok_or_else(missing)?,
-    ))
+/// Frames each cut's crossfade reaches to either side of it: half of
+/// [`CROSSFADE_SECONDS`], at most a quarter of either span, and none where a span
+/// continues the previous one in the source.
+fn overlaps(placed: &[Placed]) -> Vec<usize> {
+    let half = (CROSSFADE_SECONDS / 2.0 * SAMPLE_RATE as f64) as usize;
+    placed
+        .windows(2)
+        .map(|pair| {
+            if pair[0].fade_out && pair[1].fade_in {
+                half.min(pair[0].samples as usize / 4).min(pair[1].samples as usize / 4)
+            } else {
+                0
+            }
+        })
+        .collect()
+}
+
+/// Mixes the outgoing side of a cut into the incoming one (interleaved stereo, the same
+/// length), at equal power so the room's sound keeps its level through the cut.
+fn crossfade(outgoing: &[f32], incoming: &mut [f32]) {
+    let frames = incoming.len() / 2;
+    for frame in 0..frames {
+        let angle = (frame as f32 + 0.5) / frames as f32 * std::f32::consts::FRAC_PI_2;
+        let (fading, rising) = (angle.cos(), angle.sin());
+        for at in [frame * 2, frame * 2 + 1] {
+            incoming[at] = outgoing[at] * fading + incoming[at] * rising;
+        }
+    }
 }
 
 /// `edit/edl.json` in video-use's format: one range per rendered span.
@@ -1047,11 +1204,36 @@ mod tests {
     }
 
     #[test]
+    fn cuts_crossfade_at_equal_power() {
+        // Two stretches of the room's noise at the same level: the level holds through the cut.
+        let noise = |mut seed: u32| -> Vec<f32> {
+            (0..1920 * 2)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (seed >> 8) as f32 / (1 << 23) as f32 - 1.0
+                })
+                .collect()
+        };
+        let rms = |samples: &[f32]| (samples.iter().map(|v| v * v).sum::<f32>() / samples.len() as f32).sqrt();
+        let (outgoing, mut incoming) = (noise(1), noise(2));
+        let level = rms(&incoming);
+        crossfade(&outgoing, &mut incoming);
+        let change = 20.0 * (rms(&incoming) / level).log10();
+        assert!(change.abs() < 0.5, "{change} dB");
+        // The outgoing side fades along a quarter cosine.
+        let mut middle = vec![0.0; 4];
+        crossfade(&[1.0; 4], &mut middle);
+        assert!((middle[0] - (0.25f32 * std::f32::consts::FRAC_PI_2).cos()).abs() < 1e-6);
+    }
+
+    #[test]
     fn spans_that_continue_in_the_source_join_without_fades() {
         let placed = place(&[span(0.0, 1.0), span(1.0, 2.0), span(3.0, 4.0)], Rational::new(25, 1));
         assert_eq!(
             placed.iter().map(|p| (p.fade_in, p.fade_out)).collect::<Vec<_>>(),
             [(true, false), (false, true), (true, true)]
         );
+        // The cut overlaps 5 ms to either side; the continuing join doesn't.
+        assert_eq!(overlaps(&placed), [0, 240]);
     }
 }

@@ -503,6 +503,7 @@ impl Tools {
             burn_subtitles: bool,
             subtitle_style: Option<String>,
             grade: Option<String>,
+            clean_voice: Option<bool>,
         }
         let args: Args = parse_args(arguments)?;
         let quality = quality(&args.quality)?;
@@ -518,6 +519,7 @@ impl Tools {
             subtitle_style: style,
             grade: args.grade.unwrap_or_else(|| "none".into()),
             normalize_loudness: true,
+            clean_voice: args.clean_voice.unwrap_or(true),
         };
         let session = self.session()?;
         let record = render::render(session, &cut, &options, progress)?;
@@ -697,12 +699,13 @@ pub fn definitions() -> Value {
         },
         {
             "name": "render",
-            "description": "Render the current plan. quality preview: 720p, at most 30 fps, fast, for checking (edit/preview.mp4). quality final: source size and frame rate (edit/final.mp4). Clips are cached, so after a small change only what changed is encoded. Sound is normalised to -14 LUFS. Captions are always written next to the video as .srt; burn_subtitles also burns them in. Returns the render report and the checks.",
+            "description": "Render the current plan. quality preview: 720p, at most 30 fps, fast, for checking (edit/preview.mp4). quality final: source size and frame rate (edit/final.mp4). Clips are cached, so after a small change only what changed is encoded. The voice in takes with speech is cleaned (background noise lowered, rumble filtered; made once per take, the first render of a long take takes a minute longer), and the sound is compressed and normalised to -14 LUFS. Captions are always written next to the video as .srt; burn_subtitles also burns them in. Returns the render report and the checks.",
             "inputSchema": {"type": "object", "properties": {
                 "quality": {"type": "string", "enum": ["preview", "final"]},
                 "burn_subtitles": {"type": "boolean"},
                 "subtitle_style": {"type": "string", "enum": ["sentence", "punchy"]},
-                "grade": {"type": "string", "enum": grades}
+                "grade": {"type": "string", "enum": grades},
+                "clean_voice": {"type": "boolean", "description": "Default true. false keeps the sound of takes with speech as recorded, for sound under the voice that must stay: music, a game, an app's sounds in a demo."}
             }, "required": ["quality"], "additionalProperties": false}
         },
         {

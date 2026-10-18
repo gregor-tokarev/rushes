@@ -5804,6 +5804,7 @@ name = "rushes-edit"
 version = "0.1.16"
 dependencies = [
  "base64 0.22.1",
+ "dirs 6.0.0",
  "serde",
  "serde_json",
  "sha2 0.10.9",

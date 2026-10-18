@@ -1,5 +1,6 @@
 //! The tools end to end on generated footage: a transcript in the cache (no API call),
-//! a cut plan by phrase ids, renders, and the checks the agent reads.
+//! a cut plan by phrase ids, renders, and the checks the agent reads. Renders keep the
+//! sound as recorded (`clean_voice` false), but for one with a stand-in noise remover.
 
 use std::fs;
 use std::path::Path;
@@ -121,7 +122,7 @@ fn a_plan_renders_frame_and_sample_exact() {
     assert!(receipt.contains("1 fillers and 1 restarts cut"), "{receipt}");
     assert!(receipt.contains("S3: “one2,” before “one2 one4 one5 one6…”"), "{receipt}");
     for quality in ["preview", "final"] {
-        let report = call(&mut tools, "render", json!({"quality": quality}));
+        let report = call(&mut tools, "render", json!({"quality": quality, "clean_voice": false}));
         assert!(report.contains("No technical problems found."), "{report}");
         let median: f64 = report
             .split("median offset ")
@@ -179,8 +180,11 @@ fn vertical_output_crops_and_fits() {
             {"from": "A2", "focus_x": 0.3},
         ]}),
     );
-    let report =
-        call(&mut tools, "render", json!({"quality": "preview", "burn_subtitles": true, "subtitle_style": "punchy"}));
+    let report = call(
+        &mut tools,
+        "render",
+        json!({"quality": "preview", "burn_subtitles": true, "subtitle_style": "punchy", "clean_voice": false}),
+    );
     assert!(report.contains("No technical problems found."), "{report}");
     let probe = Command::new("ffprobe")
         .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0"])
@@ -294,7 +298,7 @@ fn outside_material_comes_in_as_takes_and_shows_over_the_speech() {
     );
     assert!(receipt.contains("O1 ") && receipt.contains("B (chart.png, image)"), "{receipt}");
     assert!(receipt.contains("B (image) for 1.50 s"), "{receipt}");
-    let report = call(&mut tools, "render", json!({"quality": "preview"}));
+    let report = call(&mut tools, "render", json!({"quality": "preview", "clean_voice": false}));
     assert!(report.contains("No technical problems found."), "{report}");
 
     let record: Value =
@@ -361,7 +365,7 @@ fn outside_material_comes_in_as_takes_and_shows_over_the_speech() {
         ]}),
     );
     assert!(receipt.contains("its last frame holds"), "{receipt}");
-    let report = call(&mut tools, "render", json!({"quality": "preview"}));
+    let report = call(&mut tools, "render", json!({"quality": "preview", "clean_voice": false}));
     assert!(report.contains("No technical problems found."), "{report}");
     let record: Value =
         serde_json::from_slice(&fs::read(footage.join("edit/.cache/render/last-preview.json")).unwrap()).unwrap();
@@ -377,4 +381,47 @@ fn outside_material_comes_in_as_takes_and_shows_over_the_speech() {
     let end = overlay["out_start"].as_f64().unwrap() + overlay["frames"].as_f64().unwrap() / 30.0;
     let (r, g, b) = colour_at(&preview, end - 0.1);
     assert!(b > 150 && r < 90 && g < 90, "the quote's last frame at {:.2}, got {:?}", end - 0.1, (r, g, b));
+}
+
+/// The voice of a take with speech is cleaned before it is cut, by DeepFilterNet found on
+/// `PATH` (here a stand-in that hands back what it is given), and stays in sync.
+#[cfg(unix)]
+#[test]
+fn the_voice_is_cleaned_before_it_is_cut() {
+    use std::os::unix::fs::PermissionsExt;
+    if !ffmpeg_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let footage = dir.path().join("footage");
+    fs::create_dir_all(&footage).unwrap();
+    make_take(&footage.join("take.mp4"));
+    write_transcript(&footage.join("edit"), false);
+    let bin = dir.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // deep-filter [options] --output-dir <dir> <file>: copies <file> into <dir>.
+    let program = bin.join("deep-filter");
+    fs::write(&program, "#!/bin/sh\nwhile [ \"$1\" != --output-dir ]; do shift; done\ncp \"$3\" \"$2/\"\n").unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
+    )
+    .unwrap();
+    let run = |tool: &str, args: Value| {
+        let out = Command::new(env!("CARGO_BIN_EXE_rushes-edit"))
+            .env("PATH", &path)
+            .args(["call", tool, &args.to_string(), "--footage"])
+            .arg(&footage)
+            .output()
+            .expect("run rushes-edit");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(out.status.success(), "{tool} failed: {text}{}", String::from_utf8_lossy(&out.stderr));
+        text
+    };
+
+    run("plan_cut", json!({"segments": [{"from": "A2"}, {"from": "A1"}]}));
+    let report = run("render", json!({"quality": "preview"}));
+    assert!(report.contains("Voice cleaned in A: noise lowered"), "{report}");
+    assert!(report.contains("No technical problems found."), "{report}");
+    assert!(footage.join("edit/.cache/audio/take.c1.voice-dfn15.48k.pcm").is_file());
 }
