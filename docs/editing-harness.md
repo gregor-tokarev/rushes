@@ -53,7 +53,7 @@ are shown as overlays or held as time segments, and the app does not list them a
 | Tool | What it does |
 | --- | --- |
 | `inventory` | Takes and their ids: length, size, rate, audio tracks, transcribed or not; images with their size. |
-| `add_footage` | Copies a file (a path, e.g. `edit/downloads/clip.mp4`) or downloads a link into the footage folder: a direct link as it is, any other page with `yt-dlp` (up to 1080p) when it is installed. Files are put together in the hidden `.rushes-import/` and get a free name (`name (2).ext`) only when complete. Returns the new take's id. |
+| `add_footage` | Copies a file (a path, e.g. `edit/downloads/clip.mp4`) or downloads a link into the footage folder: a direct link as it is, any other page with `yt-dlp` (up to 1080p) when it is installed. Files are put together in the hidden `.rushes-import/` and get a free name (`name (2).ext`) only when complete and readable by FFmpeg (a link that returns a login page adds nothing). Returns the new take's id. |
 | `transcribe` | Scribe v2 for every take with sound without a current transcript (or only `takes`): verbatim, word times, speakers, sound tags. Parallel, cached in `edit/transcripts/<stem>.json` (+ `.rushes.json` with the source's size and time). |
 | `read_transcript` | Phrases (`A12`: words without a 0.5 s pause), with the pause before each, sound tags, what the picture does in pauses of 3 s or more, fillers marked `~…~`, and hints: `{false start}` (cut-off word), `{said again in A14}` (the words come back within 120 s: a retake). Pages of 250 phrases. |
 | `phrase_words` | The words of a phrase with times, for `starts_with` / `ends_with`. |

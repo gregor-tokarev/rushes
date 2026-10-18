@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::{EditError, Result};
-use crate::project::{FOOTAGE_EXTENSIONS, IMAGE_EXTENSIONS, media_kind};
+use crate::probe::{probe, probe_image};
+use crate::project::{FOOTAGE_EXTENSIONS, IMAGE_EXTENSIONS, MediaKind, media_kind};
 use crate::tool;
 
 /// Where files are put together before they get their name in the footage folder:
@@ -29,8 +30,14 @@ pub fn copy_in(footage_dir: &Path, source: &Path, name: Option<&str>) -> Result<
     }
     let staging = staging_dir(footage_dir)?;
     let staged = staging.join(&file_name);
-    fs::copy(source, &staged)?;
-    place(footage_dir, &staged, &target_name(&file_name, name))
+    let result = fs::copy(source, &staged)
+        .map_err(EditError::from)
+        .and_then(|_| readable(&staged, &file_name))
+        .and_then(|()| place(footage_dir, &staged, &target_name(&file_name, name)));
+    if result.is_err() {
+        let _ = fs::remove_file(&staged);
+    }
+    result
 }
 
 /// Downloads `url` into `footage_dir`: a direct link to a media file or image as it is,
@@ -57,6 +64,9 @@ pub fn download(footage_dir: &Path, url: &str, name: Option<&str>, progress: &(d
         };
         let file_name = staged.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_owned();
         check_kind(&file_name)?;
+        readable(&staged, &file_name).map_err(|error| {
+            EditError::invalid(format!("{url} did not give a video or image (a login or error page?): {error}"))
+        })?;
         place(footage_dir, &staged, &target_name(&file_name, name))
     })();
     let _ = fs::remove_dir_all(&staging);
@@ -76,6 +86,19 @@ fn check_kind(file_name: &str) -> Result<()> {
             FOOTAGE_EXTENSIONS.join(", "),
             IMAGE_EXTENSIONS.join(", ")
         )));
+    }
+    Ok(())
+}
+
+/// Whether FFmpeg can read `path` as what its name says: only then does it go into the
+/// footage folder, where a file that cannot be read stops every tool.
+fn readable(path: &Path, file_name: &str) -> Result<()> {
+    let media = match media_kind(file_name) {
+        Some(MediaKind::Image) => probe_image(path)?,
+        _ => probe(path)?,
+    };
+    if media.video.is_none() && media.audio.is_empty() {
+        return Err(EditError::invalid(format!("{file_name} has neither picture nor sound")));
     }
     Ok(())
 }
@@ -114,7 +137,11 @@ fn place(footage_dir: &Path, staged: &Path, name: &str) -> Result<String> {
 fn direct_file_name(url: &str) -> Option<String> {
     let path = url.split(['?', '#']).next()?;
     let last = path.rsplit('/').next()?;
-    let name = percent_decode(last);
+    // Decoded, `%2F` is a separator: it must not lead outside the folder.
+    let name: String = percent_decode(last)
+        .chars()
+        .map(|c| if matches!(c, '/' | '\\' | ':') || c.is_control() { '_' } else { c })
+        .collect();
     (media_kind(&name).is_some() && !name.starts_with('.')).then_some(name)
 }
 
@@ -170,7 +197,8 @@ fn yt_dlp(url: &str, dir: &Path) -> Result<PathBuf> {
             "--no-progress".as_ref(),
             "--quiet".as_ref(),
             "-f".as_ref(),
-            "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b".as_ref(),
+            // Formats of unknown height pass; nothing above 1080p does.
+            "bv*[height<=?1080]+ba/b[height<=?1080]".as_ref(),
             "--merge-output-format".as_ref(),
             "mp4".as_ref(),
             "-o".as_ref(),
@@ -195,6 +223,12 @@ mod tests {
         assert_eq!(direct_file_name("https://x.org/a/clip%201.mp4?sig=2").as_deref(), Some("clip 1.mp4"));
         assert_eq!(direct_file_name("https://x.org/shot.PNG#top").as_deref(), Some("shot.PNG"));
         assert_eq!(direct_file_name("https://www.youtube.com/watch?v=e7ZwqHjQh5U"), None);
+        assert_eq!(
+            direct_file_name("https://x.org/%2Fhome%2Fme%2Foriginal.mp4").as_deref(),
+            Some("_home_me_original.mp4")
+        );
+        assert_eq!(direct_file_name("https://x.org/a%5Cb%3Aclip.mp4").as_deref(), Some("a_b_clip.mp4"));
+        assert_eq!(direct_file_name("https://x.org/..%2F..%2Fclip.mp4"), None);
     }
 
     #[test]
@@ -205,21 +239,47 @@ mod tests {
         assert_eq!(target_name("a.png", Some(".hidden")), "hidden.png");
     }
 
+    /// A one-frame PNG of `colour`.
+    fn image(path: &Path, colour: &str) -> bool {
+        std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", &format!("color=c={colour}:size=32x32"), "-frames:v", "1"])
+            .arg(path)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
     #[test]
     fn a_file_is_copied_in_under_a_free_name() {
         let root = tempfile::tempdir().unwrap();
         let footage = root.path().join("footage");
         fs::create_dir_all(&footage).unwrap();
-        fs::write(footage.join("chart.png"), b"old").unwrap();
         let source = root.path().join("chart.png");
-        fs::write(&source, b"new").unwrap();
+        if !(image(&footage.join("chart.png"), "red") && image(&source, "blue")) {
+            return;
+        }
         assert_eq!(copy_in(&footage, &source, None).unwrap(), "chart (2).png");
-        assert_eq!(fs::read(footage.join("chart (2).png")).unwrap(), b"new");
+        assert_eq!(fs::read(footage.join("chart (2).png")).unwrap(), fs::read(&source).unwrap());
         assert!(source.is_file(), "the source stays");
         // Already in the folder: nothing to copy.
         assert_eq!(copy_in(&footage, &footage.join("chart.png"), None).unwrap(), "chart.png");
         assert!(copy_in(&footage, &root.path().join("missing.mp4"), None).is_err());
         fs::write(root.path().join("notes.txt"), b"x").unwrap();
         assert!(copy_in(&footage, &root.path().join("notes.txt"), None).is_err());
+    }
+
+    #[test]
+    fn a_file_ffmpeg_cannot_read_stays_out() {
+        let root = tempfile::tempdir().unwrap();
+        let footage = root.path().join("footage");
+        fs::create_dir_all(&footage).unwrap();
+        if tool::ffprobe().is_err() {
+            return;
+        }
+        let page = root.path().join("clip.mp4");
+        fs::write(&page, b"<html><body>Please log in</body></html>").unwrap();
+        assert!(copy_in(&footage, &page, None).is_err());
+        let left: Vec<_> = fs::read_dir(&footage).unwrap().flatten().map(|entry| entry.file_name()).collect();
+        assert!(left.iter().all(|name| name == STAGING), "{left:?}");
+        assert_eq!(fs::read_dir(footage.join(STAGING)).unwrap().count(), 0);
     }
 }

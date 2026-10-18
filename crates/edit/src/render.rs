@@ -673,8 +673,11 @@ fn video_filter(take: &Take, format: &Format, grade: &str, ass: Option<&str>, pi
              [fg]scale={w}:{h}:force_original_aspect_ratio=decrease:flags=bicubic[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1"
         )
     });
-    // Enough frames even when the span runs to the very end of the take.
-    parts.push("tpad=stop_mode=clone:stop_duration=1".to_owned());
+    // Enough frames even when the span runs to the very end of the take, or (an overlay)
+    // past it: its last frame holds.
+    let shown = picture.frames as f64 / format.rate.as_f64();
+    let overrun = if take.still() { 0.0 } else { (picture.start + shown - take.media.duration).max(0.0) };
+    parts.push(format!("tpad=stop_mode=clone:stop_duration={}", (1.0 + overrun).ceil()));
     parts.push("format=yuv420p".to_owned());
     if !grade.is_empty() {
         parts.push(grade.to_owned());

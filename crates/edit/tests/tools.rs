@@ -313,4 +313,40 @@ fn outside_material_comes_in_as_takes_and_shows_over_the_speech() {
         &|_| {},
     );
     assert!(error.is_error && text(&error).contains("which the cut does not keep"), "{}", text(&error));
+    // Two overlays on the same closing word: an error, not one of them silently dropped.
+    let error = tools.call(
+        "plan_cut",
+        json!({"segments": [{"from": "A2"}], "overlays": [
+            {"take": "B", "from": "A2", "starts_with": "end"},
+            {"take": "C", "from": "A2", "starts_with": "end"},
+        ]}),
+        &|_| {},
+    );
+    assert!(error.is_error && text(&error).contains("cover the same words"), "{}", text(&error));
+
+    // An overlay that runs past the end of its clip holds the last frame for as long as planned.
+    let receipt = call(
+        &mut tools,
+        "plan_cut",
+        json!({"segments": [{"from": "A2"}], "overlays": [
+            {"take": "C", "start": 2.5, "from": "A2", "starts_with": "two15", "ends_with": "two22"},
+        ]}),
+    );
+    assert!(receipt.contains("its last frame holds"), "{receipt}");
+    let report = call(&mut tools, "render", json!({"quality": "preview"}));
+    assert!(report.contains("No technical problems found."), "{report}");
+    let record: Value =
+        serde_json::from_slice(&fs::read(footage.join("edit/.cache/render/last-preview.json")).unwrap()).unwrap();
+    let probe = Command::new("ffprobe")
+        .args(["-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames"])
+        .args(["-of", "csv=p=0"])
+        .arg(&preview)
+        .output()
+        .unwrap();
+    let frames: u64 = String::from_utf8_lossy(&probe.stdout).trim().parse().unwrap();
+    assert_eq!(frames, record["frames"].as_u64().unwrap(), "{}", record["pictures"]);
+    let overlay = record["pictures"].as_array().unwrap().iter().find(|p| p["overlay"] == 0).unwrap().clone();
+    let end = overlay["out_start"].as_f64().unwrap() + overlay["frames"].as_f64().unwrap() / 30.0;
+    let (r, g, b) = colour_at(&preview, end - 0.1);
+    assert!(b > 150 && r < 90 && g < 90, "the quote's last frame at {:.2}, got {:?}", end - 0.1, (r, g, b));
 }

@@ -616,43 +616,57 @@ fn overlays(
             Some("fill") => true,
             Some(other) => return Err(EditError::invalid(format!("{name}: framing “{other}”: use fit or fill"))),
         };
-        if out_end - out_start < SHORT_OVERLAY {
-            warnings.push(format!("{name} is on screen for only {:.1} s", out_end - out_start));
-        }
-        placed.push(Overlay {
-            index,
-            take: source.id.clone(),
-            source_start,
-            out_start,
-            out_end,
-            framing: Framing {
-                fill,
-                focus_x: spec.focus_x.unwrap_or(0.5).clamp(0.0, 1.0),
-                focus_y: spec.focus_y.unwrap_or(0.5).clamp(0.0, 1.0),
-                zoom: spec.zoom.unwrap_or(1.0).clamp(1.0, 3.0),
+        placed.push((
+            start,
+            end,
+            Overlay {
+                index,
+                take: source.id.clone(),
+                source_start,
+                out_start,
+                out_end,
+                framing: Framing {
+                    fill,
+                    focus_x: spec.focus_x.unwrap_or(0.5).clamp(0.0, 1.0),
+                    focus_y: spec.focus_y.unwrap_or(0.5).clamp(0.0, 1.0),
+                    zoom: spec.zoom.unwrap_or(1.0).clamp(1.0, 3.0),
+                },
+                label: spec.label.clone(),
+                source: if source.still() {
+                    format!("{} ({}, image)", source.id, source.file)
+                } else {
+                    format!("{} ({}) from {source_start:.2}", source.id, source.file)
+                },
+                text: view.text(selection.range.0..selection.range.1 + 1),
             },
-            label: spec.label.clone(),
-            source: if source.still() {
-                format!("{} ({}, image)", source.id, source.file)
-            } else {
-                format!("{} ({}) from {source_start:.2}", source.id, source.file)
-            },
-            text: view.text(selection.range.0..selection.range.1 + 1),
-        });
+        ));
     }
-    placed.sort_by(|a, b| a.out_start.total_cmp(&b.out_start));
-    // Overlays on neighbouring words meet: the earlier one ends where the next begins.
+    // By where their words are said: (output start of the first word, end of the last, overlay).
+    placed.sort_by(|a, b| a.0.total_cmp(&b.0));
     for index in 1..placed.len() {
-        let (previous, next) = (&placed[index - 1], &placed[index]);
+        let ((_, previous_end, previous), (next_start, _, next)) = (&placed[index - 1], &placed[index]);
+        if *next_start < previous_end - 0.01 {
+            return Err(EditError::invalid(format!(
+                "O{} and O{} cover the same words: one picture at a time",
+                previous.index + 1,
+                next.index + 1
+            )));
+        }
+        // Overlays on neighbouring words meet between them.
         if next.out_start < previous.out_end {
-            if previous.out_end - next.out_start > OVERLAY_LEAD + OVERLAY_TAIL + 0.05 {
-                return Err(EditError::invalid(format!(
-                    "O{} and O{} cover the same words: one picture at a time",
-                    previous.index + 1,
-                    next.index + 1
-                )));
-            }
-            placed[index - 1].out_end = placed[index].out_start;
+            let meet = next.out_start.clamp(*previous_end, *next_start);
+            placed[index - 1].2.out_end = meet;
+            placed[index].2.out_start = meet;
+        }
+    }
+    let placed: Vec<Overlay> = placed.into_iter().map(|(_, _, overlay)| overlay).collect();
+    for overlay in &placed {
+        if overlay.out_end - overlay.out_start < SHORT_OVERLAY {
+            warnings.push(format!(
+                "O{} is on screen for only {:.1} s",
+                overlay.index + 1,
+                overlay.out_end - overlay.out_start
+            ));
         }
     }
     Ok(placed)
