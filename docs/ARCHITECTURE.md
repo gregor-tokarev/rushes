@@ -134,8 +134,9 @@ database's write lock for seconds. The UI thread never waits for it:
   local emulators. Env overrides: `RUSHES_GOOGLE_URL`, `RUSHES_YOUTUBE_URL`.
 - OAuth: installed-app flow. `begin_authorization(&config) -> PendingAuthorization`
   binds `127.0.0.1:0`, builds the consent URL (scopes: `openid email profile
-  https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly`,
-  `access_type=offline`, `prompt=consent`, PKCE S256, random `state`). The app opens the URL
+  https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly
+  https://www.googleapis.com/auth/youtube.force-ssl`; the last, `MANAGE_SCOPE`, lets Rushes change
+  uploaded videos), `access_type=offline`, `prompt=consent`, PKCE S256, random `state`). The app opens the URL
   in the browser; `PendingAuthorization::wait(timeout, cancel)` serves the redirect, shows a
   small "you can close this tab" page, validates `state`, exchanges the code.
 - `Credentials` (access/refresh token, expiry, scope) + `CredentialStore` (JSON file, 0600).
@@ -144,6 +145,8 @@ database's write lock for seconds. The UI thread never waits for it:
   `userinfo()`, `my_channel()`, `upload_video(path, &VideoMetadata, progress, cancel)`
   (resumable protocol, chunked, resumable after interruption via the session URL),
   `resume_upload(session_url, path, ...)`, `set_thumbnail(video_id, path)`,
+  `set_visibility(video_id, Visibility)` (reads the video's status and sends it back with
+  the new privacy and schedule, since `videos.update` clears what it isn't sent),
   `get_video(id)`, `list_my_uploads(max)`, `revoke()`.
 
 ## edit (`rushes-edit`)
@@ -212,7 +215,11 @@ GPUI Kit app. Main pieces:
   default one), metadata form, upload with progress, resume. The thumbnail goes up
   when the upload finishes, and at once when it's chosen for a video already on
   YouTube (`publish/thumbnail.rs`); `YoutubeLink.thumbnail` records the image YouTube
-  has, so the Thumbnail card can say whether the chosen one is there. `PublishAssistant`
+  has, so the Thumbnail card can say whether the chosen one is there. Who can watch and
+  the schedule go to a video already on YouTube when the form saves them, and what
+  YouTube reports comes back to the form (`publish/visibility.rs`); a change made while
+  the video uploads again goes to the new video. Sign-ins from before `MANAGE_SCOPE`
+  get "Reconnect" first. `PublishAssistant`
   has the agent write the title, description and tags (with Undo) and Codex draw
   thumbnails to choose from; both keep running when the tab is left.
 - AI edit: footage list, edit brief, run timeline (agent messages/tool calls), approve /

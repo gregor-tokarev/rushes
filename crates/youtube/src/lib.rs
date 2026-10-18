@@ -15,10 +15,10 @@ mod upload;
 
 pub use client::YoutubeClient;
 pub use config::{
-    DEFAULT_GOOGLE_EMULATOR_URL, DEFAULT_YOUTUBE_EMULATOR_URL, EMULATOR_CLIENT_ID, SCOPES, YoutubeConfig,
+    DEFAULT_GOOGLE_EMULATOR_URL, DEFAULT_YOUTUBE_EMULATOR_URL, EMULATOR_CLIENT_ID, MANAGE_SCOPE, SCOPES, YoutubeConfig,
 };
 pub use credentials::{Account, CredentialStore, SavedLogin};
 pub use error::{Error, Result, RetryCause};
 pub use oauth::{Credentials, PendingAuthorization, begin_authorization, check_client, refresh, revoke};
-pub use types::{Channel, GoogleUser, Privacy, ProcessingStatus, UploadStatus, VideoInfo, watch_url};
+pub use types::{Channel, GoogleUser, Privacy, ProcessingStatus, UploadStatus, VideoInfo, Visibility, watch_url};
 pub use upload::{DEFAULT_CHUNK_SIZE, UPLOAD_GRANULARITY, UploadOptions, UploadProgress, UploadedVideo, VideoMetadata};

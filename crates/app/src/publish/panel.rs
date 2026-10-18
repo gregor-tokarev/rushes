@@ -52,6 +52,7 @@ use super::ui::{
     ConnectionPanel, FieldRow, card, file_name, help_text, section_heading, sign_in_progress, status_line, youtube_link,
 };
 use super::upload::{ProcessingOutcome, Retired, UPLOAD_ACCOUNT_LOCKED, UPLOAD_FILE_LOCKED, UploadError};
+use super::visibility::VisibilitySync;
 use crate::ai_edit::PipelineService;
 use crate::route::{Route, VideoTab};
 use crate::state::{AppEvent, AppState};
@@ -453,17 +454,39 @@ impl PublishPanel {
     /// Saves pending form edits now instead of after the delay. Only the fields the form
     /// changed are written, so a file chosen elsewhere meanwhile stays.
     pub fn save_pending(&mut self, cx: &mut App) {
+        self.save_edits(cx);
+    }
+
+    /// [`Self::save_pending`]; returns whether a new visibility went to YouTube with it.
+    fn save_edits(&mut self, cx: &mut App) -> bool {
         if self.edited.is_empty() {
-            return;
+            return false;
         }
         let edited = std::mem::take(&mut self.edited);
-        let Some(mut video) = self.state.read(cx).video(self.video_id).cloned() else { return };
+        let Some(mut video) = self.state.read(cx).video(self.video_id).cloned() else { return false };
         let publish = edited.merge(&video.publish, &self.draft);
         if video.publish == publish {
-            return;
+            return false;
         }
+        let visibility_changed =
+            (video.publish.privacy, video.publish.publish_at) != (publish.privacy, publish.publish_at);
         video.publish = publish;
+        let on_youtube = video.youtube.is_some();
         self.state.update(cx, |state, cx| state.update_video(video, cx));
+        // Who can watch the video changes on YouTube too.
+        if visibility_changed && on_youtube {
+            let video_id = self.video_id;
+            self.service.update(cx, |service, cx| service.set_youtube_visibility(video_id, cx));
+        }
+        visibility_changed && on_youtube
+    }
+
+    /// Sends who can watch the video to YouTube again, after it didn't get there.
+    fn send_visibility(&mut self, cx: &mut Context<Self>) {
+        if !self.save_edits(cx) {
+            let video_id = self.video_id;
+            self.service.update(cx, |service, cx| service.set_youtube_visibility(video_id, cx));
+        }
     }
 
     fn schedule_save(&mut self, field: Field, cx: &mut Context<Self>) {
@@ -1160,9 +1183,22 @@ impl PublishPanel {
         let scheduled = self.draft.publish_at.is_some();
         let privacy_ix = Privacy::ALL.iter().position(|privacy| *privacy == self.draft.privacy).unwrap_or(0);
         let google = self.service.read(cx).config().is_ok_and(|config| config.is_google());
+        let link = self.state.read(cx).video(self.video_id).and_then(|video| video.youtube.clone());
+        let sync = link.as_ref().and_then(|link| self.service.read(cx).visibility_sync(&link.video_id).cloned());
         v_flex()
             .gap_5()
-            .child(section_heading("Visibility"))
+            .child(v_flex().gap_0p5().child(section_heading("Visibility")).when(link.is_some(), |this| {
+                // Unlike the details, these reach the uploaded video. It reads as the
+                // section's description.
+                this.child(
+                    div()
+                        .id("publish-visibility-note")
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Changes here go to the video on YouTube.")
+                        .test_support(),
+                )
+            }))
             .child(
                 FieldRow::new("Who can watch")
                     .help(if scheduled {
@@ -1216,12 +1252,60 @@ impl PublishPanel {
                         )
                     }),
             )
+            .children(sync.map(|sync| self.render_visibility_sync(sync, cx)))
             .when(google, |this| {
                 this.child(help_text(
                     "Until Google audits your API project, YouTube locks uploads from it to private.",
                     cx,
                 ))
             })
+    }
+
+    /// Where changing who can watch the uploaded video stands, with the way on when
+    /// the change didn't get there.
+    fn render_visibility_sync(&self, sync: VisibilitySync, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let body = match sync {
+            VisibilitySync::Sending => h_flex()
+                .gap_2()
+                .child(Spinner::new().small().color(theme.muted_foreground))
+                .child(div().text_sm().child("Sending to YouTube…")),
+            VisibilitySync::Failed { problem, reconnect } => {
+                let button = match reconnect {
+                    Some(key) => {
+                        // One browser sign-in at a time: another one must end first.
+                        let busy = self.service.read(cx).is_signing_in();
+                        let service = self.service.clone();
+                        Button::new("visibility-reconnect")
+                            .label("Reconnect")
+                            .disabled(busy)
+                            .on_click(move |_, _, cx| service.update(cx, |service, cx| service.reconnect(&key, cx)))
+                    }
+                    None => Button::new("visibility-try-again")
+                        .label("Try again")
+                        .on_click(cx.listener(|this, _, _, cx| this.send_visibility(cx))),
+                };
+                v_flex()
+                    .gap_2()
+                    .child(status_line(
+                        IconName::TriangleAlert,
+                        theme.warning,
+                        "Not changed on YouTube",
+                        Some(problem.into()),
+                        cx,
+                    ))
+                    .child(h_flex().child(button.small().outline()))
+            }
+            VisibilitySync::Kept(privacy) => status_line(
+                IconName::TriangleAlert,
+                theme.warning,
+                format!("YouTube kept the video {}", privacy.api_value()),
+                Some("YouTube Studio shows why.".into()),
+                cx,
+            ),
+        };
+        // Tests check what the section says.
+        div().id("youtube-visibility-sync").child(body).test_support().into_any_element()
     }
 
     fn render_audience(&self, cx: &mut Context<Self>) -> impl IntoElement {

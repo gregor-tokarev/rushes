@@ -88,6 +88,14 @@ pub struct VideoInfo {
     pub thumbnail: Option<String>,
 }
 
+/// Who can watch a video, and when a private one goes public.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Visibility {
+    pub privacy: Privacy,
+    /// Scheduled publish time; YouTube requires `privacy == Private` until then.
+    pub publish_at: Option<DateTime<Utc>>,
+}
+
 pub fn watch_url(video_id: &str) -> String {
     format!("https://www.youtube.com/watch?v={video_id}")
 }
@@ -231,6 +239,26 @@ impl From<VideoResource> for VideoInfo {
             url,
             id: resource.id,
         }
+    }
+}
+
+/// A video resource with only its `status` part.
+#[derive(Deserialize)]
+pub(crate) struct StatusPart<T> {
+    pub status: T,
+}
+
+/// The visibility in a `status` part.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VisibilityStatus {
+    privacy_status: Privacy,
+    publish_at: Option<DateTime<Utc>>,
+}
+
+impl From<VisibilityStatus> for Visibility {
+    fn from(status: VisibilityStatus) -> Self {
+        Visibility { privacy: status.privacy_status, publish_at: status.publish_at }
     }
 }
 

@@ -458,7 +458,8 @@ mod tests {
         assert_eq!(params["include_granted_scopes"], "true");
         assert_eq!(
             params["scope"],
-            "openid email profile https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly"
+            "openid email profile https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly \
+             https://www.googleapis.com/auth/youtube.force-ssl"
         );
     }
 

@@ -543,6 +543,10 @@ impl YoutubeService {
                     }),
                     Err(error) => self.on_upload_failed(id, &error, upload.resumed, cx),
                 }
+                // A visibility chosen while it uploaded goes to the video on YouTube now.
+                if let Some(video_id) = self.job(id).map(|job| job.video_id) {
+                    self.send_visibility_after_upload(video_id, cx);
+                }
             }
         }
     }
@@ -587,10 +591,14 @@ impl YoutubeService {
             {
                 self.thumbnails.remove(&video_id);
                 self.thumbnails_chosen_again.remove(&video_id);
+                self.visibility.remove(&video_id);
+                self.visibility_changed_again.remove(&video_id);
             }
             self.retired.remove(id);
         }
         self.jobs.retain(|job| !gone.contains(&job.id));
+        let state = self.state.read(cx);
+        self.visibility_after_upload.retain(|video_id| state.video(*video_id).is_some());
         cx.emit(YoutubeEvent::UploadsChanged);
         cx.notify();
     }
@@ -702,16 +710,13 @@ impl YoutubeService {
         cx.spawn(async move |this, cx| {
             for _ in 0..PROCESSING_POLLS {
                 cx.background_executor().timer(PROCESSING_POLL_INTERVAL).await;
-                let (client, youtube_id) = (client.clone(), youtube_id.clone());
+                let Ok(changes) = this.read_with(cx, |this, _| this.visibility_changes(&youtube_id)) else { return };
+                let (client, lookup) = (client.clone(), youtube_id.clone());
                 // Errors are retried at the next poll: processing goes on without the app.
-                let state = cx.background_spawn(async move { client.get_video(&youtube_id) }).await;
+                let state = cx.background_spawn(async move { client.get_video(&lookup) }).await;
                 let Ok(Some(info)) = state else { continue };
                 let outcome = processed(&info);
-                this.update(cx, |this, cx| {
-                    this.remote.insert(info.id.clone(), info);
-                    cx.notify();
-                })
-                .ok();
+                this.update(cx, |this, cx| this.on_youtube_video(info, changes, cx)).ok();
                 if let Some(outcome) = outcome {
                     this.update(cx, |this, cx| this.finish_processing(id, outcome, cx)).ok();
                     return;

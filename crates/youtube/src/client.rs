@@ -3,7 +3,9 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use chrono::{SecondsFormat, Utc};
 use serde::de::DeserializeOwned;
+use serde_json::{Map, Value, json};
 use ureq::Agent;
 use ureq::http::StatusCode;
 
@@ -12,8 +14,8 @@ use crate::error::{Error, Result};
 use crate::http::{self, HttpResponse, bearer};
 use crate::oauth::{self, Credentials};
 use crate::types::{
-    Channel, ChannelResource, GoogleUser, ListResponse, PlaylistItemResource, ThumbnailSetResponse, Thumbnails,
-    VideoInfo, VideoResource,
+    Channel, ChannelResource, GoogleUser, ListResponse, PlaylistItemResource, Privacy, StatusPart,
+    ThumbnailSetResponse, Thumbnails, VideoInfo, VideoResource, Visibility, VisibilityStatus,
 };
 use crate::upload::UploadOptions;
 
@@ -148,6 +150,39 @@ impl YoutubeClient {
             .ok_or_else(|| Error::Protocol("thumbnails.set returned no thumbnail".to_owned()))
     }
 
+    /// Changes who can watch the video and when a private one goes public; the rest of
+    /// its status stays as it is. Returns what YouTube has afterwards, which may differ
+    /// from what was asked: YouTube keeps uploads from API projects Google hasn't
+    /// audited private. `None` when the video doesn't exist or this account can't see
+    /// it. The sign-in needs [`MANAGE_SCOPE`](crate::MANAGE_SCOPE).
+    pub fn set_visibility(&self, video_id: &str, visibility: Visibility) -> Result<Option<Visibility>> {
+        if let Some(publish_at) = visibility.publish_at {
+            if visibility.privacy != Privacy::Private {
+                return Err(Error::InvalidInput("a scheduled video must be private until it is published".to_owned()));
+            }
+            if publish_at <= Utc::now() {
+                return Err(Error::InvalidInput("the scheduled publish time is in the past".to_owned()));
+            }
+        }
+        let url = format!("{}/videos", self.config.api_base);
+        // `videos.update` clears whatever the request leaves out, so the rest of the
+        // status is sent back as YouTube has it.
+        let list: ListResponse<StatusPart<Map<String, Value>>> =
+            self.get_json(&url, &[("part", "status"), ("id", video_id)])?;
+        let Some(current) = list.items.into_iter().next() else { return Ok(None) };
+        let body = serde_json::to_vec(&json!({"id": video_id, "status": status_update(current.status, visibility)}))?;
+        let response = self.authorized(|token| {
+            self.agent
+                .put(&url)
+                .query("part", "status")
+                .header("Authorization", bearer(token))
+                .header("Content-Type", "application/json; charset=UTF-8")
+                .send(&body[..])
+        })?;
+        let updated: StatusPart<VisibilityStatus> = http::json(response)?;
+        Ok(Some(updated.status.into()))
+    }
+
     /// Signs the account out at Google. The caller should also clear the stored credentials.
     pub fn revoke(&self) -> Result<()> {
         oauth::revoke_with(&self.agent, &self.config, &self.credentials())
@@ -224,6 +259,20 @@ impl YoutubeClient {
     }
 }
 
+/// The `status` part to send for `visibility`, from the one YouTube has.
+fn status_update(mut status: Map<String, Value>, visibility: Visibility) -> Map<String, Value> {
+    // Read-only: YouTube works them out.
+    for key in ["uploadStatus", "failureReason", "rejectionReason", "madeForKids"] {
+        status.remove(key);
+    }
+    status.insert("privacyStatus".to_owned(), visibility.privacy.as_str().into());
+    match visibility.publish_at {
+        Some(at) => status.insert("publishAt".to_owned(), at.to_rfc3339_opts(SecondsFormat::Secs, true).into()),
+        None => status.remove("publishAt"),
+    };
+    status
+}
+
 pub(crate) fn extension(path: &Path) -> Option<String> {
     path.extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase)
 }
@@ -231,6 +280,28 @@ pub(crate) fn extension(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visibility_updates_keep_the_rest_of_the_status() {
+        let status = json!({
+            "uploadStatus": "processed", "privacyStatus": "private", "publishAt": "2030-01-02T03:04:05Z",
+            "license": "creativeCommon", "embeddable": false, "publicStatsViewable": true,
+            "madeForKids": false, "selfDeclaredMadeForKids": false, "containsSyntheticMedia": true,
+        });
+        let Value::Object(status) = status else { unreachable!() };
+        let public = Visibility { privacy: Privacy::Public, publish_at: None };
+        assert_eq!(
+            Value::Object(status_update(status.clone(), public)),
+            json!({
+                "privacyStatus": "public", "license": "creativeCommon", "embeddable": false,
+                "publicStatsViewable": true, "selfDeclaredMadeForKids": false, "containsSyntheticMedia": true,
+            })
+        );
+        let at = chrono::DateTime::parse_from_rfc3339("2031-05-06T07:08:09.5Z").unwrap().to_utc();
+        let scheduled = status_update(status, Visibility { privacy: Privacy::Private, publish_at: Some(at) });
+        assert_eq!(scheduled["privacyStatus"], "private");
+        assert_eq!(scheduled["publishAt"], "2031-05-06T07:08:09Z");
+    }
 
     #[test]
     fn client_is_send_and_sync() {
