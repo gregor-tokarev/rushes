@@ -1,5 +1,6 @@
 //! Who can watch videos on YouTube: what the Publish tab's Visibility section
-//! chooses goes to the video once it is there, and what YouTube has comes back to it.
+//! chooses goes to the video once it is there. The section keeps the creator's
+//! choice, and says so when YouTube has another.
 
 use chrono::{DateTime, Local, Utc};
 use gpui_kit::{AppContext as _, Context};
@@ -20,7 +21,7 @@ pub enum VisibilitySync {
         /// The account to sign in to again, when that is what it takes, by key.
         reconnect: Option<String>,
     },
-    /// YouTube took the change but kept the video `privacy`, which the form shows now.
+    /// YouTube took the change but kept the video `privacy`.
     Kept(Privacy),
 }
 
@@ -35,20 +36,19 @@ fn same(a: Visibility, b: Visibility) -> bool {
     a.privacy == b.privacy && a.publish_at.map(|at| at.timestamp()) == b.publish_at.map(|at| at.timestamp())
 }
 
-/// Whether YouTube has another visibility for `video` than the app knows of.
-fn differs(video: &Video, visibility: Visibility) -> bool {
-    !same(chosen(video), visibility)
-        || video.youtube.as_ref().is_some_and(|link| link.privacy != core_privacy(visibility.privacy))
+/// What YouTube has once it did what `visibility` asks: a schedule past its time
+/// made the video public.
+fn by_now(visibility: Visibility) -> Visibility {
+    match visibility.publish_at {
+        Some(at) if at <= Utc::now() => Visibility { privacy: rushes_youtube::Privacy::Public, publish_at: None },
+        _ => visibility,
+    }
 }
 
-/// The video's visibility as YouTube has it, with the planner following: a video
+/// Records what YouTube has for `video`, with the planner following: a video
 /// YouTube schedules is scheduled, one anyone can watch is published.
-fn take_visibility(video: &mut Video, visibility: Visibility) {
+fn record(video: &mut Video, visibility: Visibility) {
     let privacy = core_privacy(visibility.privacy);
-    if !same(chosen(video), visibility) {
-        video.publish.privacy = privacy;
-        video.publish.publish_at = visibility.publish_at;
-    }
     if let Some(link) = video.youtube.as_mut() {
         link.privacy = privacy;
     }
@@ -71,6 +71,15 @@ impl YoutubeService {
     /// change is on its way or after YouTube didn't make it.
     pub fn visibility_sync(&self, youtube_id: &str) -> Option<&VisibilitySync> {
         self.visibility.get(youtube_id)
+    }
+
+    /// Who can watch `video` on YouTube, as YouTube last said, when that isn't what
+    /// its publish settings choose: a change that didn't get there (also in an
+    /// earlier run of the app), or one made in YouTube Studio.
+    pub fn other_visibility_on_youtube(&self, video: &Video) -> Option<Visibility> {
+        let info = self.remote.get(&video.youtube.as_ref()?.video_id)?;
+        let on_youtube = Visibility { privacy: info.privacy, publish_at: info.publish_at };
+        (!same(by_now(chosen(video)), on_youtube)).then_some(on_youtube)
     }
 
     /// Changes who can watch the YouTube video of `video_id` to what its publish
@@ -155,9 +164,9 @@ impl YoutubeService {
                 if !same(now, sent) {
                     self.visibility.insert(youtube_id.clone(), VisibilitySync::Kept(core_privacy(now.privacy)));
                 }
-                // A newer choice is the one to keep; it goes next.
+                // A newer choice goes next, and is recorded then.
                 if let Some(mut video) = video.clone().filter(|_| !chosen_again) {
-                    take_visibility(&mut video, now);
+                    record(&mut video, now);
                     self.state.update(cx, |state, cx| state.update_video(video, cx));
                 }
             }
@@ -177,10 +186,18 @@ impl YoutubeService {
         }
     }
 
-    /// Sends the visibility of `video_id` once its upload ended, when it changed meanwhile:
-    /// to the new video, or to the one already there when the upload didn't finish.
-    pub(super) fn send_visibility_after_upload(&mut self, video_id: VideoId, cx: &mut Context<Self>) {
-        if self.visibility_after_upload.remove(&video_id) {
+    /// Sends the visibility of `video_id` to the video its upload just put on YouTube
+    /// as `uploaded`, when it changed while the video uploaded (also before a resume,
+    /// which keeps the settings the upload started with) or YouTube has another.
+    pub(super) fn send_visibility_after_upload(
+        &mut self,
+        video_id: VideoId,
+        uploaded: rushes_youtube::Privacy,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.visibility_after_upload.remove(&video_id);
+        let other = self.state.read(cx).video(video_id).is_some_and(|video| chosen(video).privacy != uploaded);
+        if changed || other {
             self.set_youtube_visibility(video_id, cx);
         }
     }
@@ -221,55 +238,25 @@ impl YoutubeService {
     }
 
     /// Keeps what YouTube said about a video, asked after `changes` visibility
-    /// changes. The Visibility section takes what YouTube has, unless a change of
-    /// the creator's is on its way or didn't reach YouTube, or the answer is older
-    /// than the last change.
+    /// changes. An answer asked before the last change, or while one is on its
+    /// way, may predate it: the visibility that change left stays.
     pub(super) fn on_youtube_video(&mut self, mut info: VideoInfo, changes: u64, cx: &mut Context<Self>) {
         let youtube_id = info.id.clone();
         let current = self.visibility_changes(&youtube_id) == changes
-            && !matches!(
-                self.visibility.get(&youtube_id),
-                Some(VisibilitySync::Sending | VisibilitySync::Failed { .. })
-            );
+            && self.visibility.get(&youtube_id) != Some(&VisibilitySync::Sending);
         if !current && let Some(known) = self.remote.get(&youtube_id) {
             info.privacy = known.privacy;
             info.publish_at = known.publish_at;
         }
-        let visibility = Visibility { privacy: info.privacy, publish_at: info.publish_at };
-        self.remote.insert(youtube_id.clone(), info);
-        cx.notify();
-        if !current {
-            return;
-        }
         // Changed since, in YouTube Studio: what YouTube kept is no news anymore.
-        if let Some(VisibilitySync::Kept(kept)) = self.visibility.get(&youtube_id)
-            && *kept != core_privacy(visibility.privacy)
+        if current
+            && let Some(VisibilitySync::Kept(kept)) = self.visibility.get(&youtube_id)
+            && *kept != core_privacy(info.privacy)
         {
             self.visibility.remove(&youtube_id);
         }
-        let taken: Vec<Video> = self
-            .state
-            .read(cx)
-            .rows()
-            .iter()
-            .map(|row| &row.video)
-            .filter(|video| video.youtube.as_ref().is_some_and(|link| link.video_id == youtube_id))
-            // An upload under way takes the form's visibility to its new video.
-            .filter(|video| !self.is_uploading_any(&[video.id]))
-            .filter(|video| differs(video, visibility))
-            .map(|video| {
-                let mut taken = video.clone();
-                take_visibility(&mut taken, visibility);
-                taken
-            })
-            .collect();
-        if !taken.is_empty() {
-            self.state.update(cx, |state, cx| {
-                for video in taken {
-                    state.update_video(video, cx);
-                }
-            });
-        }
+        self.remote.insert(youtube_id, info);
+        cx.notify();
     }
 }
 
@@ -298,51 +285,36 @@ mod tests {
     #[test]
     fn the_planner_follows_youtube() {
         let tomorrow = Utc::now() + TimeDelta::days(1);
-        let mut video = uploaded(Privacy::Private, None);
+        let mut video = uploaded(Privacy::Private, Some(tomorrow));
         video.status = VideoStatus::Ready;
-        take_visibility(
-            &mut video,
-            Visibility { privacy: rushes_youtube::Privacy::Private, publish_at: Some(tomorrow) },
-        );
-        assert_eq!((video.publish.privacy, video.publish.publish_at), (Privacy::Private, Some(tomorrow)));
+        record(&mut video, Visibility { privacy: rushes_youtube::Privacy::Private, publish_at: Some(tomorrow) });
         assert_eq!(video.status, VideoStatus::Scheduled);
         assert_eq!(video.publish_date, Some(tomorrow.with_timezone(&Local).date_naive()));
 
         // No schedule anymore: ready again, until anyone can watch it.
-        take_visibility(&mut video, Visibility { privacy: rushes_youtube::Privacy::Private, publish_at: None });
+        record(&mut video, Visibility { privacy: rushes_youtube::Privacy::Private, publish_at: None });
         assert_eq!(video.status, VideoStatus::Ready);
-        take_visibility(&mut video, Visibility { privacy: rushes_youtube::Privacy::Unlisted, publish_at: None });
-        assert_eq!(video.publish.privacy, Privacy::Unlisted);
+        record(&mut video, Visibility { privacy: rushes_youtube::Privacy::Unlisted, publish_at: None });
         assert_eq!(video.youtube.as_ref().map(|link| link.privacy), Some(Privacy::Unlisted));
         assert_eq!(video.status, VideoStatus::Published);
         // A published video made private stays published in the planner.
-        take_visibility(&mut video, Visibility { privacy: rushes_youtube::Privacy::Private, publish_at: None });
+        record(&mut video, Visibility { privacy: rushes_youtube::Privacy::Private, publish_at: None });
         assert_eq!(video.status, VideoStatus::Published);
+        // The form keeps the creator's choice.
+        assert_eq!((video.publish.privacy, video.publish.publish_at), (Privacy::Private, Some(tomorrow)));
     }
 
     #[test]
-    fn only_another_visibility_is_news() {
-        let video = uploaded(Privacy::Public, None);
-        assert!(!differs(&video, Visibility { privacy: rushes_youtube::Privacy::Public, publish_at: None }));
-        assert!(differs(&video, Visibility { privacy: rushes_youtube::Privacy::Unlisted, publish_at: None }));
-        // Uploaded as unlisted, kept private by YouTube.
-        let mut kept = uploaded(Privacy::Unlisted, None);
-        if let Some(link) = kept.youtube.as_mut() {
-            link.privacy = Privacy::Private;
-        }
-        assert!(differs(&kept, Visibility { privacy: rushes_youtube::Privacy::Private, publish_at: None }));
-    }
-
-    #[test]
-    fn schedules_count_to_the_second() {
+    fn schedules_count_to_the_second_and_end_public() {
         let at = DateTime::parse_from_rfc3339("2031-05-06T07:08:09.5Z").unwrap().to_utc();
-        let mut video = uploaded(Privacy::Private, Some(at));
         let youtube = Visibility {
             privacy: rushes_youtube::Privacy::Private,
             publish_at: Some(DateTime::parse_from_rfc3339("2031-05-06T07:08:09Z").unwrap().to_utc()),
         };
-        assert!(same(chosen(&video), youtube));
-        take_visibility(&mut video, youtube);
-        assert_eq!(video.publish.publish_at, Some(at), "the creator's time stays");
+        assert!(same(by_now(chosen(&uploaded(Privacy::Private, Some(at)))), youtube));
+        // YouTube made it public at its time.
+        let past = uploaded(Privacy::Private, Some(Utc::now() - TimeDelta::hours(1)));
+        let public = Visibility { privacy: rushes_youtube::Privacy::Public, publish_at: None };
+        assert!(same(by_now(chosen(&past)), public));
     }
 }

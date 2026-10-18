@@ -394,6 +394,8 @@ impl YoutubeService {
             self.retire(id, Retired::Replaced, cx);
         }
         self.jobs_changed(cx);
+        // The upload takes the visibility the video chooses now.
+        self.visibility_after_upload.remove(&video_id);
         self.spawn_transfer(job.id, client, file, stamp.size, Request::Upload(Box::new(rules::metadata(&video))), cx);
         Ok(job.id)
     }
@@ -543,10 +545,6 @@ impl YoutubeService {
                     }),
                     Err(error) => self.on_upload_failed(id, &error, upload.resumed, cx),
                 }
-                // A visibility chosen while it uploaded goes to the video on YouTube now.
-                if let Some(video_id) = self.job(id).map(|job| job.video_id) {
-                    self.send_visibility_after_upload(video_id, cx);
-                }
             }
         }
     }
@@ -695,6 +693,7 @@ impl YoutubeService {
             let target = ThumbnailTarget { video_id, youtube_id: youtube_id.clone(), channel: uploaded.channel_id };
             self.send_thumbnail(target, client.clone(), thumbnail, true, cx);
         }
+        self.send_visibility_after_upload(video_id, uploaded.privacy, cx);
         self.follow_processing(id, client, youtube_id, cx);
     }
 

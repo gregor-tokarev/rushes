@@ -1441,7 +1441,7 @@ fn an_older_sign_in_reconnects_to_change_who_can_watch(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
-fn the_visibility_follows_changes_made_in_youtube_studio(cx: &mut TestAppContext) {
+fn a_visibility_changed_in_youtube_studio_shows_beside_the_choice(cx: &mut TestAppContext) {
     let Some(emulators) = Emulators::start() else { return };
     let workspace = Workspace::open(cx, emulators.backend());
     workspace.sign_in(cx, "creator@example.com");
@@ -1453,15 +1453,61 @@ fn the_visibility_follows_changes_made_in_youtube_studio(cx: &mut TestAppContext
     client.set_visibility(&youtube_id, public).unwrap();
 
     let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
-    let video = wait_until(cx, "YouTube’s visibility", |cx| {
-        let video = workspace.video(cx, video_id);
-        (video.publish.privacy == Privacy::Public).then_some(video)
+    wait_until(cx, "YouTube’s visibility", |cx| {
+        service
+            .read_with(cx, |s, _| s.youtube_video(&youtube_id).filter(|info| info.privacy == public.privacy).map(drop))
     });
-    assert_eq!(video.youtube.map(|link| link.privacy), Some(Privacy::Public));
-    assert_eq!(video.status, VideoStatus::Published);
+    // The form keeps the creator's choice, and says what YouTube has.
+    assert_eq!(workspace.video(cx, video_id).publish.privacy, Privacy::Private);
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.within("publish-privacy").find(0usize).checked(), Some(true));
+        assert!(window.find("youtube-visibility-sync").visible());
+        window.within("youtube-visibility-sync").click("visibility-send", cx);
+    });
+    wait_until(cx, "the choice on YouTube", |cx| {
+        let on_youtube = visibility_on_youtube(cx, &service, &youtube_id);
+        (on_youtube.privacy == rushes_youtube::Privacy::Private).then_some(())
+    });
+    cx.run_until_parked();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("youtube-visibility-sync").is_none(), "YouTube has the choice");
+    });
+}
+
+#[gpui_kit::test]
+fn a_change_that_did_not_reach_youtube_is_offered_again_after_a_restart(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let (video_id, youtube_id) = uploaded_without_thumbnail(cx, &workspace);
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    emulators.inject_fault(json!({"method": "PUT", "path": "/youtube/v3/videos", "status": 503}));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.within("publish-privacy").click(2usize, cx);
+    });
+    settle(cx);
+    wait_until(cx, "the refusal", |cx| {
+        workspace.service.read_with(cx, |s, _| {
+            matches!(s.visibility_sync(&youtube_id), Some(VisibilitySync::Failed { .. })).then_some(())
+        })
+    });
+
+    // Quit before trying again: the next start still has the choice, and offers it.
+    let service = workspace.restart(cx);
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    wait_until(cx, "YouTube’s visibility", |cx| service.read_with(cx, |s, _| s.youtube_video(&youtube_id).map(drop)));
+    assert_eq!(workspace.video(cx, video_id).publish.privacy, Privacy::Public);
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         assert_eq!(window.within("publish-privacy").find(2usize).checked(), Some(true));
+        window.within("youtube-visibility-sync").click("visibility-send", cx);
+    });
+    wait_until(cx, "the change on YouTube", |cx| {
+        let on_youtube = visibility_on_youtube(cx, &service, &youtube_id);
+        (on_youtube.privacy == rushes_youtube::Privacy::Public).then_some(())
     });
 }
 

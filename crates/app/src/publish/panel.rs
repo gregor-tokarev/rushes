@@ -36,6 +36,7 @@ use rushes_core::{
     DocumentKind, Privacy, PublishSettings, UploadJob, UploadStatus, Video, VideoFormat, VideoId, VideoStatus,
 };
 use rushes_pipeline::{MediaInfo, has_transcript, kept_cuts, list_thumbnails};
+use rushes_youtube::Visibility;
 
 use super::assist_dialogs::{open_details_dialog, open_thumbnails_dialog};
 use super::assistant::{AssistEvent, DetailSources, DetailsJob, PublishAssistant, ThumbnailJob};
@@ -471,17 +472,18 @@ impl PublishPanel {
         let visibility_changed =
             (video.publish.privacy, video.publish.publish_at) != (publish.privacy, publish.publish_at);
         video.publish = publish;
-        let on_youtube = video.youtube.is_some();
         self.state.update(cx, |state, cx| state.update_video(video, cx));
-        // Who can watch the video changes on YouTube too.
-        if visibility_changed && on_youtube {
+        // Who can watch the video changes on YouTube too, or on the video an upload
+        // under way puts there.
+        if visibility_changed {
             let video_id = self.video_id;
             self.service.update(cx, |service, cx| service.set_youtube_visibility(video_id, cx));
         }
-        visibility_changed && on_youtube
+        visibility_changed
     }
 
-    /// Sends who can watch the video to YouTube again, after it didn't get there.
+    /// Sends who can watch the video to YouTube, after it didn't get there or YouTube
+    /// has another.
     fn send_visibility(&mut self, cx: &mut Context<Self>) {
         if !self.save_edits(cx) {
             let video_id = self.video_id;
@@ -1183,8 +1185,18 @@ impl PublishPanel {
         let scheduled = self.draft.publish_at.is_some();
         let privacy_ix = Privacy::ALL.iter().position(|privacy| *privacy == self.draft.privacy).unwrap_or(0);
         let google = self.service.read(cx).config().is_ok_and(|config| config.is_google());
-        let link = self.state.read(cx).video(self.video_id).and_then(|video| video.youtube.clone());
+        let video = self.state.read(cx).video(self.video_id);
+        let link = video.and_then(|video| video.youtube.clone());
         let sync = link.as_ref().and_then(|link| self.service.read(cx).visibility_sync(&link.video_id).cloned());
+        // An upload under way takes the form's choice to its new video.
+        let other = video
+            .filter(|_| !self.is_uploading(cx))
+            .and_then(|video| self.service.read(cx).other_visibility_on_youtube(video));
+        let status = match (sync, other) {
+            (Some(sync), _) => Some(self.render_visibility_sync(sync, cx)),
+            (None, Some(other)) => Some(self.render_other_visibility(other, cx)),
+            (None, None) => None,
+        };
         v_flex()
             .gap_5()
             .child(v_flex().gap_0p5().child(section_heading("Visibility")).when(link.is_some(), |this| {
@@ -1252,13 +1264,41 @@ impl PublishPanel {
                         )
                     }),
             )
-            .children(sync.map(|sync| self.render_visibility_sync(sync, cx)))
+            .children(status)
             .when(google, |this| {
                 this.child(help_text(
                     "Until Google audits your API project, YouTube locks uploads from it to private.",
                     cx,
                 ))
             })
+    }
+
+    /// YouTube has `other` instead of the form's choice: it didn't get there, or the
+    /// video changed in YouTube Studio. The form's choice goes on request.
+    fn render_other_visibility(&self, other: Visibility, cx: &mut Context<Self>) -> AnyElement {
+        let text = visibility_text(rules::core_privacy(other.privacy), other.publish_at);
+        let mut chars = text.chars();
+        let text: String = chars.next().map(|first| first.to_lowercase().chain(chars).collect()).unwrap_or_default();
+        let body = v_flex()
+            .gap_2()
+            .child(status_line(
+                IconName::TriangleAlert,
+                cx.theme().warning,
+                "Not on YouTube yet",
+                Some(format!("On YouTube it’s {text}.").into()),
+                cx,
+            ))
+            .child(
+                h_flex().child(
+                    Button::new("visibility-send")
+                        .label("Change on YouTube")
+                        .small()
+                        .outline()
+                        .on_click(cx.listener(|this, _, _, cx| this.send_visibility(cx))),
+                ),
+            );
+        // Tests check what the section says.
+        div().id("youtube-visibility-sync").child(body).test_support().into_any_element()
     }
 
     /// Where changing who can watch the uploaded video stands, with the way on when
