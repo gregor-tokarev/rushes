@@ -1,5 +1,7 @@
 // YouTube Data API v3 emulator: the subset Rushes uses (channels, resumable video
-// uploads, videos, thumbnails, uploads playlist) with Google-style error bodies.
+// uploads, videos, thumbnails, uploads playlist) with Google-style error bodies, plus
+// the parts of the YouTube Analytics API (daily views and watch time of a video) and
+// the YouTube Reporting API (reach reports) that A/B tests read.
 //
 // Bearer tokens are validated against the Google emulator's userinfo endpoint. Video
 // bytes never enter the emulator state: in-flight uploads are spooled to a temp dir and
@@ -58,6 +60,13 @@ interface ThumbnailRecord {
   sha256: string;
 }
 
+/** What a video showed from `at` on: its title and the SHA-256 of its custom thumbnail. */
+interface Showing {
+  at: number;
+  title: string;
+  thumbnail: string | null;
+}
+
 interface VideoRecord {
   id: string;
   seq: number;
@@ -67,6 +76,26 @@ interface VideoRecord {
   publishedAt: string;
   uploadedAtMs: number;
   thumbnail: ThumbnailRecord | null;
+  /** Every title and thumbnail the video showed, oldest first. */
+  history: Showing[];
+}
+
+/** What one video did on one Pacific-time day, as YouTube Analytics and the reach report count it. */
+interface DayNumbers {
+  views: number;
+  minutesWatched: number;
+  impressions: number;
+  /** Clicks per impression, 0 to 1. */
+  ctr: number;
+}
+
+/** A YouTube Reporting API job: YouTube makes one report of its type a day. */
+interface ReportingJob {
+  id: string;
+  channelId: string;
+  reportTypeId: string;
+  name: string;
+  createTime: string;
 }
 
 interface SessionRecord {
@@ -117,6 +146,14 @@ export interface YoutubeState {
   nextSeq: number;
   quota: { day: string; used: number };
   faults: Fault[];
+  /** Numbers set through `POST /_emulator/analytics`, by video id and Pacific date (YYYY-MM-DD). */
+  analytics: Record<string, Record<string, DayNumbers>>;
+  /**
+   * When numbers were set, by channel id and Pacific date, oldest first: each time
+   * publishes that day's reach report again, as YouTube does with corrected data.
+   */
+  analyticsVersions: Record<string, Record<string, number[]>>;
+  jobs: Record<string, ReportingJob>;
 }
 
 interface GoogleUser {
@@ -490,6 +527,56 @@ function placeholderPng(width: number, height: number, rgb: [number, number, num
   ]);
 }
 
+const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
+const ANALYTICS_METRICS = ["views", "estimatedMinutesWatched"];
+const REPORT_TYPES = ["channel_reach_basic_a1"];
+const REACH_COLUMNS = "date,channel_id,video_id,video_thumbnail_impressions,video_thumbnail_impressions_ctr";
+
+function hashNumber(text: string): number {
+  return createHash("sha256").update(text).digest().readUInt32BE(0);
+}
+
+function isDate(value: unknown): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+}
+
+function addDays(date: string, days: number): string {
+  return new Date(Date.parse(`${date}T00:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10);
+}
+
+/** Midnight Pacific time, standard or daylight, at the start of `date`. */
+function pacificMidnight(date: string): number {
+  const utcMidnight = Date.parse(`${date}T00:00:00Z`);
+  for (const hours of [7, 8]) {
+    const at = utcMidnight + hours * HOUR_MS;
+    if (pacificDay(new Date(at)) === date && pacificDay(new Date(at - 1)) !== date) return at;
+  }
+  return utcMidnight + 8 * HOUR_MS;
+}
+
+/**
+ * Made-up but steady numbers for a day nobody set: impressions vary by video and day,
+ * and the click rate and watch time follow what the video showed at noon that day (by
+ * now, today), so a better title or thumbnail does better. `null` before the upload.
+ */
+function syntheticNumbers(video: VideoRecord, date: string, now: number): DayNumbers | null {
+  const start = pacificMidnight(date);
+  const end = pacificMidnight(addDays(date, 1));
+  if (end <= video.uploadedAtMs || start > now) return null;
+  const noon = Math.min(start + (end - start) / 2, now);
+  const history = video.history ?? [];
+  const showing = [...history].reverse().find((entry) => entry.at <= noon) ??
+    history[0] ?? { at: 0, title: video.snippet.title, thumbnail: video.thumbnail?.sha256 ?? null };
+  // From 0.6 to 1.4.
+  const appeal = 0.6 + (hashNumber(`${showing.title}|${showing.thumbnail ?? ""}`) % 81) / 100;
+  const elapsed = Math.min(1, (now - Math.max(start, video.uploadedAtMs)) / (end - start));
+  const impressions = Math.round((400 + (hashNumber(`${video.id}:${date}`) % 400)) * elapsed);
+  const ctr = Math.round(400 * appeal) / 10000;
+  const views = Math.round(impressions * ctr * 1.25);
+  return { views, minutesWatched: Math.round(views * (1.5 + appeal) * 10) / 10, impressions, ctr };
+}
+
 const VIDEO_THUMBNAILS = { default: [120, 90], medium: [320, 180], high: [480, 360] } as const;
 const THUMBNAIL_FILES: Record<string, readonly [number, number]> = {
   "default.jpg": VIDEO_THUMBNAILS.default,
@@ -508,6 +595,9 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
       nextSeq: 1,
       quota: { day: "", used: 0 },
       faults: [],
+      analytics: {},
+      analyticsVersions: {},
+      jobs: {},
     }),
 
     setup({ app, state, baseUrl, signal, onDispose }) {
@@ -631,6 +721,62 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
 
       function channelOf(video: VideoRecord): ChannelRecord {
         return state.channels[video.channelId];
+      }
+
+      /** Notes what the video shows now, when its title or thumbnail changed. */
+      function recordShowing(video: VideoRecord, at: number): void {
+        const history = (video.history ??= []);
+        const showing: Showing = { at, title: video.snippet.title, thumbnail: video.thumbnail?.sha256 ?? null };
+        const last = history[history.length - 1];
+        if (!last || last.title !== showing.title || last.thumbnail !== showing.thumbnail) history.push(showing);
+      }
+
+      /** The numbers a test set for that day, else made-up ones while the video is public. */
+      function numbersOf(video: VideoRecord, date: string, now: number): DayNumbers | null {
+        const set = state.analytics[video.id]?.[date];
+        if (set) return set;
+        return effectivePrivacy(video, now) === "public" ? syntheticNumbers(video, date, now) : null;
+      }
+
+      function ownJob(id: string, viewer: ChannelRecord): ReportingJob {
+        const job = state.jobs[id];
+        if (!job || job.channelId !== viewer.id) {
+          throw new YoutubeError(404, "notFound", "Requested entity was not found.");
+        }
+        return job;
+      }
+
+      function renderJob(job: ReportingJob) {
+        return { id: job.id, reportTypeId: job.reportTypeId, name: job.name, createTime: job.createTime };
+      }
+
+      /**
+       * The job's daily reports: from 30 days before it was created to yesterday, each
+       * made an hour after its day ended, plus a version of a day each time a test set
+       * numbers for it.
+       */
+      function reportsOf(job: ReportingJob, now: number) {
+        const firstDay = addDays(pacificDay(new Date(Date.parse(job.createTime))), -30);
+        const yesterday = addDays(pacificDay(new Date(now)), -1);
+        const days = new Map<string, number[]>();
+        for (let date = firstDay; date <= yesterday; date = addDays(date, 1)) {
+          days.set(date, [Math.min(now, pacificMidnight(addDays(date, 1)) + HOUR_MS)]);
+        }
+        for (const [date, versions] of Object.entries(state.analyticsVersions[job.channelId] ?? {})) {
+          days.set(date, [...(days.get(date) ?? []), ...versions]);
+        }
+        return [...days]
+          .flatMap(([date, versions]) =>
+            versions.map((created, version) => ({
+              id: `${job.id}.${date.replaceAll("-", "")}.${version}`,
+              jobId: job.id,
+              startTime: new Date(pacificMidnight(date)).toISOString(),
+              endTime: new Date(pacificMidnight(addDays(date, 1))).toISOString(),
+              createTime: new Date(created).toISOString(),
+              downloadUrl: `${baseUrl}/youtubereporting/v1/media/${job.id}/${date}?version=${version}`,
+            })),
+          )
+          .sort((a, b) => a.startTime.localeCompare(b.startTime) || a.createTime.localeCompare(b.createTime));
       }
 
       function effectivePrivacy(video: VideoRecord, now: number): Privacy {
@@ -788,7 +934,9 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
           publishedAt: now.toISOString(),
           uploadedAtMs: now.getTime(),
           thumbnail: null,
+          history: [],
         };
+        recordShowing(video, now.getTime());
         state.videos[video.id] = video;
         state.uploads.push({
           videoId: video.id,
@@ -1036,6 +1184,7 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
           chargeQuota(COST.update);
           video.snippet = snippet;
           video.status = status;
+          recordShowing(video, Date.now());
           return c.json(renderVideo(video, parts, viewer, Date.now()));
         }),
       );
@@ -1090,6 +1239,7 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
             bytes: bytes.length,
             sha256: createHash("sha256").update(bytes).digest("hex"),
           };
+          recordShowing(video, Date.now());
           const items = [videoThumbnails(video)];
           return c.json({ kind: "youtube#thumbnailSetResponse", etag: etag(items), items });
         }),
@@ -1182,9 +1332,166 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
         }),
       );
 
+      // ---------- YouTube Analytics API ----------
+
+      app.get(
+        "/youtubeAnalytics/v2/reports",
+        handle(async (c) => {
+          const viewer = await authenticate(c);
+          const ids = c.req.query("ids");
+          if (ids !== "channel==MINE" && ids !== `channel==${viewer.id}`) {
+            throw new YoutubeError(403, "forbidden", "Forbidden");
+          }
+          const startDate = c.req.query("startDate");
+          const endDate = c.req.query("endDate");
+          if (!isDate(startDate) || !isDate(endDate) || endDate < startDate) {
+            throw badRequest("badRequest", "The start and end dates must be valid YYYY-MM-DD dates, the end on or after the start.");
+          }
+          const metrics = (c.req.query("metrics") ?? "")
+            .split(",")
+            .map((metric) => metric.trim())
+            .filter(Boolean);
+          const unknown = metrics.find((metric) => !ANALYTICS_METRICS.includes(metric));
+          if (!metrics.length || unknown) {
+            throw badRequest("badRequest", `Unknown identifier (${unknown ?? ""}) given in field parameters.metrics.`);
+          }
+          if (c.req.query("dimensions") !== "day") {
+            throw badRequest("badRequest", "The query is not supported. This emulator only reports by day.");
+          }
+          const filter = /^video==([A-Za-z0-9_-]+)$/.exec(c.req.query("filters") ?? "");
+          if (!filter) throw badRequest("badRequest", "The query is not supported. This emulator needs filters=video==<id>.");
+          const video = state.videos[filter[1]];
+          if (!video || video.channelId !== viewer.id) throw new YoutubeError(403, "forbidden", "Forbidden");
+          const now = Date.now();
+          const rows: Array<Array<string | number>> = [];
+          for (let date = startDate; date <= endDate; date = addDays(date, 1)) {
+            const numbers = numbersOf(video, date, now);
+            if (!numbers) continue;
+            rows.push([date, ...metrics.map((metric) => (metric === "views" ? numbers.views : numbers.minutesWatched))]);
+          }
+          return c.json({
+            kind: "youtubeAnalytics#resultTable",
+            columnHeaders: [
+              { name: "day", columnType: "DIMENSION", dataType: "STRING" },
+              ...metrics.map((name) => ({ name, columnType: "METRIC", dataType: name === "views" ? "INTEGER" : "FLOAT" })),
+            ],
+            rows,
+          });
+        }),
+      );
+
+      // ---------- YouTube Reporting API ----------
+
+      app.get(
+        "/youtubereporting/v1/jobs",
+        handle(async (c) => {
+          const viewer = await authenticate(c);
+          const jobs = Object.values(state.jobs)
+            .filter((job) => job.channelId === viewer.id)
+            .map(renderJob);
+          return c.json(jobs.length ? { jobs } : {});
+        }),
+      );
+
+      app.post(
+        "/youtubereporting/v1/jobs",
+        handle(async (c) => {
+          const viewer = await authenticate(c);
+          const body = await readJson(c);
+          const type = isRecord(body) ? body.reportTypeId : undefined;
+          if (typeof type !== "string" || !REPORT_TYPES.includes(type)) {
+            throw badRequest("badRequest", `Unknown report type: ${String(type)}.`);
+          }
+          if (Object.values(state.jobs).some((job) => job.channelId === viewer.id && job.reportTypeId === type)) {
+            throw new YoutubeError(409, "alreadyExists", "A job with this report type already exists.");
+          }
+          const job: ReportingJob = {
+            id: randomBytes(12).toString("hex"),
+            channelId: viewer.id,
+            reportTypeId: type,
+            name: isRecord(body) && typeof body.name === "string" ? body.name : "",
+            createTime: new Date().toISOString(),
+          };
+          state.jobs[job.id] = job;
+          return c.json(renderJob(job));
+        }),
+      );
+
+      app.get(
+        "/youtubereporting/v1/jobs/:id/reports",
+        handle(async (c) => {
+          const viewer = await authenticate(c);
+          const job = ownJob(c.req.param("id"), viewer);
+          const raw = c.req.query("startTimeAtOrAfter");
+          const since = raw === undefined ? Number.NEGATIVE_INFINITY : Date.parse(raw);
+          if (Number.isNaN(since)) throw badRequest("badRequest", `Invalid value for startTimeAtOrAfter: ${raw}.`);
+          const reports = reportsOf(job, Date.now()).filter((report) => Date.parse(report.startTime) >= since);
+          return c.json(reports.length ? { reports } : {});
+        }),
+      );
+
+      app.get(
+        "/youtubereporting/v1/media/:jobId/:date",
+        handle(async (c) => {
+          const viewer = await authenticate(c);
+          ownJob(c.req.param("jobId"), viewer);
+          const date = c.req.param("date");
+          if (!isDate(date)) throw new YoutubeError(404, "notFound", "Requested entity was not found.");
+          const now = Date.now();
+          const lines = [REACH_COLUMNS];
+          const videos = Object.values(state.videos)
+            .filter((video) => video.channelId === viewer.id)
+            .sort((a, b) => a.seq - b.seq);
+          for (const video of videos) {
+            const numbers = numbersOf(video, date, now);
+            if (!numbers || numbers.impressions <= 0) continue;
+            lines.push([date.replaceAll("-", ""), video.channelId, video.id, numbers.impressions, numbers.ctr.toFixed(4)].join(","));
+          }
+          return c.body(`${lines.join("\n")}\n`, 200, { "Content-Type": "application/octet-stream" });
+        }),
+      );
+
       // ---------- Inspection and fault injection for tests ----------
 
       app.get("/_emulator/uploads", (c) => c.json({ uploads: state.uploads }));
+
+      // What a video has now and every title and thumbnail it showed.
+      app.get("/_emulator/videos/:id", (c) => {
+        const video = state.videos[c.req.param("id")];
+        if (!video) return c.json({ error: "no such video" }, 404);
+        return c.json({ id: video.id, snippet: video.snippet, status: video.status, thumbnail: video.thumbnail, history: video.history ?? [] });
+      });
+
+      // Sets what YouTube Analytics and the reach report say about a video on some days.
+      app.post(
+        "/_emulator/analytics",
+        handle(async (c) => {
+          const body = await readJson(c);
+          if (!isRecord(body) || typeof body.videoId !== "string" || !Array.isArray(body.days)) {
+            throw badRequest("invalid", "Send a videoId and a list of days.");
+          }
+          const video = state.videos[body.videoId];
+          if (!video) throw videoNotFound();
+          const days = (state.analytics[video.id] ??= {});
+          const versions = (state.analyticsVersions[video.channelId] ??= {});
+          const now = Date.now();
+          for (const day of body.days as unknown[]) {
+            if (!isRecord(day) || !isDate(day.date)) throw badRequest("invalid", "Each day needs a date (YYYY-MM-DD).");
+            const number = (key: string) => {
+              const value = day[key];
+              return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+            };
+            days[day.date] = {
+              views: number("views"),
+              minutesWatched: number("minutesWatched"),
+              impressions: number("impressions"),
+              ctr: Math.min(1, number("ctr")),
+            };
+            (versions[day.date] ??= []).push(now);
+          }
+          return c.json({ videoId: video.id, days }, 201);
+        }),
+      );
 
       app.post(
         "/_emulator/faults",

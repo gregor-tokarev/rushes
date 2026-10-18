@@ -4,6 +4,7 @@
 //! a cancel flag and a progress callback. Works against real Google
 //! ([`YoutubeConfig::google`]) or the local emulators ([`YoutubeConfig::emulator`]).
 
+mod analytics;
 mod client;
 mod config;
 mod credentials;
@@ -13,12 +14,15 @@ mod oauth;
 mod types;
 mod upload;
 
-pub use client::YoutubeClient;
+pub use analytics::{DailyReach, DailyViews, REACH_REPORT_TYPE, ReachReport};
+pub use client::{TitleChange, YoutubeClient};
 pub use config::{
-    DEFAULT_GOOGLE_EMULATOR_URL, DEFAULT_YOUTUBE_EMULATOR_URL, EMULATOR_CLIENT_ID, SCOPES, YoutubeConfig,
+    DEFAULT_GOOGLE_EMULATOR_URL, DEFAULT_YOUTUBE_EMULATOR_URL, EMULATOR_CLIENT_ID, SCOPES, TEST_SCOPES, YoutubeConfig,
 };
 pub use credentials::{Account, CredentialStore, SavedLogin};
 pub use error::{Error, Result, RetryCause};
-pub use oauth::{Credentials, PendingAuthorization, begin_authorization, check_client, refresh, revoke};
+pub use oauth::{
+    Credentials, PendingAuthorization, begin_authorization, begin_authorization_with, check_client, refresh, revoke,
+};
 pub use types::{Channel, GoogleUser, Privacy, ProcessingStatus, UploadStatus, VideoInfo, watch_url};
 pub use upload::{DEFAULT_CHUNK_SIZE, UPLOAD_GRANULARITY, UploadOptions, UploadProgress, UploadedVideo, VideoMetadata};

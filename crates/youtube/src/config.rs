@@ -12,6 +12,12 @@ pub const SCOPES: [&str; 5] = [
     "https://www.googleapis.com/auth/youtube.readonly",
 ];
 
+/// Asked for only when the creator lets Rushes run A/B tests: changing the title of
+/// an uploaded video (`videos.update` needs the broad `youtube` scope) and reading its
+/// analytics and reach reports.
+pub const TEST_SCOPES: [&str; 2] =
+    ["https://www.googleapis.com/auth/youtube", "https://www.googleapis.com/auth/yt-analytics.readonly"];
+
 pub const DEFAULT_GOOGLE_EMULATOR_URL: &str = "http://127.0.0.1:4002";
 pub const DEFAULT_YOUTUBE_EMULATOR_URL: &str = "http://127.0.0.1:4020";
 
@@ -29,6 +35,10 @@ pub struct YoutubeConfig {
     pub api_base: String,
     /// Base of the media upload API, e.g. `https://www.googleapis.com/upload/youtube/v3`.
     pub upload_base: String,
+    /// Base of the YouTube Analytics API, e.g. `https://youtubeanalytics.googleapis.com/v2`.
+    pub analytics_base: String,
+    /// Base of the YouTube Reporting API, e.g. `https://youtubereporting.googleapis.com/v1`.
+    pub reporting_base: String,
     pub client_id: String,
     /// Desktop OAuth clients get a secret too; Google does not treat it as confidential.
     pub client_secret: Option<String>,
@@ -44,6 +54,8 @@ impl YoutubeConfig {
             revoke_url: "https://oauth2.googleapis.com/revoke".to_owned(),
             api_base: "https://www.googleapis.com/youtube/v3".to_owned(),
             upload_base: "https://www.googleapis.com/upload/youtube/v3".to_owned(),
+            analytics_base: "https://youtubeanalytics.googleapis.com/v2".to_owned(),
+            reporting_base: "https://youtubereporting.googleapis.com/v1".to_owned(),
             client_id: client_id.into(),
             client_secret: client_secret.filter(|secret| !secret.is_empty()),
         }
@@ -60,6 +72,8 @@ impl YoutubeConfig {
             revoke_url: format!("{google}/oauth2/revoke"),
             api_base: format!("{youtube}/youtube/v3"),
             upload_base: format!("{youtube}/upload/youtube/v3"),
+            analytics_base: format!("{youtube}/youtubeAnalytics/v2"),
+            reporting_base: format!("{youtube}/youtubereporting/v1"),
             client_id: EMULATOR_CLIENT_ID.to_owned(),
             client_secret: None,
         }
@@ -107,6 +121,8 @@ impl fmt::Debug for YoutubeConfig {
             .field("revoke_url", &self.revoke_url)
             .field("api_base", &self.api_base)
             .field("upload_base", &self.upload_base)
+            .field("analytics_base", &self.analytics_base)
+            .field("reporting_base", &self.reporting_base)
             .field("client_id", &self.client_id)
             .field("client_secret", &self.client_secret.as_ref().map(|_| "<redacted>"))
             .finish()
@@ -126,6 +142,8 @@ mod tests {
         assert_eq!(config.revoke_url, "http://127.0.0.1:4002/oauth2/revoke");
         assert_eq!(config.api_base, "http://127.0.0.1:4020/youtube/v3");
         assert_eq!(config.upload_base, "http://127.0.0.1:4020/upload/youtube/v3");
+        assert_eq!(config.analytics_base, "http://127.0.0.1:4020/youtubeAnalytics/v2");
+        assert_eq!(config.reporting_base, "http://127.0.0.1:4020/youtubereporting/v1");
         assert!(!config.is_google());
         assert_eq!(config.backend_label(), "Emulator (127.0.0.1:4002)");
     }

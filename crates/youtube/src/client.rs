@@ -23,7 +23,20 @@ const REFRESH_MARGIN: Duration = Duration::from_secs(60);
 const MAX_PAGE: usize = 50;
 const MAX_THUMBNAIL_BYTES: u64 = 2 * 1024 * 1024;
 
+/// The parts of a video's snippet `videos.update` takes; it clears the ones not sent.
+const WRITABLE_SNIPPET: [&str; 6] =
+    ["title", "description", "tags", "categoryId", "defaultLanguage", "defaultAudioLanguage"];
+
 type RefreshCallback = Box<dyn Fn(&Credentials) + Send + Sync>;
+
+/// What [`YoutubeClient::replace_title`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TitleChange {
+    /// The video has the new title.
+    Replaced,
+    /// The video's title was changed elsewhere and stays as it is: this one.
+    Changed(String),
+}
 
 /// Blocking YouTube Data API client for one signed-in account. `Send + Sync`: share
 /// it behind an `Arc`; token refreshes are serialized internally.
@@ -148,6 +161,47 @@ impl YoutubeClient {
             .ok_or_else(|| Error::Protocol("thumbnails.set returned no thumbnail".to_owned()))
     }
 
+    /// Changes the title of the channel's video `video_id` to `to`, from `from` when
+    /// given. When YouTube's title is neither, someone changed it elsewhere (in YouTube
+    /// Studio, say): it stays, and [`TitleChange::Changed`] says what it is. Needs
+    /// the `youtube` scope of [`TEST_SCOPES`](crate::TEST_SCOPES).
+    pub fn replace_title(&self, video_id: &str, from: Option<&str>, to: &str) -> Result<TitleChange> {
+        let url = format!("{}/videos", self.config.api_base);
+        let list: ListResponse<serde_json::Value> = self.get_json(&url, &[("part", "snippet"), ("id", video_id)])?;
+        let video = list.items.into_iter().next().ok_or(Error::VideoNotFound)?;
+        let snippet = video.get("snippet").and_then(serde_json::Value::as_object).cloned().unwrap_or_default();
+        let current = snippet.get("title").and_then(serde_json::Value::as_str).unwrap_or_default();
+        if current == to {
+            return Ok(TitleChange::Replaced);
+        }
+        if from.is_some_and(|from| from != current) {
+            return Ok(TitleChange::Changed(current.to_owned()));
+        }
+        // videos.update replaces the whole snippet: what isn't sent is cleared. So
+        // every field it takes goes back as YouTube has it, with the new title.
+        let mut update = serde_json::Map::new();
+        for field in WRITABLE_SNIPPET {
+            if let Some(value) = snippet.get(field) {
+                update.insert(field.to_owned(), value.clone());
+            }
+        }
+        update.insert("title".to_owned(), to.into());
+        let body = serde_json::json!({ "id": video_id, "snippet": update }).to_string();
+        let response = self.authorized(|token| {
+            self.agent
+                .put(&url)
+                .query("part", "snippet")
+                .header("Authorization", bearer(token))
+                .header("Content-Type", "application/json")
+                .send(body.as_bytes())
+        })?;
+        http::json::<serde_json::Value>(response).map_err(|error| match error {
+            Error::Api { status: 404, .. } => Error::VideoNotFound,
+            error => error,
+        })?;
+        Ok(TitleChange::Replaced)
+    }
+
     /// Signs the account out at Google. The caller should also clear the stored credentials.
     pub fn revoke(&self) -> Result<()> {
         oauth::revoke_with(&self.agent, &self.config, &self.credentials())
@@ -165,7 +219,7 @@ impl YoutubeClient {
         Ok(ids.iter().filter_map(|id| found.remove(id)).collect())
     }
 
-    fn get_json<T: DeserializeOwned>(&self, url: &str, query: &[(&str, &str)]) -> Result<T> {
+    pub(crate) fn get_json<T: DeserializeOwned>(&self, url: &str, query: &[(&str, &str)]) -> Result<T> {
         let response = self.authorized(|token| {
             self.agent.get(url).query_pairs(query.iter().copied()).header("Authorization", bearer(token)).call()
         })?;
