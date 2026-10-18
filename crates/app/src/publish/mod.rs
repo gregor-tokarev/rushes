@@ -2,13 +2,17 @@
 //!
 //! [`YoutubeService`] is the one owner of the connection and of upload jobs; the
 //! views read it and call its methods. [`PublishAssistant`] has the agent write a
-//! video's details and Codex draw its thumbnails. Blocking network work runs on worker
+//! video's details and Codex draw its thumbnails. [`AbTests`] runs the A/B tests of
+//! titles and thumbnails on YouTube. Blocking network work runs on worker
 //! threads (sign-in, uploads) or the background executor (short API calls).
 //!
 //! The views draw Lucide icons beyond GPUI Kit's default bundle (`Film`, `Image`,
 //! `ListOrdered`, `Upload`, `CloudUpload`, `CirclePlay`, ...), so the application
 //! registers the full catalog (`gpui_kit::assets::AllAssets`).
 
+mod ab_dialogs;
+mod ab_section;
+mod ab_test;
 mod assist_dialogs;
 mod assistant;
 mod badge;
@@ -24,6 +28,7 @@ mod ui;
 mod upload;
 mod uploads_page;
 
+pub use ab_test::{AbTests, version_problems};
 pub use assistant::{
     AssistError, AssistEvent, DEFAULT_THUMBNAILS, DetailSources, DetailsJob, PublishAssistant, ThumbnailJob,
     ThumbnailOptions,
@@ -33,7 +38,9 @@ pub use channel::{ChannelChoices, ChooseChannel};
 pub use chapters::{CHAPTERS_HEADING, Chapter, chapters, chapters_text, insert_chapters};
 pub use panel::PublishPanel;
 pub use rules::{AccountAccess, BlockingReason, CATEGORIES, Category, blocking_reasons, tags_length};
-pub use service::{Connection, EmulatorCheck, YoutubeAccount, YoutubeEvent, YoutubeService, backend_config};
+pub use service::{
+    Connection, EmulatorCheck, TestAccess, YoutubeAccount, YoutubeEvent, YoutubeService, backend_config,
+};
 pub use settings::YoutubeSettings;
 pub use thumbnail::ThumbnailSync;
 pub use transfer::Transfer;

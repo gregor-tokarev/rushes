@@ -28,6 +28,9 @@
   pick from.
 - **Upload** to your YouTube channels from the video's page, with resumable uploads. Connect
   several accounts and pick, per video, the channel it goes to.
+- **A/B test** titles and thumbnails of your uploaded videos: give two or three versions,
+  and Rushes puts each one on YouTube for a day at a time, compares how many viewers it
+  turned into watch time, and keeps the winner.
 
 Everything stays on your computer: one local database and a folder per video.
 

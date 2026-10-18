@@ -138,6 +138,43 @@ impl Emulators {
         assert_eq!(response.status(), 204);
     }
 
+    /// Sets what YouTube Analytics and the reach reports say about the YouTube video
+    /// `youtube_id` on some days: `[{"date", "views", "minutesWatched", "impressions", "ctr"}]`.
+    pub fn set_analytics(&self, youtube_id: &str, days: Value) {
+        let response = agent()
+            .post(&format!("{}/_emulator/analytics", self.youtube_url))
+            .header("Content-Type", "application/json")
+            .send(serde_json::json!({ "videoId": youtube_id, "days": days }).to_string())
+            .unwrap();
+        assert_eq!(response.status(), 201);
+    }
+
+    /// What the YouTube video `youtube_id` has now (`snippet`, `thumbnail`) and every
+    /// title and thumbnail it showed (`history`).
+    pub fn youtube_video(&self, youtube_id: &str) -> Value {
+        let body = agent()
+            .get(&format!("{}/_emulator/videos/{youtube_id}", self.youtube_url))
+            .call()
+            .unwrap()
+            .body_mut()
+            .read_to_string()
+            .unwrap();
+        serde_json::from_str(&body).unwrap()
+    }
+
+    /// Changes the title of a video the way YouTube Studio does, as the account `token` belongs to.
+    pub fn change_title(&self, token: &str, youtube_id: &str, title: &str) {
+        let response = agent()
+            .put(&format!("{}/youtube/v3/videos?part=snippet", self.youtube_url))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .send(
+                serde_json::json!({ "id": youtube_id, "snippet": { "title": title, "categoryId": "22" } }).to_string(),
+            )
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
     pub fn clear_faults(&self) {
         let response = agent().delete(&format!("{}/_emulator/faults", self.youtube_url)).call().unwrap();
         assert!(response.status().is_success());

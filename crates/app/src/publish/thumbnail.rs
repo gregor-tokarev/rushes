@@ -58,6 +58,10 @@ impl YoutubeService {
         }
         let Some(video) = self.state.read(cx).video(video_id) else { return };
         let (Some(link), Some(image)) = (video.youtube.clone(), video.publish.thumbnail.clone()) else { return };
+        // A test of thumbnails puts its own images on YouTube until it ends.
+        if link.ab_test.as_ref().is_some_and(|test| !test.is_over() && test.subject.has_thumbnail()) {
+            return;
+        }
         if matches!(self.thumbnails.get(&link.video_id), Some(ThumbnailSync::Sending(_))) {
             self.thumbnails_chosen_again.insert(link.video_id);
             return;
