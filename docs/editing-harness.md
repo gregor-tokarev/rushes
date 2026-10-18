@@ -127,20 +127,22 @@ A speaker who breaks off and starts again rarely pauses long enough for a new ph
 finds them per take and `select` cuts them like fillers:
 
 - The same words said again (up to 5 compared; the attempt's last word may be cut off,
-  `стану--` before `станет`) straight after, after up to two linking words (`ну`, `вот`,
+  `стану--` before `станет`) straight after, after up to three linking words (`ну`, `вот`,
   `как бы`, `I mean`, `you know`, …), or after an attempt broken off mid-word; or a lone
-  word broken off before the speaker goes on (within 6 s). At most 12 s from the attempt's
+  word broken off before the same speaker goes on (within 6 s). At most 12 s from the attempt's
   start to the restart's, however long the pause between them (a segment tightens it), same
   speaker.
-- Not restarts: emphatic doubles (`очень, очень`, `very, very`, `да, да`, …), and one word
-  that ends a sentence and starts the next (`…для JavaScript. JavaScript, я думаю…`).
+- Not restarts: emphatic doubles (`очень, очень`, `very, very`, `да, да`, …), one word
+  that ends a sentence and starts the next (`…для JavaScript. JavaScript, я думаю…`), and
+  one word said twice with no break between (`What it is is a compiler`): a one-word
+  restart needs a comma, a pause of 0.3 s, a filler or a cut-off between.
   "Коммуникация с заказчиками, коммуникация с коллегами" and "то-то и то-то" stay, since
   only linking words may stand between an attempt and its restart.
 - An attempt is cut only inside a segment that also keeps the restart, from its first word
   (or the segment's) to the restart. `read_transcript` marks it `~…~`; `remove_restarts:
   false` keeps every repeat.
 - Words are compared lower-cased, letters and digits only, a sound held out counting once
-  (`Ониии,` is `они`).
+  (`Ониии,` is `они`; digits stay as they are, `1000` is not `10`).
 - What takes judgement (a corrected word form, "два, две"; a line restated in other words)
   is the agent's: a segment's `cut` drops exact words inside it (each run must be said
   once in the segment) without splitting it in two.

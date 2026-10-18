@@ -57,7 +57,22 @@ const EMPHATIC: [&str; 31] = [
     "bye",
 ];
 /// What a speaker says between an attempt and its restart (“…, ну, …”, “…, I mean, …”).
-const LINKING: [&str; 11] = ["ну", "вот", "как", "бы", "типа", "короче", "значит", "well", "like", "mean", "know"];
+const LINKING: [&[&str]; 10] = [
+    &["ну"],
+    &["вот"],
+    &["как", "бы"],
+    &["типа"],
+    &["короче"],
+    &["значит"],
+    &["well"],
+    &["like"],
+    &["i", "mean"],
+    &["you", "know"],
+];
+/// Most linking words between an attempt and its restart.
+const LINKING_WORDS: usize = 3;
+/// A pause this long between a word and the same word again marks a restart.
+const RESTART_HESITATION: f64 = 0.3;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Word {
@@ -326,6 +341,7 @@ pub fn restarts(transcript: &Transcript) -> Vec<Restart> {
         }
         if let Some(next) = tokens.get(p + 1)
             && tokens[p].cut_off
+            && next.speaker == tokens[p].speaker
             && next.start - tokens[p].end <= RESTART_PAUSE
         {
             out.push(Restart { dropped: tokens[p].index..next.index, restart: next.index });
@@ -358,7 +374,7 @@ fn restart_after(words: &[Word], tokens: &[Token], p: usize) -> Option<usize> {
                 continue;
             }
             let between = &tokens[p + length..q];
-            let linking = gap <= 2 && between.iter().all(|token| LINKING.contains(&token.text.as_str()));
+            let linking = gap <= LINKING_WORDS && linking(between);
             let broke_off = between.last().is_some_and(|token| token.cut_off) && (length >= 2 || gap <= 3);
             if gap > 0 && !linking && !broke_off {
                 continue;
@@ -370,6 +386,19 @@ fn restart_after(words: &[Word], tokens: &[Token], p: usize) -> Option<usize> {
             if !same || (length == 1 && gap == 0 && EMPHATIC.contains(&a.text.as_str())) {
                 continue;
             }
+            // One word said twice is a restart only with a break between (“мне, мне”, “I, um,
+            // I”): “What it is is a compiler” is grammar.
+            if length == 1 && gap == 0 {
+                let said = words[a.index].text.trim_end_matches(['"', '»', ')', '\'']);
+                let broken = a.cut_off
+                    || said.ends_with([',', ';', ':', '-', '—', '…'])
+                    || said.ends_with("...")
+                    || b.index > a.index + 1
+                    || b.start - a.end >= RESTART_HESITATION;
+                if !broken {
+                    continue;
+                }
+            }
             // “…for JavaScript. JavaScript, I think…”: a sentence ended, nothing was abandoned.
             let before = words[tokens[q - 1].index].text.trim_end_matches(['"', '»', ')', '\'']);
             if length == 1 && before.ends_with(['.', '!', '?']) && !before.ends_with("...") {
@@ -379,6 +408,21 @@ fn restart_after(words: &[Word], tokens: &[Token], p: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// Whether `tokens` are only linking words ([`LINKING`]).
+fn linking(tokens: &[Token]) -> bool {
+    let mut rest = tokens;
+    while !rest.is_empty() {
+        let phrase = LINKING.iter().find(|phrase| {
+            phrase.len() <= rest.len() && phrase.iter().zip(rest).all(|(word, token)| *word == token.text)
+        });
+        match phrase {
+            Some(phrase) => rest = &rest[phrase.len()..],
+            None => return false,
+        }
+    }
+    true
 }
 
 /// Lower-case letters and digits; a sound held out (`ониии`, `чтооо`) counts once.
@@ -393,7 +437,9 @@ pub(crate) fn normalise(text: &str) -> String {
     let mut at = 0;
     while at < letters.len() {
         let run = letters[at..].iter().take_while(|c| **c == letters[at]).count();
-        out.extend(std::iter::repeat_n(letters[at], if run >= 3 { 1 } else { run }));
+        // Digits stay as they are: 1000 is not 10.
+        let held = run >= 3 && letters[at].is_alphabetic();
+        out.extend(std::iter::repeat_n(letters[at], if held { 1 } else { run }));
         at += run;
     }
     out
@@ -640,6 +686,9 @@ mod tests {
         assert_eq!(cut("I was go-- I was going to say"), "I was going to say");
         // A sound held out is the same word.
         assert_eq!(cut("вас превосходят. Ониии, они способны"), "вас превосходят. они способны");
+        assert_eq!(cut("This works, I mean, this works well."), "this works well.");
+        assert_eq!(cut("This works, you know, this works well."), "this works well.");
+        assert_eq!(cut("I think I mean I think this works."), "I think this works.");
         // Said twice on purpose, or a sentence that ends: kept as said.
         for text in [
             "вам дали очень, очень активного мидла",
@@ -649,6 +698,8 @@ mod tests {
             "Не уволят — сократят зарплаты",
             "это runtime для JavaScript. JavaScript, я думаю, все знают",
             "Да, да, заменит он меня",
+            "What it is is a compiler.",
+            "We support 1000, 10000 and 100000 users.",
         ] {
             assert_eq!(cut(text), text);
         }
@@ -667,6 +718,10 @@ mod tests {
         words[2].speaker = Some("s1".into());
         words[3].speaker = Some("s1".into());
         words[4].speaker = Some("s1".into());
+        assert!(restarts(&Transcript { language: None, words }).is_empty());
+        // Broken off by someone else: not a restart of the first speaker's line.
+        let mut words = said("I was going-- No stop now.", 0.0);
+        words.iter_mut().skip(3).for_each(|word| word.speaker = Some("s1".into()));
         assert!(restarts(&Transcript { language: None, words }).is_empty());
     }
 }

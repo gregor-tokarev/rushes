@@ -4,9 +4,7 @@
 transcript (Scribe JSON) and a gold annotation. It works only from the files: if the harness
 wrote an EDL, that EDL seeds the search and is reported next to the measured cuts, but it is
 never trusted. `compare.py` turns many result files into markdown tables. `doubles.py` counts
-the double takes a viewer hears in each edit (a line said twice because it was tried again):
-it reads the words inside each range of the harness's edit list and asks a fresh model,
-twice per edit by default.
+the double takes a viewer hears in each edit (see `docs/benchmarks.md`).
 
 Requirements: Python 3, numpy, ffmpeg/ffprobe (tested with 8.0). No other packages.
 

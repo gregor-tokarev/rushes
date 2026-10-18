@@ -617,7 +617,7 @@ fn overlays(
             ends_with: spec.ends_with.clone(),
             ..SegmentSpec::default()
         };
-        let selection = select(view, &words, true, true, &name)?;
+        let selection = select(view, &words, plan.remove_fillers, plan.remove_restarts, &name)?;
         let all = &view.transcript.words;
         let (first, last) = (&all[selection.kept[0]], &all[*selection.kept.last().expect("non-empty")]);
         let not_kept = |word: &Word| {
