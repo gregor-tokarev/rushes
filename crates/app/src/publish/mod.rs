@@ -2,7 +2,7 @@
 //!
 //! [`YoutubeService`] is the one owner of the connection and of upload jobs; the
 //! views read it and call its methods. [`PublishAssistant`] has the agent write a
-//! video's details and Codex draw its thumbnails. Blocking network work runs on worker
+//! video's details and Codex draw its thumbnails in a chat that remembers. Blocking network work runs on worker
 //! threads (sign-in, uploads) or the background executor (short API calls).
 //!
 //! The views draw Lucide icons beyond GPUI Kit's default bundle (`Film`, `Image`,
@@ -19,6 +19,7 @@ mod rules;
 mod service;
 mod settings;
 mod thumbnail;
+mod thumbnail_chat;
 mod transfer;
 mod ui;
 mod upload;
@@ -26,8 +27,8 @@ mod uploads_page;
 mod visibility;
 
 pub use assistant::{
-    AssistError, AssistEvent, DEFAULT_THUMBNAILS, DetailSources, DetailsJob, PublishAssistant, ThumbnailJob,
-    ThumbnailOptions,
+    AssistError, AssistEvent, CHAT_FORGOTTEN, ChatMessage, ChatRole, DetailSources, DetailsJob, PublishAssistant,
+    ThumbnailChat, ThumbnailJob,
 };
 pub use badge::AccountBadge;
 pub use channel::{ChannelChoices, ChooseChannel};

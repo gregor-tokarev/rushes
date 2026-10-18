@@ -18,6 +18,9 @@ pub enum PipelineError {
     },
     #[error("cancelled")]
     Cancelled,
+    /// The session to resume is gone: the agent no longer remembers that conversation.
+    #[error("no session {0} to resume")]
+    SessionNotFound(String),
     /// The agent exited unsuccessfully or without reporting a result.
     #[error("agent failed: {message}")]
     AgentFailed {

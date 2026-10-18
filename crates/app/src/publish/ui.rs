@@ -10,11 +10,14 @@ use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::link::Link;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, Size, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, Size, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClipboardItem, Div, ElementId, Entity, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, RenderOnce, SharedString, Styled as _, TestSupportExt as _, Window, div, relative,
+    ObjectFit, ParentElement as _, RenderOnce, SharedString, Styled as _, StyledImage as _, TestSupportExt as _,
+    Window, div, img, relative,
 };
 use rushes_core::{TagColor, UploadStatus};
 use rushes_youtube::Account;
@@ -156,6 +159,42 @@ pub(super) fn upload_label(status: &UploadStatus, progress: Option<f32>, resumab
 
 pub(super) fn file_name(path: &Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned())
+}
+
+/// A thumbnail Codex drew, as a button that makes it the video's thumbnail; a
+/// check marks the one `selected`.
+pub(super) fn thumbnail_tile(id: impl Into<ElementId>, path: &Path, selected: bool, cx: &App) -> Button {
+    let theme = cx.theme();
+    let (radius, ring, check_fg, check_bg) = (theme.radius, theme.primary, theme.primary_foreground, theme.primary);
+    Button::new(id)
+        .outline()
+        .selected(selected)
+        .accessibility_label(format!("Use {}", file_name(path)))
+        .w_full()
+        .h_auto()
+        .p_1()
+        .when(selected, |this| this.border_color(ring))
+        .child(
+            div()
+                .relative()
+                .w_full()
+                .aspect_ratio(16. / 9.)
+                .overflow_hidden()
+                .rounded(radius)
+                .child(img(path.to_path_buf()).size_full().object_fit(ObjectFit::Cover))
+                .when(selected, |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .top_1()
+                            .right_1()
+                            .rounded_full()
+                            .bg(check_bg)
+                            .p_0p5()
+                            .child(Icon::new(IconName::Check).xsmall().text_color(check_fg)),
+                    )
+                }),
+        )
 }
 
 /// Avatar, channel and account of a signed-in YouTube account.
