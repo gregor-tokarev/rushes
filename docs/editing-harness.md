@@ -195,17 +195,25 @@ frames, so sound and picture end every span together.
   cut re-encodes only what changed; clips no render uses any more are deleted. Up to six
   encodes run at once.
 - Voice: a take with speech (a transcript with words) is cleaned once, whole, before it
-  is cut (`voice.rs`), into `edit/.cache/audio/<stem>.<clock>.voice-dfn15.48k.pcm`:
-  DeepFilterNet lowers the noise in and between the words by at most 15 dB (some of the
-  room stays, so pauses don't sound dead), a 4th-order 80 Hz high-pass takes out rumble,
+  is cut (`voice.rs`), into `edit/.cache/audio/<stem>.<clock>.voice-dfn15.48k.f32` (one
+  channel of 32-bit float, so peaks the filter raises above full scale aren't clipped):
+  DeepFilterNet removes the noise in and between the words and the take is mixed back
+  under it 15 dB down, so the noise drops by at most 15 dB and some of the room stays
+  (pauses don't sound dead), then a 4th-order 80 Hz high-pass takes out rumble,
   and both channels are joined into one centred voice (a microphone recorded on one
   channel comes out of both). DeepFilterNet's command-line program (`deep-filter` on
   `PATH`, or its 0.5.6 release build, downloaded once into the user's cache folder and
   checked against its SHA-256) keeps the timing to the sample with `--compensate-delay`.
   It runs on one thread, so a take is cleaned in 60 s pieces on half the processors, each
-  heard from a second early so the model has settled, joined with 20 ms fades (a 33-minute
-  take: about 50 s on 6 cores). Without DeepFilterNet (no build for the system, no network)
-  the voice is only filtered and centred (`voice-hp`), and the render report says why.
+  heard from a second early so the model has settled and 6 dB down so its 16-bit output
+  keeps room above the loudest peak (the mixing is done in float: DeepFilterNet's own
+  `--atten-lim-db` mixes in its 16-bit output, where the room's sound 15 dB down is a
+  sample or two, and 40% of the pauses' samples came out as silence), joined with 20 ms
+  fades (a 33-minute take: about 50 s
+  on 6 cores). Without DeepFilterNet (no build for the system, no network) the voice is
+  only filtered and centred (`voice-hp`), and the render report says why. The download is
+  bounded (15 s to connect, 30 s to answer, 3 minutes for the file); after it fails, renders
+  don't try again for an hour, so a blocked network doesn't hold up every render.
   `render`'s `clean_voice: false` keeps the sound as recorded, for music or app sounds under
   the voice that the noise remover would take out.
 - Sound: each take is decoded once to `edit/.cache/audio/<stem>.<clock>.48k.pcm`; spans are
@@ -223,12 +231,14 @@ frames, so sound and picture end every span together.
 - Mix: measured with `ebur128`, brought to −24 LUFS so the compressor works the same on
   any recording, compressed 4:1 from −28 dBFS (knee 8 dB, attack 2 ms, release 100 ms),
   measured again and raised to −14 LUFS, then `alimiter` at −2.5 dBFS (latency-compensated;
-  at 192 kHz for finals, so peaks between samples are caught), trimmed to the exact sample
+  at 192 kHz for finals, so peaks between samples are caught); a third measurement with the
+  limiter makes up the loudness it takes off with the peaks. Trimmed to the exact sample
   count, AAC 192k, `+faststart`. `loudnorm` isn't used: speech keeps peaks about 16 dB over
   its loudness after compression, more than its linear mode allows at −14 LUFS and −1.5
   dBTP, so it fell back to its dynamic mode, which rides the gain and raised the pauses'
-  noise about 11 dB. The encoded file's true peak is measured; over −1 dBTP (AAC adds up to about
-  a decibel) the sound is encoded again that much quieter.
+  noise about 11 dB. The encoded file's true peak is measured; over −1 dBTP (AAC can add a
+  decibel or two to a transient) the sound is encoded again with the limiter that much
+  lower, which leaves the loudness almost as it was.
 - HDR (PQ/HLG) is tone-mapped to Rec.709; rotation is applied by ffmpeg; variable frame
   rates are read as the nearest broadcast rate (`Rational::standard`).
 

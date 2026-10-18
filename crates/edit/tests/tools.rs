@@ -423,5 +423,5 @@ fn the_voice_is_cleaned_before_it_is_cut() {
     let report = run("render", json!({"quality": "preview"}));
     assert!(report.contains("Voice cleaned in A: noise lowered"), "{report}");
     assert!(report.contains("No technical problems found."), "{report}");
-    assert!(footage.join("edit/.cache/audio/take.c1.voice-dfn15.48k.pcm").is_file());
+    assert!(footage.join("edit/.cache/audio/take.c1.voice-dfn15.48k.f32").is_file());
 }

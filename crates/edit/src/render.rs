@@ -609,29 +609,40 @@ pub fn render(
         Quality::Final => 4 * SAMPLE_RATE,
     };
     let end = format!("aresample={SAMPLE_RATE},apad,atrim=end_sample={total_samples}");
-    let audio_filter = match &measured {
+    let compressed = match &measured {
         Some(loudness) => {
             let compressed = format!(
                 "volume={:.2}dB,{COMPRESSOR}",
                 (LEVEL_BEFORE_COMPRESSION - loudness.integrated).clamp(-40.0, 40.0)
             );
             let gain = LOUDNESS_TARGET - measure(&ffmpeg, &wav, &compressed)?.integrated;
-            format!(
-                "{compressed},volume={gain:.2}dB,aresample={limiter_rate},alimiter=limit={LIMIT}:attack=5:release=50:level=false:latency=1,{end}"
-            )
+            // The limiter takes some loudness off with the peaks: measured with it (at 48 kHz)
+            // and made up.
+            let limited =
+                measure(&ffmpeg, &wav, &format!("{compressed},volume={gain:.2}dB,{}", limiter(LIMIT)))?.integrated;
+            Some(format!("{compressed},volume={:.2}dB", gain + LOUDNESS_TARGET - limited))
         }
-        None => end,
+        None => None,
+    };
+    let mix = |limit: f64| match &compressed {
+        Some(compressed) => format!("{compressed},aresample={limiter_rate},{},{end}", limiter(limit)),
+        None => end.clone(),
     };
     on_progress("joining clips");
     let tmp = output.with_extension("tmp.mp4");
-    mux(&ffmpeg, &list, &wav, &audio_filter, &tmp)?;
-    // AAC encoding can push peaks back up past the limiter: measure the result and,
-    // when it is over, encode the sound again a little quieter.
+    mux(&ffmpeg, &list, &wav, &mix(LIMIT), &tmp)?;
+    // AAC encoding can push peaks back up past the limiter: measure the result and, when
+    // it is over, encode the sound again with the limiter that much lower (the whole sound
+    // quieter, without one).
     if let Some(peak) = true_peak(&ffmpeg, &tmp)
         && peak > MAX_TRUE_PEAK
     {
-        let quieter = format!("{audio_filter},volume={:.2}dB", MAX_TRUE_PEAK - 0.3 - peak);
-        mux(&ffmpeg, &list, &wav, &quieter, &tmp)?;
+        let over = peak - (MAX_TRUE_PEAK - 0.3);
+        let again = match compressed {
+            Some(_) => mix(LIMIT * 10f64.powf(-over / 20.0)),
+            None => format!("{},volume={:.2}dB", mix(LIMIT), -over),
+        };
+        mux(&ffmpeg, &list, &wav, &again, &tmp)?;
     }
     fs::rename(&tmp, &output)?;
     let _ = fs::remove_file(&wav);
@@ -800,6 +811,11 @@ fn tail(text: &str) -> String {
     let text = text.trim();
     let start = text.char_indices().rev().nth(1500).map_or(0, |(index, _)| index);
     text[start..].to_owned()
+}
+
+/// The peak limiter, at `limit` (linear), latency-compensated.
+fn limiter(limit: f64) -> String {
+    format!("alimiter=limit={limit:.4}:attack=5:release=50:level=false:latency=1")
 }
 
 /// Joins the picture clips (stream copy) with the sound, encoded once.
@@ -984,7 +1000,7 @@ fn speech_gains(session: &mut Session, placed: &[Placed]) -> Result<BTreeMap<Str
 
 /// Writes the sound of the placed spans as one 48 kHz stereo 32-bit float WAV: each
 /// span's samples cut from its take's decoded audio (or its cleaned voice, from
-/// `sources`), with its take's gain (in dB, see [`speech_gains`]; float keeps the peaks a
+/// `sources`: one channel of float samples, played on both), with its take's gain (in dB, see [`speech_gains`]; float keeps the peaks a
 /// gain raises for the limiter). At a cut the sound of both sides overlaps for
 /// [`CROSSFADE_SECONDS`], centred on the cut: the outgoing span runs on past its end while
 /// the next one starts a little before its own, faded into each other at equal power.
@@ -1012,7 +1028,8 @@ fn assemble_audio(
     out.write_all(&32u16.to_le_bytes())?;
     out.write_all(b"data")?;
     out.write_all(&data_len.to_le_bytes())?;
-    let mut files: HashMap<String, Option<fs::File>> = HashMap::new();
+    // Each take's sound, and whether it is a cleaned voice. Both have 4 bytes a frame.
+    let mut files: HashMap<String, Option<(fs::File, bool)>> = HashMap::new();
     let fade = (FADE_SECONDS * SAMPLE_RATE as f64) as usize;
     let overlaps = overlaps(placed);
     // The outgoing side of the next crossfade: the last frames of the span before and its
@@ -1022,9 +1039,9 @@ fn assemble_audio(
         if !files.contains_key(&item.span.take) {
             let take = session.take(&item.span.take)?;
             let file = match sources.get(&take.id) {
-                Some(path) => Some(fs::File::open(path)?),
+                Some(path) => Some((fs::File::open(path)?, true)),
                 None if take.media.audio.is_empty() => None,
-                None => Some(fs::File::open(audio::render_audio(&session.project, take)?)?),
+                None => Some((fs::File::open(audio::render_audio(&session.project, take)?)?, false)),
             };
             files.insert(item.span.take.clone(), file);
         }
@@ -1033,7 +1050,7 @@ fn assemble_audio(
         let count = item.samples as usize;
         let frames = before + count + after;
         let mut samples = vec![0f32; frames * 2];
-        if let Some(Some(file)) = files.get_mut(&item.span.take) {
+        if let Some(Some((file, voice))) = files.get_mut(&item.span.take) {
             let first = (item.span.start * SAMPLE_RATE as f64).round() as i64 - before as i64;
             // Before the start and past the end of the take: silence.
             let skip = if first < 0 { (first.unsigned_abs() as usize).min(frames) } else { 0 };
@@ -1047,9 +1064,15 @@ fn assemble_audio(
                 }
                 filled += n;
             }
-            let level = gains.get(&item.span.take).map_or(1.0, |db| 10f32.powf(*db as f32 / 20.0)) / 32768.0;
-            for (sample, pair) in samples[skip * 2..].iter_mut().zip(bytes.as_chunks::<2>().0) {
-                *sample = f32::from(i16::from_le_bytes(*pair)) * level;
+            let level = gains.get(&item.span.take).map_or(1.0, |db| 10f32.powf(*db as f32 / 20.0));
+            let frames = samples[skip * 2..].as_chunks_mut::<2>().0.iter_mut().zip(bytes.as_chunks::<4>().0);
+            for (frame, bytes) in frames {
+                *frame = if *voice {
+                    [f32::from_le_bytes(*bytes) * level; 2]
+                } else {
+                    let channel = |at: usize| f32::from(i16::from_le_bytes([bytes[at], bytes[at + 1]])) / 32768.0;
+                    [channel(0) * level, channel(2) * level]
+                };
             }
         }
         if before > 0 {

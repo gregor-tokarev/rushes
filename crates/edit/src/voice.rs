@@ -3,10 +3,11 @@
 //! rumble under 80 Hz filtered out, and the channels joined into one centred voice.
 //!
 //! A take is cleaned once, whole, so every pause and join of the cut carries the same
-//! quieter room sound, and kept as `edit/.cache/audio/<stem>.<clock>.voice-<how>.48k.pcm`
-//! in the format of [`audio::render_audio`], so the renderer cuts from it the same way.
-//! DeepFilterNet keeps the timing to the sample (`--compensate-delay`); a long take is
-//! cleaned in pieces, several at once, that overlap and are faded into each other.
+//! quieter room sound, and kept as `edit/.cache/audio/<stem>.<clock>.voice-<how>.48k.f32`:
+//! one channel of 32-bit float samples, on the scale of the take's sound but with room
+//! above full scale for the peaks the filter raises. DeepFilterNet keeps the timing to the
+//! sample (`--compensate-delay`); a long take is cleaned in pieces, several at once, that
+//! overlap and are faded into each other.
 
 use std::fs;
 use std::io::{BufWriter, Read as _, Seek as _, SeekFrom, Write as _};
@@ -23,8 +24,11 @@ use crate::project::{Project, Take};
 use crate::tool;
 
 const RATE: usize = 48_000;
-/// Most the noise is lowered. Some of the room stays, so pauses don't sound dead and
-/// quiet syllables aren't eaten.
+/// Most the noise is lowered: the take is mixed back under DeepFilterNet's output this much
+/// quieter. Some of the room stays, so pauses don't sound dead and quiet syllables aren't
+/// eaten. (DeepFilterNet's own `--atten-lim-db` mixes the same way, but in its 16-bit
+/// output, where the room's sound 15 dB down is a sample or two: pauses turned to steps
+/// of silence.)
 pub const NOISE_REDUCTION_DB: u32 = 15;
 pub const HIGH_PASS_HZ: f64 = 80.0;
 /// A take is cleaned in pieces this long.
@@ -36,6 +40,12 @@ const LEAD: usize = RATE;
 const SEAM: usize = 960;
 /// Silence after each piece: DeepFilterNet's output ends about 30 ms before its input.
 const TAIL: usize = 4_800;
+/// DeepFilterNet hears the voice this much quieter (6 dB) and its output is raised back, so
+/// what it gives back has room above the take's loudest peak (it writes 16-bit samples).
+const HEADROOM: i16 = 2;
+/// After a failed download, renders keep to the filtered voice this long before trying
+/// again, so a network that blocks the download doesn't hold up every render.
+const RETRY_DOWNLOAD_AFTER: Duration = Duration::from_secs(60 * 60);
 
 const DEEP_FILTER_VERSION: &str = "0.5.6";
 /// DeepFilterNet's release builds: (OS, architecture, build, SHA-256).
@@ -80,20 +90,52 @@ pub fn deep_filter(on_progress: &(dyn Fn(&str) + Sync)) -> Result<PathBuf> {
     if path.is_file() {
         return Ok(path);
     }
+    let failed = dir.join(format!("{name}.failed"));
+    let failed_lately = fs::metadata(&failed)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.elapsed().ok())
+        .is_some_and(|age| age < RETRY_DOWNLOAD_AFTER);
+    if failed_lately {
+        let reason = fs::read_to_string(&failed).unwrap_or_default();
+        return Err(EditError::invalid(format!("{} (tried again after an hour)", reason.trim())));
+    }
     fs::create_dir_all(&dir)?;
     on_progress("downloading DeepFilterNet, the noise remover (once, about 35 MB)");
     let url = format!(
         "https://github.com/Rikorose/DeepFilterNet/releases/download/v{DEEP_FILTER_VERSION}/deep-filter-{DEEP_FILTER_VERSION}-{build}"
     );
-    let agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(600))).build().new_agent();
+    let part = dir.join(format!("{name}.{}.part", std::process::id()));
+    match download(&url, sha, &part) {
+        Ok(()) => {
+            fs::rename(&part, &path)?;
+            let _ = fs::remove_file(&failed);
+            Ok(path)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&part);
+            let _ = fs::write(&failed, error.to_string());
+            Err(error)
+        }
+    }
+}
+
+/// Downloads `url` to `part`, executable, checked against `sha` (SHA-256).
+fn download(url: &str, sha: &str, part: &Path) -> Result<()> {
+    // Bounded at every step: a download that stalls ends in minutes, not at a render's end.
+    let agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_recv_body(Some(Duration::from_secs(180)))
+        .build()
+        .new_agent();
     let response = agent
-        .get(&url)
+        .get(url)
         .call()
         .map_err(|error| EditError::invalid(format!("couldn't download DeepFilterNet: {error}")))?;
-    let part = dir.join(format!("{name}.{}.part", std::process::id()));
     let digest = (|| -> Result<String> {
         let mut body = response.into_body().into_reader();
-        let mut file = fs::File::create(&part)?;
+        let mut file = fs::File::create(part)?;
         let mut hasher = Sha256::new();
         let mut buffer = vec![0u8; 1 << 16];
         loop {
@@ -108,23 +150,16 @@ pub fn deep_filter(on_progress: &(dyn Fn(&str) + Sync)) -> Result<PathBuf> {
         Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
     })();
     match digest {
-        Ok(digest) if digest == *sha => {}
-        Ok(_) => {
-            let _ = fs::remove_file(&part);
-            return Err(EditError::invalid("the DeepFilterNet download doesn't match its checksum"));
-        }
-        Err(error) => {
-            let _ = fs::remove_file(&part);
-            return Err(EditError::invalid(format!("couldn't download DeepFilterNet: {error}")));
-        }
+        Ok(digest) if digest == sha => {}
+        Ok(_) => return Err(EditError::invalid("the DeepFilterNet download doesn't match its checksum")),
+        Err(error) => return Err(EditError::invalid(format!("couldn't download DeepFilterNet: {error}"))),
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&part, fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(part, fs::Permissions::from_mode(0o755))?;
     }
-    fs::rename(&part, &path)?;
-    Ok(path)
+    Ok(())
 }
 
 /// The take's sound with its voice cleaned, made once and reused while the take is
@@ -141,7 +176,7 @@ pub fn cleaned_audio(
         return Ok(path);
     }
     let source = audio::render_audio(project, take)?;
-    let tmp = path.with_extension("tmp.pcm");
+    let tmp = path.with_extension("tmp.f32");
     let made = match denoiser {
         Some(program) => {
             on_progress(&format!("lowering the noise in {} (once per take)", take.file));
@@ -172,7 +207,7 @@ pub fn denoised_audio(project: &Project, take: &Take) -> Result<Option<PathBuf>>
 
 fn cleaned_path(project: &Project, take: &Take, denoised: bool) -> Result<PathBuf> {
     let how = if denoised { format!("dfn{NOISE_REDUCTION_DB}") } else { "hp".to_owned() };
-    project.edit_path(&format!(".cache/audio/{}.{CLOCK_VERSION}.voice-{how}.48k.pcm", take.stem()))
+    project.edit_path(&format!(".cache/audio/{}.{CLOCK_VERSION}.voice-{how}.48k.f32", take.stem()))
 }
 
 fn is_fresh(path: &Path, take: &Take) -> bool {
@@ -209,8 +244,8 @@ fn pieces(frames: usize) -> Vec<Piece> {
 }
 
 /// Lowers the noise of the stereo PCM `source` into `out`: its pieces, centred to one
-/// channel, go through DeepFilterNet in parallel, then they are joined in order,
-/// filtered and written as stereo again.
+/// channel, go through DeepFilterNet in parallel, then they are joined in order and
+/// filtered.
 fn denoise(program: &Path, source: &Path, work: &Path, out: &Path) -> Result<()> {
     let frames = (fs::metadata(source)?.len() / 4) as usize;
     let pieces = pieces(frames);
@@ -240,7 +275,8 @@ fn denoise(program: &Path, source: &Path, work: &Path, out: &Path) -> Result<()>
                     let Some(piece) = pieces.get(index) else { break };
                     let input = inputs.join(format!("{index:05}.wav"));
                     let done = read_mono(&mut file, piece.from, piece.to - piece.from)
-                        .and_then(|mut samples| {
+                        .and_then(|samples| {
+                            let mut samples: Vec<i16> = samples.into_iter().map(|sample| sample / HEADROOM).collect();
                             samples.resize(samples.len() + TAIL, 0);
                             write_wav(&input, &samples)
                         })
@@ -249,8 +285,6 @@ fn denoise(program: &Path, source: &Path, work: &Path, out: &Path) -> Result<()>
                                 program,
                                 [
                                     "--compensate-delay".as_ref(),
-                                    "--atten-lim-db".as_ref(),
-                                    NOISE_REDUCTION_DB.to_string().as_ref(),
                                     "--output-dir".as_ref(),
                                     outputs.as_os_str(),
                                     input.as_os_str(),
@@ -271,22 +305,29 @@ fn denoise(program: &Path, source: &Path, work: &Path, out: &Path) -> Result<()>
         return Err(error);
     }
     let mut writer = VoiceWriter::create(out)?;
-    let mut seam: Vec<i16> = Vec::new();
+    let mut take = fs::File::open(source)?;
+    let kept = 10f32.powf(-(NOISE_REDUCTION_DB as f32) / 20.0);
+    let mut seam: Vec<f32> = Vec::new();
     for (index, piece) in pieces.iter().enumerate() {
         let output = outputs.join(format!("{index:05}.wav"));
         let mut cleaned = audio::read_wav(&output)?;
         let _ = fs::remove_file(&output);
         // Missing samples (an output a little short) are silence.
         cleaned.resize(piece.to - piece.from, 0);
-        let own = &cleaned[piece.start - piece.from..];
-        let (own, next_seam) = own.split_at(piece.end - piece.start);
+        let noisy = read_mono(&mut take, piece.start, piece.to - piece.start)?;
+        let mixed: Vec<f32> = cleaned[piece.start - piece.from..]
+            .iter()
+            .zip(&noisy)
+            .map(|(clean, noisy)| f32::from(*clean) * f32::from(HEADROOM) * (1.0 - kept) + f32::from(*noisy) * kept)
+            .collect();
+        let (own, next_seam) = mixed.split_at(piece.end - piece.start);
         let faded = seam.len().min(own.len());
         for (at, (previous, current)) in seam.iter().zip(own).enumerate() {
             let weight = (at as f32 + 0.5) / faded as f32;
-            writer.push(f32::from(*previous) * (1.0 - weight) + f32::from(*current) * weight)?;
+            writer.push(previous * (1.0 - weight) + current * weight)?;
         }
         for sample in &own[faded..] {
-            writer.push(f32::from(*sample))?;
+            writer.push(*sample)?;
         }
         seam = next_seam.to_vec();
     }
@@ -357,7 +398,8 @@ fn write_wav(path: &Path, samples: &[i16]) -> Result<()> {
     Ok(())
 }
 
-/// Writes the cleaned voice: high-passed, as stereo 16-bit PCM.
+/// Writes the cleaned voice: high-passed, as 32-bit float samples (full scale 1.0), so
+/// peaks the filter raises above full scale are kept for the limiter.
 struct VoiceWriter {
     out: BufWriter<fs::File>,
     high_pass: [Biquad; 2],
@@ -372,9 +414,7 @@ impl VoiceWriter {
     /// One sample, on the 16-bit scale.
     fn push(&mut self, sample: f32) -> Result<()> {
         let filtered = self.high_pass.iter_mut().fold(f64::from(sample), |value, section| section.process(value));
-        let bytes = (filtered.round().clamp(-32768.0, 32767.0) as i16).to_le_bytes();
-        self.out.write_all(&bytes)?;
-        self.out.write_all(&bytes)?;
+        self.out.write_all(&((filtered / 32768.0) as f32).to_le_bytes())?;
         Ok(())
     }
 
@@ -479,21 +519,39 @@ mod tests {
             left.iter().flat_map(|sample| [sample.to_le_bytes(), 0i16.to_le_bytes()].concat()).collect();
         fs::write(&source, bytes).unwrap();
 
-        let (denoised, filtered) = (dir.path().join("denoised.pcm"), dir.path().join("filtered.pcm"));
+        let (denoised, filtered) = (dir.path().join("denoised.f32"), dir.path().join("filtered.f32"));
         denoise(&program, &source, &dir.path().join("work"), &denoised).unwrap();
         filter_only(&source, &filtered).unwrap();
-        let (denoised, filtered) = (fs::read(denoised).unwrap(), fs::read(filtered).unwrap());
-        assert_eq!(denoised.len(), frames * 4);
-        // The same as filtering alone, but for rounding at the seams.
-        let samples = |bytes: &[u8]| -> Vec<i16> {
-            bytes.as_chunks::<2>().0.iter().map(|pair| i16::from_le_bytes(*pair)).collect()
-        };
-        let worst = samples(&denoised).iter().zip(samples(&filtered)).map(|(a, b)| (a - b).abs()).max().unwrap();
-        assert!(worst <= 2, "{worst}");
-        // Centred: both channels carry half of the left (past the filter's settling).
-        let out = samples(&filtered);
-        assert_eq!(out[PIECE * 2], out[PIECE * 2 + 1]);
-        let peak = out[RATE * 2..].iter().map(|sample| sample.unsigned_abs()).max().unwrap();
-        assert!((7900..=8100).contains(&peak), "{peak}");
+        let (denoised, filtered) = (samples(&fs::read(denoised).unwrap()), samples(&fs::read(filtered).unwrap()));
+        assert_eq!(denoised.len(), frames);
+        // The same as filtering alone, but for rounding (the noise remover hears 6 dB down).
+        let worst = denoised.iter().zip(&filtered).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        assert!(worst <= 3.0 / 32768.0, "{worst}");
+        // Centred: one channel with half of the left (past the filter's settling).
+        let peak = filtered[RATE * 2..].iter().fold(0.0, |peak: f32, sample| peak.max(sample.abs()));
+        assert!((0.24..0.25).contains(&peak), "{peak}");
+    }
+
+    /// Removing the low end of a full-scale sound raises its peaks above full scale: they
+    /// are kept, not clipped.
+    #[test]
+    fn peaks_the_filter_raises_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        // A full-scale 50 Hz square wave on both channels.
+        let bytes: Vec<u8> = (0..RATE)
+            .flat_map(|n| {
+                let sample: i16 = if (n / 480) % 2 == 0 { 32767 } else { -32768 };
+                [sample.to_le_bytes(), sample.to_le_bytes()].concat()
+            })
+            .collect();
+        let (source, out) = (dir.path().join("take.pcm"), dir.path().join("filtered.f32"));
+        fs::write(&source, bytes).unwrap();
+        filter_only(&source, &out).unwrap();
+        let peak = samples(&fs::read(out).unwrap()).iter().fold(0.0, |peak: f32, sample| peak.max(sample.abs()));
+        assert!(peak > 1.2, "{peak}");
+    }
+
+    fn samples(bytes: &[u8]) -> Vec<f32> {
+        bytes.as_chunks::<4>().0.iter().map(|four| f32::from_le_bytes(*four)).collect()
     }
 }
