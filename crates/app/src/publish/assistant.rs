@@ -1,10 +1,13 @@
 //! [`PublishAssistant`]: the agent writing a video's YouTube details, and Codex
-//! drawing its thumbnails, for the Publish tab.
+//! drawing its thumbnails in a chat, for the Publish tab.
 //!
 //! Both run for a while (seconds for the details, minutes for thumbnails), on a
 //! thread of their own, and keep going when the creator leaves the tab: the
-//! assistant applies the details to the video itself and says when thumbnails
-//! were drawn, so a Publish tab opened later shows the outcome too.
+//! assistant applies the details to the video itself and keeps the chat's
+//! answers and thumbnails, so a Publish tab opened later shows the outcome too.
+//!
+//! A video's [`ThumbnailChat`] is saved in the settings table; Codex remembers
+//! it in its own session, which every turn after the first resumes.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -20,20 +23,23 @@ use rushes_core::document::to_markdown;
 use rushes_core::media::{self, MediaKind};
 use rushes_core::{DocumentKind, Video, VideoFormat, VideoId};
 use rushes_pipeline::{
-    AgentConfig, AgentEvent, CodexConfig, DetailsRequest, MAX_THUMBNAILS, PipelineError, ThumbnailOutcome,
-    ThumbnailRequest, VideoDetails, WrittenDetails, generate_thumbnails, has_transcript, read_edit_notes,
-    read_transcript, write_details,
+    AgentConfig, AgentEvent, CodexConfig, DetailsRequest, PipelineError, ThumbnailOutcome, ThumbnailRequest,
+    VideoDetails, WrittenDetails, generate_thumbnails, has_transcript, read_edit_notes, read_transcript, write_details,
 };
+use serde::{Deserialize, Serialize};
 
 use super::chapters::{CHAPTERS_HEADING, MIN_CHAPTERS};
 use super::rules::{DESCRIPTION_MAX_BYTES, fit_details};
 use crate::ai_edit::{agent_config, command_path, sentence};
 use crate::state::{AppEvent, AppState};
 
-/// How many thumbnails a request asks for unless the creator says otherwise.
-pub const DEFAULT_THUMBNAILS: usize = 3;
 /// How long quitting waits for the agents to stop, beyond their kill grace period.
 const QUIT_MARGIN: Duration = Duration::from_secs(1);
+/// The settings key the thumbnail chats are saved under.
+const CHATS_KEY: &str = "publish.thumbnail_chats";
+/// What the creator reads when Codex lost the chat's session.
+pub const CHAT_FORGOTTEN: &str =
+    "Codex no longer remembers this chat, so your next message starts a new one. Say again what you’d like.";
 
 /// Where the agent writing a video's details stands.
 #[derive(Clone, Debug, PartialEq)]
@@ -44,36 +50,74 @@ pub enum DetailsJob {
     Written(VideoDetails),
 }
 
-/// Where Codex drawing a video's thumbnails stands.
+/// Where Codex answering the creator's last message in a thumbnail chat stands.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ThumbnailJob {
-    Drawing {
-        count: usize,
+    Working {
         /// The first line of what Codex last said.
         activity: Option<SharedString>,
     },
+    /// Codex couldn't answer; why. The chat says so too, and keeps saying it.
     Failed(SharedString),
-    Drawn {
-        made: usize,
-        asked: usize,
-        /// Why Codex stopped before drawing them all, when it said.
-        problem: Option<SharedString>,
-    },
 }
 
-/// What a thumbnail request asks for.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ThumbnailOptions {
-    pub count: usize,
-    pub ideas: String,
-    /// Show Codex frames of the video, so its people and set stay recognisable.
-    pub use_frames: bool,
+/// Who said a message of a thumbnail chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatRole {
+    Creator,
+    Codex,
 }
 
-impl Default for ThumbnailOptions {
-    fn default() -> Self {
-        Self { count: DEFAULT_THUMBNAILS, ideas: String::new(), use_frames: true }
+/// A message of a thumbnail chat.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChatMessage {
+    /// Numbers the chat's messages in order, for their element ids.
+    pub id: u32,
+    pub role: ChatRole,
+    pub text: String,
+    /// The thumbnails Codex drew in its turn, in the order it drew them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<PathBuf>,
+    /// Why Codex stopped before it finished, as the creator reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+}
+
+/// A video's chat with Codex about its thumbnails.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ThumbnailChat {
+    /// Codex's session, which remembers the chat; `None` until a first turn
+    /// started, or once Codex lost it.
+    pub session_id: Option<String>,
+    pub messages: Vec<ChatMessage>,
+}
+
+impl ThumbnailChat {
+    fn push(&mut self, role: ChatRole, text: String, images: Vec<PathBuf>, problem: Option<String>) {
+        let id = self.messages.last().map_or(1, |last| last.id + 1);
+        self.messages.push(ChatMessage { id, role, text, images, problem });
     }
+
+    /// The thumbnails Codex drew in its last turn.
+    fn last_drawn(&self) -> Vec<PathBuf> {
+        let last = self.messages.iter().rev().find(|message| message.role == ChatRole::Codex);
+        last.map(|message| message.images.clone()).unwrap_or_default()
+    }
+
+    /// Whether the creator's last message got no answer: Codex was cancelled, or
+    /// Rushes closed while it worked.
+    pub fn unanswered(&self) -> bool {
+        self.messages.last().is_some_and(|last| last.role == ChatRole::Creator)
+    }
+}
+
+/// A thumbnail chat as the settings keep it.
+#[derive(Serialize, Deserialize)]
+struct StoredChat {
+    video_id: VideoId,
+    #[serde(flatten)]
+    chat: ThumbnailChat,
 }
 
 /// What the agent can write the details from.
@@ -148,7 +192,7 @@ pub struct PublishAssistant {
     workers: HashMap<(VideoId, Work), Worker>,
     /// What the creator asked for last, so the dialogs open with it again.
     instructions: HashMap<VideoId, String>,
-    thumbnail_options: HashMap<VideoId, ThumbnailOptions>,
+    chats: HashMap<VideoId, ThumbnailChat>,
     agent_env: Vec<(String, String)>,
     _subscriptions: Vec<Subscription>,
 }
@@ -175,16 +219,18 @@ impl PublishAssistant {
                     async {}
                 }),
             ];
-            Self {
+            let mut assistant = Self {
                 state,
                 details: HashMap::new(),
                 thumbnails: HashMap::new(),
                 workers: HashMap::new(),
                 instructions: HashMap::new(),
-                thumbnail_options: HashMap::new(),
+                chats: HashMap::new(),
                 agent_env: Vec::new(),
                 _subscriptions: subscriptions,
-            }
+            };
+            assistant.load_chats(cx);
+            assistant
         });
         cx.set_global(GlobalPublishAssistant(assistant.clone()));
         assistant
@@ -222,16 +268,18 @@ impl PublishAssistant {
         }
     }
 
-    /// Deleting a video stops what runs for it.
+    /// Deleting a video stops what runs for it and forgets its chat.
     fn forget_deleted_videos(&mut self, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let gone: Vec<VideoId> = self
             .details
             .keys()
             .chain(self.thumbnails.keys())
+            .chain(self.chats.keys())
             .copied()
             .filter(|video_id| state.video(*video_id).is_none())
             .collect();
+        let chats = self.chats.len();
         for video_id in gone {
             for work in [Work::Details, Work::Thumbnails] {
                 if let Some(worker) = self.workers.remove(&(video_id, work)) {
@@ -240,6 +288,10 @@ impl PublishAssistant {
             }
             self.details.remove(&video_id);
             self.thumbnails.remove(&video_id);
+            self.chats.remove(&video_id);
+        }
+        if self.chats.len() != chats {
+            self.save_chats(cx);
         }
     }
 
@@ -438,23 +490,26 @@ impl PublishAssistant {
         self.is_cancelling(video_id, Work::Thumbnails)
     }
 
-    /// What the creator asked for in the last thumbnail request for `video_id`.
-    pub fn last_thumbnail_options(&self, video_id: VideoId) -> ThumbnailOptions {
-        self.thumbnail_options.get(&video_id).cloned().unwrap_or_default()
+    /// The video's chat with Codex about its thumbnails, `None` before its first message.
+    pub fn thumbnail_chat(&self, video_id: VideoId) -> Option<&ThumbnailChat> {
+        self.chats.get(&video_id)
     }
 
-    /// Has Codex draw thumbnails for the video into its thumbnails folder; views
-    /// hear [`AssistEvent::ThumbnailsDrawn`] once they are there.
-    pub fn generate_thumbnails(
+    /// Sends the creator's `message` to Codex in the video's thumbnail chat: Codex
+    /// draws what it asks for into the video's thumbnails folder, or answers it;
+    /// views hear [`AssistEvent::ThumbnailsDrawn`] once it did. A chat's first
+    /// message shows Codex frames of the video when `use_frames` is set.
+    pub fn send_thumbnail_message(
         &mut self,
         video_id: VideoId,
-        options: ThumbnailOptions,
+        message: String,
+        use_frames: bool,
         cx: &mut Context<Self>,
     ) -> Result<(), AssistError> {
         if self.workers.contains_key(&(video_id, Work::Thumbnails)) {
             return Err(AssistError::AlreadyRunning);
         }
-        let options = ThumbnailOptions { count: options.count.clamp(1, MAX_THUMBNAILS), ..options };
+        let message = message.trim().to_owned();
         if self.state.read(cx).video(video_id).is_none() {
             return Err(AssistError::VideoNotFound);
         }
@@ -468,16 +523,19 @@ impl PublishAssistant {
             env: self.agent_env.clone(),
             ..CodexConfig::default()
         };
+        let chat = self.chats.get(&video_id).cloned().unwrap_or_default();
         let request = ThumbnailRequest {
             dir,
-            count: options.count,
+            session_id: chat.session_id.clone(),
             video_title: video.upload_title().trim().to_owned(),
             short: video.format == VideoFormat::Short,
             script: script_markdown(state, video_id),
-            ideas: options.ideas.trim().to_owned(),
+            message: message.clone(),
             frames_from: None,
+            last_drawn: chat.last_drawn(),
         };
-        let frames = options.use_frames.then(|| (video.publish.file.clone(), media::footage_dir(&video)));
+        let frames =
+            (use_frames && chat.session_id.is_none()).then(|| (video.publish.file.clone(), media::footage_dir(&video)));
         self.spawn(
             video_id,
             Work::Thumbnails,
@@ -489,11 +547,11 @@ impl PublishAssistant {
                 generate_thumbnails(&config, &request, on_event, cancel)
             },
             Self::on_thumbnail_event,
-            Self::on_thumbnails_drawn,
+            Self::on_thumbnail_reply,
             cx,
         )?;
-        self.thumbnails.insert(video_id, ThumbnailJob::Drawing { count: options.count, activity: None });
-        self.thumbnail_options.insert(video_id, options);
+        self.update_chat(video_id, cx, |chat| chat.push(ChatRole::Creator, message, Vec::new(), None));
+        self.thumbnails.insert(video_id, ThumbnailJob::Working { activity: None });
         cx.notify();
         Ok(())
     }
@@ -502,54 +560,120 @@ impl PublishAssistant {
         self.cancel(video_id, Work::Thumbnails, cx);
     }
 
-    fn on_thumbnail_event(&mut self, video_id: VideoId, event: AgentEvent, cx: &mut Context<Self>) {
-        let AgentEvent::AssistantText { text } = event else { return };
-        let Some(ThumbnailJob::Drawing { activity, .. }) = self.thumbnails.get_mut(&video_id) else { return };
-        let line = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default();
-        *activity = (!line.is_empty()).then(|| SharedString::from(line.to_owned()));
+    /// Forgets the video's thumbnail chat, Codex's session with it: the next message
+    /// starts a new one. The thumbnails stay. Nothing happens while Codex works.
+    pub fn new_thumbnail_chat(&mut self, video_id: VideoId, cx: &mut Context<Self>) {
+        if self.workers.contains_key(&(video_id, Work::Thumbnails)) {
+            return;
+        }
+        self.thumbnails.remove(&video_id);
+        if self.chats.remove(&video_id).is_some() {
+            self.save_chats(cx);
+        }
         cx.notify();
     }
 
-    fn on_thumbnails_drawn(
+    fn on_thumbnail_event(&mut self, video_id: VideoId, event: AgentEvent, cx: &mut Context<Self>) {
+        match event {
+            // Saved at once: a turn that never finishes still leaves Codex's memory of the chat.
+            AgentEvent::Init { session_id, .. } if !session_id.is_empty() => {
+                if self.chats.get(&video_id).is_some_and(|chat| chat.session_id.as_ref() != Some(&session_id)) {
+                    self.update_chat(video_id, cx, |chat| chat.session_id = Some(session_id));
+                }
+            }
+            AgentEvent::AssistantText { text } => {
+                let Some(ThumbnailJob::Working { activity }) = self.thumbnails.get_mut(&video_id) else { return };
+                let line = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default();
+                *activity = (!line.is_empty()).then(|| SharedString::from(line.to_owned()));
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    fn on_thumbnail_reply(
         &mut self,
         video_id: VideoId,
         result: Result<ThumbnailOutcome, PipelineError>,
         cx: &mut Context<Self>,
     ) {
-        let asked = self.thumbnail_options.get(&video_id).map_or(DEFAULT_THUMBNAILS, |options| options.count);
+        if self.state.read(cx).video(video_id).is_none() {
+            return;
+        }
         match result {
             Ok(outcome) => {
-                self.thumbnails.insert(
-                    video_id,
-                    ThumbnailJob::Drawn {
-                        made: outcome.made.len(),
-                        asked,
-                        problem: outcome.problem.map(|problem| sentence(&problem).into()),
-                    },
-                );
+                self.thumbnails.remove(&video_id);
+                self.update_chat(video_id, cx, |chat| {
+                    if outcome.session_id.is_some() {
+                        chat.session_id = outcome.session_id;
+                    }
+                    let problem = outcome.problem.map(|problem| sentence(&problem));
+                    chat.push(ChatRole::Codex, outcome.reply.trim().to_owned(), outcome.made, problem);
+                });
                 cx.emit(AssistEvent::ThumbnailsDrawn(video_id));
             }
+            // The creator's message stays unanswered.
             Err(PipelineError::Cancelled) => {
                 self.thumbnails.remove(&video_id);
             }
             Err(error) => {
-                log_line!("rushes: drawing the thumbnails of {video_id} failed: {error}");
+                log_line!("rushes: Codex couldn't answer in the thumbnail chat of {video_id}: {error}");
                 let problem = problem_text(
                     &error,
                     "Codex",
                     "Install the Codex CLI and sign in, or set the Codex command in Settings > AI editing.",
                 );
+                self.update_chat(video_id, cx, |chat| {
+                    if matches!(error, PipelineError::SessionNotFound(_)) {
+                        chat.session_id = None;
+                    }
+                    chat.push(ChatRole::Codex, String::new(), Vec::new(), Some(problem.clone()));
+                });
                 self.thumbnails.insert(video_id, ThumbnailJob::Failed(problem.into()));
             }
         }
     }
 
-    /// Forgets how the last request ended.
+    /// Forgets that Codex couldn't answer; the chat still says so.
     pub fn dismiss_thumbnails(&mut self, video_id: VideoId, cx: &mut Context<Self>) {
-        if matches!(self.thumbnails.get(&video_id), Some(ThumbnailJob::Failed(_) | ThumbnailJob::Drawn { .. })) {
+        if matches!(self.thumbnails.get(&video_id), Some(ThumbnailJob::Failed(_))) {
             self.thumbnails.remove(&video_id);
             cx.notify();
         }
+    }
+
+    /// Changes the video's chat and saves the chats.
+    fn update_chat(&mut self, video_id: VideoId, cx: &mut Context<Self>, change: impl FnOnce(&mut ThumbnailChat)) {
+        change(self.chats.entry(video_id).or_default());
+        self.save_chats(cx);
+        cx.notify();
+    }
+
+    fn load_chats(&mut self, cx: &mut Context<Self>) {
+        match self.state.read(cx).read_setting::<Vec<StoredChat>>(CHATS_KEY) {
+            Ok(stored) => {
+                let state = self.state.read(cx);
+                self.chats = stored
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|stored| state.video(stored.video_id).is_some())
+                    .map(|stored| (stored.video_id, stored.chat))
+                    .collect();
+            }
+            Err(error) => log_line!("rushes: couldn't read the saved thumbnail chats: {error}"),
+        }
+    }
+
+    fn save_chats(&mut self, cx: &mut Context<Self>) {
+        let mut stored: Vec<StoredChat> = self
+            .chats
+            .iter()
+            .filter(|(_, chat)| !chat.messages.is_empty() || chat.session_id.is_some())
+            .map(|(video_id, chat)| StoredChat { video_id: *video_id, chat: chat.clone() })
+            .collect();
+        stored.sort_by_key(|stored| stored.video_id);
+        // A refusal is reported by the state; the chats stay until Rushes closes.
+        self.state.update(cx, |state, cx| state.save_setting(CHATS_KEY, &stored, cx));
     }
 }
 
@@ -663,6 +787,7 @@ fn problem_text(error: &PipelineError, who: &str, fix: &str) -> String {
             text
         }
         PipelineError::Io(error) => format!("Couldn’t write to the video’s media folder: {error}."),
+        PipelineError::SessionNotFound(_) => CHAT_FORGOTTEN.to_owned(),
         PipelineError::Cancelled | PipelineError::SkillNotFound(_) | PipelineError::FootageNotFound(_) => {
             sentence(&error.to_string())
         }

@@ -11,7 +11,8 @@ A pipeline turns a folder of raw takes into `edit/final.mp4` with a headless cod
   skill, a prompt plus Python helpers the agent runs through its shell.
 
 The crate also has the agent write a video's YouTube details and Codex draw its thumbnails
-(see [YouTube details](#youtube-details) and [Thumbnails](#thumbnails)). It is synchronous
+in a chat that remembers (see [YouTube details](#youtube-details) and
+[Thumbnails](#thumbnails)). It is synchronous
 and UI-free: the app calls it on a background thread with an event callback and a
 cancellation flag.
 
@@ -209,33 +210,50 @@ claude -p --output-format stream-json --verbose [--model <m>] --permission-mode 
 
 ## Thumbnails
 
-`generate_thumbnails(&CodexConfig, &ThumbnailRequest, on_event, cancel)` has Codex draw
-`count` (1–4) thumbnails with its image generation and puts them in `request.dir` as
-`thumbnail-<n>.jpg`, numbered after the ones there (`list_thumbnails` lists them, newest
-first):
+Thumbnails are a chat with Codex: every message is one turn, and every turn after the
+first resumes Codex's session, so it remembers what the creator asked and what it drew
+and can change a picture, draw more or answer a question about them.
+`generate_thumbnails(&CodexConfig, &ThumbnailRequest, on_event, cancel)` runs one turn:
+Codex answers `request.message`, drawing as many thumbnails as it asks for (at most
+`MAX_THUMBNAILS`, 4), and the drawn ones go in `request.dir` as `thumbnail-<n>.jpg`,
+numbered after the ones there (`list_thumbnails` lists them, newest first):
 
 ```text
+# a chat's first message
 codex exec --json --skip-git-repo-check --sandbox=workspace-write --cd=<thumbnails dir>
            [--model=<m>] --config=model_reasoning_effort="medium" [--image=<frame>]... < prompt
+# every later one
+codex exec --json --skip-git-repo-check --sandbox=workspace-write --cd=<thumbnails dir>
+           [--model=<m>] --config=model_reasoning_effort="medium" resume -- <session id> - < prompt
 ```
 
-- Codex works in the thumbnails folder and may write only there. The prompt
-  (`thumbnail_prompt`) names the video, the rules of a thumbnail that works (16:9, one
-  subject, at most four words of text), the creator's ideas, the start of the script, and
-  the draft paths: Codex copies each image its tool drew to the next one,
-  `.drafts/draft-<n>.png`. Reasoning effort is medium: drawing needs little, and the
-  creator's own default may be the slowest.
-- With `frames_from`, three frames of that video (at a quarter, half and three quarters,
-  ffmpeg) are attached with `--image`, so its people and set stay recognisable.
+- Codex works in the thumbnails folder and may write only there. The first prompt
+  (`thumbnail_prompt`) names the video, says it's a chat the creator may come back to,
+  the rules of a thumbnail that works (16:9, one subject, at most four words of text),
+  the start of the script and what the creator says. A later prompt
+  (`follow_up_prompt`) is what the creator says, the thumbnails in the folder by name
+  ("number 6" is `thumbnail-6.jpg`; a change is a new picture, never an overwrite) and
+  the names Rushes gave what Codex drew in its last turn (`ThumbnailRequest::last_drawn`).
+  Both end with the drawing rules: as many as asked, three ideas for a first request or
+  one picture per change when the creator doesn't say, nothing for a question; and the
+  draft paths, `.drafts/draft-<n>.png`, where Codex copies each image its tool drew.
+  Reasoning effort is medium: drawing needs little, and the creator's own default may be
+  the slowest.
+- With `frames_from`, a chat's first turn attaches three frames of that video (at a
+  quarter, half and three quarters, ffmpeg) with `--image`, so its people and set stay
+  recognisable; later turns have them in the session already.
 - Afterwards ffmpeg scales and crops each draft to 1280 × 720 and saves it as a JPG
   (`-q:v 3`, well under YouTube's 2 MB); without ffmpeg the draft is kept as it is. The
   `.drafts` folder goes either way. Cancelling stops Codex's process group and keeps
   nothing.
 - Codex's `--json` lines become the same `AgentEvent`s (`parse_codex_line`): the thread
   is `Init`, messages `AssistantText`, shell commands `ToolUse`/`ToolResult`,
-  `turn.completed`/`turn.failed` the `Result`, `error` lines `Stderr`. Drawing fewer than
-  asked returns what was drawn with the reason (`ThumbnailOutcome::problem`); drawing
-  none is an `AgentFailed`.
+  `turn.completed`/`turn.failed` the `Result`, `error` lines `Stderr`.
+  `ThumbnailOutcome` has what was drawn (nothing when Codex only answered), Codex's last
+  message as the `reply`, the session id for the next turn, and why Codex stopped early
+  when it did (`problem`); a turn that broke off with nothing drawn, or ended without a
+  word or a picture, is an `AgentFailed`.
+  A session Codex no longer has (`no rollout found`) is `PipelineError::SessionNotFound`.
 
 ## Requirements
 
@@ -309,13 +327,19 @@ cargo clippy -p rushes-pipeline --all-targets
   `FAKE_AGENT_DETAILS=<text>` replaces the answer, `FAKE_AGENT_PROMPT_FILE=<path>` records
   the prompt.
 - `scripts/fake-codex` (python3) reads the prompt from stdin, saves a test pattern PNG at
-  every draft path it names and prints Codex-shaped `--json` events. Switches:
-  `FAKE_CODEX_MODE=fail` (a usage limit), `FAKE_CODEX_DRAW=<n>` (draw only the first n,
-  then fail), `FAKE_CODEX_DELAY_MS=<ms>`, `FAKE_CODEX_ARGV_FILE`, `FAKE_CODEX_PROMPT_FILE`.
+  the draft paths it names, as many as the message asks for ("2 more", "3 ideas"; none
+  for a question; else three in a new chat and one in a resumed one), and prints
+  Codex-shaped `--json` events. It keeps sessions as files in `FAKE_CODEX_HOME`, so
+  `resume` continues one, answers a question with the chat's first message, and fails
+  like Codex for an unknown id. Switches: `FAKE_CODEX_MODE=fail` (a usage limit), `FAKE_CODEX_MODE=silent` (neither a
+  word nor a picture),
+  `FAKE_CODEX_DRAW=<n>` (draw only the first n, then fail), `FAKE_CODEX_DELAY_MS=<ms>`,
+  `FAKE_CODEX_ARGV_FILE`, `FAKE_CODEX_PROMPT_FILE`.
 - `tests/publish.rs` writes details from a prompt larger than an argument may be, refuses
   answers that aren't details, and draws thumbnails with frames of a clip, checking they
-  are 1280 × 720 JPGs numbered after the existing ones; also a partial run and
-  cancelling.
+  are 1280 × 720 JPGs numbered after the existing ones; a chat whose later turns resume
+  the session, draw a change, answer from memory and stop for a lost session; also a
+  partial run and cancelling.
 
 The tests never call a model. A real video-use run costs model and ElevenLabs credits;
 try it on short footage (`scripts/make-test-footage.sh <dir>`).

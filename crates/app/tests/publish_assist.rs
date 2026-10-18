@@ -1,6 +1,7 @@
 //! UI integration tests for the Publish tab's AI help: the agent writing the title,
 //! description and tags (`scripts/fake-agent`), and Codex drawing thumbnails to
-//! choose from (`scripts/fake-codex`), driven by clicks and typing in headless windows.
+//! choose from in a chat that remembers (`scripts/fake-codex`), driven by clicks and
+//! typing in headless windows.
 
 mod publish_support;
 
@@ -15,7 +16,7 @@ use gpui_kit::{
     size,
 };
 use publish_support::{Workspace, wait_until};
-use rushes::publish::{DetailsJob, PublishAssistant, PublishPanel, ThumbnailJob};
+use rushes::publish::{ChatMessage, ChatRole, DetailsJob, PublishAssistant, PublishPanel, ThumbnailChat, ThumbnailJob};
 use rushes_core::settings::YoutubeBackend;
 use rushes_core::{Block, BlockKind, DocumentKind, VideoId};
 
@@ -244,13 +245,49 @@ fn make_clip(path: &Path) {
     assert!(status.success());
 }
 
+fn chat(cx: &mut TestAppContext, assistant: &Entity<PublishAssistant>, video_id: VideoId) -> ThumbnailChat {
+    assistant.read_with(cx, |assistant, _| assistant.thumbnail_chat(video_id).cloned().unwrap_or_default())
+}
+
+fn argv(file: &Path) -> Vec<String> {
+    serde_json::from_str(&fs::read_to_string(file).unwrap()).unwrap()
+}
+
+/// Types `message` into the focused composer and sends it with Enter, then waits for Codex's answer.
+fn ask(
+    cx: &mut TestAppContext,
+    handle: AnyWindowHandle,
+    assistant: &Entity<PublishAssistant>,
+    video_id: VideoId,
+    message: &str,
+) -> ChatMessage {
+    let before = chat(cx, assistant, video_id).messages.len();
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.input(message, cx);
+        window.press("enter", cx);
+    });
+    wait_until(cx, "Codex's answer", |cx| {
+        let chat = chat(cx, assistant, video_id);
+        let working = matches!(thumbnail_job(cx, assistant, video_id), Some(ThumbnailJob::Working { .. }));
+        (chat.messages.len() == before + 2 && !working).then(|| chat.messages.last().cloned().unwrap())
+    })
+}
+
 #[gpui_kit::test]
-fn codex_draws_thumbnails_to_choose_from(cx: &mut TestAppContext) {
+fn codex_draws_thumbnails_in_a_chat_that_remembers(cx: &mut TestAppContext) {
     if !tools_available() {
         return;
     }
-    let argv = tempfile::NamedTempFile::new().unwrap();
-    let (workspace, assistant) = workspace(cx, &[("FAKE_CODEX_ARGV_FILE", argv.path().to_str().unwrap())]);
+    let (argv_file, home) = (tempfile::NamedTempFile::new().unwrap(), tempfile::tempdir().unwrap());
+    let (workspace, assistant) = workspace(
+        cx,
+        &[
+            ("FAKE_CODEX_ARGV_FILE", argv_file.path().to_str().unwrap()),
+            ("FAKE_CODEX_HOME", home.path().to_str().unwrap()),
+            ("FAKE_CODEX_DELAY_MS", "100"),
+        ],
+    );
     let video_id = workspace.create_video(cx, "Sourdough in 24 hours", |_| {});
     let folder = workspace.state.update(cx, |state, cx| state.ensure_video_folder(video_id, cx)).unwrap();
     make_clip(&folder.join("footage/take1.mp4"));
@@ -259,75 +296,170 @@ fn codex_draws_thumbnails_to_choose_from(cx: &mut TestAppContext) {
 
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
-        window.click("generate-thumbnails", cx);
+        window.click("thumbnail-chat", cx);
     });
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
-        // The ideas typed in the focused field, and two of them.
+        assert!(window.has_active_sheet(cx));
+        assert!(window.find("thumbnail-chat-ideas").visible(), "an empty chat offers a start");
+        assert_eq!(window.find("thumbnail-chat-frames").checked(), Some(true));
+        // Nothing to send yet.
+        window.click("thumbnail-chat-send", cx);
+    });
+    assert_eq!(chat(cx, &assistant, video_id), ThumbnailChat::default());
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        // The message goes in the focused composer; Enter sends it.
         window.input("Me holding the loaf.", cx);
-        window.within("generate-thumbnails-count").click(1usize, cx);
-    });
-    window(cx, handle, |window, cx| {
-        window.render_frame(cx);
-        assert_eq!(window.within("generate-thumbnails-count").find(1usize).checked(), Some(true));
-        window.click("generate-thumbnails-commit", cx);
+        window.press("enter", cx);
     });
     let job = thumbnail_job(cx, &assistant, video_id);
-    assert!(matches!(job, Some(ThumbnailJob::Drawing { count: 2, .. })), "{job:?}");
+    assert!(matches!(job, Some(ThumbnailJob::Working { .. })), "{job:?}");
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
-        // One request at a time.
-        window.click("generate-thumbnails", cx);
-        assert!(!window.has_active_dialog(cx));
+        // The next message can be typed, not sent: one at a time.
+        window.input("And another", cx);
+        window.press("enter", cx);
+        window.click("thumbnail-chat-send", cx);
+        assert!(window.find("thumbnail-chat-cancel").visible());
+        assert!(window.find("cancel-thumbnails").visible(), "the card says Codex works too");
     });
-    wait_until(cx, "the thumbnails", |cx| {
-        matches!(thumbnail_job(cx, &assistant, video_id), Some(ThumbnailJob::Drawn { .. })).then_some(())
+    assert_eq!(chat(cx, &assistant, video_id).messages.len(), 1);
+    let answer = wait_until(cx, "Codex's answer", |cx| {
+        let chat = chat(cx, &assistant, video_id);
+        (chat.messages.len() == 2 && thumbnail_job(cx, &assistant, video_id).is_none()).then_some(chat)
     });
-    assert_eq!(thumbnail_job(cx, &assistant, video_id), Some(ThumbnailJob::Drawn { made: 2, asked: 2, problem: None }));
+    let dir = fs::canonicalize(folder.join("thumbnails")).unwrap();
+    assert_eq!(answer.messages[0].role, ChatRole::Creator);
+    assert_eq!(answer.messages[0].text, "Me holding the loaf.");
+    let drawn = &answer.messages[1];
+    assert_eq!(drawn.role, ChatRole::Codex);
+    let expected: Vec<PathBuf> = (1..=3).map(|n| dir.join(format!("thumbnail-{n}.jpg"))).collect();
+    assert_eq!(drawn.images, expected, "three ideas when the creator doesn't say how many");
+    assert!(drawn.text.contains("Test pattern number 1."), "{}", drawn.text);
+    let session_id = answer.session_id.clone().expect("Codex's session");
     // Codex saw frames of the footage.
-    let args: Vec<String> = serde_json::from_str(&fs::read_to_string(argv.path()).unwrap()).unwrap();
+    let args = argv(argv_file.path());
     assert_eq!(args.iter().filter(|arg| arg.starts_with("--image=")).count(), 3, "{args:?}");
 
-    let dir = fs::canonicalize(folder.join("thumbnails")).unwrap();
-    let second: PathBuf = dir.join("thumbnail-2.jpg");
-    assert!(second.is_file() && dir.join("thumbnail-1.jpg").is_file());
-    wait_until(cx, "the grid", |cx| {
+    // A change goes to the same session and draws one picture.
+    let changed = ask(cx, handle, &assistant, video_id, " with a red background");
+    assert_eq!(chat(cx, &assistant, video_id).messages[2].text, "And another with a red background");
+    assert_eq!(changed.images, [dir.join("thumbnail-4.jpg")]);
+    let args = argv(argv_file.path());
+    assert_eq!(args[args.len() - 4..], ["resume", "--", session_id.as_str(), "-"]);
+    assert!(!args.iter().any(|arg| arg.starts_with("--image=")), "{args:?}");
+
+    // A question gets an answer from what Codex remembers, and draws nothing.
+    let answered = ask(cx, handle, &assistant, video_id, "What did I ask for first?");
+    assert_eq!(answered.text, "You first asked: Me holding the loaf.");
+    assert!(answered.images.is_empty() && answered.problem.is_none());
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("thumbnail-chat-frames").is_none(), "frames go with a chat's first message");
+    });
+
+    // Choosing a thumbnail in the chat makes it the video's.
+    wait_until(cx, "the thumbnails in the chat", |cx| {
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
-            window.try_find("drawn-thumbnail-2.jpg").map(drop)
+            window.try_find("chat-thumbnail-2.jpg").map(drop)
         })
         .unwrap()
     });
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
-        assert_eq!(window.find("drawn-thumbnail-2.jpg").label(), Some("Use thumbnail-2.jpg"));
-        window.click("drawn-thumbnail-2.jpg", cx);
+        assert_eq!(window.find("chat-thumbnail-2.jpg").label(), Some("Use thumbnail-2.jpg"));
+        window.click("chat-thumbnail-2.jpg", cx);
     });
     cx.executor().advance_clock(std::time::Duration::from_secs(1));
     cx.run_until_parked();
     let chosen = workspace.video(cx, video_id).publish.thumbnail.expect("a thumbnail");
-    assert_eq!(fs::canonicalize(chosen).unwrap(), second);
-    window(cx, handle, |window, cx| {
-        window.render_frame(cx);
-        window.click("drawn-thumbnail-1.jpg", cx);
-    });
-    cx.executor().advance_clock(std::time::Duration::from_secs(1));
+    assert_eq!(fs::canonicalize(chosen).unwrap(), dir.join("thumbnail-2.jpg"));
+
+    // The chat is kept: a new start of Rushes has it.
+    let kept = chat(cx, &assistant, video_id);
+    assert_eq!(kept.messages.len(), 6);
     cx.run_until_parked();
-    let chosen = workspace.video(cx, video_id).publish.thumbnail.expect("a thumbnail");
-    assert_eq!(fs::canonicalize(chosen).unwrap(), dir.join("thumbnail-1.jpg"));
+    let state = workspace.state.clone();
+    let reopened = cx.update(|cx| PublishAssistant::init(state, cx));
+    assert_eq!(chat(cx, &reopened, video_id), kept);
 }
 
 #[gpui_kit::test]
-fn cancelling_codex_leaves_no_thumbnails(cx: &mut TestAppContext) {
+fn a_new_chat_starts_over_and_keeps_the_thumbnails(cx: &mut TestAppContext) {
     if !tools_available() {
         return;
     }
-    let (workspace, assistant) = workspace(cx, &[("FAKE_CODEX_DELAY_MS", "300")]);
+    let (argv_file, home) = (tempfile::NamedTempFile::new().unwrap(), tempfile::tempdir().unwrap());
+    let (workspace, assistant) = workspace(
+        cx,
+        &[
+            ("FAKE_CODEX_ARGV_FILE", argv_file.path().to_str().unwrap()),
+            ("FAKE_CODEX_HOME", home.path().to_str().unwrap()),
+        ],
+    );
     let video_id = workspace.create_video(cx, "Desk setup", |_| {});
     let (handle, _panel) = open_panel(cx, video_id);
-    let options = rushes::publish::ThumbnailOptions { count: 2, ideas: String::new(), use_frames: false };
-    cx.update(|cx| assistant.update(cx, |assistant, cx| assistant.generate_thumbnails(video_id, options, cx)))
-        .expect("started");
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("thumbnail-chat", cx);
+    });
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        // Nothing to forget yet.
+        window.click("new-thumbnail-chat", cx);
+        assert!(!window.has_active_dialog(cx));
+        window.click("thumbnail-chat-ideas", cx);
+    });
+    wait_until(cx, "the ideas", |cx| (chat(cx, &assistant, video_id).messages.len() == 2).then_some(()));
+    assert_eq!(chat(cx, &assistant, video_id).messages[1].images.len(), 3);
+
+    // Codex lost the session: the chat says so, and the next message starts over.
+    fs::remove_dir_all(home.path()).unwrap();
+    let lost = ask(cx, handle, &assistant, video_id, "One more with a red background.");
+    assert_eq!(lost.problem.as_deref(), Some(rushes::publish::CHAT_FORGOTTEN));
+    assert_eq!(chat(cx, &assistant, video_id).session_id, None);
+    let again = ask(cx, handle, &assistant, video_id, "One more with a red background.");
+    assert_eq!(again.images.len(), 3, "a new chat's first message");
+    assert!(!argv(argv_file.path()).contains(&"resume".to_owned()));
+
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("new-thumbnail-chat", cx);
+    });
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.has_active_dialog(cx), "asks first");
+        window.click("ok", cx);
+    });
+    assert_eq!(assistant.read_with(cx, |assistant, _| assistant.thumbnail_chat(video_id).cloned()), None);
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("thumbnail-chat-ideas").visible());
+        assert!(window.try_find("thumbnail-chat-frames").is_none(), "there's no video to show Codex frames of");
+        // Escape from the composer closes the chat.
+        window.press("escape", cx);
+        assert!(!window.has_active_sheet(cx));
+    });
+    let dir = workspace.video(cx, video_id).folder.unwrap().join("thumbnails");
+    assert_eq!(rushes_pipeline::list_thumbnails(&dir).len(), 6);
+}
+
+#[gpui_kit::test]
+fn cancelling_codex_leaves_the_message_unanswered(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let (workspace, assistant) =
+        workspace(cx, &[("FAKE_CODEX_DELAY_MS", "300"), ("FAKE_CODEX_HOME", home.path().to_str().unwrap())]);
+    let video_id = workspace.create_video(cx, "Desk setup", |_| {});
+    let (handle, _panel) = open_panel(cx, video_id);
+    cx.update(|cx| {
+        assistant.update(cx, |assistant, cx| assistant.send_thumbnail_message(video_id, "Two ideas".into(), false, cx))
+    })
+    .expect("started");
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         window.click("cancel-thumbnails", cx);
@@ -335,6 +467,8 @@ fn cancelling_codex_leaves_no_thumbnails(cx: &mut TestAppContext) {
     wait_until(cx, "the cancellation", |cx| thumbnail_job(cx, &assistant, video_id).is_none().then_some(()));
     let dir = workspace.video(cx, video_id).folder.unwrap().join("thumbnails");
     assert!(rushes_pipeline::list_thumbnails(&dir).is_empty());
+    let chat = chat(cx, &assistant, video_id);
+    assert!(chat.unanswered(), "{chat:?}");
 }
 
 #[gpui_kit::test]
@@ -345,30 +479,33 @@ fn a_codex_that_fails_says_why(cx: &mut TestAppContext) {
     let (workspace, assistant) = workspace(cx, &[("FAKE_CODEX_MODE", "fail")]);
     let video_id = workspace.create_video(cx, "Desk setup", |_| {});
     let (handle, _panel) = open_panel(cx, video_id);
-    cx.update(|cx| {
-        assistant.update(cx, |assistant, cx| assistant.generate_thumbnails(video_id, Default::default(), cx))
-    })
-    .expect("started");
+    let send = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            assistant.update(cx, |assistant, cx| assistant.send_thumbnail_message(video_id, String::new(), false, cx))
+        })
+        .expect("started")
+    };
+    send(cx);
     let error = wait_until(cx, "the failure", |cx| match thumbnail_job(cx, &assistant, video_id) {
         Some(ThumbnailJob::Failed(error)) => Some(error),
         _ => None,
     });
     assert_eq!(error, "You've hit your usage limit.");
+    let said = chat(cx, &assistant, video_id).messages.last().cloned().unwrap();
+    assert_eq!(said.problem.as_deref(), Some("You've hit your usage limit."), "the chat says so too");
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         assert!(window.find("thumbnail-job").visible());
         window.click("dismiss-thumbnails", cx);
     });
     assert_eq!(thumbnail_job(cx, &assistant, video_id), None);
+    assert_eq!(chat(cx, &assistant, video_id).messages.len(), 2, "dismissing keeps the chat");
 
     // Without Codex installed, the creator learns where to set it.
     workspace.state.update(cx, |state, cx| {
         state.update_settings(cx, |settings| settings.pipeline.codex_command = "/nonexistent/codex".into())
     });
-    cx.update(|cx| {
-        assistant.update(cx, |assistant, cx| assistant.generate_thumbnails(video_id, Default::default(), cx))
-    })
-    .expect("started");
+    send(cx);
     let error = wait_until(cx, "the failure", |cx| match thumbnail_job(cx, &assistant, video_id) {
         Some(ThumbnailJob::Failed(error)) => Some(error),
         _ => None,

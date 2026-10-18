@@ -12,7 +12,7 @@ crates/
   youtube/    rushes-youtube   Google OAuth (loopback + PKCE), YouTube Data API v3 client, resumable upload
   edit/       rushes-edit      Rushes' editing tools (transcribe, cut plans, render, checks), served to the agent over MCP
   pipeline/   rushes-pipeline  AI edit pipelines: drives a coding agent (Claude Code) with rushes-edit or the video-use skill;
-                               writes YouTube details with it and draws thumbnails with Codex
+                               writes YouTube details with it and draws thumbnails with Codex in a chat
   update/     rushes-update    self-update: newest GitHub release, verified download, install in place, relaunch
   app/        rushes           GPUI Kit desktop app (the only crate that depends on gpui-kit)
 emulators/    local API emulation for dev/tests: vercel-labs/emulate (Google OAuth) + custom YouTube emulator
@@ -176,8 +176,9 @@ plus the video-use skill and Python.
 The same agent writes a video's YouTube title, description and tags in one turn without
 tools (`write_details`, JSON checked against a schema), from the script and the edit's
 transcript; Codex (`codex exec --json`) draws thumbnails with its image generation
-(`generate_thumbnails`), which ffmpeg turns into 1280 × 720 JPGs. `scripts/fake-codex`
-stands in for Codex in tests.
+(`generate_thumbnails`), which ffmpeg turns into 1280 × 720 JPGs, in a chat: each turn
+after the first resumes Codex's session (`codex exec resume`), so it remembers the chat.
+`scripts/fake-codex` stands in for Codex in tests.
 
 ## app (`rushes`)
 
@@ -214,7 +215,9 @@ GPUI Kit app. Main pieces:
   YouTube (`publish/thumbnail.rs`); `YoutubeLink.thumbnail` records the image YouTube
   has, so the Thumbnail card can say whether the chosen one is there. `PublishAssistant`
   has the agent write the title, description and tags (with Undo) and Codex draw
-  thumbnails to choose from; both keep running when the tab is left.
+  thumbnails to choose from in a chat (`publish/thumbnail_chat.rs`, a sheet over the
+  tab); both keep running when the tab is left. A video's chat, with the id of Codex's
+  session that remembers it, is kept in the settings table (`publish.thumbnail_chats`).
 - AI edit: footage list, edit brief, run timeline (agent messages/tool calls), approve /
   feedback, output preview and "use for upload".
 - `update/` — `UpdateService`: automatic checks, background install, Settings › About ›
