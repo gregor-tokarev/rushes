@@ -425,3 +425,35 @@ fn the_voice_is_cleaned_before_it_is_cut() {
     assert!(report.contains("No technical problems found."), "{report}");
     assert!(footage.join("edit/.cache/audio/take.c1.voice-dfn15.48k.f32").is_file());
 }
+
+/// A short high transient over a quiet chord: in a preview (limited without oversampling)
+/// AAC puts its peak between samples over -1 dBTP, also with the limiter lowered; the
+/// render still ends under it.
+#[test]
+fn a_transient_ends_under_the_peak_ceiling() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let footage = dir.path();
+    let status = Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=4", "-f", "lavfi"])
+        .args([
+            "-i",
+            "aevalsrc=0.01*(sin(2*PI*220*t)+sin(2*PI*331*t)+sin(2*PI*497*t))+if(between(t\\,2\\,2.01)\\,0.9*sin(2*PI*12000*t+0.785)\\,0):s=48000:d=4",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-c:a",
+            "pcm_s16le",
+        ])
+        .arg(footage.join("take.mov"))
+        .status()
+        .expect("run ffmpeg");
+    assert!(status.success());
+    let mut tools = Tools::new(footage);
+    call(&mut tools, "plan_cut", json!({"segments": [{"take": "A", "start": 0, "end": 4}]}));
+    let report = call(&mut tools, "render", json!({"quality": "preview", "clean_voice": false}));
+    assert!(report.contains("No technical problems found."), "{report}");
+}

@@ -624,25 +624,33 @@ pub fn render(
         }
         None => None,
     };
-    let mix = |limit: f64| match &compressed {
-        Some(compressed) => format!("{compressed},aresample={limiter_rate},{},{end}", limiter(limit)),
-        None => end.clone(),
+    let mix = |limit: f64, quieter: f64| {
+        let limited = match &compressed {
+            Some(compressed) => format!("{compressed},aresample={limiter_rate},{},", limiter(limit)),
+            None => String::new(),
+        };
+        format!("{limited}volume={quieter:.2}dB,{end}")
     };
     on_progress("joining clips");
     let tmp = output.with_extension("tmp.mp4");
-    mux(&ffmpeg, &list, &wav, &mix(LIMIT), &tmp)?;
+    let (mut limit, mut quieter) = (LIMIT, 0.0);
+    mux(&ffmpeg, &list, &wav, &mix(limit, quieter), &tmp)?;
     // AAC encoding can push peaks back up past the limiter: measure the result and, when
-    // it is over, encode the sound again with the limiter that much lower (the whole sound
-    // quieter, without one).
-    if let Some(peak) = true_peak(&ffmpeg, &tmp)
-        && peak > MAX_TRUE_PEAK
-    {
+    // it is over, encode the sound again with the limiter that much lower. A peak between
+    // samples the limiter doesn't see (a preview's isn't oversampled) can stay over: then
+    // the whole sound is made that much quieter.
+    for attempt in 0..2 {
+        let Some(peak) = true_peak(&ffmpeg, &tmp) else { break };
+        if peak <= MAX_TRUE_PEAK {
+            break;
+        }
         let over = peak - (MAX_TRUE_PEAK - 0.3);
-        let again = match compressed {
-            Some(_) => mix(LIMIT * 10f64.powf(-over / 20.0)),
-            None => format!("{},volume={:.2}dB", mix(LIMIT), -over),
-        };
-        mux(&ffmpeg, &list, &wav, &again, &tmp)?;
+        if attempt == 0 && compressed.is_some() {
+            limit *= 10f64.powf(-over / 20.0);
+        } else {
+            quieter -= over;
+        }
+        mux(&ffmpeg, &list, &wav, &mix(limit, quieter), &tmp)?;
     }
     fs::rename(&tmp, &output)?;
     let _ = fs::remove_file(&wav);

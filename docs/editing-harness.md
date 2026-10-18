@@ -238,7 +238,9 @@ frames, so sound and picture end every span together.
   dBTP, so it fell back to its dynamic mode, which rides the gain and raised the pauses'
   noise about 11 dB. The encoded file's true peak is measured; over −1 dBTP (AAC can add a
   decibel or two to a transient) the sound is encoded again with the limiter that much
-  lower, which leaves the loudness almost as it was.
+  lower, which leaves the loudness almost as it was; when that is still over (a peak
+  between samples that a preview's limiter, not oversampled, doesn't see), once more with
+  the whole sound that much quieter.
 - HDR (PQ/HLG) is tone-mapped to Rec.709; rotation is applied by ffmpeg; variable frame
   rates are read as the nearest broadcast rate (`Rational::standard`).
 
