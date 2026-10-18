@@ -2,8 +2,8 @@
 //!
 //! The agent never types timestamps for speech: it reads phrases with ids (`A12`),
 //! picks which to keep, and the cut plan turns ids into cut times. Hints (false
-//! starts, lines said again a bit later, fillers) are computed here so the agent
-//! does not have to spot them by reading.
+//! starts, lines said again a bit later, fillers, restarts) are computed here so the
+//! agent does not have to spot them by reading.
 
 use std::fmt::Write as _;
 use std::ops::Range;
@@ -16,6 +16,48 @@ use crate::error::{EditError, Result};
 pub const PHRASE_GAP: f64 = 0.5;
 /// How far ahead (seconds) a line said again counts as a retake.
 const RETAKE_WINDOW: f64 = 120.0;
+/// Most words of an abandoned attempt compared with its restart.
+const RESTART_WORDS: usize = 5;
+/// Longest pause before a restart, and longest time from an attempt's start to its
+/// restart's, in seconds.
+const RESTART_PAUSE: f64 = 6.0;
+const RESTART_WINDOW: f64 = 12.0;
+/// Words said twice in a row on purpose (“very, very”), not restarted.
+const EMPHATIC: [&str; 31] = [
+    "очень",
+    "гораздо",
+    "намного",
+    "сильно",
+    "слишком",
+    "совсем",
+    "много",
+    "долго",
+    "давно",
+    "никогда",
+    "всегда",
+    "нет",
+    "да",
+    "так",
+    "ну",
+    "very",
+    "really",
+    "so",
+    "much",
+    "many",
+    "more",
+    "too",
+    "far",
+    "way",
+    "no",
+    "yes",
+    "never",
+    "always",
+    "again",
+    "ever",
+    "bye",
+];
+/// What a speaker says between an attempt and its restart (“…, ну, …”, “…, I mean, …”).
+const LINKING: [&str; 11] = ["ну", "вот", "как", "бы", "типа", "короче", "значит", "well", "like", "mean", "know"];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Word {
@@ -231,6 +273,112 @@ pub fn retakes(transcript: &Transcript, phrases: &[Phrase]) -> Vec<(usize, usize
     pairs
 }
 
+/// An attempt the speaker abandons and starts again at once (“I was go-- I was going”,
+/// “прикольный, э-э-э, прикольный”, “стану-- станет”): inside a segment that keeps the
+/// restart, the attempt is cut like a filler.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Restart {
+    /// From the attempt's first word up to the restart: indices into [`Transcript::words`].
+    pub dropped: Range<usize>,
+    /// The restart's first word.
+    pub restart: usize,
+}
+
+/// The restarts of a take, in time order. An attempt is the same words said again (up
+/// to [`RESTART_WORDS`]; its last word may be cut off, `стану--` before `станет`) after
+/// nothing, a few linking words, or an attempt broken off mid-word; or a lone word cut
+/// off mid-way before the speaker goes on. Words said twice on purpose ([`EMPHATIC`]) and
+/// a word ending one sentence and starting the next are not restarts.
+pub fn restarts(transcript: &Transcript) -> Vec<Restart> {
+    let words = &transcript.words;
+    let mut tokens: Vec<Token> = Vec::new();
+    for (index, word) in words.iter().enumerate() {
+        if word.event || word.is_filler() {
+            continue;
+        }
+        let text = normalise(&word.text);
+        if text.is_empty() {
+            // A lone `--` after a word: that word broke off.
+            if word.is_cut_off()
+                && let Some(last) = tokens.last_mut()
+            {
+                last.cut_off = true;
+            }
+            continue;
+        }
+        tokens.push(Token {
+            index,
+            text,
+            start: word.start,
+            end: word.end,
+            cut_off: word.is_cut_off(),
+            speaker: word.speaker.clone(),
+        });
+    }
+    let mut out = Vec::new();
+    let mut p = 0;
+    while p < tokens.len() {
+        if let Some(q) = restart_after(words, &tokens, p) {
+            out.push(Restart { dropped: tokens[p].index..tokens[q].index, restart: tokens[q].index });
+            // The restart can be abandoned in turn (“мне, мне, мне”).
+            p = q;
+            continue;
+        }
+        if let Some(next) = tokens.get(p + 1)
+            && tokens[p].cut_off
+            && next.start - tokens[p].end <= RESTART_PAUSE
+        {
+            out.push(Restart { dropped: tokens[p].index..next.index, restart: next.index });
+        }
+        p += 1;
+    }
+    out
+}
+
+struct Token {
+    index: usize,
+    text: String,
+    start: f64,
+    end: f64,
+    cut_off: bool,
+    speaker: Option<String>,
+}
+
+/// Where the attempt starting at token `p` is said again, if it is.
+fn restart_after(words: &[Word], tokens: &[Token], p: usize) -> Option<usize> {
+    for length in (1..=RESTART_WORDS).rev() {
+        for gap in 0..=8 {
+            let q = p + length + gap;
+            if q + length > tokens.len() || tokens[q].start - tokens[p].start > RESTART_WINDOW {
+                break;
+            }
+            if tokens[q].start - tokens[q - 1].end > RESTART_PAUSE || tokens[q].speaker != tokens[p].speaker {
+                continue;
+            }
+            let between = &tokens[p + length..q];
+            let linking = gap <= 2 && between.iter().all(|token| LINKING.contains(&token.text.as_str()));
+            let broke_off = between.last().is_some_and(|token| token.cut_off) && (length >= 2 || gap <= 3);
+            if gap > 0 && !linking && !broke_off {
+                continue;
+            }
+            let (first, second) = (&tokens[p..p + length], &tokens[q..q + length]);
+            let (a, b) = (&first[length - 1], &second[length - 1]);
+            let same = first.iter().zip(second).take(length - 1).all(|(a, b)| a.text == b.text)
+                && (a.text == b.text || (a.cut_off && b.text.starts_with(&a.text)));
+            if !same || (length == 1 && gap == 0 && EMPHATIC.contains(&a.text.as_str())) {
+                continue;
+            }
+            // “…for JavaScript. JavaScript, I think…”: a sentence ended, nothing was abandoned.
+            let before = words[tokens[q - 1].index].text.trim_end_matches(['"', '»', ')', '\'']);
+            if length == 1 && before.ends_with(['.', '!', '?']) && !before.ends_with("...") {
+                continue;
+            }
+            return Some(q);
+        }
+    }
+    None
+}
+
 fn normalise(text: &str) -> String {
     text.chars()
         .filter(|c| c.is_alphanumeric())
@@ -246,6 +394,9 @@ pub struct TakeView {
     pub phrases: Vec<Phrase>,
     /// For each phrase, the phrases that say its words again later.
     pub said_again: Vec<Vec<usize>>,
+    pub restarts: Vec<Restart>,
+    /// For each word, whether it belongs to an abandoned attempt.
+    abandoned: Vec<bool>,
 }
 
 impl TakeView {
@@ -255,7 +406,12 @@ impl TakeView {
         for (earlier, later) in retakes(&transcript, &phrases) {
             said_again[earlier].push(later);
         }
-        Self { take: take.to_owned(), transcript, phrases, said_again }
+        let restarts = restarts(&transcript);
+        let mut abandoned = vec![false; transcript.words.len()];
+        for restart in &restarts {
+            abandoned[restart.dropped.clone()].fill(true);
+        }
+        Self { take: take.to_owned(), transcript, phrases, said_again, restarts, abandoned }
     }
 
     pub fn phrase_index(&self, id: &str) -> Result<usize> {
@@ -285,19 +441,26 @@ impl TakeView {
             let _ = write!(line, " ({note})");
         }
         line.push_str("  ");
-        let mut first = true;
         let mut cut_off = false;
-        for word in &words[phrase.words.clone()] {
-            if !first {
+        for index in phrase.words.clone() {
+            let word = &words[index];
+            if index > phrase.words.start {
                 line.push(' ');
             }
-            first = false;
-            if word.is_filler() {
+            // An abandoned attempt is marked as one run: `~I was go--~ I was going`.
+            let abandoned = self.abandoned[index];
+            if abandoned && (index == phrase.words.start || !self.abandoned[index - 1]) {
+                line.push('~');
+            }
+            if word.is_filler() && !abandoned {
                 let _ = write!(line, "~{}~", word.text);
             } else {
                 line.push_str(&word.text);
             }
-            cut_off |= word.is_cut_off();
+            if abandoned && (index + 1 == phrase.words.end || !self.abandoned[index + 1]) {
+                line.push('~');
+            }
+            cut_off |= word.is_cut_off() && !abandoned;
         }
         let mut hints = Vec::new();
         if cut_off {
@@ -419,7 +582,77 @@ mod tests {
         assert_eq!(view.said_again[0], vec![1]);
         assert!(view.said_again[1].is_empty());
         let line = view.line(0, None);
-        assert!(line.contains("{false start; said again in A2}"), "{line}");
+        // The broken-off attempt is a restart of A2's start: marked, and no longer a false start to handle.
+        assert!(line.contains("~I have never been so--~  {said again in A2}"), "{line}");
+        assert_eq!(view.restarts, vec![Restart { dropped: 0..6, restart: 6 }]);
         assert!(view.line(1, None).contains("+2.0s [sigh]"), "{}", view.line(1, None));
+    }
+
+    /// Words every 0.3 s from `start`.
+    fn said(text: &str, start: f64) -> Vec<Word> {
+        text.split_whitespace()
+            .enumerate()
+            .map(|(n, text)| word(text, start + n as f64 * 0.3, start + n as f64 * 0.3 + 0.25))
+            .collect()
+    }
+
+    /// The abandoned words of `text`, or what it keeps.
+    fn cut(text: &str) -> String {
+        let transcript = Transcript { language: None, words: said(text, 0.0) };
+        let restarts = restarts(&transcript);
+        let gone: Vec<usize> = restarts.iter().flat_map(|restart| restart.dropped.clone()).collect();
+        let kept: Vec<&str> = transcript
+            .words
+            .iter()
+            .enumerate()
+            .filter(|(index, word)| !gone.contains(index) && !word.is_filler())
+            .map(|(_, word)| word.text.as_str())
+            .collect();
+        kept.join(" ")
+    }
+
+    #[test]
+    fn restarts_lose_the_abandoned_attempt() {
+        // From a real recording: repeats, a broken-off word, a restart after linking words.
+        assert_eq!(cut("А, еще один прикольный, э-э-э, прикольный use case"), "А, еще один прикольный use case");
+        assert_eq!(cut("Это месяцы, а может быть, может быть, это год"), "Это месяцы, а может быть, это год");
+        assert_eq!(cut("Мне, мне, мне лень считать."), "мне лень считать.");
+        assert_eq!(cut("порог входа стану-- станет настолько низким"), "порог входа станет настолько низким");
+        assert_eq!(cut("насколько долго два -- две этих вершины"), "насколько долго две этих вершины");
+        assert_eq!(cut("И что мне как бы, что мне больше всего нравится?"), "И что мне больше всего нравится?");
+        assert_eq!(cut("то, наверное, ну, наверное, я не хочу"), "то, наверное, я не хочу");
+        assert_eq!(
+            cut("Они патчат систему, на которой они-- они патчат систему, на которой исполняют код"),
+            "они патчат систему, на которой исполняют код"
+        );
+        assert_eq!(cut("I was go-- I was going to say"), "I was going to say");
+        // Said twice on purpose, or a sentence that ends: kept as said.
+        for text in [
+            "вам дали очень, очень активного мидла",
+            "гораздо, гораздо дешевле",
+            "сказать: То-то и то-то сделано",
+            "коммуникация с заказчиками, коммуникация с коллегами",
+            "Не уволят — сократят зарплаты",
+            "это runtime для JavaScript. JavaScript, я думаю, все знают",
+            "Да, да, заменит он меня",
+        ] {
+            assert_eq!(cut(text), text);
+        }
+    }
+
+    #[test]
+    fn a_restart_after_a_long_pause_or_from_another_speaker_is_not_one() {
+        let mut words = said("Они,", 0.0);
+        words.extend(said("они способны", 4.0));
+        let transcript = Transcript { language: None, words: words.clone() };
+        assert_eq!(restarts(&transcript).len(), 1, "a pause of a few seconds before the restart");
+        words.iter_mut().skip(1).for_each(|word| word.start += 10.0);
+        words.iter_mut().skip(1).for_each(|word| word.end += 10.0);
+        assert!(restarts(&Transcript { language: None, words: words.clone() }).is_empty());
+        let mut words = said("I think I think so", 0.0);
+        words[2].speaker = Some("s1".into());
+        words[3].speaker = Some("s1".into());
+        words[4].speaker = Some("s1".into());
+        assert!(restarts(&Transcript { language: None, words }).is_empty());
     }
 }

@@ -55,7 +55,7 @@ are shown as overlays or held as time segments, and the app does not list them a
 | `inventory` | Takes and their ids: length, size, rate, audio tracks, transcribed or not; images with their size. |
 | `add_footage` | Copies a file (a path, e.g. `edit/downloads/clip.mp4`) or downloads a link into the footage folder: a direct link as it is, any other page with `yt-dlp` (up to 1080p) when it is installed. Files are put together in the hidden `.rushes-import/` and get a free name (`name (2).ext`) only when complete and readable by FFmpeg (a link that returns a login page adds nothing). Returns the new take's id. |
 | `transcribe` | Scribe v2 for every take with sound without a current transcript (or only `takes`): verbatim, word times, speakers, sound tags. Parallel, cached in `edit/transcripts/<stem>.json` (+ `.rushes.json` with the source's size and time). |
-| `read_transcript` | Phrases (`A12`: words without a 0.5 s pause), with the pause before each, sound tags, what the picture does in pauses of 3 s or more, fillers marked `~…~`, and hints: `{false start}` (cut-off word), `{said again in A14}` (the words come back within 120 s: a retake). Pages of 250 phrases. |
+| `read_transcript` | Phrases (`A12`: words without a 0.5 s pause), with the pause before each, sound tags, what the picture does in pauses of 3 s or more, fillers and abandoned attempts marked `~…~` (see Restarts below), and hints: `{false start}` (a cut-off word that is not part of a restart), `{said again in A14}` (the words come back within 120 s: a retake). Pages of 250 phrases. |
 | `phrase_words` | The words of a phrase with times, for `starts_with` / `ends_with`. |
 | `silences` | Pauses of at least N seconds with a picture-activity label from keyframe differences (still / changes a little / a lot / scene changes). |
 | `shots` | The shots inside a stretch of a take (up to 10 min), each labelled by how much of the screen moves, with a contact sheet of them. Tells the payoff of a silent screen demo (a video playing full screen) from the preparation around it (opening a page, a small player, switching windows). |
@@ -81,7 +81,7 @@ The agent never types times for speech. A plan is a list of segments in output o
   "overlays": [
     {"take": "B", "from": "A6", "to": "A7", "framing": "fit", "label": "MMLU chart"}
   ],
-  "remove_fillers": true, "max_pause": 1.0, "tight_pause": 0.45, "sentence_pause": 0.7,
+  "remove_fillers": true, "remove_restarts": true, "max_pause": 1.0, "tight_pause": 0.45, "sentence_pause": 0.7,
   "target_min_seconds": 480, "target_max_seconds": 600, "aspect": "9:16", "punch_in": true
 }
 ```
@@ -89,7 +89,8 @@ The agent never types times for speech. A plan is a list of segments in output o
 `plan::resolve` turns it into spans:
 
 - A speech segment keeps the spoken words of its phrases (fillers dropped when
-  `remove_fillers`). Between two kept words, a pause longer than `max_pause` (1.0 s) is
+  `remove_fillers`, abandoned attempts when `remove_restarts` and the segment keeps the
+  restart; see Restarts). Between two kept words, a pause longer than `max_pause` (1.0 s) is
   cut down to `tight_pause` (0.45 s), or `sentence_pause` (0.7 s) after a full stop; a pause
   holding a removed filler is always cut. Shorter pauses stay: trimming them saves little
   and shows as a jump cut. 55 % of a tightened pause stays after the first word, 45 %
@@ -110,12 +111,35 @@ The agent never types times for speech. A plan is a list of segments in output o
   (zoomed: the part around the focus), `fill` crops it to the frame. Overlays on neighbouring
   words meet; overlays on the same words are an error.
 - The receipt warns about: retakes kept twice (shared 4-grams between segments, or a kept
-  phrase whose `said again` phrase is kept too), cut-off words kept, segments ending
-  mid-sentence that the next one does not continue, long pauses squeezed where the picture
+  phrase whose `said again` phrase is kept too), the same words on both sides of a cut,
+  cut-off words kept, segments ending mid-sentence that the next one does not continue, long pauses squeezed where the picture
   changes a lot (a demo?), silent time segments of 20 s or more where the screen mostly stays
   for 3 s or more (preparation around a demo?), reused footage, very short segments, length
   against the target, overlays shorter than 1.5 s, a video overlay running past the end of
-  its take (its last frame holds).
+  its take (its last frame holds). It lists each restart it cut.
+
+### Restarts
+
+A speaker who breaks off and starts again rarely pauses long enough for a new phrase:
+"А, еще один прикольный, э-э-э, прикольный use case", "а может быть, может быть, это год",
+"стану-- станет". Phrase-level hints miss these, and trimming the middle of a phrase with
+`starts_with`/`ends_with` takes two segments, so agents left them in. `transcript::restarts`
+finds them per take and `select` cuts them like fillers:
+
+- The same words said again (up to 5 compared; the attempt's last word may be cut off,
+  `стану--` before `станет`) straight after, after up to two linking words (`ну`, `вот`,
+  `как бы`, `I mean`, `you know`, …), or after an attempt broken off mid-word; or a lone
+  word broken off before the speaker goes on. At most 6 s of pause before the restart and
+  12 s from the attempt's start to the restart's, same speaker.
+- Not restarts: emphatic doubles (`очень, очень`, `very, very`, `да, да`, …), and one word
+  that ends a sentence and starts the next (`…для JavaScript. JavaScript, я думаю…`).
+  "Коммуникация с заказчиками, коммуникация с коллегами" and "то-то и то-то" stay, since
+  only linking words may stand between an attempt and its restart.
+- An attempt is cut only inside a segment that also keeps the restart, from its first word
+  (or the segment's) to the restart. `read_transcript` marks it `~…~`; `remove_restarts:
+  false` keeps every repeat.
+
+On the benchmark's 33-minute recording it finds 35 restarts, every one a real restart.
 
 ### Shots
 

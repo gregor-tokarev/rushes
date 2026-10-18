@@ -36,8 +36,9 @@ fn make_take(path: &Path) {
 }
 
 /// Words every 0.4 s from 0.1 to 4 s (phrase A1), a 2 s pause, then words from 6 to 11 s
-/// with a filler at 7.2 s (phrase A2).
-fn write_transcript(edit: &Path) {
+/// with a filler at 7.2 s (phrase A2). With `restart`, A1's second word is said twice
+/// (`one2 one2`).
+fn write_transcript(edit: &Path, restart: bool) {
     let mut words = Vec::new();
     let mut add = |text: &str, start: f64, end: f64| {
         words.push(json!({"text": text, "start": start, "end": end, "type": "word", "speaker_id": "s0"}));
@@ -46,6 +47,7 @@ fn write_transcript(edit: &Path) {
     let mut n = 0;
     while t < 3.9 {
         n += 1;
+        let n = if restart && n == 3 { 2 } else { n };
         add(&format!("one{n}"), t, t + 0.3);
         t += 0.4;
     }
@@ -92,7 +94,7 @@ fn a_plan_renders_frame_and_sample_exact() {
     let dir = tempfile::tempdir().unwrap();
     let footage = dir.path();
     make_take(&footage.join("take.mp4"));
-    write_transcript(&footage.join("edit"));
+    write_transcript(&footage.join("edit"), true);
     let mut tools = Tools::new(footage);
 
     let inventory = call(&mut tools, "inventory", json!({}));
@@ -112,7 +114,8 @@ fn a_plan_renders_frame_and_sample_exact() {
         ]}),
     );
     assert!(receipt.contains("Cut: 3 segments"), "{receipt}");
-    assert!(receipt.contains("1 fillers cut"), "{receipt}");
+    assert!(receipt.contains("1 fillers and 1 restarts cut"), "{receipt}");
+    assert!(receipt.contains("S3: “one2” before “one2 one4 one5 one6…”"), "{receipt}");
 
     for quality in ["preview", "final"] {
         let report = call(&mut tools, "render", json!({"quality": quality}));
@@ -140,7 +143,7 @@ fn vertical_output_crops_and_fits() {
     let dir = tempfile::tempdir().unwrap();
     let footage = dir.path();
     make_take(&footage.join("take.mp4"));
-    write_transcript(&footage.join("edit"));
+    write_transcript(&footage.join("edit"), false);
     let mut tools = Tools::new(footage);
     call(
         &mut tools,
@@ -225,7 +228,7 @@ fn outside_material_comes_in_as_takes_and_shows_over_the_speech() {
     fs::create_dir_all(&footage).unwrap();
     fs::create_dir_all(&outside).unwrap();
     make_take(&footage.join("take.mp4"));
-    write_transcript(&footage.join("edit"));
+    write_transcript(&footage.join("edit"), false);
     make_image(&outside.join("chart.png"), "red");
     // Recorded much quieter than the take it goes into.
     make_clip(&outside.join("quote.mp4"), "blue", 4.0, 0.05);
