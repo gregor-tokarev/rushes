@@ -31,6 +31,10 @@ const PAD_AFTER: f64 = 0.14;
 const SNAP: f64 = 0.04;
 /// Spans shorter than this are dropped.
 const MIN_SPAN: f64 = 0.04;
+/// Share of the silence next to a cut-out word (a filler, an abandoned attempt) a cut may
+/// keep: transcripts place word edges a few tens of ms off, and the rest of the word must
+/// not leak in.
+const NEXT_TO_REMOVED: f64 = 0.8;
 /// A pause this long inside a segment is worth a word in the receipt.
 const LONG_PAUSE: f64 = 3.0;
 /// A silent time segment this long may hold preparation around the demo.
@@ -353,6 +357,11 @@ pub fn resolve(session: &mut Session, plan: &CutPlan) -> Result<ResolvedCut> {
                 let before = removed.last().map_or(gap, |w| (b.start - w.end).max(0.0));
                 let natural = if removed.is_empty() { gap } else { after + before };
                 let target = if segment.keep_pauses { natural } else { natural.min(limit) };
+                let (after, before) = if removed.is_empty() {
+                    (after, before)
+                } else {
+                    (after * NEXT_TO_REMOVED, before * NEXT_TO_REMOVED)
+                };
                 let (keep_after, keep_before) = if removed.is_empty() {
                     (target * 0.55, target * 0.45)
                 } else {

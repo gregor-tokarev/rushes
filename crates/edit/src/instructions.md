@@ -41,6 +41,8 @@ from there. Never change or delete the source takes; keep scratch files in `edit
 - Restarts inside a passage (`~прикольный,~ прикольный use case`, `~I was go--~ I was going`):
   the marked attempt is cut automatically when the segment also keeps the restart, and the
   receipt lists each one. Keep such passages in one segment; never trim around them by hand.
+  A restart can be abandoned too (it trails off, “…который я показал, а-а-а...”, and the
+  line never ends): then drop the restart as well.
 - Repeats the tools do not mark are yours: read every phrase you keep for a corrected word
   (“два, две”), a line restated in other words (“Миллионы, сотни миллионов, миллионы
   разработчиков”) or a stumble, and drop the first attempt with the segment's `cut`

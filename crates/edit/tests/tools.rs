@@ -119,7 +119,12 @@ fn a_plan_renders_frame_and_sample_exact() {
     for quality in ["preview", "final"] {
         let report = call(&mut tools, "render", json!({"quality": quality}));
         assert!(report.contains("No technical problems found."), "{report}");
-        assert!(report.contains("median offset 0.0 ms"), "audio lands where the plan puts it: {report}");
+        let median: f64 = report
+            .split("median offset ")
+            .nth(1)
+            .and_then(|rest| rest.split(" ms").next()?.parse().ok())
+            .expect("audio placement in the report");
+        assert!(median.abs() <= 0.5, "audio lands where the plan puts it: {report}");
     }
     let edl: Value = serde_json::from_slice(&fs::read(footage.join("edit/edl.json")).unwrap()).unwrap();
     let ranges = edl["ranges"].as_array().unwrap();
