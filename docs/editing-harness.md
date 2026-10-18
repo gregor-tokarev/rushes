@@ -129,8 +129,9 @@ finds them per take and `select` cuts them like fillers:
 - The same words said again (up to 5 compared; the attempt's last word may be cut off,
   `стану--` before `станет`) straight after, after up to two linking words (`ну`, `вот`,
   `как бы`, `I mean`, `you know`, …), or after an attempt broken off mid-word; or a lone
-  word broken off before the speaker goes on. At most 6 s of pause before the restart and
-  12 s from the attempt's start to the restart's, same speaker.
+  word broken off before the speaker goes on (within 6 s). At most 12 s from the attempt's
+  start to the restart's, however long the pause between them (a segment tightens it), same
+  speaker.
 - Not restarts: emphatic doubles (`очень, очень`, `very, very`, `да, да`, …), and one word
   that ends a sentence and starts the next (`…для JavaScript. JavaScript, я думаю…`).
   "Коммуникация с заказчиками, коммуникация с коллегами" and "то-то и то-то" stay, since
@@ -144,7 +145,7 @@ finds them per take and `select` cuts them like fillers:
   is the agent's: a segment's `cut` drops exact words inside it (each run must be said
   once in the segment) without splitting it in two.
 
-On the benchmark's 33-minute recording it finds 35 restarts, every one a real restart.
+On the benchmark's 33-minute recording it finds 36 restarts, every one a real restart.
 
 ### Shots
 

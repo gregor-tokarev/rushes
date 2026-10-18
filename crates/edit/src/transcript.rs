@@ -18,10 +18,10 @@ pub const PHRASE_GAP: f64 = 0.5;
 const RETAKE_WINDOW: f64 = 120.0;
 /// Most words of an abandoned attempt compared with its restart.
 const RESTART_WORDS: usize = 5;
-/// Longest pause before a restart, and longest time from an attempt's start to its
-/// restart's, in seconds.
-const RESTART_PAUSE: f64 = 6.0;
+/// Longest time from an attempt's start to its restart's, in seconds.
 const RESTART_WINDOW: f64 = 12.0;
+/// Longest pause after a word broken off for the speaker to count as going on.
+const RESTART_PAUSE: f64 = 6.0;
 /// Words said twice in a row on purpose (“very, very”), not restarted.
 const EMPHATIC: [&str; 31] = [
     "очень",
@@ -352,7 +352,9 @@ fn restart_after(words: &[Word], tokens: &[Token], p: usize) -> Option<usize> {
             if q + length > tokens.len() || tokens[q].start - tokens[p].start > RESTART_WINDOW {
                 break;
             }
-            if tokens[q].start - tokens[q - 1].end > RESTART_PAUSE || tokens[q].speaker != tokens[p].speaker {
+            // However long the pause before it (a cut tightens it), the restart comes soon after
+            // the attempt began.
+            if tokens[q].speaker != tokens[p].speaker {
                 continue;
             }
             let between = &tokens[p + length..q];
@@ -653,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn a_restart_after_a_long_pause_or_from_another_speaker_is_not_one() {
+    fn a_repeat_long_after_or_from_another_speaker_is_not_a_restart() {
         let mut words = said("Они,", 0.0);
         words.extend(said("они способны", 4.0));
         let transcript = Transcript { language: None, words: words.clone() };
