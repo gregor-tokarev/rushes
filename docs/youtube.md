@@ -86,6 +86,8 @@ Test helpers on the YouTube emulator (no auth):
   - `{"method": "POST", "path": "/upload/youtube/v3/videos", "status": 403, "reason": "quotaExceeded"}`
   - `{"path": "/upload/youtube/v3/videos", "persistBytes": 262144}`: the next chunk keeps
     only 256 KiB and answers 308, as if the connection dropped.
+  - `{"method": "PUT", "path": "/youtube/v3/videos", "status": 500, "skip": 1}`: let one
+    title update through, fail the next.
 - `DELETE /_emulator/faults`: clear pending faults.
 - `GET /_emulate`: the emulate inspector (requests, routes, state, reset).
 
@@ -433,12 +435,17 @@ one or the last one).
   (changed in YouTube Studio), the test stops and leaves it: "Test stopped · the title was
   changed on YouTube to …". A thumbnail switch sets the version's image and records it as
   the image YouTube has (`YoutubeLink::thumbnail`); while a thumbnail test runs, choosing
-  another image in the Thumbnail card doesn't reach YouTube, and the card says so.
+  another image in the Thumbnail card doesn't reach YouTube, and the card says so. A
+  title-and-thumbnail switch whose image YouTube refuses takes the title back; when that
+  fails too, the test records whose title is up (`AbTest::title_up`) and the next switch
+  puts a whole version up again.
 - Every three hours (and when the Publish tab is shown, at most every ten minutes) the
   test reads its numbers: views and watch time of every day so far from YouTube Analytics,
   and impressions and clicks of each day whose reach report is new (the channel's reach
   job is created once and kept in the settings key `youtube.reach_jobs`). A day counts once
-  its reach report is in, about two days later. Each day's numbers are shared between the
+  both have it, about two days later: YouTube Analytics leaves out days without views but
+  also days it hasn't counted yet, so a missing day reads as zero only when a later day is
+  there. Each day's numbers are shared between the
   versions by the part of the day each was up, so a late switch costs precision, not
   correctness.
 - The versions are compared by watch time per impression: YouTube's own test keeps the
@@ -446,12 +453,13 @@ one or the last one).
   impression is that with the audience changing day to day. The section shows each
   version's days, impressions, click rate and watch time per impression, the leader and
   whether its lead is clear: every version needs two days and 100 impressions measured, and
-  the lead must beat chance at 95 % (a ratio estimator's variance over the days; Bonferroni
-  for three versions).
+  the lead must beat chance at 95 % (Welch's t-test with the days as samples, so a short
+  test needs a bigger lead; Bonferroni for three versions).
 - After the last day the test reads the numbers once more and waits for the last day's
   report (up to four days), then keeps the clear winner, or A when there is none, puts it
   up and ends with a notification. **End test…** ends it early, keeping the version the
-  creator picks. A new test can follow; it replaces the last one on the link.
+  creator picks. An end YouTube refuses is tried again before the versions take another
+  turn. A new test can follow; it replaces the last one on the link.
 - Analytics and reach need the YouTube Analytics API and the YouTube Reporting API turned
   on in the Google Cloud project; without them the section says to turn them on.
 

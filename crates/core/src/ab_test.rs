@@ -84,6 +84,10 @@ pub struct DayNumbers {
     pub date: NaiveDate,
     pub views: u64,
     pub watch_minutes: f64,
+    /// Whether YouTube Analytics has reported the day's views and watch time. Until
+    /// then they aren't zeros but unknown, and the day doesn't count.
+    #[serde(default)]
+    pub views_reported: bool,
     /// Thumbnail impressions, once the day's reach report is in. Until then the day
     /// doesn't count.
     pub impressions: Option<u64>,
@@ -97,7 +101,21 @@ pub struct DayNumbers {
 
 impl DayNumbers {
     fn new(date: NaiveDate) -> Self {
-        Self { date, views: 0, watch_minutes: 0.0, impressions: None, clicks: 0.0, reach_report: None }
+        Self {
+            date,
+            views: 0,
+            watch_minutes: 0.0,
+            views_reported: false,
+            impressions: None,
+            clicks: 0.0,
+            reach_report: None,
+        }
+    }
+
+    /// Whether both YouTube Analytics and the reach report have the day: only then
+    /// does it count.
+    pub fn is_measured(&self) -> bool {
+        self.views_reported && self.impressions.is_some()
     }
 }
 
@@ -213,6 +231,11 @@ pub struct AbTest {
     pub numbers: Vec<DayNumbers>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<TestOutcome>,
+    /// The version whose title YouTube has when a switch of a title-and-thumbnail
+    /// test put up its title but not its thumbnail, and couldn't take the title back.
+    /// YouTube then shows neither version whole, and the next switch fixes that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_up: Option<usize>,
 }
 
 impl AbTest {
@@ -236,6 +259,7 @@ impl AbTest {
             showings: Vec::new(),
             numbers: Vec::new(),
             outcome: None,
+            title_up: None,
         }
     }
 
@@ -259,10 +283,12 @@ impl AbTest {
         self.showings.last().map(|showing| showing.version)
     }
 
-    /// The title YouTube has, as far as Rushes knows: the live version's, else the
-    /// one the video had before the test.
+    /// The title YouTube has, as far as Rushes knows: the live version's (or the one
+    /// a half-done switch left, see [`Self::title_up`]), else the one the video had
+    /// before the test.
     pub fn live_title(&self) -> Option<&str> {
-        self.live_version()
+        self.title_up
+            .or(self.live_version())
             .and_then(|version| self.versions.get(version))
             .and_then(|version| version.title.as_deref())
             .or(self.original_title.as_deref())
@@ -291,7 +317,8 @@ impl AbTest {
             return if complete || now >= self.ends_at() + FINISH_WAIT { TestStep::Finish } else { TestStep::Wait };
         }
         let due = self.version_at(now);
-        if self.live_version() == Some(due) { TestStep::Wait } else { TestStep::Show(due) }
+        // A half-done switch shows no version whole: the due one goes up again.
+        if self.live_version() == Some(due) && self.title_up.is_none() { TestStep::Wait } else { TestStep::Show(due) }
     }
 
     /// The Pacific days the test covers so far at `now`, first and last; `None`
@@ -306,14 +333,14 @@ impl AbTest {
         (self.turns_end() > self.starts_at).then(|| pacific_day(self.turns_end() - TimeDelta::seconds(1)))
     }
 
-    /// The last day up to which every day of the test has its reach numbers.
+    /// The last day up to which every day of the test has all its numbers.
     pub fn measured_through(&self) -> Option<NaiveDate> {
         let first = pacific_day(self.starts_at);
         let mut through = None;
         let mut day = first;
         loop {
             match self.numbers.iter().find(|numbers| numbers.date == day) {
-                Some(numbers) if numbers.impressions.is_some() => through = Some(day),
+                Some(numbers) if numbers.is_measured() => through = Some(day),
                 _ => return through,
             }
             day = day.succ_opt()?;
@@ -325,6 +352,26 @@ impl AbTest {
         let day = self.day_mut(date);
         day.views = views;
         day.watch_minutes = watch_minutes.max(0.0);
+        day.views_reported = true;
+    }
+
+    /// Records an answer of YouTube Analytics: `days` (date, views, watch minutes),
+    /// one per day it has numbers for. It leaves out days without views, but also
+    /// the days it hasn't counted yet: a test day before the last one it answered
+    /// for had no views, one after it is still unknown.
+    pub fn record_views(&mut self, days: &[(NaiveDate, u64, f64)]) {
+        for (date, views, minutes) in days {
+            self.set_views(*date, *views, *minutes);
+        }
+        let Some(latest) = days.iter().map(|(date, ..)| *date).max() else { return };
+        let mut date = pacific_day(self.starts_at);
+        while date < latest {
+            if !self.numbers.iter().any(|day| day.date == date && day.views_reported) {
+                self.set_views(date, 0, 0.0);
+            }
+            let Some(next) = date.succ_opt() else { break };
+            date = next;
+        }
     }
 
     /// When the reach report the impressions of `date` come from was made.
@@ -392,10 +439,10 @@ impl AbTest {
         results
     }
 
-    /// The days with reach numbers, each with every version's share of it: the part
-    /// of the day it was up.
+    /// The days with all their numbers, each with every version's share of it: the
+    /// part of the day it was up.
     fn measured_shares(&self) -> impl Iterator<Item = (&DayNumbers, Vec<f64>)> {
-        self.numbers.iter().filter(|day| day.impressions.is_some()).map(|day| {
+        self.numbers.iter().filter(|day| day.is_measured()).map(|day| {
             let (start, end) = (pacific_midnight(day.date), pacific_midnight(day.date + TimeDelta::days(1)));
             let length = (end - start).num_milliseconds() as f64 / 1000.0;
             (day, self.shown_within(start, end).into_iter().map(|seconds| seconds / length).collect())
@@ -418,20 +465,20 @@ impl AbTest {
             return none;
         }
         let lift = if scores[runner_up] > 0.0 { scores[leader] / scores[runner_up] - 1.0 } else { f64::INFINITY };
-        let variances = self.score_variances();
+        let spreads = self.score_spreads();
         // 95 % for the one comparison, Bonferroni-corrected for two.
-        let critical = if scores.len() > 2 { 2.24 } else { 1.96 };
+        let alpha = if scores.len() > 2 { 0.025 } else { 0.05 };
         let clear = order[1..].iter().all(|other| {
             let difference = scores[leader] - scores[*other];
-            let spread = (variances[leader] + variances[*other]).sqrt();
-            difference > 0.0 && (spread <= 0.0 || difference / spread >= critical)
+            difference > 0.0 && welch_p_value(difference, spreads[leader], spreads[*other]) < alpha
         });
         Verdict { leader: Some(leader), lift, clear }
     }
 
-    /// The variance of each version's score (seconds per impression), from how much
-    /// it varies from day to day: the ratio estimator's, with days as samples.
-    fn score_variances(&self) -> Vec<f64> {
+    /// How uncertain each version's score (seconds per impression) is, from how much
+    /// it varies from day to day: the ratio estimator's variance, with days as
+    /// samples, and how many days that is.
+    fn score_spreads(&self) -> Vec<(f64, f64)> {
         let count = self.versions.len();
         let mut samples: Vec<Vec<(f64, f64)>> = vec![Vec::new(); count];
         for (day, shares) in self.measured_shares() {
@@ -449,11 +496,11 @@ impl AbTest {
                 let (seconds, impressions) =
                     days.iter().fold((0.0, 0.0), |(s, i), (seconds, impressions)| (s + seconds, i + impressions));
                 if n < 2.0 || impressions <= 0.0 {
-                    return f64::INFINITY;
+                    return (f64::INFINITY, n);
                 }
                 let ratio = seconds / impressions;
                 let residuals: f64 = days.iter().map(|(s, i)| (s - ratio * i).powi(2)).sum();
-                n / (n - 1.0) * residuals / impressions.powi(2)
+                (n / (n - 1.0) * residuals / impressions.powi(2), n)
             })
             .collect()
     }
@@ -466,6 +513,90 @@ impl AbTest {
             None => (0, None),
         }
     }
+}
+
+/// The two-sided p-value of Welch's t-test of `difference` between two scores,
+/// each given as its variance and the number of days it comes from. Few days make
+/// the variances uncertain too, which the degrees of freedom account for.
+fn welch_p_value(difference: f64, (a, days_a): (f64, f64), (b, days_b): (f64, f64)) -> f64 {
+    let spread = (a + b).sqrt();
+    if !spread.is_finite() {
+        return 1.0;
+    }
+    if spread <= 0.0 {
+        return if difference > 0.0 { 0.0 } else { 1.0 };
+    }
+    let t = difference.abs() / spread;
+    let freedom = (a + b).powi(2) / (a * a / (days_a - 1.0) + b * b / (days_b - 1.0));
+    // The upper tail of Student's t, twice.
+    regularized_incomplete_beta(freedom / 2.0, 0.5, freedom / (freedom + t * t))
+}
+
+/// I_x(a, b), by its continued fraction (Numerical Recipes, `betai`).
+fn regularized_incomplete_beta(a: f64, b: f64, x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    let front = (ln_gamma(a + b) - ln_gamma(a) - ln_gamma(b) + a * x.ln() + b * (1.0 - x).ln()).exp();
+    if x < (a + 1.0) / (a + b + 2.0) {
+        front * beta_fraction(a, b, x) / a
+    } else {
+        1.0 - front * beta_fraction(b, a, 1.0 - x) / b
+    }
+}
+
+/// The continued fraction of the incomplete beta function, by Lentz's method.
+fn beta_fraction(a: f64, b: f64, x: f64) -> f64 {
+    const TINY: f64 = 1e-300;
+    let nonzero = |value: f64| if value.abs() < TINY { TINY } else { value };
+    let mut c = 1.0;
+    let mut d = 1.0 / nonzero(1.0 - (a + b) * x / (a + 1.0));
+    let mut h = d;
+    for m in 1..300 {
+        let m = f64::from(m);
+        let even = m * (b - m) * x / ((a + 2.0 * m - 1.0) * (a + 2.0 * m));
+        d = 1.0 / nonzero(1.0 + even * d);
+        c = nonzero(1.0 + even / c);
+        h *= d * c;
+        let odd = -(a + m) * (a + b + m) * x / ((a + 2.0 * m) * (a + 2.0 * m + 1.0));
+        d = 1.0 / nonzero(1.0 + odd * d);
+        c = nonzero(1.0 + odd / c);
+        let step = d * c;
+        h *= step;
+        if (step - 1.0).abs() < 1e-12 {
+            break;
+        }
+    }
+    h
+}
+
+/// ln Γ(x) for x > 0, by Lanczos' approximation (g = 7).
+fn ln_gamma(x: f64) -> f64 {
+    const COEFFICIENTS: [f64; 9] = [
+        0.999_999_999_999_809_9,
+        676.520_368_121_885_1,
+        -1_259.139_216_722_402_8,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
+        12.507_343_278_686_905,
+        -0.138_571_095_265_720_12,
+        9.984_369_578_019_572e-6,
+        1.505_632_735_149_311_6e-7,
+    ];
+    if x < 0.5 {
+        let pi = std::f64::consts::PI;
+        return (pi / (pi * x).sin()).ln() - ln_gamma(1.0 - x);
+    }
+    let x = x - 1.0;
+    let t = x + 7.5;
+    let sum = COEFFICIENTS[1..]
+        .iter()
+        .enumerate()
+        .fold(COEFFICIENTS[0], |sum, (ix, coefficient)| sum + coefficient / (x + ix as f64 + 1.0));
+    0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + sum.ln()
 }
 
 /// Letter of the version at `ix`: A, B, C.
@@ -575,8 +706,10 @@ mod tests {
         assert_eq!(test.step(end), TestStep::Wait);
         assert_eq!(test.step(end + FINISH_WAIT), TestStep::Finish);
         test.set_reach(date("2026-10-01"), 100, 0.05, end);
+        test.record_views(&[(date("2026-10-01"), 5, 20.0)]);
         assert_eq!(test.measured_through(), Some(date("2026-10-01")));
         test.set_reach(date("2026-10-02"), 100, 0.05, end);
+        test.record_views(&[(date("2026-10-02"), 5, 20.0)]);
         assert_eq!(test.step(end + TimeDelta::hours(1)), TestStep::Finish);
         test.outcome = Some(TestOutcome::Finished { at: end, kept: 0, winner: None, chosen: false });
         assert_eq!(test.step(end + FINISH_WAIT), TestStep::Wait);
@@ -656,6 +789,75 @@ mod tests {
         let short = measured(2, 2, &[10.0, 20.0]);
         assert_eq!(short.verdict(short.ends_at()).leader, None);
         assert_eq!(short.version_to_keep(short.ends_at()), (0, None));
+    }
+
+    #[test]
+    fn welch_p_values_match_the_t_table() {
+        // Two-sided 5 % points of Student's t: 2.571 (5 df), 2.228 (10), 1.960 (∞).
+        let p = |t: f64, freedom: f64| regularized_incomplete_beta(freedom / 2.0, 0.5, freedom / (freedom + t * t));
+        assert!((p(2.571, 5.0) - 0.05).abs() < 1e-3, "{}", p(2.571, 5.0));
+        assert!((p(2.228, 10.0) - 0.05).abs() < 1e-3);
+        assert!((p(1.96, 1e6) - 0.05).abs() < 1e-3);
+        assert!((p(0.0, 7.0) - 1.0).abs() < 1e-12);
+        assert!((ln_gamma(5.0) - 24f64.ln()).abs() < 1e-10);
+        assert!((ln_gamma(0.5) - std::f64::consts::PI.sqrt().ln()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn a_week_of_days_needs_more_than_a_normal_lead() {
+        // A B B A A B B, 1,000 impressions a day: A earns 10, 12 and 11 s per
+        // impression, B 12, 14, 12 and 14. The lead is 2.45 standard errors, short of
+        // what 4.8 degrees of freedom need at 95 % (2.6).
+        let mut test = october_test(2, 7);
+        let scores = [10.0, 12.0, 14.0, 11.0, 12.0, 12.0, 14.0];
+        for (n, score) in scores.iter().enumerate() {
+            let day = date("2026-10-01") + TimeDelta::days(n as i64);
+            let version = test.version_at(pacific_midnight(day));
+            test.showings.push(Showing { version, from: pacific_midnight(day) });
+            test.set_views(day, 50, 1000.0 * score / 60.0);
+            test.set_reach(day, 1000, 0.05, pacific_midnight(day) + TimeDelta::days(2));
+        }
+        let verdict = test.verdict(test.ends_at());
+        assert_eq!(verdict.leader, Some(1));
+        assert!(!verdict.clear);
+    }
+
+    #[test]
+    fn a_day_counts_once_analytics_and_the_reach_report_have_it() {
+        let mut test = october_test(2, 2);
+        test.showings.push(Showing { version: 0, from: test.starts_at });
+        let end = test.ends_at();
+        test.set_reach(date("2026-10-01"), 100, 0.05, end);
+        test.set_reach(date("2026-10-02"), 100, 0.05, end);
+        // The reach of both days is in, Analytics has only the first: not done yet.
+        test.record_views(&[(date("2026-10-01"), 5, 20.0)]);
+        assert_eq!(test.measured_through(), Some(date("2026-10-01")));
+        assert_eq!(test.step(end + TimeDelta::hours(1)), TestStep::Wait);
+        assert_eq!(test.results(end)[0].days_measured, 1.0);
+        // Analytics leaves out a day without views when it has a later one.
+        let mut gap = october_test(2, 3);
+        gap.record_views(&[(date("2026-10-01"), 5, 20.0), (date("2026-10-03"), 4, 10.0)]);
+        let second = gap.numbers.iter().find(|day| day.date == date("2026-10-02")).unwrap();
+        assert!(second.views_reported && second.views == 0);
+    }
+
+    #[test]
+    fn a_half_done_switch_puts_the_due_version_up_again() {
+        let mut test = AbTest::new(
+            TestSubject::Both,
+            titles(2),
+            7,
+            Some("Before".into()),
+            pacific_midnight(date("2026-10-01")),
+            None,
+        );
+        test.showings.push(Showing { version: 0, from: test.starts_at });
+        let later = test.starts_at + TimeDelta::hours(2);
+        assert_eq!(test.step(later), TestStep::Wait);
+        // B's title went up, its thumbnail didn't, and the title couldn't go back.
+        test.title_up = Some(1);
+        assert_eq!(test.live_title(), Some("Title 1"));
+        assert_eq!(test.step(later), TestStep::Show(0));
     }
 
     #[test]

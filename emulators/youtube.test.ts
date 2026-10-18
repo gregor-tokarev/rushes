@@ -536,3 +536,23 @@ test("reports daily views and reach, and records what a video showed", async () 
     assert.match(corrected, new RegExp(`,${id},2000,`));
   });
 });
+
+test("faults can let the first matching requests through", async () => {
+  await withYoutube(async (youtube) => {
+    const { id } = await uploadWhole(youtube, "Before");
+    const update = (title: string) =>
+      youtube.request("/youtube/v3/videos?part=snippet", {
+        method: "PUT",
+        headers: auth(creatorToken, { "Content-Type": "application/json" }),
+        body: JSON.stringify({ id, snippet: { title, categoryId: "22" } }),
+      });
+    const fault = await youtube.request("/_emulator/faults", {
+      method: "POST",
+      body: JSON.stringify({ method: "PUT", path: "/youtube/v3/videos", status: 500, skip: 1 }),
+    });
+    assert.equal(fault.status, 201);
+    assert.equal((await update("First")).status, 200);
+    assert.equal((await update("Second")).status, 500);
+    assert.equal((await update("Third")).status, 200);
+  });
+});

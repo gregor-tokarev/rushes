@@ -124,7 +124,8 @@ interface UploadRecord {
 }
 
 /**
- * Injected failure for the next `remaining` requests matching `method` and `path`.
+ * Injected failure for the next `remaining` requests matching `method` and `path`,
+ * after letting `skip` of them through.
  * Either fails with an error body (`status`) or, for upload session PUTs, persists at
  * most `persistBytes` of the chunk and answers 308 like a server that lost the rest.
  */
@@ -136,6 +137,7 @@ interface Fault {
   reason: string | null;
   message: string | null;
   persistBytes: number | null;
+  skip: number;
 }
 
 export interface YoutubeState {
@@ -710,6 +712,10 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
         );
         if (index < 0) return null;
         const fault = state.faults[index];
+        if (fault.skip > 0) {
+          fault.skip -= 1;
+          return null;
+        }
         fault.remaining -= 1;
         if (fault.remaining <= 0) state.faults.splice(index, 1);
         return fault;
@@ -1503,6 +1509,8 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
           if ((status === null) === (persistBytes === null)) throw badRequest("invalid", "Set exactly one of status or persistBytes.");
           const times = body.times ?? 1;
           if (typeof times !== "number" || !Number.isInteger(times) || times < 1) throw badRequest("invalid", "times must be a positive integer.");
+          const skip = body.skip ?? 0;
+          if (typeof skip !== "number" || !Number.isInteger(skip) || skip < 0) throw badRequest("invalid", "skip must be a whole number.");
           state.faults.push({
             method: typeof body.method === "string" ? body.method.toUpperCase() : null,
             path: body.path,
@@ -1511,6 +1519,7 @@ export function createYoutubeEmulator(options: YoutubeEmulatorOptions = {}): Emu
             reason: typeof body.reason === "string" ? body.reason : null,
             message: typeof body.message === "string" ? body.message : null,
             persistBytes,
+            skip,
           });
           return c.json({ faults: state.faults }, 201);
         }),

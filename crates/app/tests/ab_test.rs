@@ -273,6 +273,91 @@ fn a_title_changed_in_studio_stops_the_test(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn an_end_youtube_refused_is_tried_again(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    let (video_id, youtube_id) = upload_public(&workspace, cx, "Retry me");
+    let start = on("2026-04-01", 9);
+    let runner = Runner::start(&workspace, cx, start);
+    let versions = vec![
+        TestVersion { title: Some("Retry me".into()), thumbnail: None },
+        TestVersion { title: Some("Second try".into()), thumbnail: None },
+    ];
+    runner.runner.update(cx, |runner, cx| runner.start(video_id, TestSubject::Title, versions, 14, cx)).unwrap();
+    wait_for_showings(&workspace, cx, video_id, 1);
+
+    // Ending on B, the day A is due: YouTube refuses the title once.
+    emulators.inject_fault(json!({"method": "PUT", "path": "/youtube/v3/videos", "status": 500}));
+    runner.runner.update(cx, |runner, cx| runner.end(video_id, 1, cx));
+    wait_until(cx, "the refusal", |cx| {
+        runner.runner.read_with(cx, |runner, _| runner.switch_problem(video_id).map(drop))
+    });
+    assert_eq!(
+        runner.runner.read_with(cx, |runner, _| runner.switch_problem(video_id).map(|(version, _)| version)),
+        Some(1)
+    );
+    assert!(!test_of(&workspace, cx, video_id).is_over());
+    assert_eq!(title_on_youtube(&emulators, &youtube_id), "Retry me");
+
+    // The end is tried again, though the schedule wants A today.
+    runner.at(cx, start + TimeDelta::minutes(6));
+    let test = wait_until(cx, "the end", |cx| Some(test_of(&workspace, cx, video_id)).filter(AbTest::is_over));
+    assert!(matches!(test.outcome, Some(TestOutcome::Finished { kept: 1, chosen: true, .. })));
+    assert_eq!(title_on_youtube(&emulators, &youtube_id), "Second try");
+}
+
+#[gpui_kit::test]
+fn a_pair_that_went_up_halfway_is_put_right(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    let (video_id, youtube_id) = upload_public(&workspace, cx, "Pair");
+    let runner = Runner::start(&workspace, cx, on("2026-06-01", 9));
+    let images: Vec<PathBuf> =
+        ["a.png", "b.png"].iter().map(|name| publish_support::png_file(workspace.dir.path(), name)).collect();
+    std::fs::write(&images[1], [std::fs::read(&images[1]).unwrap(), vec![0]].concat()).unwrap();
+    let versions = vec![
+        TestVersion { title: Some("Pair".into()), thumbnail: Some(images[0].clone()) },
+        TestVersion { title: Some("Pair, part two".into()), thumbnail: Some(images[1].clone()) },
+    ];
+    runner.runner.update(cx, |runner, cx| runner.start(video_id, TestSubject::Both, versions, 14, cx)).unwrap();
+    wait_for_showings(&workspace, cx, video_id, 1);
+    let sha = |emulators: &Emulators| {
+        emulators.youtube_video(&youtube_id)["thumbnail"]["sha256"].as_str().map(str::to_owned).unwrap()
+    };
+    let a = publish_support::sha256(&images[0]);
+    assert_eq!(sha(&emulators), a);
+    let problem = |cx: &mut TestAppContext| {
+        runner.runner.read_with(cx, |runner, _| runner.switch_problem(video_id).map(|(version, _)| version))
+    };
+
+    // B's turn: its title goes up, its thumbnail doesn't, and the title goes back.
+    emulators.inject_fault(json!({"method": "POST", "path": "/upload/youtube/v3/thumbnails/set", "status": 500}));
+    runner.at(cx, on("2026-06-02", 0) + TimeDelta::minutes(1));
+    wait_until(cx, "the failed switch", |cx| problem(cx).filter(|version| *version == 1));
+    assert_eq!((title_on_youtube(&emulators, &youtube_id), sha(&emulators)), ("Pair".to_owned(), a.clone()));
+    let test = test_of(&workspace, cx, video_id);
+    assert_eq!((test.showings.len(), test.title_up), (1, None));
+
+    // Again, and now the title can't go back either: the test knows what YouTube has.
+    emulators.inject_fault(json!({"method": "POST", "path": "/upload/youtube/v3/thumbnails/set", "status": 500}));
+    emulators.inject_fault(json!({"method": "PUT", "path": "/youtube/v3/videos", "status": 500, "skip": 1}));
+    runner.at(cx, on("2026-06-02", 0) + TimeDelta::minutes(7));
+    let test = wait_until(cx, "the half switch", |cx| {
+        Some(test_of(&workspace, cx, video_id)).filter(|test| test.title_up.is_some())
+    });
+    assert_eq!((test.title_up, test.live_version()), (Some(1), Some(0)));
+    assert_eq!((title_on_youtube(&emulators, &youtube_id), sha(&emulators)), ("Pair, part two".to_owned(), a.clone()));
+
+    // Ending on A puts A back whole.
+    emulators.clear_faults();
+    runner.runner.update(cx, |runner, cx| runner.end(video_id, 0, cx));
+    let test = wait_until(cx, "the end", |cx| Some(test_of(&workspace, cx, video_id)).filter(AbTest::is_over));
+    assert!(matches!(test.outcome, Some(TestOutcome::Finished { kept: 0, chosen: true, .. })));
+    assert_eq!(test.title_up, None);
+    assert_eq!((title_on_youtube(&emulators, &youtube_id), sha(&emulators)), ("Pair".to_owned(), a));
+}
+
+#[gpui_kit::test]
 fn private_videos_and_missing_permissions_say_why(cx: &mut TestAppContext) {
     let Some(emulators) = Emulators::start() else { return };
     let workspace = Workspace::open(cx, emulators.backend());

@@ -203,13 +203,8 @@ fn render_test(video_id: VideoId, test: &AbTest, runner: &Entity<AbTests>, now: 
                         .into_any_element(),
                 );
             }
-            if let Some(problem) = runner.switch_problem(video_id) {
-                let due = match test.step(now) {
-                    rushes_core::ab_test::TestStep::Show(version) => {
-                        format!("Couldn’t put {} on YouTube", version_letter(version))
-                    }
-                    _ => "Couldn’t change the video on YouTube".to_owned(),
-                };
+            if let Some((version, problem)) = runner.switch_problem(video_id) {
+                let due = format!("Couldn’t put {} on YouTube", version_letter(version));
                 lines.push(
                     div()
                         .id("ab-switch-problem")

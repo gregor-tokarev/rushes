@@ -58,12 +58,23 @@ struct Work {
     read_at: Option<DateTime<Utc>>,
     /// When to try the change YouTube didn't take again.
     retry_at: Option<DateTime<Utc>>,
-    /// Why the last change didn't happen, as the creator should read it.
-    switch_problem: Option<String>,
+    /// The version the last change was to put up and why it didn't, as the creator
+    /// should read it.
+    switch_problem: Option<(usize, String)>,
     /// Why the numbers couldn't be read.
     numbers_problem: Option<String>,
-    /// The version the creator chose to keep while another was on its way.
-    pending_end: Option<usize>,
+    /// The version an ending test keeps, waiting to go up: the creator chose it
+    /// while another was on its way, or putting it up failed. It goes before any
+    /// turn of the versions.
+    finish: Option<(usize, Finish)>,
+}
+
+/// A change YouTube didn't take, and whether the title went up all the same.
+struct SwitchFailure {
+    error: YoutubeError,
+    /// The new title is on YouTube though the thumbnail isn't, and it couldn't be
+    /// taken back.
+    title_up: bool,
 }
 
 /// Runs every video's A/B test. One per app, after [`YoutubeService`].
@@ -160,9 +171,11 @@ impl AbTests {
         self.work.get(&video_id).is_some_and(|work| work.reading)
     }
 
-    /// Why the last change of `video_id`'s test didn't reach YouTube; it is tried again.
-    pub fn switch_problem(&self, video_id: VideoId) -> Option<&str> {
-        self.work.get(&video_id).and_then(|work| work.switch_problem.as_deref())
+    /// The version the last change of `video_id`'s test was to put up, and why it
+    /// didn't reach YouTube; it is tried again.
+    pub fn switch_problem(&self, video_id: VideoId) -> Option<(usize, &str)> {
+        let (version, problem) = self.work.get(&video_id)?.switch_problem.as_ref()?;
+        Some((*version, problem))
     }
 
     /// Why the numbers of `video_id`'s test couldn't be read.
@@ -223,17 +236,19 @@ impl AbTests {
         Ok(())
     }
 
-    /// Ends `video_id`'s test, keeping `keep` on YouTube.
+    /// Ends `video_id`'s test, keeping `keep` on YouTube. Until it is up, the test
+    /// keeps trying that before anything else.
     pub fn end(&mut self, video_id: VideoId, keep: usize, cx: &mut Context<Self>) {
-        let work = self.work.entry(video_id).or_default();
-        if work.switching.is_some() {
-            work.pending_end = Some(keep);
-            return;
-        }
         let Some(test) = self.running_test(video_id, cx) else { return };
         let verdict = test.verdict(self.now());
-        let winner = verdict.leader.filter(|_| verdict.clear);
-        self.switch(video_id, keep, Some(Finish { winner, chosen: true }), cx);
+        let finish = Finish { winner: verdict.leader.filter(|_| verdict.clear), chosen: true };
+        let work = self.work.entry(video_id).or_default();
+        work.finish = Some((keep, finish));
+        // Another change is on its way: the end follows it.
+        if work.switching.is_none() {
+            work.retry_at = None;
+            self.switch(video_id, keep, Some(finish), cx);
+        }
     }
 
     /// Reads `video_id`'s numbers again, unless they were read a moment ago.
@@ -262,11 +277,21 @@ impl AbTests {
             .collect();
         for (video_id, test) in running {
             let work = self.work.entry(video_id).or_default();
-            if work.switching.is_some() || work.reading {
+            if work.switching.is_some() {
+                continue;
+            }
+            let retry_due = work.retry_at.is_none_or(|at| now >= at);
+            // An ending test puts its kept version up before anything else.
+            if let Some((version, finish)) = work.finish {
+                if retry_due {
+                    self.switch(video_id, version, Some(finish), cx);
+                }
+                continue;
+            }
+            if work.reading {
                 continue;
             }
             let stale = work.read_at.is_none_or(|at| now >= at + READ_INTERVAL);
-            let retry_due = work.retry_at.is_none_or(|at| now >= at);
             let read_since_end = work.read_at.is_some_and(|at| at >= test.ends_at());
             match test.step(now) {
                 TestStep::Show(version) if retry_due => self.switch(video_id, version, None, cx),
@@ -306,7 +331,8 @@ impl AbTests {
         let Some(link) = video.youtube.clone() else { return };
         let Some(test) = link.ab_test.clone().filter(|test| !test.is_over()) else { return };
         let Some(target) = test.versions.get(version).cloned() else { return };
-        if test.live_version() == Some(version) {
+        // Already up, whole: nothing to change on YouTube.
+        if test.live_version() == Some(version) && test.title_up.is_none() {
             if let Some(finish) = then {
                 self.on_switched(video_id, test.created_at, version, Some(finish), Ok(None), cx);
             }
@@ -321,13 +347,14 @@ impl AbTests {
             Ok(client) => client,
             Err(problem) => {
                 let work = self.work.entry(video_id).or_default();
-                work.switch_problem = Some(problem);
+                work.switch_problem = Some((version, problem));
                 cx.notify();
                 return;
             }
         };
         // Until A is up, the title is whatever the video had: A replaces it as it is.
-        let from = (!test.showings.is_empty()).then(|| test.live_title().map(str::to_owned)).flatten();
+        let known = !test.showings.is_empty() || test.title_up.is_some();
+        let from = known.then(|| test.live_title().map(str::to_owned)).flatten();
         self.work.entry(video_id).or_default().switching = Some(version);
         cx.notify();
         let (youtube_id, subject, created_at) = (link.video_id, test.subject, test.created_at);
@@ -347,19 +374,21 @@ impl AbTests {
         created_at: DateTime<Utc>,
         version: usize,
         then: Option<Finish>,
-        result: Result<Option<String>, YoutubeError>,
+        result: Result<Option<String>, SwitchFailure>,
         cx: &mut Context<Self>,
     ) {
         let now = self.now();
         let work = self.work.entry(video_id).or_default();
         work.switching = None;
-        let pending_end = work.pending_end.take();
+        // An end the creator chose meanwhile goes next.
+        let ending = work.finish.filter(|_| then.is_none());
         cx.notify();
         // The video may be gone, on YouTube again as another video, or its test over.
         let Some(mut video) = self.state.read(cx).video(video_id).cloned() else { return };
         let title = video.upload_title().to_owned();
         let Some(link) = video.youtube.as_mut() else { return };
         let channel = link.channel_id.clone();
+        let linked = link.clone();
         let Some(test) = link.ab_test.as_mut().filter(|test| test.created_at == created_at && !test.is_over()) else {
             return;
         };
@@ -369,6 +398,7 @@ impl AbTests {
                 if test.live_version() != Some(version) {
                     test.showings.push(Showing { version, from: now });
                 }
+                test.title_up = None;
                 let image = test.versions[version].thumbnail.clone().filter(|_| test.subject.has_thumbnail());
                 let announcement = then.map(|finish| {
                     test.outcome = Some(TestOutcome::Finished {
@@ -385,6 +415,9 @@ impl AbTests {
                 let work = self.work.entry(video_id).or_default();
                 work.switch_problem = None;
                 work.retry_at = None;
+                if then.is_some() {
+                    work.finish = None;
+                }
                 announcement
             }
             Ok(Some(changed)) => {
@@ -395,22 +428,28 @@ impl AbTests {
                     detail: format!("Its title was changed on YouTube to “{changed}”, so Rushes left it as it is."),
                 })
             }
-            Err(error) => {
+            Err(SwitchFailure { error, title_up }) => {
                 if error.needs_sign_in() && !error.is_missing_scope() {
                     self.service.update(cx, |service, cx| service.require_sign_in(&channel, cx));
                 }
                 // Deleted in YouTube Studio: asking YouTube about it drops the dead link.
                 if matches!(error, YoutubeError::VideoNotFound) {
-                    let link = link.clone();
-                    self.service.update(cx, |service, cx| service.refresh_youtube_video(&link, cx));
+                    self.service.update(cx, |service, cx| service.refresh_youtube_video(&linked, cx));
                 }
                 let work = self.work.entry(video_id).or_default();
-                work.switch_problem = Some(test_error(&error));
+                work.switch_problem = Some((version, test_error(&error)));
                 work.retry_at = Some(now + RETRY_DELAY);
-                if let Some(keep) = pending_end {
-                    work.pending_end = Some(keep);
+                // An end that failed is tried again before the versions take turns.
+                if let Some(finish) = then {
+                    work.finish = Some((version, finish));
                 }
-                return;
+                // YouTube shows this version's title with the other's thumbnail now:
+                // the next change knows, also after a restart.
+                if !title_up {
+                    return;
+                }
+                test.title_up = Some(version);
+                None
             }
         };
         self.state.update(cx, |state, cx| state.update_video(video, cx));
@@ -420,8 +459,8 @@ impl AbTests {
                 Announcement::Stopped { title, detail } => notification::warning(detail, cx).title(title),
             });
         }
-        if let Some(keep) = pending_end {
-            self.end(video_id, keep, cx);
+        if let Some((keep, finish)) = ending {
+            self.switch(video_id, keep, Some(finish), cx);
         }
     }
 
@@ -499,9 +538,8 @@ impl AbTests {
             return;
         };
         let before = test.numbers.clone();
-        for day in &numbers.views {
-            test.set_views(day.date, day.views, day.watch_minutes);
-        }
+        let views: Vec<_> = numbers.views.iter().map(|day| (day.date, day.views, day.watch_minutes)).collect();
+        test.record_views(&views);
         for (date, impressions, click_rate, report) in numbers.reach {
             test.set_reach(date, impressions, click_rate, report);
         }
@@ -566,23 +604,35 @@ fn test_error(error: &YoutubeError) -> String {
 
 /// Puts `version` on the YouTube video `youtube_id`: its title, replacing `from`,
 /// then its thumbnail. `Ok(Some(title))` when someone changed the title elsewhere.
+/// When the thumbnail fails after the title went up, the title goes back to `from`,
+/// so YouTube keeps showing one version whole.
 fn put_up(
     client: &Arc<YoutubeClient>,
     youtube_id: &str,
     subject: TestSubject,
     version: &TestVersion,
     from: Option<String>,
-) -> Result<Option<String>, YoutubeError> {
-    if subject.has_title()
-        && let Some(title) = &version.title
-        && let TitleChange::Changed(current) = client.replace_title(youtube_id, from.as_deref(), title)?
-    {
-        return Ok(Some(current));
+) -> Result<Option<String>, SwitchFailure> {
+    let fail = |error| SwitchFailure { error, title_up: false };
+    let title = version.title.as_deref().filter(|_| subject.has_title());
+    if let Some(title) = title {
+        match client.replace_title(youtube_id, from.as_deref(), title).map_err(fail)? {
+            TitleChange::Changed(current) => return Ok(Some(current)),
+            TitleChange::Replaced => {}
+        }
     }
-    if subject.has_thumbnail()
-        && let Some(image) = &version.thumbnail
+    let image = version.thumbnail.as_deref().filter(|_| subject.has_thumbnail());
+    if let Some(image) = image
+        && let Err(error) = client.set_thumbnail(youtube_id, image)
     {
-        client.set_thumbnail(youtube_id, image)?;
+        let title_up = match (title, from.as_deref()) {
+            (Some(title), Some(previous)) if title != previous => {
+                !matches!(client.replace_title(youtube_id, Some(title), previous), Ok(TitleChange::Replaced))
+            }
+            (Some(title), None) => !title.is_empty(),
+            _ => false,
+        };
+        return Err(SwitchFailure { error, title_up });
     }
     Ok(None)
 }
