@@ -593,6 +593,7 @@ impl YoutubeService {
                 self.visibility.remove(&video_id);
                 self.visibility_changed_again.remove(&video_id);
                 self.details.remove(&video_id);
+                self.details_answered.remove(&video_id);
             }
             self.retired.remove(id);
         }

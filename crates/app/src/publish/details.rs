@@ -147,6 +147,22 @@ impl YoutubeService {
             // The upload sent the details it started with.
             return;
         }
+        self.wait_to_send_details(video_id, cx);
+        cx.notify();
+    }
+
+    /// The form is changing the details of `video_id` again, before it saves
+    /// them: what waits to go waits [`DETAILS_SEND_DELAY`] more, so a draft being
+    /// typed doesn't go half-written.
+    pub fn postpone_youtube_details(&mut self, video_id: VideoId, cx: &mut Context<Self>) {
+        if self.details_timers.contains_key(&video_id) {
+            self.wait_to_send_details(video_id, cx);
+        }
+    }
+
+    /// Sends the details of `video_id` waiting to go [`DETAILS_SEND_DELAY`] from
+    /// now, instead of when an earlier wait would have.
+    fn wait_to_send_details(&mut self, video_id: VideoId, cx: &mut Context<Self>) {
         let wait = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(DETAILS_SEND_DELAY).await;
             this.update(cx, |this, cx| {
@@ -157,7 +173,6 @@ impl YoutubeService {
         });
         // Replacing the wait cancels the one before.
         self.details_timers.insert(video_id, wait);
-        cx.notify();
     }
 
     /// Sends the details of `video_id` to YouTube now: its `fields`, with those
@@ -171,10 +186,10 @@ impl YoutubeService {
     }
 
     /// Takes the details YouTube has into the publish settings of `video_id`,
-    /// where they differ.
-    pub fn use_youtube_details(&mut self, video_id: VideoId, cx: &mut Context<Self>) {
-        let Some(mut video) = self.state.read(cx).video(video_id).cloned() else { return };
-        let Some((fields, on_youtube)) = self.other_details_on_youtube(&video) else { return };
+    /// where they differ. Returns which it took.
+    pub fn use_youtube_details(&mut self, video_id: VideoId, cx: &mut Context<Self>) -> DetailFields {
+        let Some(mut video) = self.state.read(cx).video(video_id).cloned() else { return DetailFields::default() };
+        let Some((fields, on_youtube)) = self.other_details_on_youtube(&video) else { return DetailFields::default() };
         let publish = &mut video.publish;
         if fields.title {
             publish.title = on_youtube.title;
@@ -190,6 +205,7 @@ impl YoutubeService {
         }
         self.state.update(cx, |state, cx| state.update_video(video, cx));
         cx.notify();
+        fields
     }
 
     /// Sends the details of `video_id` waiting to go, unless its upload under way
@@ -245,23 +261,35 @@ impl YoutubeService {
     ) {
         self.details.remove(&youtube_id);
         self.details_changed(&youtube_id);
+        // The video may have gone, or uploaded again to another YouTube video.
+        let linked = self
+            .state
+            .read(cx)
+            .video(video_id)
+            .and_then(|video| video.youtube.as_ref())
+            .is_some_and(|link| link.video_id == youtube_id);
+        // Changed while this one was on its way, and done waiting.
+        let changed_since =
+            self.details_waiting.contains_key(&video_id) && !self.details_timers.contains_key(&video_id);
         match result {
             Ok(Some(now)) => {
                 if let Some(info) = self.remote.get_mut(&youtube_id) {
-                    info.set_details(now);
+                    info.set_details(now.clone());
                 }
-                // Changed while this one was on its way, and done waiting.
-                if !self.details_timers.contains_key(&video_id) {
-                    self.send_waiting_details(video_id, cx);
-                }
+                // For answers asked before this one, also before YouTube was first asked.
+                self.details_answered.insert(youtube_id, now);
             }
             Ok(None) => {
-                self.details_waiting.remove(&video_id);
+                if linked {
+                    self.details_waiting.remove(&video_id);
+                }
                 self.on_video_gone(&youtube_id, &channel, cx);
             }
             Err(error) => {
                 // What didn't get there goes with the next try.
-                *self.details_waiting.entry(video_id).or_default() |= sent;
+                if linked {
+                    *self.details_waiting.entry(video_id).or_default() |= sent;
+                }
                 let problem = describe_error(&error);
                 let reconnect = error.needs_sign_in().then(|| channel.clone());
                 if reconnect.is_some() {
@@ -269,6 +297,9 @@ impl YoutubeService {
                 }
                 self.details.insert(youtube_id, DetailsSync::Failed { problem, reconnect });
             }
+        }
+        if changed_since {
+            self.send_waiting_details(video_id, cx);
         }
         cx.notify();
     }
@@ -332,8 +363,12 @@ impl YoutubeService {
     pub(super) fn keep_sent_details(&self, info: &mut VideoInfo, changes: u64) {
         let current =
             self.details_changes(&info.id) == changes && self.details.get(&info.id) != Some(&DetailsSync::Sending);
-        if !current && let Some(known) = self.remote.get(&info.id) {
-            info.set_details(known.details());
+        if current {
+            return;
+        }
+        let known = self.remote.get(&info.id).map(VideoInfo::details);
+        if let Some(known) = known.or_else(|| self.details_answered.get(&info.id).cloned()) {
+            info.set_details(known);
         }
     }
 }

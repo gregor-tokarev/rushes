@@ -19,8 +19,8 @@ use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, Shar
 use rushes_core::settings::{self, YoutubeBackend};
 use rushes_core::{PublishChannel, UploadId, UploadJob, UploadStatus, Video, VideoId, YoutubeLink};
 use rushes_youtube::{
-    Account, CredentialStore, Credentials, Error as YoutubeError, MANAGE_SCOPE, SavedLogin, VideoInfo, YoutubeClient,
-    YoutubeConfig, begin_authorization, check_client,
+    Account, CredentialStore, Credentials, Details, Error as YoutubeError, MANAGE_SCOPE, SavedLogin, VideoInfo,
+    YoutubeClient, YoutubeConfig, begin_authorization, check_client,
 };
 
 use super::details::{DetailFields, DetailsSync};
@@ -178,6 +178,9 @@ pub struct YoutubeService {
     pub(super) details_timers: HashMap<VideoId, Task<()>>,
     /// How many details changes went to each YouTube video, by YouTube video id.
     pub(super) details_changes: HashMap<String, u64>,
+    /// What YouTube answered the last details change of each YouTube video, by
+    /// YouTube video id.
+    pub(super) details_answered: HashMap<String, Details>,
     /// Why stopped uploads stopped offering Resume, for this run of the app.
     pub(super) retired: HashMap<UploadId, Retired>,
     /// A background check of the files of stopped uploads is running.
@@ -360,6 +363,7 @@ impl YoutubeService {
             details_waiting: HashMap::new(),
             details_timers: HashMap::new(),
             details_changes: HashMap::new(),
+            details_answered: HashMap::new(),
             retired: HashMap::new(),
             checking_files: false,
             remote: HashMap::new(),

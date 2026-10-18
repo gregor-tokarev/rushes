@@ -180,6 +180,10 @@ impl Edited {
         self.0 & (1 << field as u8) != 0
     }
 
+    fn remove(&mut self, field: Field) {
+        self.0 &= !(1 << field as u8);
+    }
+
     fn is_empty(self) -> bool {
         self.0 == 0
     }
@@ -505,11 +509,21 @@ impl PublishPanel {
         self.service.update(cx, |service, cx| service.send_youtube_details(video_id, fields, cx));
     }
 
-    /// Takes the details YouTube has into the form. Fields with edits of the
-    /// form's own waiting keep them, and those go to YouTube.
+    /// Takes the details YouTube has into the form where they differ. Edits of the
+    /// form's own to those, waiting to be saved, go: the creator chose YouTube's.
     fn use_youtube_details(&mut self, cx: &mut Context<Self>) {
         let video_id = self.video_id;
-        self.service.update(cx, |service, cx| service.use_youtube_details(video_id, cx));
+        let taken = self.service.update(cx, |service, cx| service.use_youtube_details(video_id, cx));
+        for (taken, field) in [
+            (taken.title, Field::Title),
+            (taken.description, Field::Description),
+            (taken.tags, Field::Tags),
+            (taken.category, Field::Category),
+        ] {
+            if taken {
+                self.edited.remove(field);
+            }
+        }
     }
 
     fn schedule_save(&mut self, field: Field, cx: &mut Context<Self>) {
@@ -520,6 +534,11 @@ impl PublishPanel {
         {
             let video_id = self.video_id;
             assistant.update(cx, |assistant, cx| assistant.dismiss_details(video_id, cx));
+        }
+        // Details waiting to go to YouTube wait for this change too.
+        if matches!(field, Field::Title | Field::Description | Field::Tags | Field::Category) {
+            let video_id = self.video_id;
+            self.service.update(cx, |service, cx| service.postpone_youtube_details(video_id, cx));
         }
         self.edited.insert(field);
         self.save_task = Some(cx.spawn(async move |this, cx| {

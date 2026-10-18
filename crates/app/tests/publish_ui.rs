@@ -19,8 +19,8 @@ use gpui_kit::{
 use publish_support::{Emulators, Workspace, wait_until};
 use rushes::ai_edit::{AiEditPanel, PipelineService};
 use rushes::publish::{
-    AccountBadge, BlockingReason, CHAPTERS_HEADING, Connection, DETAILS_SEND_DELAY, DetailsSync, PublishPanel,
-    ThumbnailSync, UploadsPage, VisibilitySync, YoutubeService, YoutubeSettings,
+    AccountBadge, BlockingReason, CHAPTERS_HEADING, Connection, DETAILS_SEND_DELAY, DetailFields, DetailsSync,
+    PublishPanel, ThumbnailSync, UploadsPage, VisibilitySync, YoutubeService, YoutubeSettings,
 };
 use rushes::route::{Route, SettingsSection, VideoTab};
 use rushes::state::{AppEvent, Severity};
@@ -1631,6 +1631,67 @@ fn details_change_on_youtube_once_the_typing_stops(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn details_wait_while_the_typing_goes_on(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let (video_id, youtube_id) = uploaded_without_thumbnail(cx, &workspace);
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("publish-description", cx);
+        window.input("Links", cx);
+    });
+    settle(cx);
+    cx.executor().advance_clock(DETAILS_SEND_DELAY / 2);
+    cx.run_until_parked();
+    // Typing again, faster than the form saves, past when "Links" would have gone.
+    for word in [" below", " and", " in", " the", " pinned", " comment."] {
+        window(cx, handle, |window, cx| window.input(word, cx));
+        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.run_until_parked();
+    }
+    assert_eq!(service.read_with(cx, |s, _| s.details_sync(&youtube_id).cloned()), None, "still waiting");
+    assert_eq!(details_on_youtube(cx, &service, &youtube_id).description, "");
+    settle(cx);
+    send_details(cx, &service, &youtube_id);
+    assert_eq!(details_on_youtube(cx, &service, &youtube_id).description, "Links below and in the pinned comment.");
+}
+
+#[gpui_kit::test]
+fn a_change_made_while_one_fails_goes_after_it(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let (video_id, youtube_id) = uploaded_without_thumbnail(cx, &workspace);
+    emulators.inject_fault(json!({"method": "PUT", "path": "/youtube/v3/videos", "status": 503}));
+    // Sends `edit` of `fields` the way the form's wait ending does.
+    let send = |cx: &mut TestAppContext, edit: fn(&mut rushes_core::PublishSettings), fields: DetailFields| {
+        workspace.state.update(cx, |state, cx| {
+            let mut video = state.video(video_id).cloned().unwrap();
+            edit(&mut video.publish);
+            state.update_video(video, cx);
+        });
+        service.update(cx, |service, cx| service.send_youtube_details(video_id, fields, cx));
+    };
+    // The description goes; the title changes while it is on its way, and its
+    // wait ends before YouTube refuses the description.
+    let description = DetailFields { description: true, ..DetailFields::default() };
+    send(cx, |publish| publish.description = "Links below.".into(), description);
+    assert_eq!(service.read_with(cx, |s, _| s.details_sync(&youtube_id).cloned()), Some(DetailsSync::Sending));
+    let title = DetailFields { title: true, ..DetailFields::default() };
+    send(cx, |publish| publish.title = "Autocomplete, Explained".into(), title);
+    // Both go once YouTube answered, without another change or Try again.
+    wait_until(cx, "both on YouTube", |cx| {
+        let on_youtube = details_on_youtube(cx, &service, &youtube_id);
+        (on_youtube.title == "Autocomplete, Explained" && on_youtube.description == "Links below.").then_some(())
+    });
+    assert_eq!(service.read_with(cx, |s, _| s.details_sync(&youtube_id).cloned()), None);
+}
+
+#[gpui_kit::test]
 fn details_youtube_refused_go_with_the_next_try(cx: &mut TestAppContext) {
     let Some(emulators) = Emulators::start() else { return };
     let workspace = Workspace::open(cx, emulators.backend());
@@ -1773,13 +1834,22 @@ fn details_changed_in_youtube_studio_show_beside_the_form(cx: &mut TestAppContex
         ("Sponsored by Example.", ["ai".to_owned()].as_slice())
     );
 
-    // The form takes YouTube's description.
+    // The form takes YouTube's description, over an edit to it the form hadn't saved yet.
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        window.click("publish-description", cx);
+        window.input("Draft words.", cx);
+    });
+    cx.run_until_parked();
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         window.within("youtube-details-sync").click("details-use-youtube", cx);
     });
+    settle(cx);
+    cx.executor().advance_clock(DETAILS_SEND_DELAY);
     cx.run_until_parked();
     assert_eq!(workspace.video(cx, video_id).publish.description, "Sponsored by Example.");
+    assert_eq!(details_on_youtube(cx, &service, &youtube_id).description, "Sponsored by Example.");
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         assert!(window.try_find("youtube-details-sync").is_none(), "the form has YouTube’s details");

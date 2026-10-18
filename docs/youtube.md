@@ -341,8 +341,8 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   video on YouTube with `videos.update`, which needs `MANAGE_SCOPE`
   (`youtube.force-ssl`); older sign-ins get "Reconnect" first, and the change goes once
   signed in again. Who can watch and the schedule go when the form saves them. The title,
-  description, tags and category go `DETAILS_SEND_DELAY` (3 s) after the form last saved
-  one of them, so a description typed in bursts costs one update (50 quota units, plus 1
+  description, tags and category go `DETAILS_SEND_DELAY` (3 s) after the last change to
+  one of them (typing postpones it), so a description typed in bursts costs one update (50 quota units, plus 1
   to read the snippet), and only the fields that changed go: `set_details` reads the
   video's snippet and sends it back with those fields, so a description changed in
   YouTube Studio stays when only the tags change in Rushes. **Write with AI…** and its
@@ -354,7 +354,8 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   trailing spaces and line breaks of the description don't count), the Details section
   says which ("Not on YouTube yet · On YouTube the description is different.") and offers
   **Change on YouTube** (sends the form's) and **Use YouTube’s** (takes YouTube's into the
-  form). The form keeps the creator's choice until then.
+  form, over edits to those fields the form hadn't saved yet). The form keeps the creator's
+  choice until then.
 - **Schedule** forces private (YouTube makes the video public at the publish time) and
   restores the earlier visibility when turned off.
 - The Upload card lists what blocks an upload in every state, so a disabled **Upload to
