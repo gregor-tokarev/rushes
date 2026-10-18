@@ -315,6 +315,7 @@ mod tests {
             uploaded_at: Utc::now(),
             thumbnail: None,
             publish_at: None,
+            ab_test: None,
         });
         video
     }

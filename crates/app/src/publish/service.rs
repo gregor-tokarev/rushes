@@ -19,8 +19,8 @@ use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, Shar
 use rushes_core::settings::{self, YoutubeBackend};
 use rushes_core::{PublishChannel, UploadId, UploadJob, UploadStatus, Video, VideoId, YoutubeLink};
 use rushes_youtube::{
-    Account, CredentialStore, Credentials, Error as YoutubeError, SavedLogin, VideoInfo, YoutubeClient, YoutubeConfig,
-    begin_authorization, check_client,
+    Account, CredentialStore, Credentials, Error as YoutubeError, SCOPES, SavedLogin, TEST_SCOPES, VideoInfo,
+    YoutubeClient, YoutubeConfig, begin_authorization_with, check_client,
 };
 
 use super::rules::AccountAccess;
@@ -67,6 +67,22 @@ pub enum Connection {
     NeedsSignIn(Account),
     /// The last sign-in failed.
     Failed(SharedString),
+}
+
+/// Whether A/B tests can use an account: they change titles and read analytics,
+/// which a sign-in grants only when asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TestAccess {
+    Allowed,
+    /// Signed in without those permissions: before A/B tests asked for them, or
+    /// with their boxes unticked on the consent page.
+    NeedsPermission,
+    /// A sign-in of the account is under way.
+    SigningIn,
+    /// YouTube no longer accepts the account's sign-in.
+    NeedsSignIn,
+    /// The account isn't signed in.
+    NotConnected,
 }
 
 /// What the emulator "Check" found out.
@@ -200,6 +216,8 @@ struct SignIn {
     reconnecting: Option<String>,
     /// The video whose Publish tab added the account: it uploads to the account.
     for_video: Option<VideoId>,
+    /// The sign-in also asks for the permissions of A/B tests.
+    for_tests: bool,
 }
 
 enum SignInStep {
@@ -497,20 +515,56 @@ impl YoutubeService {
     /// sign-in in the background. Signing in to an account that is already there
     /// signs it in again.
     pub fn connect(&mut self, cx: &mut Context<Self>) {
-        self.begin_sign_in(None, None, cx);
+        self.begin_sign_in(None, None, false, cx);
     }
 
     /// [`Self::connect`] for `video_id`: the video uploads to the account signed in.
     pub fn connect_for(&mut self, video_id: VideoId, cx: &mut Context<Self>) {
-        self.begin_sign_in(None, Some(video_id), cx);
+        self.begin_sign_in(None, Some(video_id), false, cx);
     }
 
     /// Signs the account `key` in again, after YouTube stopped accepting its sign-in.
     pub fn reconnect(&mut self, key: &str, cx: &mut Context<Self>) {
-        self.begin_sign_in(Some(key.to_owned()), None, cx);
+        self.begin_sign_in(Some(key.to_owned()), None, false, cx);
     }
 
-    fn begin_sign_in(&mut self, reconnecting: Option<String>, for_video: Option<VideoId>, cx: &mut Context<Self>) {
+    /// Signs the account `key` in again, asking also for what A/B tests need:
+    /// changing titles and reading analytics ([`TEST_SCOPES`]).
+    pub fn allow_tests(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.begin_sign_in(Some(key.to_owned()), None, true, cx);
+    }
+
+    /// Whether A/B tests can use the account `key`, or what it needs first.
+    pub fn test_access(&self, key: &str) -> TestAccess {
+        let Some(account) = self.find_account(key) else { return TestAccess::NotConnected };
+        if self.reconnecting() == Some(key) {
+            return TestAccess::SigningIn;
+        }
+        match &account.client {
+            None => TestAccess::NeedsSignIn,
+            Some(client) => {
+                let credentials = client.credentials();
+                if TEST_SCOPES.iter().all(|scope| credentials.has_scope(scope)) {
+                    TestAccess::Allowed
+                } else {
+                    TestAccess::NeedsPermission
+                }
+            }
+        }
+    }
+
+    /// Whether the sign-in under way asks for the permissions of A/B tests.
+    pub fn is_allowing_tests(&self) -> bool {
+        self.sign_in.as_ref().is_some_and(|sign_in| sign_in.for_tests)
+    }
+
+    fn begin_sign_in(
+        &mut self,
+        reconnecting: Option<String>,
+        for_video: Option<VideoId>,
+        for_tests: bool,
+        cx: &mut Context<Self>,
+    ) {
         // One browser sign-in at a time: the consent page names no account.
         if self.sign_in.is_some() {
             return;
@@ -526,15 +580,19 @@ impl YoutubeService {
         let cancel = Arc::new(AtomicBool::new(false));
         self.sign_in_attempt += 1;
         let attempt = self.sign_in_attempt;
-        self.sign_in = Some(SignIn { cancel: cancel.clone(), authorize_url: None, reconnecting, for_video });
+        self.sign_in = Some(SignIn { cancel: cancel.clone(), authorize_url: None, reconnecting, for_video, for_tests });
         self.sign_in_problem = None;
         self.connection_changed(cx);
 
         let tokens = TokenSink::new(CredentialStore::new(self.new_account_file(attempt)), false);
         let (sender, mut steps) = mpsc::unbounded();
+        let mut scopes = SCOPES.to_vec();
+        if for_tests {
+            scopes.extend(TEST_SCOPES.iter().filter(|scope| !SCOPES.contains(scope)));
+        }
         let spawned = thread::Builder::new()
             .name("youtube-sign-in".into())
-            .spawn(move || sign_in(config, tokens, &cancel, &sender));
+            .spawn(move || sign_in(config, &scopes, tokens, &cancel, &sender));
         if let Err(error) = spawned {
             log_line!("rushes: couldn't start the sign-in thread: {error}");
             self.sign_in = None;
@@ -666,7 +724,7 @@ impl YoutubeService {
                 self.connection_changed(cx);
             }
             SignInStep::Finished(result) => {
-                let Some(SignIn { reconnecting, for_video, .. }) = self.sign_in.take() else { return };
+                let Some(SignIn { reconnecting, for_video, for_tests, .. }) = self.sign_in.take() else { return };
                 let signed_in = (*result).and_then(|signed_in| {
                     let login = SavedLogin {
                         credentials: signed_in.client.credentials(),
@@ -687,7 +745,7 @@ impl YoutubeService {
                 match signed_in {
                     Ok(signed_in) => {
                         let key = signed_in.account.key().to_owned();
-                        self.add_account(signed_in, reconnecting.as_deref(), cx);
+                        self.add_account(signed_in, reconnecting.as_deref(), for_tests, cx);
                         if let Some(video_id) = for_video {
                             self.choose_channel(video_id, &key, cx);
                         }
@@ -698,14 +756,18 @@ impl YoutubeService {
                     Err(SignInError::Denied(message)) => {
                         match reconnecting.as_deref().and_then(|key| self.find_account(key)) {
                             Some(account) => {
-                                let notice = Problem::new(
-                                    "Sign-in cancelled",
+                                let name = display_name(&account.account);
+                                let detail = if for_tests {
                                     format!(
-                                        "The sign-in was cancelled in the browser. Reconnect to keep uploading as {}.",
-                                        display_name(&account.account)
-                                    ),
-                                )
-                                .with_severity(Severity::Info);
+                                        "The sign-in was cancelled in the browser. {name} stays signed in; allow \
+                                         access again to run A/B tests."
+                                    )
+                                } else {
+                                    format!(
+                                        "The sign-in was cancelled in the browser. Reconnect to keep uploading as {name}."
+                                    )
+                                };
+                                let notice = Problem::new("Sign-in cancelled", detail).with_severity(Severity::Info);
                                 report_problem(&self.state, notice, cx);
                             }
                             None => self.sign_in_problem = Some(message.into()),
@@ -723,7 +785,13 @@ impl YoutubeService {
 
     /// Keeps a finished sign-in. One of an account that is already there replaces
     /// its earlier sign-in.
-    fn add_account(&mut self, signed_in: SignedIn, reconnecting: Option<&str>, cx: &mut Context<Self>) {
+    fn add_account(
+        &mut self,
+        signed_in: SignedIn,
+        reconnecting: Option<&str>,
+        for_tests: bool,
+        cx: &mut Context<Self>,
+    ) {
         let SignedIn { client, tokens, account } = signed_in;
         let key = account.key().to_owned();
         // The same account, also when it got a channel since its earlier sign-in.
@@ -746,14 +814,18 @@ impl YoutubeService {
         // Signing in again picks the account on the consent page: another one
         // may come back, and the account signing in again still waits for its turn.
         if let Some(waiting) = reconnecting.filter(|waiting| *waiting != key).and_then(|key| self.find_account(key)) {
-            let notice = Problem::new(
-                format!("Signed in as {}", display_name(&account)),
+            let waiting = display_name(&waiting.account);
+            let detail = if for_tests {
                 format!(
-                    "{} still needs a new sign-in. Reconnect it and pick it in the browser to keep uploading as it.",
-                    display_name(&waiting.account)
-                ),
-            )
-            .with_severity(Severity::Info);
+                    "A/B tests of {waiting}’s videos still need access. Allow it again and pick {waiting} in the browser."
+                )
+            } else {
+                format!(
+                    "{waiting} still needs a new sign-in. Reconnect it and pick it in the browser to keep uploading as it."
+                )
+            };
+            let notice =
+                Problem::new(format!("Signed in as {}", display_name(&account)), detail).with_severity(Severity::Info);
             report_problem(&self.state, notice, cx);
         }
         self.accounts.push(YoutubeAccount { account, client: Some(client), tokens, avatar: None });
@@ -1110,7 +1182,13 @@ impl YoutubeService {
 
 /// Sign-in worker: a check that the sign-in can work, consent in the browser, then the
 /// account it belongs to.
-fn sign_in(config: YoutubeConfig, tokens: TokenSink, cancel: &AtomicBool, steps: &mpsc::UnboundedSender<SignInStep>) {
+fn sign_in(
+    config: YoutubeConfig,
+    scopes: &[&str],
+    tokens: TokenSink,
+    cancel: &AtomicBool,
+    steps: &mpsc::UnboundedSender<SignInStep>,
+) {
     let result = (|| {
         // Opening the browser on a sign-in that can't work only leaves the creator
         // waiting: stopped emulators, no connection, or a client Google doesn't know.
@@ -1123,18 +1201,20 @@ fn sign_in(config: YoutubeConfig, tokens: TokenSink, cancel: &AtomicBool, steps:
         if cancel.load(Ordering::Relaxed) {
             return Err(SignInError::Cancelled);
         }
-        sign_in_with_browser(config.clone(), tokens, cancel, steps).map_err(|error| SignInError::new(error, &config))
+        sign_in_with_browser(config.clone(), scopes, tokens, cancel, steps)
+            .map_err(|error| SignInError::new(error, &config))
     })();
     let _ = steps.unbounded_send(SignInStep::Finished(Box::new(result)));
 }
 
 fn sign_in_with_browser(
     config: YoutubeConfig,
+    scopes: &[&str],
     tokens: TokenSink,
     cancel: &AtomicBool,
     steps: &mpsc::UnboundedSender<SignInStep>,
 ) -> Result<SignedIn, YoutubeError> {
-    let pending = begin_authorization(&config)?;
+    let pending = begin_authorization_with(&config, scopes)?;
     // The receiver is gone only when the app is shutting down.
     let _ = steps.unbounded_send(SignInStep::Opened(pending.authorize_url().to_owned()));
     let credentials = pending.wait(SIGN_IN_TIMEOUT, cancel)?;

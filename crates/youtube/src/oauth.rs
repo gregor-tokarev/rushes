@@ -96,8 +96,15 @@ pub struct PendingAuthorization {
     authorize_url: String,
 }
 
-/// Binds the loopback redirect listener and builds the consent URL.
+/// Binds the loopback redirect listener and builds the consent URL for [`SCOPES`].
 pub fn begin_authorization(config: &YoutubeConfig) -> Result<PendingAuthorization> {
+    begin_authorization_with(config, &SCOPES)
+}
+
+/// [`begin_authorization`] asking for `scopes`, such as [`SCOPES`] plus
+/// [`TEST_SCOPES`](crate::TEST_SCOPES). Google adds the scopes the account granted
+/// before (`include_granted_scopes`).
+pub fn begin_authorization_with(config: &YoutubeConfig, scopes: &[&str]) -> Result<PendingAuthorization> {
     if config.client_id.trim().is_empty() {
         return Err(Error::InvalidInput("the OAuth client id is empty".to_owned()));
     }
@@ -112,7 +119,7 @@ pub fn begin_authorization(config: &YoutubeConfig) -> Result<PendingAuthorizatio
     let redirect_uri = format!("http://127.0.0.1:{port}");
     let verifier = random_token(48)?;
     let state = random_token(24)?;
-    let authorize_url = authorize_url(config, &redirect_uri, &state, &pkce_challenge(&verifier))?;
+    let authorize_url = authorize_url(config, scopes, &redirect_uri, &state, &pkce_challenge(&verifier))?;
     Ok(PendingAuthorization { listener, config: config.clone(), redirect_uri, state, verifier, authorize_url })
 }
 
@@ -200,8 +207,14 @@ impl PendingAuthorization {
     }
 }
 
-fn authorize_url(config: &YoutubeConfig, redirect_uri: &str, state: &str, challenge: &str) -> Result<String> {
-    let scope = SCOPES.join(" ");
+fn authorize_url(
+    config: &YoutubeConfig,
+    scopes: &[&str],
+    redirect_uri: &str,
+    state: &str,
+    challenge: &str,
+) -> Result<String> {
+    let scope = scopes.join(" ");
     let url = Url::parse_with_params(
         &config.auth_url,
         [
@@ -443,7 +456,7 @@ mod tests {
     #[test]
     fn authorize_url_carries_the_installed_app_parameters() {
         let config = YoutubeConfig::google("client.apps.googleusercontent.com", None);
-        let url = authorize_url(&config, "http://127.0.0.1:5555", "the-state", "the-challenge").unwrap();
+        let url = authorize_url(&config, &SCOPES, "http://127.0.0.1:5555", "the-state", "the-challenge").unwrap();
         let url = Url::parse(&url).unwrap();
         assert_eq!(url.host_str(), Some("accounts.google.com"));
         let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
@@ -461,6 +474,14 @@ mod tests {
             "openid email profile https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly \
              https://www.googleapis.com/auth/youtube.force-ssl"
         );
+
+        // Turning on A/B tests asks for more.
+        let mut scopes = SCOPES.to_vec();
+        scopes.extend(crate::TEST_SCOPES.iter().filter(|scope| !SCOPES.contains(scope)));
+        let url = authorize_url(&config, &scopes, "http://127.0.0.1:5555", "s", "c").unwrap();
+        let url = Url::parse(&url).unwrap();
+        let scope = url.query_pairs().find(|(key, _)| key == "scope").unwrap().1.into_owned();
+        assert!(scope.ends_with("youtube.force-ssl https://www.googleapis.com/auth/yt-analytics.readonly"), "{scope}");
     }
 
     fn emulator_config() -> YoutubeConfig {

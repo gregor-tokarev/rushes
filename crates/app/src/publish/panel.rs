@@ -36,6 +36,8 @@ use rushes_core::{
 use rushes_pipeline::{MediaInfo, has_transcript, kept_cuts, list_thumbnails};
 use rushes_youtube::Visibility;
 
+use super::ab_section::TestSection;
+use super::ab_test::AbTests;
 use super::assist_dialogs::open_details_dialog;
 use super::assistant::{AssistEvent, DetailSources, DetailsJob, PublishAssistant, ThumbnailJob};
 use super::channel::{ChannelChoices, ChooseChannel};
@@ -132,6 +134,8 @@ enum YoutubeThumbnail {
     Failed(SharedString),
     /// No image is chosen; YouTube keeps the one it has.
     Kept,
+    /// An A/B test of thumbnails decides what YouTube shows until it ends.
+    Testing,
 }
 
 /// A video file the creator is likely to upload.
@@ -337,6 +341,9 @@ impl PublishPanel {
 
         let assistant = PublishAssistant::try_global(cx);
         let mut subscriptions = subscriptions;
+        if let Some(runner) = AbTests::try_global(cx) {
+            subscriptions.push(cx.observe(&runner, |_, _, cx| cx.notify()));
+        }
         if let Some(assistant) = &assistant {
             subscriptions.push(cx.observe(assistant, |_, _, cx| cx.notify()));
             subscriptions.push(cx.subscribe(assistant, |this, _, event: &AssistEvent, cx| {
@@ -388,12 +395,33 @@ impl PublishPanel {
         *self.state.read(cx).route() == Route::Video { id: self.video_id, tab: VideoTab::Publish }
     }
 
-    /// Asks YouTube how the uploaded video stands, for the Upload card.
+    /// Asks YouTube how the uploaded video stands, for the Upload card, and how its
+    /// A/B test does.
     fn refresh_youtube_video(&mut self, cx: &mut Context<Self>) {
         let Some(link) = self.state.read(cx).video(self.video_id).and_then(|video| video.youtube.clone()) else {
             return;
         };
         self.service.update(cx, |service, cx| service.refresh_youtube_video(&link, cx));
+        if link.ab_test.as_ref().is_some_and(|test| !test.is_over())
+            && let Some(runner) = AbTests::try_global(cx)
+        {
+            let video_id = self.video_id;
+            runner.update(cx, |runner, cx| runner.read_numbers(video_id, cx));
+        }
+    }
+
+    /// Thumbnails a test can choose versions from: the one on YouTube, the chosen
+    /// one, then the drawn ones.
+    fn test_images(&self, cx: &App) -> Vec<PathBuf> {
+        let on_youtube =
+            self.state.read(cx).video(self.video_id).and_then(|video| video.youtube.as_ref()?.thumbnail.clone());
+        let mut images: Vec<PathBuf> = Vec::new();
+        for image in on_youtube.into_iter().chain(self.draft.thumbnail.clone()).chain(self.drawn.iter().cloned()) {
+            if !images.contains(&image) {
+                images.push(image);
+            }
+        }
+        images
     }
 
     pub fn video_id(&self) -> VideoId {
@@ -778,6 +806,9 @@ impl PublishPanel {
             return None;
         }
         let link = self.state.read(cx).video(self.video_id)?.youtube.as_ref()?;
+        if link.ab_test.as_ref().is_some_and(|test| !test.is_over() && test.subject.has_thumbnail()) {
+            return Some(YoutubeThumbnail::Testing);
+        }
         let chosen = self.draft.thumbnail.as_ref();
         Some(match (self.service.read(cx).thumbnail_sync(&link.video_id), chosen) {
             (Some(ThumbnailSync::Sending(_)), _) => YoutubeThumbnail::Sending,
@@ -2194,7 +2225,13 @@ impl Render for PublishPanel {
             .child(self.render_visibility(cx))
             .child(self.render_audience(cx));
         let upload = self.render_upload(cx);
-        // The cards that clear the upload's blocking reasons follow it.
+        // A video on YouTube can test titles and thumbnails there: that comes first.
+        let test = self
+            .state
+            .read(cx)
+            .video(self.video_id)
+            .filter(|video| TestSection::applies(video, cx))
+            .map(|_| TestSection::new(self.video_id, self.test_images(cx)));
         let cards = [
             card("publish-account", "YouTube account").child(self.render_account(cx)).into_any_element(),
             self.render_file(cx).into_any_element(),
@@ -2219,25 +2256,27 @@ impl Render for PublishPanel {
             .size_full()
         };
         // The video page owns scrolling and the page inset.
-        div()
+        let columns = div().relative().w_full().map(|this| {
+            if stacked {
+                this.flex()
+                    .flex_col()
+                    .gap_10()
+                    .child(upload)
+                    .child(form)
+                    .child(v_flex().w_full().gap_6().children(cards))
+            } else {
+                let side = v_flex().w(SIDE_COLUMN_WIDTH).flex_shrink_0().gap_6().child(upload).children(cards);
+                this.flex().flex_row().items_start().gap_8().child(form).child(side)
+            }
+        });
+        v_flex()
             .id("publish-panel")
             .test_support()
             .relative()
             .w_full()
-            .map(|this| {
-                if stacked {
-                    this.flex()
-                        .flex_col()
-                        .gap_10()
-                        .child(upload)
-                        .child(form)
-                        .child(v_flex().w_full().gap_6().children(cards))
-                } else {
-                    let side = v_flex().w(SIDE_COLUMN_WIDTH).flex_shrink_0().gap_6().child(upload).children(cards);
-                    this.flex().flex_row().items_start().gap_8().child(form).child(side)
-                }
-            })
-            .child(measure)
+            .gap_10()
+            .children(test)
+            .child(columns.child(measure))
     }
 }
 
@@ -2372,6 +2411,9 @@ fn render_youtube_thumbnail(state: YoutubeThumbnail, cx: &mut Context<PublishPan
             .child(status_line(IconName::TriangleAlert, theme.warning, "Not set on YouTube", Some(problem), cx))
             .child(send("Try again")),
         YoutubeThumbnail::Kept => help_text("YouTube keeps its thumbnail until you choose another image.", cx),
+        YoutubeThumbnail::Testing => {
+            help_text("An A/B test is running: YouTube shows its thumbnails until it ends.", cx)
+        }
     };
     // Tests check what the card says.
     div().id("youtube-thumbnail").child(body).test_support().into_any_element()

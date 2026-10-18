@@ -1,8 +1,9 @@
 # YouTube integration
 
 Rushes signs in with Google (installed-app OAuth: loopback redirect + PKCE) and uploads
-through the YouTube Data API v3 resumable upload protocol. The code lives in
-`crates/youtube` (`rushes-youtube`); local emulators for both services live in
+through the YouTube Data API v3 resumable upload protocol. A/B tests of titles and
+thumbnails also read the YouTube Analytics API and the YouTube Reporting API. The code
+lives in `crates/youtube` (`rushes-youtube`); local emulators for both services live in
 `emulators/`.
 
 ## Developing against the emulators
@@ -19,7 +20,7 @@ foreground:
 | Service | URL | What it is |
 |---|---|---|
 | Google | `http://127.0.0.1:4002` | Built-in Google emulator from [`emulate`](https://github.com/vercel-labs/emulate): OAuth 2.0 / OIDC consent page, token endpoint, userinfo, revoke |
-| YouTube | `http://127.0.0.1:4020` | Custom emulator (`emulators/youtube.ts`): channels, resumable video uploads, videos, thumbnails, uploads playlist |
+| YouTube | `http://127.0.0.1:4020` | Custom emulator (`emulators/youtube.ts`): channels, resumable video uploads, videos, thumbnails, uploads playlist; YouTube Analytics daily views and watch time (`/youtubeAnalytics/v2`); Reporting API jobs and daily reach reports (`/youtubereporting/v1`) |
 
 Ports come from `GOOGLE_EMULATOR_PORT` and `YOUTUBE_EMULATOR_PORT`. Point the app at the
 emulators with **Settings → YouTube → Developer: local emulator** (a switch, folded away by
@@ -59,17 +60,34 @@ memory and resets when the emulators stop.
   count against `YOUTUBE_EMULATOR_DAILY_QUOTA` (default 10,000, reset at midnight Pacific
   time) and fail with `quotaExceeded` once used up.
 - Scheduled publishing: a private video with `publishAt` turns public when that time passes.
+- Every video keeps a history of the titles and custom thumbnails it showed.
+- YouTube Analytics (`GET /youtubeAnalytics/v2/reports`, `ids=channel==MINE`,
+  `dimensions=day`, `filters=video==<id>`, metrics `views` and `estimatedMinutesWatched`)
+  and the Reporting API (`GET/POST /youtubereporting/v1/jobs` for `channel_reach_basic_a1`,
+  `GET …/jobs/<id>/reports`, CSV downloads under `…/media/`) report the numbers a test set
+  for a day (see below), and otherwise made-up but steady numbers for each day a public
+  video is up: impressions vary by video and day, the click rate and watch time follow the
+  title and thumbnail it showed at noon that day. A job reports from 30 days before it was
+  created to yesterday (Pacific time). Neither counts against the Data API quota.
 
 Test helpers on the YouTube emulator (no auth):
 
 - `GET /_emulator/uploads`: completed uploads with byte count, SHA-256, content type and
   metadata.
+- `GET /_emulator/videos/<id>`: a video's snippet, status, custom thumbnail (size and
+  SHA-256) and `history` of titles and thumbnails.
+- `POST /_emulator/analytics`: `{"videoId", "days": [{"date": "2026-03-01", "views",
+  "minutesWatched", "impressions", "ctr"}]}` sets what YouTube Analytics and the reach
+  reports say about those days, on any date. Each post publishes the days' reach reports
+  again, with a newer `createTime`, as YouTube does with corrected data.
 - `POST /_emulator/faults`: make the next matching requests fail. Examples:
   - `{"method": "PUT", "path": "/upload/youtube/v3/videos", "status": 503, "times": 2}`:
     fail two chunk PUTs.
   - `{"method": "POST", "path": "/upload/youtube/v3/videos", "status": 403, "reason": "quotaExceeded"}`
   - `{"path": "/upload/youtube/v3/videos", "persistBytes": 262144}`: the next chunk keeps
     only 256 KiB and answers 308, as if the connection dropped.
+  - `{"method": "PUT", "path": "/youtube/v3/videos", "status": 500, "skip": 1}`: let one
+    title update through, fail the next.
 - `DELETE /_emulator/faults`: clear pending faults.
 - `GET /_emulate`: the emulate inspector (requests, routes, state, reset).
 
@@ -82,6 +100,8 @@ Known differences from real Google:
 - Emulator access tokens never expire; tests force a refresh by setting `expires_at` in
   the past.
 - Scopes are not enforced, and custom thumbnails work without channel verification.
+- Reach reports appear an hour after their day ends (YouTube takes about two days), and an
+  older version of a day's report downloads the newest numbers.
 
 ### Tests
 
@@ -132,7 +152,21 @@ All calls block; run them on a background thread and stream progress back to the
    reported before its wait as `UploadProgress::Retrying { attempt, max_retries, wait,
    cause }`, where `cause` is `Network`, `Server` or `RateLimited`. Cancel takes effect at
    the next read of the chunk being sent. `Error::SessionExpired` means start over.
-5. `Error::needs_sign_in()` tells when to ask the user to reconnect (revoked or expired
+5. A/B tests need `TEST_SCOPES`: `MANAGE_SCOPE` (`youtube.force-ssl`, for `videos.update`;
+   sign-ins ask for it, but older ones lack it) and `yt-analytics.readonly`, which only tests
+   ask for. `begin_authorization_with(&config, &scopes)` asks for more than `SCOPES`; Google
+   adds the scopes granted before (`include_granted_scopes`). Then `replace_title(id, from, to)` reads the snippet and sends it
+   back with only the title changed (`videos.update` clears what isn't sent), or returns
+   `TitleChange::Changed(title)` without touching it when the title is no longer `from`;
+   `daily_views(id, start, end)` reads views and watch time per Pacific day from YouTube
+   Analytics; `reach_job()` finds or creates the channel's `channel_reach_basic_a1` job,
+   `reach_reports(job, since)` lists its daily reports (a day YouTube published again
+   appears once per version; the latest `created` counts) and `reach_of(&report, id)`
+   downloads one (only from the Reporting API host) and returns the video's impressions and
+   click rate, zero when the report has no row for it. `Error::is_missing_scope()` tells a
+   sign-in without those scopes, `Error::is_api_disabled()` an API the Google Cloud project
+   hasn't turned on, `Error::VideoNotFound` a video the channel doesn't have.
+6. `Error::needs_sign_in()` tells when to ask the user to reconnect (revoked or expired
    grant, or a `403 insufficientPermissions` because a YouTube scope was unticked);
    `quotaExceeded`, `uploadLimitExceeded`, `insufficientPermissions`, rate limits and server
    errors (5xx) have user-facing messages; `Error::is_network()` tells a missing connection.
@@ -151,6 +185,7 @@ views and the `YoutubeService` global.
 | `AccountBadge::new(window, cx)` | `badge.rs` | Sidebar footer: the default account; click opens `Route::Settings` |
 | `ChannelChoices::of(video, cx)` | `channel.rs` | Which account a video uploads to and the menu to choose another, for the Channel column, the Channel property and the Publish tab |
 | `PublishAssistant` | `assistant.rs`, `assist_dialogs.rs` | Global entity (`PublishAssistant::init(state, cx)`): the agent writing a video's title, description and tags, Codex drawing its thumbnails, and their dialogs |
+| `AbTests` | `ab_test.rs`, `ab_section.rs`, `ab_dialogs.rs` | Global entity (`AbTests::init(state, cx)`, after `YoutubeService`): runs the A/B tests of titles and thumbnails; the Publish tab's A/B test section and its dialogs |
 | rules, chapters, progress maths | `rules.rs`, `chapters.rs`, `transfer.rs` | Pure functions, unit tested |
 
 The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `ListOrdered`,
@@ -290,8 +325,8 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   plain **Upload to YouTube**, the Uploads row stops linking to it and the videos table
   shows no YouTube state. The YouTube ids of the uploads that are gone are kept in the
   settings table (`youtube.gone_videos`), so an earlier upload of a video uploaded again
-  still reads "Not on YouTube" after a restart. A failed lookup (offline) keeps the stored link. There is no "update on YouTube": `videos.update` needs the broader `youtube`
-  scope, which Rushes does not ask for.
+  still reads "Not on YouTube" after a restart. A failed lookup (offline) keeps the stored link. The details (title, description,
+  tags) don't go to the uploaded video; only an A/B test changes its title there.
 - While the worker retries a passing failure, the Upload card and the Uploads page say so
   ("YouTube isn’t responding · Retrying (2 of 5)…", or "Can’t reach YouTube" when offline)
   and the sidebar badge reads "Retrying the upload…", until the upload gets further than
@@ -375,6 +410,61 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   Codex drawing fewer than asked, or failing, says why. The Codex command is set in
   Settings › AI editing › Publishing.
 
+### A/B tests
+
+YouTube Studio's own "Test & compare" has no API, so Rushes runs the test itself. The
+model and the arithmetic are `rushes_core::ab_test` (unit tested); `AbTests` makes the
+YouTube calls; the test is kept on the video's link (`YoutubeLink::ab_test`, the running
+one or the last one).
+
+- A test compares a title, a thumbnail, or both (paired: version B is B's title with B's
+  thumbnail) in 2 or 3 versions, for 1, 2 or 4 weeks. It needs a public video, or one
+  scheduled to go public (the versions take turns from then; A is up until; a schedule
+  moved in Visibility moves the start, and a video no longer public or scheduled stops the
+  test, as the link records YouTube having it), and a sign-in
+  with `TEST_SCOPES`: the section asks for them with **Allow access…**, a browser sign-in of
+  the video's account that asks for those scopes too (`YoutubeService::allow_tests`). Until
+  then the rest of Rushes works as before; a missing permission never asks for a new
+  sign-in.
+- Starting puts A up at once (the title A replaces is whatever the video has). Then one
+  version a Pacific day, switching at midnight Pacific time, when YouTube's daily numbers
+  turn over: each in turn and then back in reverse (A B B A A B …, A B C C B A …), so no
+  version always gets the busy first days. A tick every minute does the due switch; one
+  missed while Rushes was closed happens at the next start. Each change that reached
+  YouTube is recorded as a showing (`version`, `from`); a failed one says why in the section
+  and is tried again five minutes later (at once when the account connects again).
+- A title switch replaces the title Rushes put up last. When YouTube has another one
+  (changed in YouTube Studio), the test stops and leaves it: "Test stopped · the title was
+  changed on YouTube to …". A thumbnail switch sets the version's image and records it as
+  the image YouTube has (`YoutubeLink::thumbnail`); while a thumbnail test runs, choosing
+  another image in the Thumbnail card doesn't reach YouTube, and the card says so. A
+  title-and-thumbnail switch whose image YouTube refuses takes the title back; when that
+  fails too, the test records whose title is up (`AbTest::title_up`) and the next switch
+  puts a whole version up again.
+- Every three hours (and when the Publish tab is shown, at most every ten minutes) the
+  test reads its numbers: views and watch time of every day so far from YouTube Analytics,
+  and impressions and clicks of each day whose reach report is new (the channel's reach
+  job is created once and kept in the settings key `youtube.reach_jobs`). A day counts once
+  both have it, about two days later: YouTube Analytics leaves out days without views but
+  also days it hasn't counted yet, so a missing day reads as zero only when a later day is
+  there. Each day's numbers are shared between the
+  versions by the part of the day each was up, so a late switch costs precision, not
+  correctness.
+- The versions are compared by watch time per impression: YouTube's own test keeps the
+  version with the most watch time when every version gets the same audience, and per
+  impression is that with the audience changing day to day. The section shows each
+  version's days, impressions, click rate and watch time per impression, the leader and
+  whether its lead is clear: every version needs two days and 100 impressions measured, and
+  the lead must beat chance at 95 % (Welch's t-test with the days as samples, so a short
+  test needs a bigger lead; Bonferroni for three versions).
+- After the last day the test reads the numbers once more and waits for the last day's
+  report (up to four days), then keeps the clear winner, or A when there is none, puts it
+  up and ends with a notification. **End test…** ends it early, keeping the version the
+  creator picks. An end YouTube refuses is tried again before the versions take another
+  turn. A new test can follow; it replaces the last one on the link.
+- Analytics and reach need the YouTube Analytics API and the YouTube Reporting API turned
+  on in the Google Cloud project; without them the section says to turn them on.
+
 ### Trying it
 
 ```bash
@@ -394,6 +484,7 @@ cargo test -p rushes --lib publish        # validation, chapters, progress and f
 cargo test -p rushes --test publish       # YoutubeService against the emulators
 cargo test -p rushes --test publish_ui    # the views in headless windows, clicks and typing
 cargo test -p rushes --test publish_assist  # Write with AI and Generate, with scripts/fake-agent and fake-codex
+cargo test -p rushes --test ab_test       # A/B tests against the emulators, on a clock the tests move
 ```
 
 `tests/publish.rs` covers sign-in (consent posted like a browser), restart, disconnect,
@@ -404,8 +495,11 @@ channel, and the default account and the videos' choices across sign-outs and re
 `tests/publish_ui.rs` drives the form, chapters, Uploads page, settings and badge,
 connect-and-upload from the Publish tab, the retry state during an outage, the done card,
 an expired sign-in, file drops, a stopped emulator failing fast, choosing a video's
-account (and adding one) from the Publish tab, and the account list in settings. Both start their own emulators and skip with
-a notice without Node.
+account (and adding one) from the Publish tab, and the account list in settings.
+`tests/ab_test.rs` allows the test permissions, runs a title test day by day to its
+winner, a thumbnail test ended early, a test stopped by a title changed in Studio, the
+private-video and missing-permission refusals, and the Publish tab's section and dialogs.
+They start their own emulators and skip with a notice without Node.
 
 ## Connecting a real YouTube account
 
@@ -417,7 +511,8 @@ client in Google Cloud (free) and pastes it into Rushes. It takes about ten minu
    Make sure it is selected.
 2. **Enable the YouTube Data API v3.** Go to **APIs & Services → Library**, search for
    "YouTube Data API v3", open it and click **Enable**
-   (<https://console.cloud.google.com/apis/library/youtube.googleapis.com>).
+   (<https://console.cloud.google.com/apis/library/youtube.googleapis.com>). For A/B tests,
+   enable the **YouTube Analytics API** and the **YouTube Reporting API** the same way.
 3. **Configure the consent screen.** Open **Google Auth Platform**
    (<https://console.cloud.google.com/auth/overview>) and click **Get started**:
    - App name "Rushes", your email as user support email.
@@ -426,7 +521,8 @@ client in Google Cloud (free) and pastes it into Rushes. It takes about ten minu
 4. **Add the scopes** (recommended). In **Data Access → Add or remove scopes**, add
    `https://www.googleapis.com/auth/youtube.upload` and
    `https://www.googleapis.com/auth/youtube.readonly` (`openid`, `email` and `profile` need
-   no setup). Save.
+   no setup), `https://www.googleapis.com/auth/youtube.force-ssl` (changes to uploaded
+   videos), and for A/B tests `https://www.googleapis.com/auth/yt-analytics.readonly`. Save.
 5. **Add yourself as a test user.** In **Audience → Test users → Add users**, enter the
    Google account that owns your YouTube channel. Leave the publishing status on
    **Testing**: only test users can sign in, which is all you need.
@@ -462,6 +558,10 @@ client in Google Cloud (free) and pastes it into Rushes. It takes about ten minu
   projects with an external audience after 7 days. Rushes then asks you to connect again.
   Publishing the app (Audience → **Publish app**) removes the 7-day limit; the unverified
   warning stays.
+- **A/B tests** cost about 100 units of the daily quota per switch (`videos.update` and
+  `thumbnails.set`, 50 each), one switch a day; reading their numbers uses the Analytics and
+  Reporting APIs' own quotas. They need a public video, which an unverified project's
+  uploads never become (above).
 - **Custom thumbnails** require a verified YouTube channel (phone verification at
   <https://www.youtube.com/verify>); otherwise YouTube rejects `thumbnails.set` with
   `403 forbidden`.

@@ -17,9 +17,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{TimeDelta, Timelike as _, Utc};
 use rushes_youtube::{
-    Account, CredentialStore, Credentials, Error, MANAGE_SCOPE, Privacy, ProcessingStatus, RetryCause, SavedLogin,
-    UPLOAD_GRANULARITY, UploadOptions, UploadProgress, UploadStatus, VideoMetadata, Visibility, YoutubeClient,
-    YoutubeConfig, begin_authorization, check_client, refresh,
+    Account, CredentialStore, Credentials, DailyViews, Error, MANAGE_SCOPE, Privacy, ProcessingStatus, ReachReport,
+    RetryCause, SavedLogin, TitleChange, UPLOAD_GRANULARITY, UploadOptions, UploadProgress, UploadStatus,
+    VideoMetadata, Visibility, YoutubeClient, YoutubeConfig, begin_authorization, check_client, refresh,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -681,4 +681,93 @@ fn thumbnails_processing_and_uploads_list() {
     assert_eq!(listed, expected);
     let latest: Vec<String> = client.list_my_uploads(3).unwrap().into_iter().map(|video| video.id).collect();
     assert_eq!(latest, expected[..3]);
+}
+
+#[test]
+fn replaces_titles_without_losing_the_rest_of_the_snippet() {
+    let Some(emulators) = Emulators::start() else {
+        return;
+    };
+    let (credentials, _) = sign_in(&emulators, "creator@example.com");
+    let client = client(&emulators, credentials);
+    let dir = tempfile::tempdir().unwrap();
+    let (path, _) = video_file(dir.path(), "short.mp4", 4096);
+    let video = client.upload_video(&path, &metadata("Version A"), &mut |_| {}, &AtomicBool::new(false)).unwrap();
+
+    assert_eq!(client.replace_title(&video.id, Some("Version A"), "Version B").unwrap(), TitleChange::Replaced);
+    let snippet = |emulators: &Emulators| -> Value {
+        let mut response =
+            plain_agent().get(&format!("{}/_emulator/videos/{}", emulators.youtube_url, video.id)).call().unwrap();
+        response.body_mut().read_json::<Value>().unwrap()["snippet"].clone()
+    };
+    let after = snippet(&emulators);
+    assert_eq!(after["title"], "Version B");
+    // videos.update clears what isn't sent: everything else went back as it was.
+    assert_eq!(after["description"], "Made with Rushes");
+    assert_eq!(after["tags"], json!(["rust", "desktop app"]));
+    assert_eq!(after["categoryId"], "28");
+
+    // Done already (a retry after a lost answer): fine.
+    assert_eq!(client.replace_title(&video.id, Some("Version A"), "Version B").unwrap(), TitleChange::Replaced);
+    // Changed in YouTube Studio meanwhile: left alone.
+    assert_eq!(
+        client.replace_title(&video.id, Some("Version A"), "Version C").unwrap(),
+        TitleChange::Changed("Version B".into())
+    );
+    assert_eq!(snippet(&emulators)["title"], "Version B");
+    // Without a title to expect, whatever is there goes.
+    assert_eq!(client.replace_title(&video.id, None, "Version C").unwrap(), TitleChange::Replaced);
+    assert_eq!(snippet(&emulators)["title"], "Version C");
+    assert!(matches!(client.replace_title("doesNotExist", None, "b"), Err(Error::VideoNotFound)));
+}
+
+#[test]
+fn reads_daily_views_and_reach_reports() {
+    let Some(emulators) = Emulators::start() else {
+        return;
+    };
+    let (credentials, _) = sign_in(&emulators, "creator@example.com");
+    let client = client(&emulators, credentials);
+    let dir = tempfile::tempdir().unwrap();
+    let (path, _) = video_file(dir.path(), "short.mp4", 4096);
+    let video = client.upload_video(&path, &metadata("Measured"), &mut |_| {}, &AtomicBool::new(false)).unwrap();
+    let day = |text: &str| chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap();
+    let response = plain_agent()
+        .post(&format!("{}/_emulator/analytics", emulators.youtube_url))
+        .send_json(json!({"videoId": video.id, "days": [
+            {"date": "2026-03-01", "views": 40, "minutesWatched": 120.5, "impressions": 1000, "ctr": 0.05},
+            {"date": "2026-03-02", "views": 10, "minutesWatched": 20, "impressions": 0, "ctr": 0},
+        ]}))
+        .unwrap();
+    assert_eq!(response.status(), 201);
+
+    let views = client.daily_views(&video.id, day("2026-02-28"), day("2026-03-02")).unwrap();
+    assert_eq!(
+        views,
+        vec![
+            DailyViews { date: day("2026-03-01"), views: 40, watch_minutes: 120.5 },
+            DailyViews { date: day("2026-03-02"), views: 10, watch_minutes: 20.0 },
+        ]
+    );
+
+    // The job is created once and found from then on.
+    let job = client.reach_job().unwrap();
+    assert_eq!(client.reach_job().unwrap(), job);
+    let since = Utc::now() - TimeDelta::days(400);
+    let reports = client.reach_reports(&job, since).unwrap();
+    let march: Vec<&ReachReport> = reports.iter().filter(|report| report.day() == day("2026-03-01")).collect();
+    let [march] = march.try_into().expect("one report of 1 March");
+    let reach = client.reach_of(march, &video.id).unwrap();
+    assert_eq!(reach.date, day("2026-03-01"));
+    assert_eq!(reach.impressions, 1000);
+    assert!((reach.click_rate - 0.05).abs() < 1e-9);
+    // No thumbnail impressions: no row, and no reach.
+    let second = reports.iter().find(|report| report.day() == day("2026-03-02")).unwrap();
+    assert_eq!(client.reach_of(second, &video.id).unwrap().impressions, 0);
+    assert!(reports.iter().all(|report| report.start >= since));
+    assert!(reports.windows(2).all(|pair| pair[0].start <= pair[1].start));
+
+    // The token goes nowhere but the Reporting API.
+    let foreign = ReachReport::new("x", march.start, march.end, march.created, "https://example.com/report.csv");
+    assert!(matches!(client.reach_of(&foreign, &video.id), Err(Error::Protocol(_))));
 }

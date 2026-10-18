@@ -1,5 +1,6 @@
 //! Domain model, persistence and document logic for Rushes.
 
+pub mod ab_test;
 pub mod document;
 pub mod input;
 pub mod media;

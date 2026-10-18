@@ -46,6 +46,10 @@ pub enum Error {
     #[error("this Google account has no YouTube channel yet; create one on youtube.com first")]
     NoChannel,
 
+    /// The channel signed in has no such video: it was deleted, or it belongs to another channel.
+    #[error("YouTube has no such video on this channel")]
+    VideoNotFound,
+
     /// `thumbnails.set` answered `403 forbidden`: custom thumbnails need a verified channel.
     #[error(
         "YouTube allows custom thumbnails only on verified channels; verify the channel at https://www.youtube.com/verify"
@@ -75,6 +79,20 @@ impl Error {
             Error::NoRefreshToken => true,
             _ => false,
         }
+    }
+
+    /// True when the sign-in lacks a permission the request needs, such as the
+    /// [`TEST_SCOPES`](crate::TEST_SCOPES) of a sign-in from before A/B tests.
+    pub fn is_missing_scope(&self) -> bool {
+        matches!(self, Error::Api { status: 403, reason, .. }
+            if reason == "insufficientPermissions" || reason == "ACCESS_TOKEN_SCOPE_INSUFFICIENT")
+    }
+
+    /// True when the Google Cloud project of the OAuth client hasn't turned on the API
+    /// the request went to, such as the YouTube Analytics or Reporting API.
+    pub fn is_api_disabled(&self) -> bool {
+        matches!(self, Error::Api { status: 403, reason, .. }
+            if reason == "accessNotConfigured" || reason == "SERVICE_DISABLED")
     }
 
     /// True when the server could not be reached or the connection broke: offline,
@@ -197,6 +215,9 @@ struct ApiErrorBody {
     message: String,
     #[serde(default)]
     errors: Vec<ApiErrorItem>,
+    /// Newer Google APIs (Analytics, Reporting) give the reason here, in an `ErrorInfo`.
+    #[serde(default)]
+    details: Vec<ApiErrorItem>,
     status: Option<String>,
 }
 
@@ -213,6 +234,7 @@ pub(crate) fn api_error(status: u16, body: &str) -> Error {
             reason: error
                 .errors
                 .into_iter()
+                .chain(error.details)
                 .find_map(|item| item.reason)
                 .or(error.status)
                 .unwrap_or_else(|| "unknown".to_owned()),
@@ -300,6 +322,22 @@ mod tests {
             !api_error(403, r#"{"error":{"code":403,"message":"x","errors":[{"reason":"forbidden"}]}}"#)
                 .needs_sign_in()
         );
+    }
+
+    #[test]
+    fn newer_apis_give_their_reason_in_the_details() {
+        let disabled = r#"{"error":{"code":403,"message":"YouTube Analytics API has not been used in project 1 before or it is disabled.",
+            "status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo",
+            "reason":"SERVICE_DISABLED","domain":"googleapis.com"}]}}"#;
+        let error = api_error(403, disabled);
+        assert!(error.is_api_disabled() && !error.needs_sign_in() && !error.is_missing_scope());
+
+        let scope = r#"{"error":{"code":403,"message":"Request had insufficient authentication scopes.",
+            "status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo",
+            "reason":"ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}}"#;
+        assert!(api_error(403, scope).is_missing_scope());
+        let legacy = r#"{"error":{"code":403,"message":"x","errors":[{"reason":"accessNotConfigured"}]}}"#;
+        assert!(api_error(403, legacy).is_api_disabled());
     }
 
     #[test]

@@ -43,3 +43,12 @@ pub(crate) fn json<T: DeserializeOwned>(mut response: HttpResponse) -> Result<T>
     let text = response.body_mut().read_to_string()?;
     serde_json::from_str(&text).map_err(|error| Error::Protocol(format!("invalid JSON from server: {error}")))
 }
+
+/// The body of a 2xx response as text, or the response as [`Error::Api`].
+pub(crate) fn text(mut response: HttpResponse) -> Result<String> {
+    let status = response.status().as_u16();
+    if !response.status().is_success() {
+        return Err(api_error(status, &body_text(&mut response)));
+    }
+    Ok(response.body_mut().read_to_string()?)
+}

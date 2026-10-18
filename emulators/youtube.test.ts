@@ -435,3 +435,124 @@ test("injected faults and quota exhaustion", async () => {
     { dailyQuota: 3300 },
   );
 });
+
+test("reports daily views and reach, and records what a video showed", async () => {
+  await withYoutube(async (youtube) => {
+    const { id } = await uploadWhole(youtube, "First title", "public");
+    const json = { "Content-Type": "application/json" };
+    const update = await youtube.request("/youtube/v3/videos?part=snippet", {
+      method: "PUT",
+      headers: auth(creatorToken, json),
+      body: JSON.stringify({ id, snippet: { title: "Second title", categoryId: "22" } }),
+    });
+    assert.equal(update.status, 200);
+    const inspected = (await (await youtube.request(`/_emulator/videos/${id}`)).json()) as any;
+    assert.deepEqual(
+      inspected.history.map((entry: { title: string }) => entry.title),
+      ["First title", "Second title"],
+    );
+
+    const day = { date: "2026-03-01", views: 40, minutesWatched: 120.5, impressions: 1000, ctr: 0.05 };
+    const set = await youtube.request("/_emulator/analytics", {
+      method: "POST",
+      headers: json,
+      body: JSON.stringify({ videoId: id, days: [day] }),
+    });
+    assert.equal(set.status, 201);
+
+    const query = `ids=channel==MINE&metrics=views,estimatedMinutesWatched&dimensions=day&filters=video==${id}&sort=day`;
+    const report = await youtube.request(`/youtubeAnalytics/v2/reports?${query}&startDate=2026-02-28&endDate=2026-03-01`, {
+      headers: auth(creatorToken),
+    });
+    assert.equal(report.status, 200);
+    const table = (await report.json()) as any;
+    assert.deepEqual(
+      table.columnHeaders.map((header: { name: string }) => header.name),
+      ["day", "views", "estimatedMinutesWatched"],
+    );
+    // Nothing before the upload, except what a test set.
+    assert.deepEqual(table.rows, [["2026-03-01", 40, 120.5]]);
+    const foreign = await youtube.request(`/youtubeAnalytics/v2/reports?${query}&startDate=2026-03-01&endDate=2026-03-01`, {
+      headers: auth(editorToken),
+    });
+    assert.equal(foreign.status, 403);
+    const backwards = await youtube.request(`/youtubeAnalytics/v2/reports?${query}&startDate=2026-03-02&endDate=2026-03-01`, {
+      headers: auth(creatorToken),
+    });
+    assert.equal(backwards.status, 400);
+
+    // A public video gets made-up numbers for the days it is up.
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
+    const live = (await (
+      await youtube.request(`/youtubeAnalytics/v2/reports?${query}&startDate=${today}&endDate=${today}`, { headers: auth(creatorToken) })
+    ).json()) as any;
+    assert.equal(live.rows.length, 1);
+    assert.equal(live.rows[0][0], today);
+
+    assert.deepEqual(await (await youtube.request("/youtubereporting/v1/jobs", { headers: auth(creatorToken) })).json(), {});
+    const createJob = () =>
+      youtube.request("/youtubereporting/v1/jobs", {
+        method: "POST",
+        headers: auth(creatorToken, json),
+        body: JSON.stringify({ reportTypeId: "channel_reach_basic_a1", name: "Rushes reach" }),
+      });
+    const created = await createJob();
+    assert.equal(created.status, 200);
+    const job = (await created.json()) as { id: string; reportTypeId: string };
+    assert.equal(job.reportTypeId, "channel_reach_basic_a1");
+    assert.equal((await createJob()).status, 409);
+    const jobs = (await (await youtube.request("/youtubereporting/v1/jobs", { headers: auth(creatorToken) })).json()) as any;
+    assert.deepEqual(
+      jobs.jobs.map((listed: { id: string }) => listed.id),
+      [job.id],
+    );
+    const editorJobs = await youtube.request(`/youtubereporting/v1/jobs/${job.id}/reports`, { headers: auth(editorToken) });
+    assert.equal(editorJobs.status, 404);
+
+    const reportsSince = async () =>
+      ((await (
+        await youtube.request(`/youtubereporting/v1/jobs/${job.id}/reports?startTimeAtOrAfter=2026-03-01T00:00:00Z`, {
+          headers: auth(creatorToken),
+        })
+      ).json()) as { reports: Array<{ startTime: string; createTime: string; downloadUrl: string }> }).reports;
+    // Midnight Pacific standard time.
+    const march = (await reportsSince()).filter((listed) => listed.startTime === "2026-03-01T08:00:00.000Z");
+    assert.equal(march.length, 1);
+    const csv = await (await youtube.request(local(march[0].downloadUrl), { headers: auth(creatorToken) })).text();
+    assert.match(csv, /^date,channel_id,video_id,video_thumbnail_impressions,video_thumbnail_impressions_ctr\n/);
+    assert.match(csv, new RegExp(`^20260301,UC[^,]+,${id},1000,0\\.0500$`, "m"));
+
+    // Setting the day again publishes a newer version of its report, as YouTube does with corrections.
+    await sleep(5);
+    await youtube.request("/_emulator/analytics", {
+      method: "POST",
+      headers: json,
+      body: JSON.stringify({ videoId: id, days: [{ ...day, impressions: 2000 }] }),
+    });
+    const versions = (await reportsSince()).filter((listed) => listed.startTime === "2026-03-01T08:00:00.000Z");
+    assert.equal(versions.length, 2);
+    assert.ok(versions[0].createTime < versions[1].createTime);
+    const corrected = await (await youtube.request(local(versions[1].downloadUrl), { headers: auth(creatorToken) })).text();
+    assert.match(corrected, new RegExp(`,${id},2000,`));
+  });
+});
+
+test("faults can let the first matching requests through", async () => {
+  await withYoutube(async (youtube) => {
+    const { id } = await uploadWhole(youtube, "Before");
+    const update = (title: string) =>
+      youtube.request("/youtube/v3/videos?part=snippet", {
+        method: "PUT",
+        headers: auth(creatorToken, { "Content-Type": "application/json" }),
+        body: JSON.stringify({ id, snippet: { title, categoryId: "22" } }),
+      });
+    const fault = await youtube.request("/_emulator/faults", {
+      method: "POST",
+      body: JSON.stringify({ method: "PUT", path: "/youtube/v3/videos", status: 500, skip: 1 }),
+    });
+    assert.equal(fault.status, 201);
+    assert.equal((await update("First")).status, 200);
+    assert.equal((await update("Second")).status, 500);
+    assert.equal((await update("Third")).status, 200);
+  });
+});

@@ -116,6 +116,10 @@ database's write lock for seconds. The UI thread never waits for it:
   `> [!onscreen]` callout syntax), teleprompter text (spoken blocks plus talking points
   marked `[Talking point]`, inline markdown stripped). Talking points are ideas the creator
   says in their own words, so they count toward neither the word count nor the runtime.
+- `ab_test.rs` — A/B tests of a video's title and thumbnail on YouTube (kept on its
+  `YoutubeLink`): the versions' turns by Pacific-time day, which version was up when, each
+  day's numbers shared by the time each version was up, and the verdict (watch time per
+  impression, with a confidence check). Plain data and arithmetic; the app makes the calls.
 - `templates.rs` — script templates (Tutorial, Review, Vlog, Short, Blank) producing
   `Vec<Block>` personalised with title/hook/format.
 - `media.rs` — media root, per-video folder creation, footage listing (video/audio
@@ -136,7 +140,8 @@ database's write lock for seconds. The UI thread never waits for it:
   binds `127.0.0.1:0`, builds the consent URL (scopes: `openid email profile
   https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly
   https://www.googleapis.com/auth/youtube.force-ssl`; the last, `MANAGE_SCOPE`, lets Rushes change
-  uploaded videos), `access_type=offline`, `prompt=consent`, PKCE S256, random `state`). The app opens the URL
+  uploaded videos), `access_type=offline`, `prompt=consent`, PKCE S256, random `state`;
+  `begin_authorization_with` adds more, such as `TEST_SCOPES`). The app opens the URL
   in the browser; `PendingAuthorization::wait(timeout, cancel)` serves the redirect, shows a
   small "you can close this tab" page, validates `state`, exchanges the code.
 - `Credentials` (access/refresh token, expiry, scope) + `CredentialStore` (JSON file, 0600).
@@ -147,7 +152,9 @@ database's write lock for seconds. The UI thread never waits for it:
   `resume_upload(session_url, path, ...)`, `set_thumbnail(video_id, path)`,
   `set_visibility(video_id, Visibility)` (reads the video's status and sends it back with
   the new privacy and schedule, since `videos.update` clears what it isn't sent),
-  `get_video(id)`, `list_my_uploads(max)`, `revoke()`.
+  `get_video(id)`, `list_my_uploads(max)`, `revoke()`. For A/B tests (they also need
+  `yt-analytics.readonly`, asked for separately): `replace_title`, `daily_views` (YouTube
+  Analytics), `reach_job` / `reach_reports` / `reach_of` (Reporting API reach reports).
 
 ## edit (`rushes-edit`)
 
@@ -229,6 +236,9 @@ GPUI Kit app. Main pieces:
   thumbnails to choose from in a chat (`publish/thumbnail_chat.rs`, a sheet over the
   tab); both keep running when the tab is left. A video's chat, with the id of Codex's
   session that remembers it, is kept in the settings table (`publish.thumbnail_chats`).
+  `AbTests` runs A/B tests of a video's titles and thumbnails: one version on YouTube a
+  day, the numbers from YouTube Analytics and reach reports, the winner kept
+  (`publish/ab_test.rs`).
 - AI edit: footage list, edit brief, run timeline (agent messages/tool calls), approve /
   feedback, output preview and "use for upload".
 - `update/` — `UpdateService`: automatic checks, background install, Settings › About ›
