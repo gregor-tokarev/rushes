@@ -168,6 +168,7 @@ mod tests {
             privacy: rushes_core::Privacy::Unlisted,
             uploaded_at: now,
             thumbnail: None,
+            publish_at: None,
         };
         let live = YoutubeState::Live(&link);
         assert_eq!(youtube(live, false), "Unlisted");

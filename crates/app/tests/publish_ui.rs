@@ -290,6 +290,7 @@ fn a_finished_upload_says_why_it_cannot_go_up_again(cx: &mut TestAppContext) {
             privacy: Privacy::Public,
             uploaded_at: Utc::now(),
             thumbnail: None,
+            publish_at: None,
         });
     });
     let done = UploadJob {
@@ -333,6 +334,7 @@ fn after_a_failed_reupload_the_button_still_says_upload_again(cx: &mut TestAppCo
             privacy: Privacy::Private,
             uploaded_at: Utc::now(),
             thumbnail: None,
+            publish_at: None,
         });
     });
     // "Upload again…" ran out of quota.
@@ -512,6 +514,7 @@ fn the_uploads_page_offers_what_each_job_allows(cx: &mut TestAppContext) {
             privacy: Privacy::Unlisted,
             uploaded_at: Utc::now(),
             thumbnail: None,
+            publish_at: None,
         });
     });
     let job = |status: UploadStatus, session_url: Option<&str>| UploadJob {
@@ -1457,8 +1460,12 @@ fn a_visibility_changed_in_youtube_studio_shows_beside_the_choice(cx: &mut TestA
         service
             .read_with(cx, |s, _| s.youtube_video(&youtube_id).filter(|info| info.privacy == public.privacy).map(drop))
     });
-    // The form keeps the creator's choice, and says what YouTube has.
-    assert_eq!(workspace.video(cx, video_id).publish.privacy, Privacy::Private);
+    // The form keeps the creator's choice and says what YouTube has, which the
+    // table and the planner show.
+    let video = workspace.video(cx, video_id);
+    assert_eq!(video.publish.privacy, Privacy::Private);
+    assert_eq!(video.youtube.map(|link| link.privacy), Some(Privacy::Public));
+    assert_eq!(video.status, VideoStatus::Published);
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         assert_eq!(window.within("publish-privacy").find(0usize).checked(), Some(true));
@@ -1473,6 +1480,48 @@ fn a_visibility_changed_in_youtube_studio_shows_beside_the_choice(cx: &mut TestA
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         assert!(window.try_find("youtube-visibility-sync").is_none(), "YouTube has the choice");
+    });
+}
+
+#[gpui_kit::test]
+fn a_schedule_youtube_carried_out_asks_for_a_new_choice(cx: &mut TestAppContext) {
+    let Some(emulators) = Emulators::start() else { return };
+    let workspace = Workspace::open(cx, emulators.backend());
+    workspace.sign_in(cx, "creator@example.com");
+    let service = workspace.service.clone();
+    let file = publish_support::video_file(workspace.dir.path(), "final.mp4");
+    let publish_at = Utc::now() + chrono::TimeDelta::seconds(3);
+    let video_id = workspace.create_video(cx, "Desk setup 2026", |video| {
+        video.publish.file = Some(file.clone());
+        video.publish.privacy = Privacy::Private;
+        video.publish.publish_at = Some(publish_at);
+    });
+    let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
+    let youtube_id = wait_until(cx, "the upload", |cx| {
+        match service.read_with(cx, |s, _| s.job(upload).map(|job| job.status.clone())) {
+            Some(UploadStatus::Processing { video_id } | UploadStatus::Done { video_id }) => Some(video_id),
+            Some(UploadStatus::Failed { error }) => panic!("upload failed: {error}"),
+            _ => None,
+        }
+    });
+    assert_eq!(workspace.video(cx, video_id).status, VideoStatus::Scheduled);
+    // YouTube publishes it at its time; then it's made unlisted in YouTube Studio.
+    std::thread::sleep((publish_at - Utc::now()).to_std().unwrap_or_default() + Duration::from_millis(500));
+    let client = service.read_with(cx, |s, _| s.client()).unwrap();
+    let unlisted = Visibility { privacy: rushes_youtube::Privacy::Unlisted, publish_at: None };
+    client.set_visibility(&youtube_id, unlisted).unwrap();
+
+    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let video = wait_until(cx, "YouTube’s visibility", |cx| {
+        let video = workspace.video(cx, video_id);
+        (video.youtube.as_ref().map(|link| link.privacy) == Some(Privacy::Unlisted)).then_some(video)
+    });
+    assert_eq!(video.status, VideoStatus::Published);
+    // YouTube takes no schedule in the past, so there is nothing to send back.
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("youtube-visibility-sync").visible());
+        assert!(window.try_find("visibility-send").is_none());
     });
 }
 

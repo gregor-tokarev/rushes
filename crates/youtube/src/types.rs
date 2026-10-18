@@ -216,7 +216,7 @@ pub(crate) struct VideoSnippet {
 pub(crate) struct VideoStatus {
     pub upload_status: UploadStatus,
     pub privacy_status: Privacy,
-    publish_at: Option<DateTime<Utc>>,
+    pub publish_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize)]

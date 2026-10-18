@@ -218,9 +218,11 @@ GPUI Kit app. Main pieces:
   has, so the Thumbnail card can say whether the chosen one is there. Who can watch and
   the schedule go to a video already on YouTube when the form saves them
   (`publish/visibility.rs`); one chosen while the video uploads goes to the video the
-  upload puts there, also after a resume. The form keeps the creator's choice: when
-  YouTube reports another (a change that didn't get there, also in an earlier run, or
-  one made in YouTube Studio), the section says so and offers to send it. Sign-ins from
+  upload puts there, also after a resume. `YoutubeLink.privacy` and `publish_at` record
+  what YouTube last had, and the planner status follows them. The form keeps the
+  creator's choice: when YouTube reports another (a change that didn't get there, also
+  in an earlier run, or one made in YouTube Studio), the section says so and offers to
+  send it, unless the form's schedule is over. Sign-ins from
   before `MANAGE_SCOPE` get "Reconnect" first. `PublishAssistant`
   has the agent write the title, description and tags (with Undo) and Codex draw
   thumbnails to choose from; both keep running when the tab is left.

@@ -17,7 +17,7 @@ use gpui_kit::{App, AppContext as _, Context, SharedString};
 use rushes_core::{FileStamp, Privacy, UploadId, UploadJob, UploadStatus, Video, VideoId, VideoStatus, YoutubeLink};
 use rushes_youtube::{
     Error as YoutubeError, ProcessingStatus, RetryCause, UploadProgress, UploadStatus as YoutubeUploadStatus,
-    UploadedVideo, VideoInfo, VideoMetadata, YoutubeClient,
+    UploadedVideo, VideoInfo, VideoMetadata, Visibility, YoutubeClient,
 };
 
 use super::rules::{self, AccountAccess, BlockingReason};
@@ -661,8 +661,9 @@ impl YoutubeService {
                 privacy,
                 uploaded_at: Utc::now(),
                 thumbnail: None,
+                publish_at: uploaded.publish_at,
             });
-            if let Some(publish_at) = video.publish.publish_at {
+            if let Some(publish_at) = uploaded.publish_at {
                 video.status = VideoStatus::Scheduled;
                 // YouTube publishes it then, whatever the planner said before.
                 video.publish_date = Some(publish_at.with_timezone(&Local).date_naive());
@@ -693,7 +694,11 @@ impl YoutubeService {
             let target = ThumbnailTarget { video_id, youtube_id: youtube_id.clone(), channel: uploaded.channel_id };
             self.send_thumbnail(target, client.clone(), thumbnail, true, cx);
         }
-        self.send_visibility_after_upload(video_id, uploaded.privacy, cx);
+        self.send_visibility_after_upload(
+            video_id,
+            Visibility { privacy: uploaded.privacy, publish_at: uploaded.publish_at },
+            cx,
+        );
         self.follow_processing(id, client, youtube_id, cx);
     }
 

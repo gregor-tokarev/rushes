@@ -161,6 +161,8 @@ pub struct UploadedVideo {
     pub channel_id: String,
     pub title: String,
     pub privacy: Privacy,
+    /// Scheduled publish time of a private video.
+    pub publish_at: Option<DateTime<Utc>>,
     pub upload_status: UploadStatus,
 }
 
@@ -465,6 +467,7 @@ fn upload_step(mut response: HttpResponse) -> Result<Step> {
                 channel_id: snippet.channel_id,
                 title: snippet.title,
                 privacy: status.privacy_status,
+                publish_at: status.publish_at,
                 upload_status: status.upload_status,
             }))
         }

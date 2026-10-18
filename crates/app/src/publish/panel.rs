@@ -1274,29 +1274,32 @@ impl PublishPanel {
     }
 
     /// YouTube has `other` instead of the form's choice: it didn't get there, or the
-    /// video changed in YouTube Studio. The form's choice goes on request.
+    /// video changed in YouTube Studio. The form's choice goes on request, unless
+    /// its schedule is over: YouTube takes no schedule in the past.
     fn render_other_visibility(&self, other: Visibility, cx: &mut Context<Self>) -> AnyElement {
         let text = visibility_text(rules::core_privacy(other.privacy), other.publish_at);
         let mut chars = text.chars();
         let text: String = chars.next().map(|first| first.to_lowercase().chain(chars).collect()).unwrap_or_default();
+        let over = self.draft.publish_at.is_some_and(|at| at <= Utc::now());
+        let (title, detail) = if over {
+            ("Changed on YouTube", format!("On YouTube it’s {text}. Turn off Schedule to choose who can watch it."))
+        } else {
+            ("Not on YouTube yet", format!("On YouTube it’s {text}."))
+        };
         let body = v_flex()
             .gap_2()
-            .child(status_line(
-                IconName::TriangleAlert,
-                cx.theme().warning,
-                "Not on YouTube yet",
-                Some(format!("On YouTube it’s {text}.").into()),
-                cx,
-            ))
-            .child(
-                h_flex().child(
-                    Button::new("visibility-send")
-                        .label("Change on YouTube")
-                        .small()
-                        .outline()
-                        .on_click(cx.listener(|this, _, _, cx| this.send_visibility(cx))),
-                ),
-            );
+            .child(status_line(IconName::TriangleAlert, cx.theme().warning, title, Some(detail.into()), cx))
+            .when(!over, |this| {
+                this.child(
+                    h_flex().child(
+                        Button::new("visibility-send")
+                            .label("Change on YouTube")
+                            .small()
+                            .outline()
+                            .on_click(cx.listener(|this, _, _, cx| this.send_visibility(cx))),
+                    ),
+                )
+            });
         // Tests check what the section says.
         div().id("youtube-visibility-sync").child(body).test_support().into_any_element()
     }
