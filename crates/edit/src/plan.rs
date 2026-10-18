@@ -654,7 +654,8 @@ fn overlays(
         }
         // Overlays on neighbouring words meet between them.
         if next.out_start < previous.out_end {
-            let meet = next.out_start.clamp(*previous_end, *next_start);
+            // Word times may overlap by a few ms (tolerated above).
+            let meet = next.out_start.clamp(previous_end.min(*next_start), *next_start);
             placed[index - 1].2.out_end = meet;
             placed[index].2.out_start = meet;
         }
