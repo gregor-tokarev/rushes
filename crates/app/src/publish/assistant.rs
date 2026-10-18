@@ -59,6 +59,8 @@ pub enum ThumbnailJob {
     },
     /// Codex couldn't answer; why. The chat says so too, and keeps saying it.
     Failed(SharedString),
+    /// Codex drew some of what was asked, then stopped; why.
+    StoppedEarly(SharedString),
 }
 
 /// Who said a message of a thumbnail chat.
@@ -602,12 +604,16 @@ impl PublishAssistant {
         }
         match result {
             Ok(outcome) => {
-                self.thumbnails.remove(&video_id);
+                let problem = outcome.problem.map(|problem| sentence(&problem));
+                // The card says so too, for a creator who closed the chat.
+                match &problem {
+                    Some(problem) => self.thumbnails.insert(video_id, ThumbnailJob::StoppedEarly(problem.into())),
+                    None => self.thumbnails.remove(&video_id),
+                };
                 self.update_chat(video_id, cx, |chat| {
                     if outcome.session_id.is_some() {
                         chat.session_id = outcome.session_id;
                     }
-                    let problem = outcome.problem.map(|problem| sentence(&problem));
                     chat.push(ChatRole::Codex, outcome.reply.trim().to_owned(), outcome.made, problem);
                 });
                 cx.emit(AssistEvent::ThumbnailsDrawn(video_id));
@@ -634,9 +640,9 @@ impl PublishAssistant {
         }
     }
 
-    /// Forgets that Codex couldn't answer; the chat still says so.
+    /// Forgets that Codex couldn't answer or stopped early; the chat still says so.
     pub fn dismiss_thumbnails(&mut self, video_id: VideoId, cx: &mut Context<Self>) {
-        if matches!(self.thumbnails.get(&video_id), Some(ThumbnailJob::Failed(_))) {
+        if matches!(self.thumbnails.get(&video_id), Some(ThumbnailJob::Failed(_) | ThumbnailJob::StoppedEarly(_))) {
             self.thumbnails.remove(&video_id);
             cx.notify();
         }

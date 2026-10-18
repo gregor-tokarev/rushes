@@ -1997,14 +1997,11 @@ impl PublishPanel {
             ),
             ThumbnailJob::Failed(error) => (
                 status_line(IconName::CircleAlert, theme.danger, "Codex couldn’t answer", Some(error), cx),
-                vec![
-                    Button::new("thumbnail-job-open-chat")
-                        .label("Open chat…")
-                        .small()
-                        .outline()
-                        .on_click(cx.listener(|this, _, window, cx| this.open_thumbnail_chat(window, cx))),
-                    self.dismiss_thumbnails_button(cx),
-                ],
+                vec![self.open_chat_button(cx), self.dismiss_thumbnails_button(cx)],
+            ),
+            ThumbnailJob::StoppedEarly(problem) => (
+                status_line(IconName::TriangleAlert, theme.warning, "Codex stopped early", Some(problem), cx),
+                vec![self.open_chat_button(cx), self.dismiss_thumbnails_button(cx)],
             ),
         };
         // The side column is narrow: the actions go under the status.
@@ -2016,6 +2013,14 @@ impl PublishPanel {
             // Tests check what the card says.
             .test_support()
             .into_any_element()
+    }
+
+    fn open_chat_button(&self, cx: &mut Context<Self>) -> Button {
+        Button::new("thumbnail-job-open-chat")
+            .label("Open chat…")
+            .small()
+            .outline()
+            .on_click(cx.listener(|this, _, window, cx| this.open_thumbnail_chat(window, cx)))
     }
 
     fn dismiss_thumbnails_button(&self, cx: &mut Context<Self>) -> Button {

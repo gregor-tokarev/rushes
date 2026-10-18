@@ -231,7 +231,7 @@ impl ThumbnailChatView {
                 "new-thumbnail-chat-reason",
                 working.then(|| "Wait for Codex to answer, or cancel it.".into()),
                 Button::new("new-thumbnail-chat")
-                    .label("New chat")
+                    .label("New chat…")
                     .icon(IconName::Plus)
                     .small()
                     .ghost()

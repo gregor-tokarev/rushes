@@ -472,6 +472,35 @@ fn cancelling_codex_leaves_the_message_unanswered(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_codex_that_stops_early_says_why_on_the_card(cx: &mut TestAppContext) {
+    if !tools_available() {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let (workspace, assistant) =
+        workspace(cx, &[("FAKE_CODEX_DRAW", "1"), ("FAKE_CODEX_HOME", home.path().to_str().unwrap())]);
+    let video_id = workspace.create_video(cx, "Desk setup", |_| {});
+    let (handle, _panel) = open_panel(cx, video_id);
+    cx.update(|cx| {
+        assistant.update(cx, |assistant, cx| assistant.send_thumbnail_message(video_id, "3 ideas".into(), false, cx))
+    })
+    .expect("started");
+    let problem = wait_until(cx, "the partial answer", |cx| match thumbnail_job(cx, &assistant, video_id) {
+        Some(ThumbnailJob::StoppedEarly(problem)) => Some(problem),
+        _ => None,
+    });
+    assert_eq!(problem, "You've hit your usage limit.");
+    let said = chat(cx, &assistant, video_id).messages.last().cloned().unwrap();
+    assert_eq!((said.images.len(), said.problem.as_deref()), (1, Some("You've hit your usage limit.")));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("thumbnail-job").visible(), "the card says Codex stopped early");
+        window.click("dismiss-thumbnails", cx);
+    });
+    assert_eq!(thumbnail_job(cx, &assistant, video_id), None);
+}
+
+#[gpui_kit::test]
 fn a_codex_that_fails_says_why(cx: &mut TestAppContext) {
     if !tools_available() {
         return;
