@@ -157,6 +157,7 @@ fn mini_pc_review(options: &Options, today: NaiveDate) -> Sample {
         privacy: Privacy::Public,
         uploaded_at,
         thumbnail: None,
+        ab_test: None,
     });
 
     let script = vec![

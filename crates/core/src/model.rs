@@ -11,6 +11,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::ab_test::AbTest;
 use crate::settings::EditHarness;
 
 macro_rules! id_type {
@@ -280,6 +281,9 @@ pub struct YoutubeLink {
     /// until Rushes sets one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<PathBuf>,
+    /// The video's A/B test of titles or thumbnails: the one running, or the last one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ab_test: Option<AbTest>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

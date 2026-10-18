@@ -290,6 +290,7 @@ fn a_finished_upload_says_why_it_cannot_go_up_again(cx: &mut TestAppContext) {
             privacy: Privacy::Public,
             uploaded_at: Utc::now(),
             thumbnail: None,
+            ab_test: None,
         });
     });
     let done = UploadJob {
@@ -333,6 +334,7 @@ fn after_a_failed_reupload_the_button_still_says_upload_again(cx: &mut TestAppCo
             privacy: Privacy::Private,
             uploaded_at: Utc::now(),
             thumbnail: None,
+            ab_test: None,
         });
     });
     // "Upload again…" ran out of quota.
@@ -512,6 +514,7 @@ fn the_uploads_page_offers_what_each_job_allows(cx: &mut TestAppContext) {
             privacy: Privacy::Unlisted,
             uploaded_at: Utc::now(),
             thumbnail: None,
+            ab_test: None,
         });
     });
     let job = |status: UploadStatus, session_url: Option<&str>| UploadJob {

@@ -930,6 +930,7 @@ fn a_live_video_and_a_finished_edit_win_over_newer_attempts(cx: &mut TestAppCont
                             privacy: Privacy::Public,
                             uploaded_at: Utc::now(),
                             thumbnail: None,
+                            ab_test: None,
                         });
                         row.latest_upload = Some(UploadStatus::Cancelled);
                         row.latest_run = Some(RunStatus::Failed);

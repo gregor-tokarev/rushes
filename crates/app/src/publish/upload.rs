@@ -655,6 +655,7 @@ impl YoutubeService {
                 privacy,
                 uploaded_at: Utc::now(),
                 thumbnail: None,
+                ab_test: None,
             });
             if let Some(publish_at) = video.publish.publish_at {
                 video.status = VideoStatus::Scheduled;
