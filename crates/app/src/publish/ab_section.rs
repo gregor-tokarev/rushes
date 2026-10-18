@@ -74,7 +74,7 @@ impl RenderOnce for TestSection {
                 );
             state_tooltip("ab-end-reason", reason, button)
         } else {
-            let availability = runner.read(cx).availability(&video, cx);
+            let availability = runner.read(cx).availability(&video);
             let reason = match (availability, access) {
                 (Err(reason), _) => Some(SharedString::from(reason)),
                 (Ok(()), TestAccess::Allowed) => None,
@@ -265,6 +265,10 @@ fn render_test(video_id: VideoId, test: &AbTest, runner: &Entity<AbTests>, now: 
                     local_day(*at)
                 ),
                 StopReason::Cancelled => format!("You stopped it on {}.", local_day(*at)),
+                StopReason::NotPublic => format!(
+                    "On {} the video wasn’t public or scheduled to go public anymore, so the test stopped.",
+                    local_day(*at)
+                ),
             };
             lines.push(
                 div()

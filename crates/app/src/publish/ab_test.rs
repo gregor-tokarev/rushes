@@ -20,7 +20,7 @@ use rushes_core::ab_test::{
     AbTest, MAX_VERSIONS, MIN_VERSIONS, Showing, StopReason, TestOutcome, TestStep, TestSubject, TestVersion,
     pacific_midnight, version_letter,
 };
-use rushes_core::{Video, VideoId};
+use rushes_core::{Privacy, Video, VideoId, YoutubeLink};
 use rushes_youtube::{Error as YoutubeError, ReachReport, TitleChange, YoutubeClient};
 
 use super::rules::{THUMBNAIL_MAX_BYTES, TITLE_MAX_CHARS};
@@ -184,20 +184,14 @@ impl AbTests {
     }
 
     /// Whether `video` can have a test now, or why not.
-    pub fn availability(&self, video: &Video, cx: &App) -> Result<(), &'static str> {
+    pub fn availability(&self, video: &Video) -> Result<(), &'static str> {
         let link = video.youtube.as_ref().ok_or("Upload the video to YouTube first.")?;
         if link.ab_test.as_ref().is_some_and(|test| !test.is_over()) {
             return Err("A test is running.");
         }
-        let service = self.service.read(cx);
-        let (privacy, publish_at) = match service.youtube_video(&link.video_id) {
-            Some(info) => (info.privacy.as_str(), info.publish_at),
-            None => (link.privacy.api_value(), None),
-        };
-        match (privacy, publish_at) {
-            ("public", _) => Ok(()),
-            ("private", Some(at)) if at > self.now() => Ok(()),
-            _ => Err("A/B tests need a public video, or one scheduled to go public: YouTube doesn’t show private \
+        match going_public(link, self.now()) {
+            Some(_) => Ok(()),
+            None => Err("A/B tests need a public video, or one scheduled to go public: YouTube doesn’t show private \
                  or unlisted videos in feeds and search."),
         }
     }
@@ -219,16 +213,15 @@ impl AbTests {
         let Some(mut video) = self.state.read(cx).video(video_id).cloned() else {
             return Err("The video is gone.".to_owned());
         };
-        self.availability(&video, cx).map_err(str::to_owned)?;
+        self.availability(&video).map_err(str::to_owned)?;
         let Some(link) = video.youtube.as_mut() else { return Err("Upload the video to YouTube first.".to_owned()) };
         let service = self.service.read(cx);
         if let Some(problem) = access_problem(service.test_access(&link.channel_id), &link.channel_id, service) {
             return Err(problem);
         }
-        let remote = service.youtube_video(&link.video_id);
-        let original_title = remote.map(|info| info.title.clone());
-        let publish_at = remote.and_then(|info| info.publish_at);
+        let original_title = service.youtube_video(&link.video_id).map(|info| info.title.clone());
         let now = self.now();
+        let publish_at = going_public(link, now).flatten();
         link.ab_test = Some(AbTest::new(subject, versions, days, original_title, now, publish_at));
         self.work.insert(video_id, Work::default());
         self.state.update(cx, |state, cx| state.update_video(video, cx));
@@ -265,17 +258,18 @@ impl AbTests {
     /// read when they are old, an ended test finishes.
     pub fn tick(&mut self, cx: &mut Context<Self>) {
         let now = self.now();
-        let running: Vec<(VideoId, AbTest)> = self
+        let running: Vec<VideoId> = self
             .state
             .read(cx)
             .rows()
             .iter()
-            .filter_map(|row| {
-                let test = row.video.youtube.as_ref()?.ab_test.as_ref()?;
-                (!test.is_over()).then(|| (row.video.id, test.clone()))
+            .filter(|row| {
+                row.video.youtube.as_ref().and_then(|link| link.ab_test.as_ref()).is_some_and(|test| !test.is_over())
             })
+            .map(|row| row.video.id)
             .collect();
-        for (video_id, test) in running {
+        for video_id in running {
+            let Some(test) = self.follow_video(video_id, now, cx) else { continue };
             let work = self.work.entry(video_id).or_default();
             if work.switching.is_some() {
                 continue;
@@ -318,6 +312,30 @@ impl AbTests {
         // Videos deleted since take their work with them.
         let state = self.state.read(cx);
         self.work.retain(|video_id, _| state.video(*video_id).is_some());
+    }
+
+    /// Keeps `video_id`'s test in step with when the video goes public, as YouTube
+    /// last said: a schedule that moved moves the start of the turns, and a video
+    /// that is no longer public or scheduled stops the test. The test, while it goes on.
+    fn follow_video(&mut self, video_id: VideoId, now: DateTime<Utc>, cx: &mut Context<Self>) -> Option<AbTest> {
+        let mut video = self.state.read(cx).video(video_id).cloned()?;
+        let title = video.upload_title().to_owned();
+        let link = video.youtube.as_mut()?;
+        let schedule = going_public(link, now);
+        let test = link.ab_test.as_mut().filter(|test| !test.is_over())?;
+        let going_on = match schedule {
+            Some(publish_at) if !test.follow_schedule(publish_at, now) => return Some(test.clone()),
+            Some(_) => Some(test.clone()),
+            None => {
+                test.outcome = Some(TestOutcome::Stopped { at: now, reason: StopReason::NotPublic });
+                let detail = "The video isn’t public or scheduled to go public anymore.";
+                let title = format!("The A/B test of “{title}” stopped");
+                push_notification(cx, move |cx| notification::warning(detail, cx).title(title));
+                None
+            }
+        };
+        self.state.update(cx, |state, cx| state.update_video(video, cx));
+        going_on
     }
 
     fn running_test(&self, video_id: VideoId, cx: &App) -> Option<AbTest> {
@@ -554,6 +572,19 @@ impl AbTests {
         let jobs = self.reach_jobs.clone();
         // A refusal is reported by the state; this run still knows.
         self.state.update(cx, |state, cx| state.save_setting(REACH_JOBS_KEY, &jobs, cx));
+    }
+}
+
+/// When the video of `link` goes public, as YouTube last said: `Some(None)` when it
+/// is public, `Some(Some(at))` when a schedule makes it public at `at`, `None` when
+/// it won't be.
+fn going_public(link: &YoutubeLink, now: DateTime<Utc>) -> Option<Option<DateTime<Utc>>> {
+    match (link.privacy, link.publish_at) {
+        (Privacy::Public, _) => Some(None),
+        (Privacy::Private, Some(at)) if at > now => Some(Some(at)),
+        // Its time came: YouTube made it public.
+        (Privacy::Private, Some(_)) => Some(None),
+        (Privacy::Private, None) | (Privacy::Unlisted, _) => None,
     }
 }
 

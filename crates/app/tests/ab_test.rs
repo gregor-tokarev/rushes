@@ -196,7 +196,7 @@ fn titles_take_turns_and_the_winner_stays(cx: &mut TestAppContext) {
 
     // A new test can follow.
     let video = workspace.video(cx, video_id);
-    assert_eq!(runner.runner.read_with(cx, |runner, cx| runner.availability(&video, cx)), Ok(()));
+    assert_eq!(runner.runner.read_with(cx, |runner, _| runner.availability(&video)), Ok(()));
     let job = workspace.state.read_with(cx, |state, _| {
         state.read_setting::<std::collections::HashMap<String, String>>("youtube.reach_jobs").unwrap()
     });
@@ -358,6 +358,51 @@ fn a_pair_that_went_up_halfway_is_put_right(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_scheduled_test_follows_the_video_schedule(cx: &mut TestAppContext) {
+    // No YouTube needed: the test follows what the video's link records YouTube having.
+    let workspace = Workspace::open(cx, rushes_core::settings::YoutubeBackend::default());
+    let now = on("2026-10-18", 9);
+    let publish_at = on("2026-10-19", 9);
+    let versions = vec![
+        TestVersion { title: Some("One".into()), thumbnail: None },
+        TestVersion { title: Some("Two".into()), thumbnail: None },
+    ];
+    let test = AbTest::new(TestSubject::Title, versions, 7, None, now, Some(publish_at));
+    let video_id = workspace.create_video(cx, "Scheduled", |video| {
+        video.youtube = Some(rushes_core::YoutubeLink {
+            video_id: "sched".into(),
+            url: "https://www.youtube.com/watch?v=sched".into(),
+            channel_id: "UC1".into(),
+            privacy: Privacy::Private,
+            uploaded_at: now,
+            thumbnail: None,
+            publish_at: Some(publish_at),
+            ab_test: Some(test),
+        });
+    });
+    let runner = Runner::start(&workspace, cx, now);
+    cx.run_until_parked();
+    assert_eq!(test_of(&workspace, cx, video_id).starts_at, publish_at);
+
+    // Postponed by two weeks in Visibility: the turns wait for the new time.
+    let later = on("2026-11-02", 9);
+    let mut video = workspace.video(cx, video_id);
+    video.youtube.as_mut().unwrap().publish_at = Some(later);
+    workspace.state.update(cx, |state, cx| state.update_video(video, cx));
+    runner.at(cx, now + TimeDelta::minutes(1));
+    let test = test_of(&workspace, cx, video_id);
+    assert_eq!((test.starts_at, test.ends_at()), (later, later + TimeDelta::days(7)));
+
+    // No longer scheduled: the test stops before it began.
+    let mut video = workspace.video(cx, video_id);
+    video.youtube.as_mut().unwrap().publish_at = None;
+    workspace.state.update(cx, |state, cx| state.update_video(video, cx));
+    runner.at(cx, now + TimeDelta::minutes(2));
+    let test = test_of(&workspace, cx, video_id);
+    assert!(matches!(test.outcome, Some(TestOutcome::Stopped { reason: StopReason::NotPublic, .. })));
+}
+
+#[gpui_kit::test]
 fn private_videos_and_missing_permissions_say_why(cx: &mut TestAppContext) {
     let Some(emulators) = Emulators::start() else { return };
     let workspace = Workspace::open(cx, emulators.backend());
@@ -366,7 +411,7 @@ fn private_videos_and_missing_permissions_say_why(cx: &mut TestAppContext) {
     let (video_id, _) = upload(&workspace, cx, "Public", Privacy::Public);
     let runner = Runner::start(&workspace, cx, Utc::now());
     let video = workspace.video(cx, private);
-    let availability = runner.runner.read_with(cx, |runner, cx| runner.availability(&video, cx));
+    let availability = runner.runner.read_with(cx, |runner, _| runner.availability(&video));
     assert!(availability.unwrap_err().starts_with("A/B tests need a public video"));
 
     // Public, but the sign-in lacks the permissions.

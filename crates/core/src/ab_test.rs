@@ -153,6 +153,9 @@ pub enum StopReason {
     TitleChanged { title: String },
     /// The creator stopped it.
     Cancelled,
+    /// The video stopped being public, or scheduled to be: YouTube shows it to no one
+    /// the test could measure.
+    NotPublic,
 }
 
 /// What the test should do next, at some moment.
@@ -261,6 +264,19 @@ impl AbTest {
             outcome: None,
             title_up: None,
         }
+    }
+
+    /// Follows the video's schedule until the versions start taking turns: they
+    /// start when it goes public, at `publish_at`, or at once when it is public
+    /// (`None`). Whether the start moved.
+    pub fn follow_schedule(&mut self, publish_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+        if self.is_over() || now >= self.starts_at {
+            return false;
+        }
+        let starts_at = publish_at.filter(|at| *at > now).unwrap_or(now);
+        let moved = starts_at != self.starts_at;
+        self.starts_at = starts_at;
+        moved
     }
 
     /// When the last version's turn ends.
@@ -689,6 +705,26 @@ mod tests {
         assert_eq!(scheduled.starts_at, publish);
         assert_eq!(scheduled.version_at(at("2026-10-03T12:00:00Z")), 0);
         assert_eq!(scheduled.ends_at(), at("2026-10-12T16:00:00Z"));
+    }
+
+    #[test]
+    fn a_scheduled_test_follows_the_publish_time() {
+        let now = at("2026-10-18T12:00:00Z");
+        let tomorrow = at("2026-10-19T16:00:00Z");
+        let mut test = AbTest::new(TestSubject::Title, titles(2), 7, None, now, Some(tomorrow));
+        assert_eq!((test.starts_at, test.ends_at()), (tomorrow, at("2026-10-26T16:00:00Z")));
+        // Postponed by two weeks: the turns wait for it.
+        let later = at("2026-11-02T16:00:00Z");
+        assert!(test.follow_schedule(Some(later), now));
+        assert_eq!((test.starts_at, test.ends_at()), (later, at("2026-11-09T16:00:00Z")));
+        assert!(!test.follow_schedule(Some(later), now));
+        // Published early: the turns start at once.
+        let early = at("2026-10-20T09:00:00Z");
+        assert!(test.follow_schedule(None, early));
+        assert_eq!(test.starts_at, early);
+        // Once they started, the schedule has nothing to move.
+        assert!(!test.follow_schedule(Some(later), early + TimeDelta::hours(1)));
+        assert_eq!(test.starts_at, early);
     }
 
     #[test]

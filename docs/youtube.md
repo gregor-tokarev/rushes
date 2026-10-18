@@ -419,7 +419,9 @@ one or the last one).
 
 - A test compares a title, a thumbnail, or both (paired: version B is B's title with B's
   thumbnail) in 2 or 3 versions, for 1, 2 or 4 weeks. It needs a public video, or one
-  scheduled to go public (the versions take turns from then; A is up until), and a sign-in
+  scheduled to go public (the versions take turns from then; A is up until; a schedule
+  moved in Visibility moves the start, and a video no longer public or scheduled stops the
+  test, as the link records YouTube having it), and a sign-in
   with `TEST_SCOPES`: the section asks for them with **Allow access…**, a browser sign-in of
   the video's account that asks for those scopes too (`YoutubeService::allow_tests`). Until
   then the rest of Rushes works as before; a missing permission never asks for a new
