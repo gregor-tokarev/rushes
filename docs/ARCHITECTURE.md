@@ -86,6 +86,9 @@ database's write lock for seconds. The UI thread never waits for it:
   (`thumbnail-<n>.jpg`) beside `footage/`.
 - ElevenLabs key for AI edits: `elevenlabs-key` in the data folder, mode 0600, never in the
   database.
+- DeepFilterNet, the noise remover AI edits clean voices with: `deep-filter-<version>` in
+  `dirs::cache_dir()/rushes/`, downloaded on the first render that needs it (checked
+  against its SHA-256), unless `deep-filter` is on `PATH`.
 - OAuth credentials: one file per signed-in YouTube account in `youtube-accounts/`, file
   mode 0600. Never logged. A `credentials.json` left by a release that kept one account
   moves there at the next start.

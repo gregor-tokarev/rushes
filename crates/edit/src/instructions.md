@@ -105,6 +105,9 @@ from there. Never change or delete the source takes; keep scratch files in `edit
   frame (use `look` to set `focus_x` on the face when it is off centre); screen content uses
   `fit`. A Short is one idea with a hook in the first seconds, not a summary of everything;
   usually captions are burnt in with `subtitle_style` punchy.
+- Sound: `render` cleans the voice of every take with speech (lowers the background noise).
+  Set `clean_voice` false when sound under the voice must stay: music, a game, an app's
+  sounds in a demo.
 
 ## Before you finish
 

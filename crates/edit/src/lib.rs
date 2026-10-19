@@ -24,6 +24,7 @@ mod tool;
 pub mod tools;
 pub mod transcribe;
 pub mod transcript;
+mod voice;
 
 pub use error::{EditError, Result};
 pub use plan::{CutPlan, ResolvedCut, SegmentSpec};
