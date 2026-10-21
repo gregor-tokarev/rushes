@@ -79,6 +79,8 @@ struct NewVideoForm {
     title: Entity<InputState>,
     hook: Entity<InputState>,
     format: VideoFormat,
+    /// Whether the user picked the format, so a template change keeps it.
+    format_chosen: bool,
     /// The Format choice is one Tab stop; the arrow keys move within it.
     format_focus: FocusHandle,
     template: TemplateKind,
@@ -115,6 +117,7 @@ impl NewVideoForm {
             title,
             hook,
             format: VideoFormat::LongForm,
+            format_chosen: false,
             format_focus: cx.focus_handle().tab_stop(true),
             template: TemplateKind::Blank,
             template_chosen: false,
@@ -128,6 +131,7 @@ impl NewVideoForm {
 
     fn set_format(&mut self, format: VideoFormat, cx: &mut Context<Self>) {
         self.format = format;
+        self.format_chosen = true;
         if !self.template_chosen {
             self.template = default_template(format);
         }
@@ -146,6 +150,9 @@ impl NewVideoForm {
     fn set_template(&mut self, template: TemplateKind, cx: &mut Context<Self>) {
         self.template = template;
         self.template_chosen = true;
+        if !self.format_chosen {
+            self.format = default_format(template);
+        }
         cx.notify();
     }
 
@@ -265,6 +272,16 @@ fn default_template(format: VideoFormat) -> TemplateKind {
     match format {
         VideoFormat::Short => TemplateKind::Short,
         VideoFormat::LongForm | VideoFormat::Livestream => TemplateKind::Blank,
+    }
+}
+
+/// The format a template gives the video until the user picks one.
+fn default_format(template: TemplateKind) -> VideoFormat {
+    match template {
+        TemplateKind::Short => VideoFormat::Short,
+        TemplateKind::Blank | TemplateKind::Tutorial | TemplateKind::Review | TemplateKind::Vlog => {
+            VideoFormat::default()
+        }
     }
 }
 
