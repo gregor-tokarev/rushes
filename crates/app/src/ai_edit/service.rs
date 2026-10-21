@@ -82,7 +82,7 @@ impl fmt::Display for RunError {
                 write!(f, "Couldn’t create the video’s media folder. Check the media folder in Settings.")
             }
             RunError::NoFootage(dir) => {
-                write!(f, "Add footage first: video-use edits the raw takes in {}.", dir.display())
+                write!(f, "Add footage first: the agent edits the raw takes in {}.", dir.display())
             }
             RunError::NoSkillFolder => write!(f, "Choose the video-use skill folder in Settings."),
             RunError::NotAvailable(status) => {

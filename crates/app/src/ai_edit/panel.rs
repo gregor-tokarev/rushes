@@ -430,7 +430,7 @@ impl AiEditPanel {
                 .into_any_element()
         });
         SectionHeader::new("AI edit")
-            .description("video-use cuts the takes: it proposes a strategy, you approve, it renders.")
+            .description("The agent cuts the takes: it proposes a strategy, you approve, it renders.")
             .actions(history.map(IntoElement::into_any_element).into_iter().chain(new_edit))
     }
 
