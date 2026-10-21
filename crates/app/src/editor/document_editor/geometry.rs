@@ -29,9 +29,19 @@ pub(super) struct Geometry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Reveal {
     /// The least scrolling that shows the block, as for the caret while typing.
-    Nearest,
+    /// A block too tall to show whole shows the end the caret was put at, if
+    /// it was put at one.
+    Nearest(Option<CaretEnd>),
     /// The block at the top of the viewport, as for a table of contents.
     Top,
+}
+
+/// The end of a block the caret was put at, as by Up and Down from the
+/// blocks around it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CaretEnd {
+    Start,
+    End,
 }
 
 #[derive(Clone, Copy)]
@@ -55,9 +65,11 @@ pub(super) fn fingerprint(block: &Block, number: usize) -> u64 {
 }
 
 impl Geometry {
-    pub fn request_reveal(&mut self) {
+    /// Scrolls the focused block into view after the next layout; `caret`
+    /// says which end of it the caret was put at, if it was.
+    pub fn request_reveal(&mut self, caret: Option<CaretEnd>) {
         if self.reveal != Some(Reveal::Top) {
-            self.reveal = Some(Reveal::Nearest);
+            self.reveal = Some(Reveal::Nearest(caret));
         }
     }
 
@@ -126,15 +138,20 @@ impl Geometry {
         {
             let margin = rem_size * 2.;
             let top = viewport.top() + covered_top;
+            let shown = |edge: Pixels| edge - margin >= top && edge + margin <= viewport.bottom();
+            let fits = row.bounds.size.height + margin * 2. <= viewport.bottom() - top;
             let mut offset = scroll.offset();
             let to_top = (offset.y + top - row.bounds.top() + margin).min(Pixels::ZERO);
+            let to_bottom = offset.y - (row.bounds.bottom() + margin - viewport.bottom());
             match reveal {
                 Reveal::Top => offset.y = to_top,
-                Reveal::Nearest if row.bounds.bottom() + margin > viewport.bottom() => {
-                    offset.y -= row.bounds.bottom() + margin - viewport.bottom();
-                }
-                Reveal::Nearest if row.bounds.top() - margin < top => offset.y = to_top,
-                Reveal::Nearest => {}
+                // Too tall to show whole: the end with the caret, if it isn't shown.
+                Reveal::Nearest(Some(CaretEnd::Start)) if !fits && !shown(row.bounds.top()) => offset.y = to_top,
+                Reveal::Nearest(Some(CaretEnd::End)) if !fits && !shown(row.bounds.bottom()) => offset.y = to_bottom,
+                Reveal::Nearest(Some(_)) if !fits => {}
+                Reveal::Nearest(_) if row.bounds.bottom() + margin > viewport.bottom() => offset.y = to_bottom,
+                Reveal::Nearest(_) if row.bounds.top() - margin < top => offset.y = to_top,
+                Reveal::Nearest(_) => {}
             }
             if offset != scroll.offset() {
                 scroll.set_offset(offset);

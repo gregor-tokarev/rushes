@@ -19,7 +19,7 @@ use gpui_kit::{
 };
 use rushes_core::{Block, BlockId, BlockKind, Document};
 
-use self::geometry::Geometry;
+use self::geometry::{CaretEnd, Geometry};
 use super::blocks::{self, Merge};
 use super::inline::{Marker, toggle_marker};
 use super::markdown::{Shortcut, detect_quote_marker, detect_shortcut, is_list, parse_pasted};
@@ -346,7 +346,12 @@ impl DocumentEditor {
         });
         self.selected = None;
         self.set_focused(Some(id), cx);
-        self.geometry.borrow_mut().request_reveal();
+        let end = match caret {
+            Caret::Start => Some(CaretEnd::Start),
+            Caret::End => Some(CaretEnd::End),
+            Caret::At(_) => None,
+        };
+        self.geometry.borrow_mut().request_reveal(end);
         cx.notify();
     }
 
@@ -355,7 +360,7 @@ impl DocumentEditor {
         self.slash = None;
         self.focus_handle.focus(window, cx);
         self.set_focused(Some(id), cx);
-        self.geometry.borrow_mut().request_reveal();
+        self.geometry.borrow_mut().request_reveal(None);
         cx.notify();
     }
 
@@ -400,7 +405,7 @@ impl DocumentEditor {
             return;
         }
         let previous = std::mem::replace(&mut self.document.blocks[ix].text, text);
-        self.geometry.borrow_mut().request_reveal();
+        self.geometry.borrow_mut().request_reveal(None);
         self.update_slash(ix, &previous, cursor);
         let block = &self.document.blocks[ix];
         let shortcut = match block.kind {
