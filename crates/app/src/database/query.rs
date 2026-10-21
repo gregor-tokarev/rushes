@@ -109,11 +109,18 @@ pub fn active_filter_count(filter: &FilterSpec) -> usize {
     usize::from(!filter.statuses.is_empty()) + usize::from(!filter.formats.is_empty())
 }
 
+/// Whether `filter`'s "Hide archived" takes part in what shows. A status rule
+/// decides instead, as in [`status_visible`]: checking Archived shows archived
+/// videos whatever the switch says.
+pub fn hide_archived_applies(filter: &FilterSpec) -> bool {
+    filter.statuses.is_empty()
+}
+
 /// How many archived videos `filter`'s "Hide archived" keeps out of `rows`:
 /// the ones its other rules would show. None when a status rule decides
 /// instead, as in [`status_visible`].
 pub fn hidden_archived(rows: &[VideoRow], filter: &FilterSpec) -> usize {
-    if !filter.hide_archived || !filter.statuses.is_empty() {
+    if !filter.hide_archived || !hide_archived_applies(filter) {
         return 0;
     }
     let shown = FilterSpec { hide_archived: false, ..filter.clone() };

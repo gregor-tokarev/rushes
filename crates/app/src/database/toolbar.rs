@@ -27,7 +27,7 @@ use super::elements::{Chip, count_badge};
 use super::icons::{column_icon, view_icon};
 use super::panel::{DatabasePanel, SortPicker};
 use super::property_editor::PropertyEditorMode;
-use super::query::{active_filter_count, column_name, resolve_columns};
+use super::query::{active_filter_count, column_name, hide_archived_applies, resolve_columns};
 use super::table::column_key;
 use crate::ui::zoom::zoomed_tabs;
 use crate::ui::{PAGE_INSET, menu_item};
@@ -303,19 +303,34 @@ fn filter_popover(filter: &FilterSpec, panel: &WeakEntity<DatabasePanel>, cx: &A
                             .child(h_flex().child(Chip::new(format.label(), format_color(format))))
                     }),
                 ))
-                .child(
-                    Switch::new("filter-hide-archived").label("Hide archived").checked(filter.hide_archived).on_click(
-                        {
-                            let panel = panel.clone();
-                            move |hide: &bool, _, cx| {
-                                let hide = *hide;
-                                _ = panel.update(cx, |panel, cx| {
-                                    panel.update_view(|view| view.filter.hide_archived = hide, cx)
-                                });
-                            }
-                        },
-                    ),
-                )
+                .child({
+                    // Checked statuses decide what shows, so the switch rests
+                    // and keeps the view's setting for when they're cleared.
+                    let applies = hide_archived_applies(&filter);
+                    let panel = panel.clone();
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            Switch::new("filter-hide-archived")
+                                .label("Hide archived")
+                                .checked(filter.hide_archived)
+                                .disabled(!applies)
+                                .on_click(move |hide: &bool, _, cx| {
+                                    let hide = *hide;
+                                    _ = panel.update(cx, |panel, cx| {
+                                        panel.update_view(|view| view.filter.hide_archived = hide, cx)
+                                    });
+                                }),
+                        )
+                        .when(!applies, |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Not applied while a status is checked."),
+                            )
+                        })
+                })
                 .when(active_filter_count(&filter) > 0, |this| {
                     let panel = panel.clone();
                     this.child(h_flex().child(
