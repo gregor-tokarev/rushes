@@ -1,13 +1,16 @@
 //! A video's page: icon, title, hook, properties and the Script / Notes /
 //! Footage / Publish tabs. The Footage tab embeds `ai_edit::AiEditPanel` and
-//! the Publish tab embeds `publish::PublishPanel`.
+//! the Publish tab embeds `publish::PublishPanel`. Once the page is scrolled
+//! past the tab strip, the strip stays pinned to the top of the page.
 
 mod document;
 mod emoji;
 mod properties;
 mod saves;
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use chrono::Utc;
 use gpui_kit::assets::IconName;
@@ -17,15 +20,16 @@ use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::tab::{Tab, TabBar, TabVariant};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Sizable as _, Size, StyledExt as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, Focusable as _, FontWeight, Global,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Rems, Render,
-    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _,
-    Window, div, point, px, rems,
+    Action, Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, Focusable as _, FontWeight,
+    Global, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Rems,
+    Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    TestSupportExt as _, Window, actions, canvas, div, point, px, rems,
 };
 use rushes_core::input::normalize_title;
 use rushes_core::{DocumentKind, Video, VideoId};
@@ -63,6 +67,37 @@ const PAGE_ICON_SIZE: Rems = Rems(3.5);
 /// The tab strip's index among the scrolled page's children: header,
 /// properties, tab strip, tab content, page end.
 const TAB_STRIP_ITEM: usize = 2;
+/// Space between the properties and the tab strip.
+const TAB_STRIP_GAP: Rems = Rems(1.5);
+/// Space above the tab strip while it is pinned to the top of the page.
+const PINNED_STRIP_INSET: Rems = Rems(0.5);
+/// How far the page scrolls past the top of the tab strip's slot before the
+/// strip is pinned: by then the strip has risen to where it is pinned.
+const PIN_AFTER: Rems = Rems(TAB_STRIP_GAP.0 - PINNED_STRIP_INSET.0);
+
+actions!(
+    video_page,
+    [
+        /// Show the open video's Script tab.
+        ShowScript,
+        /// Show the open video's Notes tab.
+        ShowNotes,
+        /// Show the open video's Footage & AI edit tab.
+        ShowFootage,
+        /// Show the open video's Publish tab.
+        ShowPublish,
+    ]
+);
+
+/// The action that shows `tab`, whose key binding is the tab's shortcut.
+fn tab_action(tab: VideoTab) -> Box<dyn Action> {
+    match tab {
+        VideoTab::Script => Box::new(ShowScript),
+        VideoTab::Notes => Box::new(ShowNotes),
+        VideoTab::Footage => Box::new(ShowFootage),
+        VideoTab::Publish => Box::new(ShowPublish),
+    }
+}
 
 pub struct VideoPage {
     state: Entity<AppState>,
@@ -83,6 +118,9 @@ pub struct VideoPage {
     scroll: ScrollHandle,
     /// How far each tab was scrolled when it was left, restored when it is shown again.
     scrolled: HashMap<VideoTab, Pixels>,
+    /// How much of the page's top the tab strip covers while it is pinned
+    /// there: what the tabs scroll to the top of the page is kept below it.
+    covered_top: Rc<Cell<Pixels>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -181,6 +219,7 @@ impl VideoPage {
             publish: None,
             scroll: ScrollHandle::new(),
             scrolled: HashMap::new(),
+            covered_top: Rc::default(),
             _subscriptions: subscriptions,
         };
         if video.is_some() {
@@ -240,14 +279,18 @@ impl VideoPage {
 
     /// Where the tab strip starts, as a scroll position that puts it at the top.
     pub fn tab_strip_top(&self) -> Pixels {
-        self.scroll
-            .bounds_for_item(TAB_STRIP_ITEM)
-            .map_or(Pixels::ZERO, |strip| (strip.top() - self.scroll.bounds().top()).max(Pixels::ZERO))
+        tab_strip_top(&self.scroll)
+    }
+
+    /// Whether the page is scrolled past the tab strip, which is pinned to its top.
+    fn is_tab_strip_pinned(&self, window: &Window) -> bool {
+        is_tab_strip_pinned(&self.scroll, window.rem_size())
     }
 
     /// Shows `tab`. Each tab keeps its own scroll position; a tab shown for
     /// the first time, or one that was left above its content, opens where
-    /// the tab strip stays put, so the strip doesn't move under the pointer.
+    /// the tab strip stays put, so the strip doesn't move under the pointer:
+    /// where it was in the page, or where it was pinned.
     pub fn set_tab(&mut self, tab: VideoTab, window: &mut Window, cx: &mut Context<Self>) {
         let reveal = take_tab_reveal(self.video_id, tab, cx);
         if tab != self.tab {
@@ -257,10 +300,10 @@ impl VideoPage {
             self.scrolled.insert(self.tab, scrolled);
             self.tab = tab;
             self.ensure_tab(window, cx);
-            let strip = self.tab_strip_top();
+            let pinned_from = pinned_from(&self.scroll, window.rem_size());
             let target = match self.scrolled.get(&tab) {
-                Some(saved) if *saved > strip => *saved,
-                _ => scrolled.min(strip),
+                Some(saved) if *saved > pinned_from => *saved,
+                _ => scrolled.min(pinned_from),
             };
             self.scroll.set_offset(point(px(0.), -target));
         }
@@ -295,18 +338,18 @@ impl VideoPage {
         let id = self.video_id;
         match self.tab {
             VideoTab::Script if self.script.is_none() => {
-                let scroll = self.scroll.clone();
-                let script = cx.new(|cx| DocumentTab::new(id, DocumentKind::Script, scroll, window, cx));
+                let (scroll, covered) = (self.scroll.clone(), self.covered_top.clone());
+                let script = cx.new(|cx| DocumentTab::new(id, DocumentKind::Script, scroll, covered, window, cx));
                 self.rail = Some(cx.new(|cx| ScriptRail::new(script.clone(), cx)));
                 self.script = Some(script);
             }
             VideoTab::Notes if self.notes.is_none() => {
-                let scroll = self.scroll.clone();
-                self.notes = Some(cx.new(|cx| DocumentTab::new(id, DocumentKind::Notes, scroll, window, cx)));
+                let (scroll, covered) = (self.scroll.clone(), self.covered_top.clone());
+                self.notes = Some(cx.new(|cx| DocumentTab::new(id, DocumentKind::Notes, scroll, covered, window, cx)));
             }
             VideoTab::Footage if self.footage.is_none() => {
-                let scroll = self.scroll.clone();
-                self.footage = Some(cx.new(|cx| AiEditPanel::new(id, window, cx).page_scroll(scroll)));
+                let (scroll, covered) = (self.scroll.clone(), self.covered_top.clone());
+                self.footage = Some(cx.new(|cx| AiEditPanel::new(id, window, cx).page_scroll(scroll, covered)));
             }
             VideoTab::Publish if self.publish.is_none() => {
                 self.publish = Some(cx.new(|cx| PublishPanel::new(id, window, cx)));
@@ -521,9 +564,9 @@ impl VideoPage {
         })
     }
 
-    fn render_page_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_page_menu(&self, id: SharedString, cx: &mut Context<Self>) -> impl IntoElement {
         let page = cx.weak_entity();
-        Button::new("page-menu")
+        Button::new(id)
             .ghost()
             .small()
             .icon(IconName::Ellipsis)
@@ -574,23 +617,32 @@ impl VideoPage {
             ))
     }
 
-    fn render_tabs(&self, wide: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The tabs with the save state, the script menu of narrow windows and the
+    /// page menu after them. The copy `pinned` to the top of the page names its
+    /// parts apart from the strip in the page, which stays laid out under it.
+    fn render_tabs(&self, wide: bool, pinned: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = |name: &str| SharedString::from(if pinned { format!("pinned-{name}") } else { name.to_string() });
         let selected = VideoTab::ALL.iter().position(|tab| *tab == self.tab).unwrap_or(0);
         // Without the rail, its content is one menu away next to the tabs.
         let script_menu = self.script.as_ref().filter(|_| !wide && self.tab == VideoTab::Script);
         let unsaved = self.state.read(cx).is_save_failing(self.video_id)
             || [&self.script, &self.notes].into_iter().flatten().any(|tab| tab.read(cx).is_save_failing(cx));
-        let tabs = TabBar::new("video-tabs")
+        let tabs = TabBar::new(id("video-tabs"))
             .w_full()
             .selected_index(selected)
-            .children(VideoTab::ALL.iter().map(|tab| Tab::new().label(tab.label())))
+            .children(VideoTab::ALL.iter().map(|tab| {
+                let (label, action) = (tab.label(), tab_action(*tab));
+                Tab::new()
+                    .label(label)
+                    .tooltip(move |window, cx| Tooltip::new(label).action(action.as_ref(), None).build(window, cx))
+            }))
             .suffix(
                 h_flex()
                     .gap_1()
                     .when(unsaved, |this| {
                         this.child(
                             h_flex()
-                                .id("not-saved")
+                                .id(id("not-saved"))
                                 .test_support()
                                 .gap_1()
                                 .px_2()
@@ -600,8 +652,10 @@ impl VideoPage {
                                 .child("Not saved — retrying"),
                         )
                     })
-                    .when_some(script_menu, |this, script| this.child(document::script_menu_button(script, cx)))
-                    .child(self.render_page_menu(cx)),
+                    .when_some(script_menu, |this, script| {
+                        this.child(document::script_menu_button(id("script-menu"), script, cx))
+                    })
+                    .child(self.render_page_menu(id("page-menu"), cx)),
             )
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
                 if let Some(tab) = VideoTab::ALL.get(*ix) {
@@ -623,6 +677,48 @@ impl VideoPage {
             VideoTab::Publish => self.publish.clone().map(|panel| column().child(panel).into_any_element()),
         }
         .unwrap_or_else(|| div().into_any_element())
+    }
+
+    /// The tab strip pinned to the top of the page, laid out like the strip in
+    /// the page, which it covers exactly where they meet. Its surface hides
+    /// the content scrolling under it, and its bottom edge runs the page's width.
+    fn render_pinned_tabs(&self, lane: impl IntoElement, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .id("pinned-tab-strip")
+            .test_support()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .items_center()
+            .pt(PINNED_STRIP_INSET)
+            .bg(cx.theme().background)
+            // Clicks stay off the content under the strip; the wheel still scrolls it.
+            .block_mouse_except_scroll()
+            // Drawn on the same row as the tab bar's own bottom edge.
+            .child(div().absolute().left_0().bottom_0().size_full().border_b_1().border_color(cx.theme().border))
+            .child(lane)
+    }
+
+    /// Once the page is laid out: notes how much of its top the pinned strip
+    /// covers, and draws the page again when the strip's pinning differs from
+    /// what this render showed, as when a revealed block scrolled the page.
+    fn render_pin_check(&self, pinned: bool) -> impl IntoElement {
+        let (scroll, covered_top) = (self.scroll.clone(), self.covered_top.clone());
+        canvas(
+            move |_, window, _| {
+                let rem_size = window.rem_size();
+                if let Some(slot) = scroll.bounds_for_item(TAB_STRIP_ITEM) {
+                    covered_top.set(slot.size.height - PIN_AFTER.to_pixels(rem_size));
+                }
+                if is_tab_strip_pinned(&scroll, rem_size) != pinned {
+                    window.request_animation_frame();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_0()
     }
 
     fn render_missing(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -649,6 +745,25 @@ impl VideoPage {
     }
 }
 
+/// Where the tab strip's slot starts in the scrolled page, as a scroll
+/// position that puts it at the top.
+fn tab_strip_top(scroll: &ScrollHandle) -> Pixels {
+    scroll
+        .bounds_for_item(TAB_STRIP_ITEM)
+        .map_or(Pixels::ZERO, |strip| (strip.top() - scroll.bounds().top()).max(Pixels::ZERO))
+}
+
+/// The scroll position past which the tab strip is pinned: where the strip,
+/// scrolling up, reaches the place it is pinned at.
+fn pinned_from(scroll: &ScrollHandle, rem_size: Pixels) -> Pixels {
+    tab_strip_top(scroll) + PIN_AFTER.to_pixels(rem_size)
+}
+
+/// Whether the page, as last laid out, is scrolled past the tab strip.
+fn is_tab_strip_pinned(scroll: &ScrollHandle, rem_size: Pixels) -> bool {
+    scroll.bounds_for_item(TAB_STRIP_ITEM).is_some() && -scroll.offset().y > pinned_from(scroll, rem_size)
+}
+
 /// Whether someone asked to show `tab` of `video` from the top; asking clears
 /// a matching request.
 fn take_tab_reveal(video: VideoId, tab: VideoTab, cx: &mut App) -> bool {
@@ -665,6 +780,7 @@ impl Render for VideoPage {
         let wide = window.viewport_size().width >= RAIL_MIN_WINDOW_WIDTH.to_pixels(window.rem_size());
         let rail = self.rail.clone().filter(|_| wide && self.tab == VideoTab::Script);
         let has_document = self.document().is_some();
+        let pinned = self.is_tab_strip_pinned(window);
         let lane = || {
             v_flex()
                 .flex_none()
@@ -690,7 +806,7 @@ impl Render for VideoPage {
                     .pt_12()
                     .child(lane().child(column().child(self.render_header(&video, cx))))
                     .child(lane().pt_4().child(column().child(self.properties.clone())))
-                    .child(lane().pt_6().child(column().child(self.render_tabs(wide, cx))))
+                    .child(lane().pt(TAB_STRIP_GAP).child(column().child(self.render_tabs(wide, false, cx))))
                     .child(lane().pt_4().child(self.render_content()))
                     .child(div().id("page-end").test_support().w_full().flex_1().min_h_24().when(
                         has_document,
@@ -699,6 +815,10 @@ impl Render for VideoPage {
                         },
                     )),
             )
+            .when(pinned, |this| {
+                let tabs = lane().child(column().child(self.render_tabs(wide, true, cx)));
+                this.child(self.render_pinned_tabs(tabs, cx))
+            })
             .child(
                 // The scrollbar sits against the rail when it is shown.
                 div()
@@ -724,6 +844,7 @@ impl Render for VideoPage {
                         .child(rail),
                 )
             })
+            .child(self.render_pin_check(pinned))
             .into_any_element()
     }
 }

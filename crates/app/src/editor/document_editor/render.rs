@@ -194,9 +194,10 @@ impl Render for DocumentEditor {
         let record = {
             let geometry = self.geometry.clone();
             let scroll = self.scroll_handle.clone();
+            let covered_top = self.covered_top.clone();
             let focused = self.focused;
             move |bounds: Vec<Bounds<Pixels>>, window: &mut Window, _: &mut App| {
-                geometry.borrow_mut().record(&rendered, &bounds, focused, scroll.as_ref(), window)
+                geometry.borrow_mut().record(&rendered, &bounds, focused, scroll.as_ref(), covered_top.get(), window)
             }
         };
 

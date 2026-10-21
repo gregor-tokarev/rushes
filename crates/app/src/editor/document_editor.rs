@@ -4,7 +4,7 @@
 mod geometry;
 mod render;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -19,7 +19,7 @@ use gpui_kit::{
 };
 use rushes_core::{Block, BlockId, BlockKind, Document};
 
-use self::geometry::Geometry;
+use self::geometry::{CaretEnd, Geometry};
 use super::blocks::{self, Merge};
 use super::inline::{Marker, toggle_marker};
 use super::markdown::{Shortcut, detect_quote_marker, detect_shortcut, is_list, parse_pasted};
@@ -63,6 +63,9 @@ pub struct DocumentEditor {
     geometry: Rc<RefCell<Geometry>>,
     /// The owner's scroll container, used to keep the caret in view.
     scroll_handle: Option<ScrollHandle>,
+    /// How much of that container's top the owner covers, e.g. with a pinned
+    /// header; the caret is kept in view below it.
+    covered_top: Rc<Cell<Pixels>>,
     focus_handle: FocusHandle,
     _focus_out: Subscription,
     _focus_root: Subscription,
@@ -167,6 +170,7 @@ impl DocumentEditor {
             hovered: None,
             geometry: Rc::default(),
             scroll_handle: None,
+            covered_top: Rc::default(),
             focus_handle,
             _focus_out: focus_out,
             _focus_root: focus_root,
@@ -208,6 +212,12 @@ impl DocumentEditor {
     /// keyboard navigation and typing keep the focused block visible.
     pub fn set_scroll_handle(&mut self, handle: ScrollHandle) {
         self.scroll_handle = Some(handle);
+    }
+
+    /// Shares how much of the scroll container's top the owner covers, e.g.
+    /// with a header pinned over it, so the focused block is kept below that.
+    pub fn set_covered_top(&mut self, covered_top: Rc<Cell<Pixels>>) {
+        self.covered_top = covered_top;
     }
 
     /// The block with keyboard focus, if the editor has focus.
@@ -336,7 +346,12 @@ impl DocumentEditor {
         });
         self.selected = None;
         self.set_focused(Some(id), cx);
-        self.geometry.borrow_mut().request_reveal();
+        let end = match caret {
+            Caret::Start => Some(CaretEnd::Start),
+            Caret::End => Some(CaretEnd::End),
+            Caret::At(_) => None,
+        };
+        self.geometry.borrow_mut().request_reveal(end);
         cx.notify();
     }
 
@@ -345,7 +360,7 @@ impl DocumentEditor {
         self.slash = None;
         self.focus_handle.focus(window, cx);
         self.set_focused(Some(id), cx);
-        self.geometry.borrow_mut().request_reveal();
+        self.geometry.borrow_mut().request_reveal(None);
         cx.notify();
     }
 
@@ -390,7 +405,7 @@ impl DocumentEditor {
             return;
         }
         let previous = std::mem::replace(&mut self.document.blocks[ix].text, text);
-        self.geometry.borrow_mut().request_reveal();
+        self.geometry.borrow_mut().request_reveal(None);
         self.update_slash(ix, &previous, cursor);
         let block = &self.document.blocks[ix];
         let shortcut = match block.kind {

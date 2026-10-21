@@ -39,7 +39,7 @@ use crate::state::{AppEvent, AppState, Problem, Remedy, Severity};
 use crate::ui::zoom::apply_zoom;
 use crate::ui::{PageHeader, notification, page_frame};
 use crate::update::UpdateService;
-use crate::video_page::VideoPage;
+use crate::video_page::{ShowFootage, ShowNotes, ShowPublish, ShowScript, VideoPage};
 use crate::wizard;
 
 pub use launch_path::extend_tool_path;
@@ -106,6 +106,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(zoom::ZOOM_IN_KEY, ZoomIn, None),
         KeyBinding::new(zoom::ZOOM_OUT_KEY, ZoomOut, None),
         KeyBinding::new(zoom::RESET_ZOOM_KEY, ResetZoom, None),
+        // The open video's tabs, in the order the tab strip shows them.
+        KeyBinding::new("secondary-1", ShowScript, None),
+        KeyBinding::new("secondary-2", ShowNotes, None),
+        KeyBinding::new("secondary-3", ShowFootage, None),
+        KeyBinding::new("secondary-4", ShowPublish, None),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-[", GoBack, None),
         #[cfg(target_os = "macos")]
@@ -467,6 +472,12 @@ impl Workspace {
         self.state.update(cx, |state, cx| state.open_settings(SettingsSection::General, cx));
     }
 
+    /// Shows `tab` of the open video; other pages have no tabs to show.
+    fn show_video_tab(&mut self, tab: VideoTab, cx: &mut Context<Self>) {
+        let Route::Video { id, .. } = *self.state.read(cx).route() else { return };
+        self.state.update(cx, |state, cx| state.open_video(id, tab, cx));
+    }
+
     fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
         let route = self.state.read(cx).route().clone();
         let page: Option<AnyElement> = match route {
@@ -592,6 +603,10 @@ impl Render for Workspace {
                     .on_action(cx.listener(Self::on_toggle_sidebar))
                     .on_action(cx.listener(Self::on_toggle_theme))
                     .on_action(cx.listener(Self::open_settings))
+                    .on_action(cx.listener(|this, _: &ShowScript, _, cx| this.show_video_tab(VideoTab::Script, cx)))
+                    .on_action(cx.listener(|this, _: &ShowNotes, _, cx| this.show_video_tab(VideoTab::Notes, cx)))
+                    .on_action(cx.listener(|this, _: &ShowFootage, _, cx| this.show_video_tab(VideoTab::Footage, cx)))
+                    .on_action(cx.listener(|this, _: &ShowPublish, _, cx| this.show_video_tab(VideoTab::Publish, cx)))
             })
             .size_full()
             .bg(cx.theme().background)

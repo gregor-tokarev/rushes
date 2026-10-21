@@ -1,7 +1,9 @@
 //! A video's Script or Notes document in the block editor, saved shortly after
 //! the last edit, plus the Script tab's rail: stats, Markdown and outline.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::assets::IconName;
@@ -14,7 +16,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
-    IntoElement, ParentElement as _, PathPromptOptions, Rems, Render, ScrollHandle, SharedString, Styled as _,
+    IntoElement, ParentElement as _, PathPromptOptions, Pixels, Rems, Render, ScrollHandle, SharedString, Styled as _,
     Subscription, Task, TestSupportExt as _, Window, div,
 };
 use rushes_core::document::{
@@ -104,6 +106,8 @@ pub struct DocumentTab {
     kind: DocumentKind,
     document_id: Option<DocumentId>,
     scroll: ScrollHandle,
+    /// How much of the scroll container's top the page covers.
+    covered_top: Rc<Cell<Pixels>>,
     editor: Option<Entity<DocumentEditor>>,
     /// A Tab stop in front of the editor: Tab from the controls above puts
     /// the caret in the first block.
@@ -122,11 +126,14 @@ impl EventEmitter<StatsChanged> for DocumentTab {}
 
 impl DocumentTab {
     /// Loads the video's document of `kind`, creating it when missing. `scroll`
-    /// is the container the editor scrolls in, so the caret stays visible.
+    /// is the container the editor scrolls in, so the caret stays visible, and
+    /// `covered_top` how much of its top the page covers, so the caret stays
+    /// below that.
     pub fn new(
         video_id: VideoId,
         kind: DocumentKind,
         scroll: ScrollHandle,
+        covered_top: Rc<Cell<Pixels>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -139,6 +146,7 @@ impl DocumentTab {
             kind,
             document_id: None,
             scroll,
+            covered_top,
             editor: None,
             entry,
             stats: ScriptStats::default(),
@@ -164,10 +172,11 @@ impl DocumentTab {
         }
         self.document_id = Some(document.id);
         self.stats = ScriptStats::of(&document.blocks);
-        let scroll = self.scroll.clone();
+        let (scroll, covered_top) = (self.scroll.clone(), self.covered_top.clone());
         let editor = cx.new(|cx| {
             let mut editor = DocumentEditor::new(document, window, cx);
             editor.set_scroll_handle(scroll);
+            editor.set_covered_top(covered_top);
             editor
         });
         self._subscriptions = vec![
@@ -705,10 +714,10 @@ impl Render for ScriptRail {
 
 /// A one-line summary of the script with its stats, commands and outline in a
 /// menu: the rail's content where the window is too narrow for the rail.
-pub fn script_menu_button(tab: &Entity<DocumentTab>, cx: &App) -> impl IntoElement {
+pub fn script_menu_button(id: SharedString, tab: &Entity<DocumentTab>, cx: &App) -> impl IntoElement {
     let summary = tab.read(cx).stats().summary();
     let tab = tab.clone();
-    Button::new("script-menu")
+    Button::new(id)
         .ghost()
         .small()
         .label(summary)

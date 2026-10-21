@@ -216,6 +216,10 @@ GPUI Kit app. Main pieces:
 - `editor/` — block-based rich document editor (slash menu, markdown shortcuts,
   keyboard navigation between blocks, drag to reorder, inline formatting, live stats).
 - Video page: icon + title, properties panel, tabs Script / Notes / Footage & AI edit / Publish.
+  The page scrolls as a whole; once it is scrolled past the tab strip, a copy of the strip
+  is pinned to its top (`VideoPage::render_pinned_tabs`), and what the tabs scroll into
+  view (the caret, an outline heading, a revealed AI edit) stays below it. Each tab keeps
+  its scroll position, and Ctrl/⌘ with `1`–`4` show the tabs from anywhere on the page.
 - Onboarding (first run) and New-video wizard (templates).
 - Publish: the video's YouTube account (one of several connected accounts, or the
   default one), metadata form, upload with progress, resume. The thumbnail goes up
