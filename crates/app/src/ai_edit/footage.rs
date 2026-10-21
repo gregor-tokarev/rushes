@@ -11,8 +11,8 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use futures::channel::mpsc::unbounded;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
-use gpui_kit::component::menu::ContextMenuExt as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu};
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
@@ -20,7 +20,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, ClickEvent, Context, Div, ElementId, Entity, EventEmitter, ExternalPaths,
+    Anchor, App, AppContext as _, ClickEvent, Context, Div, ElementId, Entity, EventEmitter, ExternalPaths,
     InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, PathPromptOptions, Render, SharedString,
     Styled as _, Subscription, Task, TestSupportExt as _, Window, div,
 };
@@ -517,8 +517,8 @@ impl FootageCard {
 
     /// The takes, one row each. A take opens in the system's default app from its
     /// Open button (Tab reaches it, Enter or Space presses it), a double-click on its
-    /// row or its context menu; the button's menu and the context menu show it in its
-    /// folder.
+    /// row or its context menu; its actions menu and its context menu also show it in
+    /// its folder.
     fn render_list(&self, cx: &mut Context<Self>) -> Div {
         let card = cx.weak_entity();
         let theme = cx.theme();
@@ -541,11 +541,15 @@ impl FootageCard {
             let open = command(Self::open_take);
             let menu_open = command(Self::open_take);
             let reveal = command(Self::reveal_take);
-            let menu_reveal = command(Self::reveal_take);
             let (open_icon, open_tooltip) = match take.file.kind {
                 MediaKind::Video => (IconName::Play, "Open in your video player"),
                 MediaKind::Audio => (IconName::Play, "Open in your audio player"),
                 MediaKind::Image => (IconName::Eye, "Open in your image viewer"),
+            };
+            // The context menu and the actions button show the same commands.
+            let take_menu = move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
+                menu.item(menu_item("Open").icon(open_icon).on_click(menu_open.clone()))
+                    .item(menu_item("Show in folder").icon(IconName::FolderOpen).on_click(reveal.clone()))
             };
             // The path, not the lossy display name: two takes never share an ID.
             let row_id = ElementId::Path(take.file.path.as_path().into());
@@ -577,30 +581,37 @@ impl FootageCard {
                         .text_color(theme.muted_foreground)
                         .child(format::bytes(take.file.size)),
                 )
-                // Clicks on the button act on their own, not as the row's double-click.
+                // Clicks on the buttons act on their own, not as the row's double-click.
                 .child(
-                    div().flex_shrink_0().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(
-                        DropdownButton::new((row_id, "open"))
-                            .ghost()
-                            .small()
-                            .button(Button::new("open").icon(open_icon).label("Open").tooltip(open_tooltip).on_click(
-                                move |event, window, cx| {
+                    h_flex()
+                        .flex_shrink_0()
+                        .gap_1()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            Button::new((row_id.clone(), "open"))
+                                .ghost()
+                                .small()
+                                .icon(open_icon)
+                                .label("Open")
+                                .accessibility_label(format!("Open {}", take.file.name))
+                                .tooltip(open_tooltip)
+                                .on_click(move |event, window, cx| {
                                     if event.click_count() == 1 {
                                         open(event, window, cx);
                                     }
-                                },
-                            ))
-                            .dropdown_menu(move |menu, _, _| {
-                                menu.item(
-                                    menu_item("Show in folder").icon(IconName::FolderOpen).on_click(reveal.clone()),
-                                )
-                            }),
-                    ),
+                                }),
+                        )
+                        .child(
+                            Button::new((row_id, "actions"))
+                                .ghost()
+                                .small()
+                                .icon(IconName::Ellipsis)
+                                .accessibility_label(format!("Actions for {}", take.file.name))
+                                .tooltip("Take actions")
+                                .dropdown_menu_with_anchor(Anchor::TopRight, take_menu.clone()),
+                        ),
                 )
-                .context_menu(move |menu, _, _| {
-                    menu.item(menu_item("Open").icon(open_icon).on_click(menu_open.clone()))
-                        .item(menu_item("Show in folder").icon(IconName::FolderOpen).on_click(menu_reveal.clone()))
-                })
+                .context_menu(take_menu)
         }))
     }
 
