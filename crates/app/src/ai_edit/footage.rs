@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use futures::channel::mpsc::unbounded;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::spinner::Spinner;
@@ -21,8 +21,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, ClickEvent, Context, Div, ElementId, Entity, EventEmitter, ExternalPaths,
-    InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _,
-    Subscription, Task, TestSupportExt as _, Window, div,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, PathPromptOptions, Render, SharedString,
+    Styled as _, Subscription, Task, TestSupportExt as _, Window, div,
 };
 use rushes_core::VideoId;
 use rushes_core::media::{self, MediaFile, MediaKind};
@@ -447,24 +447,37 @@ impl FootageCard {
     }
 
     /// Opens a take in the system's default app for it, a video player for example,
-    /// to check it before an edit. A take gone from the folder is said instead.
+    /// to check it before an edit.
     fn open_take(&mut self, path: &Path, cx: &mut Context<Self>) {
-        if path.is_file() {
-            cx.open_with_system(path);
-        } else {
-            self.error = Some(format!("Couldn’t find {}. It was moved or deleted.", file_name(path)).into());
-            self.refresh(cx);
-            cx.notify();
-        }
+        self.with_take(path, |_, path, cx| cx.open_with_system(path), cx);
     }
 
     /// Shows a take in the file manager, in its folder.
     fn reveal_take(&mut self, path: &Path, cx: &mut Context<Self>) {
-        if path.is_file() {
-            cx.reveal_path(path);
-        } else {
-            self.open_folder(cx);
-        }
+        self.with_take(path, |_, path, cx| cx.reveal_path(path), cx);
+    }
+
+    /// Runs `act` on the take at `path` once a check on a background thread found
+    /// it still in the folder, which may be on a slow or network disk. A take gone
+    /// from it is taken off the list and said instead.
+    fn with_take(&mut self, path: &Path, act: fn(&mut Self, &Path, &mut Context<Self>), cx: &mut Context<Self>) {
+        let path = path.to_owned();
+        cx.spawn(async move |this, cx| {
+            let check = path.clone();
+            let exists = cx.background_spawn(async move { check.is_file() }).await;
+            _ = this.update(cx, |this, cx| if exists { act(this, &path, cx) } else { this.forget_take(&path, cx) });
+        })
+        .detach();
+    }
+
+    /// Takes a take gone from the folder off the list at once: the next listing may
+    /// wait for probes of other takes.
+    fn forget_take(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.takes.retain(|take| take.file.path != path);
+        self.error = Some(format!("Couldn’t find {}. It was moved or deleted.", file_name(path)).into());
+        cx.emit(FootageChanged);
+        cx.notify();
+        self.refresh(cx);
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> SectionHeader {
@@ -504,7 +517,8 @@ impl FootageCard {
 
     /// The takes, one row each. A take opens in the system's default app from its
     /// Open button (Tab reaches it, Enter or Space presses it), a double-click on its
-    /// row or its context menu.
+    /// row or its context menu; the button's menu and the context menu show it in its
+    /// folder.
     fn render_list(&self, cx: &mut Context<Self>) -> Div {
         let card = cx.weak_entity();
         let theme = cx.theme();
@@ -527,13 +541,16 @@ impl FootageCard {
             let open = command(Self::open_take);
             let menu_open = command(Self::open_take);
             let reveal = command(Self::reveal_take);
+            let menu_reveal = command(Self::reveal_take);
             let (open_icon, open_tooltip) = match take.file.kind {
                 MediaKind::Video => (IconName::Play, "Open in your video player"),
                 MediaKind::Audio => (IconName::Play, "Open in your audio player"),
                 MediaKind::Image => (IconName::Eye, "Open in your image viewer"),
             };
+            // The path, not the lossy display name: two takes never share an ID.
+            let row_id = ElementId::Path(take.file.path.as_path().into());
             h_flex()
-                .id(ElementId::Name(format!("footage-take-{}", take.file.name).into()))
+                .id(row_id.clone())
                 .gap_3()
                 .px_3()
                 .py_1p5()
@@ -560,24 +577,29 @@ impl FootageCard {
                         .text_color(theme.muted_foreground)
                         .child(format::bytes(take.file.size)),
                 )
+                // Clicks on the button act on their own, not as the row's double-click.
                 .child(
-                    Button::new(ElementId::Name(format!("footage-open-{}", take.file.name).into()))
-                        .ghost()
-                        .small()
-                        .icon(open_icon)
-                        .label("Open")
-                        .tooltip(open_tooltip)
-                        .on_click(move |event, window, cx| {
-                            // The row's double-click is the button's second click: one open.
-                            cx.stop_propagation();
-                            if event.click_count() == 1 {
-                                open(event, window, cx);
-                            }
-                        }),
+                    div().flex_shrink_0().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(
+                        DropdownButton::new((row_id, "open"))
+                            .ghost()
+                            .small()
+                            .button(Button::new("open").icon(open_icon).label("Open").tooltip(open_tooltip).on_click(
+                                move |event, window, cx| {
+                                    if event.click_count() == 1 {
+                                        open(event, window, cx);
+                                    }
+                                },
+                            ))
+                            .dropdown_menu(move |menu, _, _| {
+                                menu.item(
+                                    menu_item("Show in folder").icon(IconName::FolderOpen).on_click(reveal.clone()),
+                                )
+                            }),
+                    ),
                 )
                 .context_menu(move |menu, _, _| {
                     menu.item(menu_item("Open").icon(open_icon).on_click(menu_open.clone()))
-                        .item(menu_item("Show in folder").icon(IconName::FolderOpen).on_click(reveal.clone()))
+                        .item(menu_item("Show in folder").icon(IconName::FolderOpen).on_click(menu_reveal.clone()))
                 })
         }))
     }
