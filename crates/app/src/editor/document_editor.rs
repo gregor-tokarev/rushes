@@ -4,7 +4,7 @@
 mod geometry;
 mod render;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -63,6 +63,9 @@ pub struct DocumentEditor {
     geometry: Rc<RefCell<Geometry>>,
     /// The owner's scroll container, used to keep the caret in view.
     scroll_handle: Option<ScrollHandle>,
+    /// How much of that container's top the owner covers, e.g. with a pinned
+    /// header; the caret is kept in view below it.
+    covered_top: Rc<Cell<Pixels>>,
     focus_handle: FocusHandle,
     _focus_out: Subscription,
     _focus_root: Subscription,
@@ -167,6 +170,7 @@ impl DocumentEditor {
             hovered: None,
             geometry: Rc::default(),
             scroll_handle: None,
+            covered_top: Rc::default(),
             focus_handle,
             _focus_out: focus_out,
             _focus_root: focus_root,
@@ -208,6 +212,12 @@ impl DocumentEditor {
     /// keyboard navigation and typing keep the focused block visible.
     pub fn set_scroll_handle(&mut self, handle: ScrollHandle) {
         self.scroll_handle = Some(handle);
+    }
+
+    /// Shares how much of the scroll container's top the owner covers, e.g.
+    /// with a header pinned over it, so the focused block is kept below that.
+    pub fn set_covered_top(&mut self, covered_top: Rc<Cell<Pixels>>) {
+        self.covered_top = covered_top;
     }
 
     /// The block with keyboard focus, if the editor has focus.

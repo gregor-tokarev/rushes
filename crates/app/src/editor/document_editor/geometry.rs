@@ -87,13 +87,15 @@ impl Geometry {
     }
 
     /// Stores the bounds of the rows prepainted this frame (`bounds` may end
-    /// with trailing non-row children) and scrolls a pending reveal into view.
+    /// with trailing non-row children) and scrolls a pending reveal into view,
+    /// below the `covered_top` of the viewport that the owner draws over.
     pub fn record(
         &mut self,
         rendered: &[RenderedRow],
         bounds: &[Bounds<Pixels>],
         focused: Option<BlockId>,
         scroll: Option<&ScrollHandle>,
+        covered_top: Pixels,
         window: &mut Window,
     ) {
         let viewport = window.content_mask().bounds;
@@ -123,14 +125,15 @@ impl Geometry {
             && let Some(row) = focused.and_then(|id| self.rows.get(&id))
         {
             let margin = rem_size * 2.;
+            let top = viewport.top() + covered_top;
             let mut offset = scroll.offset();
-            let to_top = (offset.y + viewport.top() - row.bounds.top() + margin).min(Pixels::ZERO);
+            let to_top = (offset.y + top - row.bounds.top() + margin).min(Pixels::ZERO);
             match reveal {
                 Reveal::Top => offset.y = to_top,
                 Reveal::Nearest if row.bounds.bottom() + margin > viewport.bottom() => {
                     offset.y -= row.bounds.bottom() + margin - viewport.bottom();
                 }
-                Reveal::Nearest if row.bounds.top() - margin < viewport.top() => offset.y = to_top,
+                Reveal::Nearest if row.bounds.top() - margin < top => offset.y = to_top,
                 Reveal::Nearest => {}
             }
             if offset != scroll.offset() {

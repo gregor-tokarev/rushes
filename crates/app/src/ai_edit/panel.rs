@@ -15,8 +15,8 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, ScrollHandle, SharedString, Styled as _, Subscription, Task, TestSupportExt as _, Window, canvas, div,
-    point, px,
+    Pixels, Render, ScrollHandle, SharedString, Styled as _, Subscription, Task, TestSupportExt as _, Window, canvas,
+    div, point, px,
 };
 use rushes_core::settings::EditPreferences;
 use rushes_core::{Block, DocumentKind, PipelineRun, RunId, RunStatus, Video, VideoId};
@@ -82,8 +82,9 @@ pub struct AiEditPanel {
     run_view: Entity<RunView>,
     doctor: Entity<DoctorChecklist>,
     start_error: Option<SharedString>,
-    /// The scrolling page around the panel, if any.
-    page_scroll: Option<ScrollHandle>,
+    /// The scrolling page around the panel, if any, and how much of its top
+    /// the page covers.
+    page_scroll: Option<(ScrollHandle, Rc<Cell<Pixels>>)>,
     /// A run was revealed (from the Pipelines page): the page scrolls the AI edit
     /// section into view once the footage list above it has its final height.
     reveal: Rc<Cell<Reveal>>,
@@ -190,9 +191,10 @@ impl AiEditPanel {
         self.video_id
     }
 
-    /// The page that scrolls the panel: a run revealed from elsewhere is scrolled into view.
-    pub fn page_scroll(mut self, scroll: ScrollHandle) -> Self {
-        self.page_scroll = Some(scroll);
+    /// The page that scrolls the panel, and how much of its top the page
+    /// covers: a run revealed from elsewhere is scrolled into view below that.
+    pub fn page_scroll(mut self, scroll: ScrollHandle, covered_top: Rc<Cell<Pixels>>) -> Self {
+        self.page_scroll = Some((scroll, covered_top));
         self
     }
 
@@ -572,20 +574,20 @@ impl AiEditPanel {
     }
 
     /// While a revealed run waits to be shown: once laid out, scrolls the page so the
-    /// AI edit section starts at its top, unless it is in the upper part of the view
-    /// already, and keeps it there while what is above it settles. Waits for the
-    /// footage list, whose height moves the section.
+    /// AI edit section starts at its top, below what the page covers there, unless it
+    /// is in the upper part of the view already, and keeps it there while what is
+    /// above it settles. Waits for the footage list, whose height moves the section.
     fn render_reveal(&self, cx: &App) -> Option<impl IntoElement + use<>> {
         if self.reveal.get() == Reveal::Idle || !self.footage.read(cx).is_loaded() {
             return None;
         }
-        let scroll = self.page_scroll.clone()?;
+        let (scroll, covered_top) = self.page_scroll.clone()?;
         let reveal = self.reveal.clone();
         Some(
             canvas(
                 move |section, window, _| {
                     let view = scroll.bounds();
-                    let offset = section.top() - view.top();
+                    let offset = section.top() - (view.top() + covered_top.get());
                     let frames = match reveal.get() {
                         Reveal::Pending if offset >= px(0.) && offset <= view.size.height / 3. => 0,
                         Reveal::Pending => REVEAL_FRAMES,
