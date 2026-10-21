@@ -20,7 +20,7 @@ use super::elements::{Chip, muted_icon, youtube_gone};
 use super::format;
 use super::panel::{BOARD_CARD_CONTEXT, DatabasePanel, OpenSelected};
 use super::query::status_visible;
-use super::table::{EmptyReason, element_id, render_empty_state, video_menu};
+use super::table::{element_id, render_empty_state, video_menu};
 use crate::ui::{KeyboardFocus as _, PAGE_INSET, video_icon};
 
 /// The payload of a card being dragged.
@@ -76,8 +76,10 @@ fn redraw_on_next_move(cx: &mut Context<DatabasePanel>) -> impl IntoElement {
 
 impl DatabasePanel {
     pub(super) fn render_board(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.empty_reason(cx) == EmptyReason::NoVideos && self.shown_rows().next().is_none() {
-            return render_empty_state(EmptyReason::NoVideos, &cx.weak_entity());
+        // Empty columns would read as an empty board even when the search, the
+        // filters or "Hide archived" hide every card, so say why, as the table does.
+        if self.shown_rows().next().is_none() {
+            return render_empty_state(self.empty_reason(cx), &cx.weak_entity());
         }
         let Some(view) = self.active_view() else {
             return div().into_any_element();

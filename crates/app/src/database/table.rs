@@ -53,7 +53,7 @@ const ADD_COLUMN_WIDTH: f32 = 44.0;
 /// Most tag suggestions offered at once.
 const MAX_TAG_SUGGESTIONS: usize = 8;
 
-/// Why the table has no rows.
+/// Why the table has no rows, or the board no cards.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum EmptyReason {
     #[default]
