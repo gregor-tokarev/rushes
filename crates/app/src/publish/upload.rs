@@ -17,7 +17,7 @@ use gpui_kit::{App, AppContext as _, Context, SharedString};
 use rushes_core::{FileStamp, Privacy, UploadId, UploadJob, UploadStatus, Video, VideoId, VideoStatus, YoutubeLink};
 use rushes_youtube::{
     Error as YoutubeError, ProcessingStatus, RetryCause, UploadProgress, UploadStatus as YoutubeUploadStatus,
-    UploadedVideo, VideoInfo, VideoMetadata, Visibility, YoutubeClient,
+    UploadedVideo, VideoInfo, VideoMetadata, YoutubeClient,
 };
 
 use super::rules::{self, AccountAccess, BlockingReason};
@@ -394,8 +394,7 @@ impl YoutubeService {
             self.retire(id, Retired::Replaced, cx);
         }
         self.jobs_changed(cx);
-        // The upload takes the visibility and the details the video chooses now.
-        self.visibility_after_upload.remove(&video_id);
+        // The upload takes the details the video chooses now.
         self.details_taken_by_upload(video_id);
         self.spawn_transfer(job.id, client, file, stamp.size, Request::Upload(Box::new(rules::metadata(&video))), cx);
         Ok(job.id)
@@ -599,9 +598,9 @@ impl YoutubeService {
         }
         self.jobs.retain(|job| !gone.contains(&job.id));
         let state = self.state.read(cx);
-        self.visibility_after_upload.retain(|video_id| state.video(*video_id).is_some());
         self.details_waiting.retain(|video_id, _| state.video(*video_id).is_some());
-        self.details_timers.retain(|video_id, _| state.video(*video_id).is_some());
+        self.details_again.retain(|video_id| state.video(*video_id).is_some());
+        self.thumbnails_chosen.retain(|video_id| state.video(*video_id).is_some());
         cx.emit(YoutubeEvent::UploadsChanged);
         cx.notify();
     }
@@ -667,6 +666,7 @@ impl YoutubeService {
                 uploaded_at: Utc::now(),
                 thumbnail: None,
                 publish_at: uploaded.publish_at,
+                details: Some(rules::youtube_details(uploaded.details())),
             });
             if let Some(publish_at) = uploaded.publish_at {
                 video.status = VideoStatus::Scheduled;
@@ -695,17 +695,11 @@ impl YoutubeService {
                 .autohide(true)
         });
 
-        let details = uploaded.details();
+        // What changed since the upload started waits for the creator to save it.
         if let Some(thumbnail) = thumbnail {
             let target = ThumbnailTarget { video_id, youtube_id: youtube_id.clone(), channel: uploaded.channel_id };
             self.send_thumbnail(target, client.clone(), thumbnail, true, cx);
         }
-        self.send_visibility_after_upload(
-            video_id,
-            Visibility { privacy: uploaded.privacy, publish_at: uploaded.publish_at },
-            cx,
-        );
-        self.send_details_after_upload(video_id, &details, cx);
         self.follow_processing(id, client, youtube_id, cx);
     }
 

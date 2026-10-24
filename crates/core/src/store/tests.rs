@@ -292,6 +292,7 @@ fn video_round_trips_every_field() {
             uploaded_at: Utc::now(),
             thumbnail: None,
             publish_at: None,
+            details: None,
         }),
         properties: BTreeMap::from([
             (property, PropertyValue::Number(4.5)),
@@ -453,6 +454,7 @@ fn a_failed_retry_does_not_hide_a_finished_edit_or_a_live_video() {
         uploaded_at: Utc::now(),
         thumbnail: None,
         publish_at: None,
+        details: None,
     };
     video.youtube = Some(link.clone());
     store.update_video(&mut video).unwrap();
@@ -514,6 +516,7 @@ fn duplicate_copies_content_but_not_publishing_state() {
         uploaded_at: Utc::now(),
         thumbnail: None,
         publish_at: None,
+        details: None,
     });
     store.update_video(&mut original).unwrap();
     let after = insert(&mut store, "After", original.position + 1.0);

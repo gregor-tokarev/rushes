@@ -223,20 +223,17 @@ GPUI Kit app. Main pieces:
 - Onboarding (first run) and New-video wizard (templates).
 - Publish: the video's YouTube account (one of several connected accounts, or the
   default one), metadata form, upload with progress, resume. The thumbnail goes up
-  when the upload finishes, and at once when it's chosen for a video already on
-  YouTube (`publish/thumbnail.rs`); `YoutubeLink.thumbnail` records the image YouTube
-  has, so the Thumbnail card can say whether the chosen one is there. Who can watch and
-  the schedule go to a video already on YouTube when the form saves them
-  (`publish/visibility.rs`); one chosen while the video uploads goes to the video the
-  upload puts there, also after a resume. `YoutubeLink.privacy` and `publish_at` record
-  what YouTube last had, and the planner status follows them. The form keeps the
-  creator's choice: when YouTube reports another (a change that didn't get there, also
-  in an earlier run, or one made in YouTube Studio), the section says so and offers to
-  send it, unless the form's schedule is over. The title, description, tags and
-  category go the same way (`publish/details.rs`), `DETAILS_SEND_DELAY` after the last
-  change and only the fields that changed, so typing costs one update and edits made in
-  YouTube Studio to the others stay; when YouTube has other details, the section offers
-  to send the form's or take YouTube's. Sign-ins from
+  when the upload finishes (`publish/thumbnail.rs`). For a video already on YouTube the
+  form keeps its edits locally and sends them only on **Save** (beside the video tabs,
+  or Ctrl/⌘+S; `PublishPanel::save_to_youtube`), which is enabled while the form differs
+  from what YouTube has: the details that differ (`publish/details.rs`), who can watch
+  and the schedule (`publish/visibility.rs`), and a chosen image YouTube doesn't have.
+  `YoutubeLink` records what YouTube last had (`privacy`, `publish_at`, `details`,
+  `thumbnail`), from the upload, each save's answer and each lookup, and the planner
+  status follows it. A field changed on YouTube since it was recorded (in YouTube Studio,
+  or a schedule that came) comes into the form unless the form has an unsaved edit of
+  it. Only the fields that differ go, so edits made in YouTube Studio to the others
+  stay. Changes made while the video uploads wait for its new video. Sign-ins from
   before `MANAGE_SCOPE` get "Reconnect" first. `PublishAssistant`
   has the agent write the title, description and tags (with Undo) and Codex draw
   thumbnails to choose from in a chat (`publish/thumbnail_chat.rs`, a sheet over the

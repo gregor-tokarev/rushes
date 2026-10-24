@@ -716,7 +716,8 @@ fn frame_source(file: Option<PathBuf>, footage_dir: Option<PathBuf>) -> Option<P
     })
 }
 
-/// The details of `video_id` changed: on YouTube too, as when they are typed.
+/// The details of `video_id` changed: for a video on YouTube, they wait there for
+/// the creator to save them, as when they are typed.
 fn send_to_youtube(video_id: VideoId, changed: DetailFields, cx: &mut App) {
     if let Some(service) = YoutubeService::try_global(cx) {
         service.update(cx, |service, cx| service.change_youtube_details(video_id, changed, cx));

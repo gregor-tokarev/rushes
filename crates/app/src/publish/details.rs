@@ -1,12 +1,10 @@
 //! What viewers read about videos on YouTube: the title, description, tags and
 //! category the Publish tab's Details section chooses go to the video once it is
-//! there, a moment after the last change, so a description typed in bursts goes
-//! once. Only the details that changed go; the others stay as YouTube has them,
-//! also when they were changed in YouTube Studio. The section keeps the creator's
-//! choice, and says so when YouTube has another.
+//! there when the creator saves them. Only the details that changed go; the others
+//! stay as YouTube has them, also when they were changed in YouTube Studio. The
+//! section keeps the creator's choice, and says so when YouTube has another.
 
 use std::ops::{BitOr, BitOrAssign};
-use std::time::Duration;
 
 use gpui_kit::{AppContext as _, Context};
 use rushes_core::{Video, VideoId};
@@ -14,9 +12,6 @@ use rushes_youtube::{Details, DetailsChange, Error as YoutubeError, VideoInfo};
 
 use super::rules;
 use super::service::{YoutubeService, describe_error};
-
-/// How long details wait after their last change before they go to YouTube.
-pub const DETAILS_SEND_DELAY: Duration = Duration::from_secs(3);
 
 /// Some of a video's details.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -32,6 +27,16 @@ impl DetailFields {
 
     pub fn is_empty(self) -> bool {
         self == Self::default()
+    }
+
+    /// These fields but `other`'s.
+    fn without(self, other: Self) -> Self {
+        Self {
+            title: self.title && !other.title,
+            description: self.description && !other.description,
+            tags: self.tags && !other.tags,
+            category: self.category && !other.category,
+        }
     }
 
     /// The details `a` and `b` differ in, as viewers see them: YouTube may drop
@@ -117,24 +122,42 @@ impl YoutubeService {
     }
 
     /// The details YouTube, as it last said, has otherwise than the publish
-    /// settings of `video` choose, and what YouTube has: a change that didn't get
-    /// there (also in an earlier run of the app), or one made in YouTube Studio.
-    /// `None` while a change waits to go or is on its way.
+    /// settings of `video` choose, and what YouTube has: changes the form hasn't
+    /// saved to YouTube yet (also in an earlier run of the app). `None` until
+    /// YouTube said what it has.
     pub fn other_details_on_youtube(&self, video: &Video) -> Option<(DetailFields, Details)> {
-        let youtube_id = &video.youtube.as_ref()?.video_id;
-        if self.details_waiting.get(&video.id).is_some_and(|fields| !fields.is_empty())
-            || self.details.contains_key(youtube_id)
-        {
-            return None;
-        }
-        let on_youtube = self.remote.get(youtube_id)?.details();
+        let on_youtube = self.details_on_youtube(video)?;
         let fields = DetailFields::between(&rules::details(video), &on_youtube);
         (!fields.is_empty()).then_some((fields, on_youtube))
     }
 
-    /// The publish settings of `video_id` changed its `fields`: they go to its
-    /// video on YouTube [`DETAILS_SEND_DELAY`] after the last change, or to the
-    /// video an upload under way puts there, once it's there.
+    /// The details of `video` its video on YouTube doesn't have: what saving sends.
+    /// Until YouTube said what it has, the details changed since they last went.
+    pub fn unsaved_details(&self, video: &Video) -> DetailFields {
+        if video.youtube.is_none() {
+            return DetailFields::default();
+        }
+        match self.details_on_youtube(video) {
+            Some(on_youtube) => DetailFields::between(&rules::details(video), &on_youtube),
+            None => self.details_waiting.get(&video.id).copied().unwrap_or_default(),
+        }
+    }
+
+    /// The details of the YouTube video `video` links to, as YouTube last said:
+    /// as the video recorded them, or as YouTube said this run.
+    fn details_on_youtube(&self, video: &Video) -> Option<Details> {
+        let link = video.youtube.as_ref()?;
+        link.details.as_ref().map(rules::recorded_details).or_else(|| {
+            let youtube_id = &link.video_id;
+            self.remote
+                .get(youtube_id)
+                .map(VideoInfo::details)
+                .or_else(|| self.details_answered.get(youtube_id).cloned())
+        })
+    }
+
+    /// The publish settings of `video_id` changed its `fields`: once it is on
+    /// YouTube, they wait there for the creator to save them.
     pub fn change_youtube_details(&mut self, video_id: VideoId, fields: DetailFields, cx: &mut Context<Self>) {
         let uploaded = self.state.read(cx).video(video_id).is_some_and(|video| video.youtube.is_some());
         let uploading = self.is_uploading_any(&[video_id]);
@@ -143,36 +166,7 @@ impl YoutubeService {
             return;
         }
         *self.details_waiting.entry(video_id).or_default() |= fields;
-        if uploading {
-            // The upload sent the details it started with.
-            return;
-        }
-        self.wait_to_send_details(video_id, cx);
         cx.notify();
-    }
-
-    /// The form is changing the details of `video_id` again, before it saves
-    /// them: what waits to go waits [`DETAILS_SEND_DELAY`] more, so a draft being
-    /// typed doesn't go half-written.
-    pub fn postpone_youtube_details(&mut self, video_id: VideoId, cx: &mut Context<Self>) {
-        if self.details_timers.contains_key(&video_id) {
-            self.wait_to_send_details(video_id, cx);
-        }
-    }
-
-    /// Sends the details of `video_id` waiting to go [`DETAILS_SEND_DELAY`] from
-    /// now, instead of when an earlier wait would have.
-    fn wait_to_send_details(&mut self, video_id: VideoId, cx: &mut Context<Self>) {
-        let wait = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(DETAILS_SEND_DELAY).await;
-            this.update(cx, |this, cx| {
-                this.details_timers.remove(&video_id);
-                this.send_waiting_details(video_id, cx);
-            })
-            .ok();
-        });
-        // Replacing the wait cancels the one before.
-        self.details_timers.insert(video_id, wait);
     }
 
     /// Sends the details of `video_id` to YouTube now: its `fields`, with those
@@ -181,7 +175,6 @@ impl YoutubeService {
         if !fields.is_empty() {
             *self.details_waiting.entry(video_id).or_default() |= fields;
         }
-        self.details_timers.remove(&video_id);
         self.send_waiting_details(video_id, cx);
     }
 
@@ -190,20 +183,12 @@ impl YoutubeService {
     pub fn use_youtube_details(&mut self, video_id: VideoId, cx: &mut Context<Self>) -> DetailFields {
         let Some(mut video) = self.state.read(cx).video(video_id).cloned() else { return DetailFields::default() };
         let Some((fields, on_youtube)) = self.other_details_on_youtube(&video) else { return DetailFields::default() };
-        let publish = &mut video.publish;
-        if fields.title {
-            publish.title = on_youtube.title;
-        }
-        if fields.description {
-            publish.description = on_youtube.description;
-        }
-        if fields.tags {
-            publish.tags = on_youtube.tags;
-        }
-        if fields.category {
-            publish.category_id = on_youtube.category_id;
-        }
+        take_details(&mut video, fields, on_youtube);
         self.state.update(cx, |state, cx| state.update_video(video, cx));
+        // YouTube has them: nothing of them is left to save.
+        if let Some(waiting) = self.details_waiting.get_mut(&video_id) {
+            *waiting = waiting.without(fields);
+        }
         cx.notify();
         fields
     }
@@ -224,6 +209,7 @@ impl YoutubeService {
         };
         let youtube_id = link.video_id;
         if self.details.get(&youtube_id) == Some(&DetailsSync::Sending) {
+            self.details_again.insert(video_id);
             return;
         }
         let Some(fields) = self.details_waiting.get(&video_id).copied().filter(|fields| !fields.is_empty()) else {
@@ -268,13 +254,18 @@ impl YoutubeService {
             .video(video_id)
             .and_then(|video| video.youtube.as_ref())
             .is_some_and(|link| link.video_id == youtube_id);
-        // Changed while this one was on its way, and done waiting.
-        let changed_since =
-            self.details_waiting.contains_key(&video_id) && !self.details_timers.contains_key(&video_id);
+        // Saved again while this one was on its way.
+        let again = self.details_again.remove(&video_id);
         match result {
             Ok(Some(now)) => {
                 if let Some(info) = self.remote.get_mut(&youtube_id) {
                     info.set_details(now.clone());
+                }
+                if linked
+                    && let Some(mut video) = self.state.read(cx).video(video_id).cloned()
+                    && record_details(&mut video, &now)
+                {
+                    self.state.update(cx, |state, cx| state.update_video(video, cx));
                 }
                 // For answers asked before this one, also before YouTube was first asked.
                 self.details_answered.insert(youtube_id, now);
@@ -298,24 +289,13 @@ impl YoutubeService {
                 self.details.insert(youtube_id, DetailsSync::Failed { problem, reconnect });
             }
         }
-        if changed_since {
+        if again && linked {
             self.send_waiting_details(video_id, cx);
         }
         cx.notify();
     }
 
-    /// Sends the details of `video_id` to the video its upload just put on
-    /// YouTube with `uploaded`, when they changed while the video uploaded (also
-    /// before a resume, which keeps the details the upload started with).
-    pub(super) fn send_details_after_upload(&mut self, video_id: VideoId, uploaded: &Details, cx: &mut Context<Self>) {
-        let Some(video) = self.state.read(cx).video(video_id) else { return };
-        let fields = DetailFields::between(&rules::details(video), uploaded);
-        if !fields.is_empty() || self.details_waiting.contains_key(&video_id) {
-            self.send_youtube_details(video_id, fields, cx);
-        }
-    }
-
-    /// Sends again the changes that waited for the account `key` to sign in again.
+    /// Sends again the saved changes that waited for the account `key` to sign in again.
     pub(super) fn send_details_after_sign_in(&mut self, key: &str, cx: &mut Context<Self>) {
         let waiting: Vec<VideoId> = self
             .state
@@ -343,7 +323,7 @@ impl YoutubeService {
     /// them as they are.
     pub(super) fn details_taken_by_upload(&mut self, video_id: VideoId) {
         self.details_waiting.remove(&video_id);
-        self.details_timers.remove(&video_id);
+        self.details_again.remove(&video_id);
     }
 
     /// Counts a change sent to `youtube_id`: what YouTube said about it before
@@ -371,6 +351,44 @@ impl YoutubeService {
             info.set_details(known);
         }
     }
+}
+
+/// Takes `fields` of `on_youtube` into the publish settings of `video`.
+fn take_details(video: &mut Video, fields: DetailFields, on_youtube: Details) {
+    let publish = &mut video.publish;
+    if fields.title {
+        publish.title = on_youtube.title;
+    }
+    if fields.description {
+        publish.description = on_youtube.description;
+    }
+    if fields.tags {
+        publish.tags = on_youtube.tags;
+    }
+    if fields.category {
+        publish.category_id = on_youtube.category_id;
+    }
+}
+
+/// Records that YouTube has `on_youtube` for `video`. What changed there since
+/// the video last recorded it (in YouTube Studio) comes into its publish
+/// settings, unless the form changed it too and hasn't saved it to YouTube yet.
+/// Returns whether `video` changed.
+pub(super) fn record_details(video: &mut Video, on_youtube: &Details) -> bool {
+    let Some(link) = &video.youtube else { return false };
+    let recorded = link.details.as_ref().map(rules::recorded_details);
+    if recorded.as_ref() == Some(on_youtube) {
+        return false;
+    }
+    if let Some(recorded) = recorded {
+        let changed_there = DetailFields::between(&recorded, on_youtube);
+        let changed_here = DetailFields::between(&rules::details(video), &recorded);
+        take_details(video, changed_there.without(changed_here), on_youtube.clone());
+    }
+    if let Some(link) = video.youtube.as_mut() {
+        link.details = Some(rules::youtube_details(on_youtube.clone()));
+    }
+    true
 }
 
 #[cfg(test)]

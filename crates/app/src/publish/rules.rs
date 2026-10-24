@@ -3,7 +3,7 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use rushes_core::{Privacy, Video};
+use rushes_core::{Privacy, Video, YoutubeDetails};
 use rushes_pipeline::VideoDetails;
 use rushes_youtube::{Details, VideoMetadata};
 
@@ -255,6 +255,18 @@ pub fn youtube_privacy(privacy: Privacy) -> rushes_youtube::Privacy {
         Privacy::Unlisted => rushes_youtube::Privacy::Unlisted,
         Privacy::Public => rushes_youtube::Privacy::Public,
     }
+}
+
+/// `details` as a video records what YouTube has.
+pub fn youtube_details(details: Details) -> YoutubeDetails {
+    let Details { title, description, tags, category_id } = details;
+    YoutubeDetails { title, description, tags, category_id }
+}
+
+/// The details a video recorded YouTube having.
+pub fn recorded_details(details: &YoutubeDetails) -> Details {
+    let YoutubeDetails { title, description, tags, category_id } = details.clone();
+    Details { title, description, tags, category_id }
 }
 
 pub fn core_privacy(privacy: rushes_youtube::Privacy) -> Privacy {

@@ -1,12 +1,13 @@
 //! Who can watch videos on YouTube: what the Publish tab's Visibility section
-//! chooses goes to the video once it is there. The section keeps the creator's
-//! choice, and says so when YouTube has another.
+//! chooses goes to the video once it is there when the creator saves it. The
+//! section keeps the creator's choice, and says so when YouTube has another.
 
 use chrono::{DateTime, Local, Utc};
 use gpui_kit::{AppContext as _, Context};
 use rushes_core::{Privacy, Video, VideoId, VideoStatus};
 use rushes_youtube::{Error as YoutubeError, VideoInfo, Visibility};
 
+use super::details::record_details;
 use super::rules::{core_privacy, youtube_privacy};
 use super::service::{Changes, YoutubeService, describe_error};
 
@@ -64,6 +65,20 @@ fn record(video: &mut Video, visibility: Visibility) {
     plan(video, privacy, visibility.publish_at);
 }
 
+/// Records that YouTube has `visibility` for `video`, which changed there since
+/// the video last recorded it (in YouTube Studio, or at its scheduled time): the
+/// form takes it too, unless it has a choice of its own not saved to YouTube yet.
+fn follow(video: &mut Video, visibility: Visibility) {
+    let unchanged_here = video.youtube.as_ref().is_some_and(|link| {
+        same(chosen(video), Visibility { privacy: youtube_privacy(link.privacy), publish_at: link.publish_at })
+    });
+    if unchanged_here {
+        video.publish.privacy = core_privacy(visibility.privacy);
+        video.publish.publish_at = visibility.publish_at;
+    }
+    record(video, visibility);
+}
+
 fn plan(video: &mut Video, privacy: Privacy, publish_at: Option<DateTime<Utc>>) {
     if let Some(at) = publish_at {
         video.status = VideoStatus::Scheduled;
@@ -82,22 +97,31 @@ impl YoutubeService {
         self.visibility.get(youtube_id)
     }
 
-    /// Who can watch `video` on YouTube, as YouTube last said, when that isn't what
-    /// its publish settings choose: a change that didn't get there (also in an
-    /// earlier run of the app), or one made in YouTube Studio.
+    /// Who can watch `video` on YouTube, as YouTube last said (this run, or as the
+    /// video recorded), when that isn't what its publish settings choose: a change
+    /// not saved to YouTube yet (also in an earlier run of the app), or one made in
+    /// YouTube Studio.
     pub fn other_visibility_on_youtube(&self, video: &Video) -> Option<Visibility> {
-        let info = self.remote.get(&video.youtube.as_ref()?.video_id)?;
-        let on_youtube = Visibility { privacy: info.privacy, publish_at: info.publish_at };
+        let link = video.youtube.as_ref()?;
+        let on_youtube = match self.remote.get(&link.video_id) {
+            Some(info) => Visibility { privacy: info.privacy, publish_at: info.publish_at },
+            None => Visibility { privacy: youtube_privacy(link.privacy), publish_at: link.publish_at },
+        };
         (!same(by_now(chosen(video)), on_youtube)).then_some(on_youtube)
     }
 
+    /// Whether saving sends who can watch `video`: YouTube has another choice, and
+    /// the form's schedule isn't over (YouTube takes no schedule in the past).
+    pub fn unsaved_visibility(&self, video: &Video) -> bool {
+        let over = video.publish.publish_at.is_some_and(|at| at <= Utc::now());
+        !over && self.other_visibility_on_youtube(video).is_some()
+    }
+
     /// Changes who can watch the YouTube video of `video_id` to what its publish
-    /// settings say. A change made while another is on its way follows that one; one
-    /// made while the video uploads again goes to its new video.
+    /// settings say. A change asked for while another is on its way follows that
+    /// one. While the video uploads again, there is no video to change yet.
     pub fn set_youtube_visibility(&mut self, video_id: VideoId, cx: &mut Context<Self>) {
         if self.is_uploading_any(&[video_id]) {
-            // The upload sent the settings it started with.
-            self.visibility_after_upload.insert(video_id);
             return;
         }
         let Some(video) = self.state.read(cx).video(video_id) else { return };
@@ -143,9 +167,8 @@ impl YoutubeService {
         let video = self.state.read(cx).video(video_id).cloned();
         // The video may have gone, or uploaded again to another YouTube video.
         let video = video.filter(|video| video.youtube.as_ref().is_some_and(|link| link.video_id == youtube_id));
-        // A change made while this one was on its way: chosen again, or saved since.
-        let chosen_again = self.visibility_changed_again.remove(&youtube_id)
-            || video.as_ref().is_some_and(|video| !same(chosen(video), sent));
+        // A change asked for while this one was on its way.
+        let chosen_again = self.visibility_changed_again.remove(&youtube_id);
         match result {
             Ok(Some(now)) => {
                 if let Some(info) = self.remote.get_mut(&youtube_id) {
@@ -173,22 +196,6 @@ impl YoutubeService {
         }
         cx.notify();
         if video.is_some() && chosen_again {
-            self.set_youtube_visibility(video_id, cx);
-        }
-    }
-
-    /// Sends the visibility of `video_id` to the video its upload just put on YouTube
-    /// as `uploaded`, when it changed while the video uploaded (also before a resume,
-    /// which keeps the settings the upload started with) or YouTube has another.
-    pub(super) fn send_visibility_after_upload(
-        &mut self,
-        video_id: VideoId,
-        uploaded: Visibility,
-        cx: &mut Context<Self>,
-    ) {
-        let changed = self.visibility_after_upload.remove(&video_id);
-        let other = self.state.read(cx).video(video_id).is_some_and(|video| !same(chosen(video), uploaded));
-        if changed || other {
             self.set_youtube_visibility(video_id, cx);
         }
     }
@@ -229,9 +236,9 @@ impl YoutubeService {
     }
 
     /// Keeps what YouTube said about a video, asked after `changes`, and records
-    /// its visibility (published in Studio, or at its scheduled time) on the
-    /// videos linked to it. An answer asked before the last change, or while one
-    /// is on its way, may predate it: what that change left stays.
+    /// its visibility (published in Studio, or at its scheduled time) and details
+    /// on the videos linked to it. An answer asked before the last change, or
+    /// while one is on its way, may predate it: what that change left stays.
     pub(super) fn on_youtube_video(&mut self, mut info: VideoInfo, changes: Changes, cx: &mut Context<Self>) {
         let youtube_id = info.id.clone();
         self.keep_sent_details(&mut info, changes.details);
@@ -249,6 +256,7 @@ impl YoutubeService {
             self.visibility.remove(&youtube_id);
         }
         let visibility = Visibility { privacy: info.privacy, publish_at: info.publish_at };
+        let details = info.details();
         self.remote.insert(youtube_id.clone(), info);
         cx.notify();
         if !current {
@@ -261,11 +269,14 @@ impl YoutubeService {
             .iter()
             .map(|row| &row.video)
             .filter(|video| video.youtube.as_ref().is_some_and(|link| link.video_id == youtube_id))
-            .filter(|video| !recorded(video, visibility))
-            .map(|video| {
+            .filter_map(|video| {
                 let mut changed = video.clone();
-                record(&mut changed, visibility);
-                changed
+                let mut any = record_details(&mut changed, &details);
+                if !recorded(video, visibility) {
+                    follow(&mut changed, visibility);
+                    any = true;
+                }
+                any.then_some(changed)
             })
             .collect();
         if !changed.is_empty() {
@@ -297,6 +308,7 @@ mod tests {
             uploaded_at: Utc::now(),
             thumbnail: None,
             publish_at: None,
+            details: None,
         });
         video
     }

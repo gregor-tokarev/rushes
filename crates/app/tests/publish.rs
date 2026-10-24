@@ -195,7 +195,7 @@ fn a_scheduled_private_upload_marks_the_video_scheduled(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
-fn a_visibility_chosen_while_the_video_uploads_again_goes_to_the_new_video(cx: &mut TestAppContext) {
+fn a_visibility_chosen_while_the_video_uploads_again_is_saved_to_the_new_video(cx: &mut TestAppContext) {
     let Some(emulators) = Emulators::start() else { return };
     let workspace = Workspace::open(cx, emulators.backend());
     workspace.sign_in(cx, "creator@example.com");
@@ -218,11 +218,13 @@ fn a_visibility_chosen_while_the_video_uploads_again_goes_to_the_new_video(cx: &
     let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
     let first = upload_done(cx, upload);
 
-    // Uploading again: the upload sent the settings it started with.
+    // Uploading again: the upload sent the settings it started with; saving
+    // sends the choice to the new video.
     let again = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
     choose_privacy(cx, &workspace, video_id, Privacy::Unlisted);
     let second = upload_done(cx, again);
     assert_ne!(first, second);
+    save_visibility(cx, &workspace, video_id);
     let client = service.read_with(cx, |s, _| s.client()).unwrap();
     let unlisted = wait_until(cx, "the new video’s visibility", |_| {
         let privacy = client.get_video(&second).unwrap().unwrap().privacy;
@@ -233,18 +235,22 @@ fn a_visibility_chosen_while_the_video_uploads_again_goes_to_the_new_video(cx: &
     assert_eq!(workspace.video(cx, video_id).youtube.map(|link| link.privacy), Some(Privacy::Unlisted));
 }
 
-/// Chooses `privacy` for `video_id` the way the Publish tab saves it.
+/// Chooses `privacy` for `video_id` the way the Publish tab keeps it.
 fn choose_privacy(cx: &mut TestAppContext, workspace: &Workspace, video_id: VideoId, privacy: Privacy) {
     workspace.state.update(cx, |state, cx| {
         let mut video = state.video(video_id).cloned().unwrap();
         video.publish.privacy = privacy;
         state.update_video(video, cx);
     });
+}
+
+/// Saves who can watch `video_id` to YouTube, as the Publish tab's Save does.
+fn save_visibility(cx: &mut TestAppContext, workspace: &Workspace, video_id: VideoId) {
     workspace.service.update(cx, |service, cx| service.set_youtube_visibility(video_id, cx));
 }
 
 #[gpui_kit::test]
-fn a_visibility_chosen_during_the_first_upload_goes_to_the_video(cx: &mut TestAppContext) {
+fn a_visibility_chosen_during_the_first_upload_is_saved_to_the_video(cx: &mut TestAppContext) {
     let Some(emulators) = Emulators::start() else { return };
     let workspace = Workspace::open(cx, emulators.backend());
     workspace.sign_in(cx, "creator@example.com");
@@ -263,6 +269,7 @@ fn a_visibility_chosen_during_the_first_upload_goes_to_the_video(cx: &mut TestAp
             _ => None,
         }
     });
+    save_visibility(cx, &workspace, video_id);
     let client = service.read_with(cx, |s, _| s.client()).unwrap();
     wait_until(cx, "the choice on YouTube", |cx| {
         cx.executor().advance_clock(Duration::from_secs(5));
@@ -275,7 +282,7 @@ fn a_visibility_chosen_during_the_first_upload_goes_to_the_video(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
-fn a_visibility_chosen_during_a_cancelled_upload_waits_for_its_resume(cx: &mut TestAppContext) {
+fn a_visibility_chosen_during_a_cancelled_upload_is_saved_after_its_resume(cx: &mut TestAppContext) {
     let Some(emulators) = Emulators::start() else { return };
     let workspace = Workspace::open(cx, emulators.backend());
     workspace.sign_in(cx, "creator@example.com");
@@ -316,10 +323,11 @@ fn a_visibility_chosen_during_a_cancelled_upload_waits_for_its_resume(cx: &mut T
         "the choice was for the new video"
     );
 
-    // The resumed session uploads what it started with; the choice follows.
+    // The resumed session uploads what it started with; saving sends the choice.
     emulators.clear_faults();
     service.update(cx, |service, cx| service.resume_upload(again, cx)).unwrap();
     let second = finished(cx, again);
+    save_visibility(cx, &workspace, video_id);
     wait_until(cx, "the choice on YouTube", |_| {
         let privacy = client.get_video(&second).unwrap().unwrap().privacy;
         (privacy == rushes_youtube::Privacy::Public).then_some(())
@@ -328,7 +336,7 @@ fn a_visibility_chosen_during_a_cancelled_upload_waits_for_its_resume(cx: &mut T
 }
 
 #[gpui_kit::test]
-fn details_changed_while_the_video_uploads_go_to_the_video_it_puts_there(cx: &mut TestAppContext) {
+fn details_changed_while_the_video_uploads_are_saved_to_the_video_it_puts_there(cx: &mut TestAppContext) {
     let Some(emulators) = Emulators::start() else { return };
     let workspace = Workspace::open(cx, emulators.backend());
     workspace.sign_in(cx, "creator@example.com");
@@ -353,22 +361,25 @@ fn details_changed_while_the_video_uploads_go_to_the_video_it_puts_there(cx: &mu
         client.get_video(youtube_id).unwrap().unwrap().description
     };
 
-    // During the first upload: the upload sent the description it started with.
+    // During the first upload: the upload sent the description it started with;
+    // saving sends the new one.
     let upload = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
     write_description(cx, &workspace, video_id, "Second words.");
     let first = upload_done(cx, upload);
+    save_description(cx, &workspace, video_id);
     wait_until(cx, "the description on YouTube", |cx| (description_of(cx, &first) == "Second words.").then_some(()));
 
-    // During another upload: it goes to the new video, not the first.
+    // During another upload: it's saved to the new video, not the first.
     let again = service.update(cx, |service, cx| service.start_upload(video_id, cx)).unwrap();
     write_description(cx, &workspace, video_id, "Third words.");
     let second = upload_done(cx, again);
     assert_ne!(first, second);
+    save_description(cx, &workspace, video_id);
     wait_until(cx, "the new video’s description", |cx| (description_of(cx, &second) == "Third words.").then_some(()));
     assert_eq!(description_of(cx, &first), "Second words.");
 }
 
-/// Writes `description` for `video_id` the way the Publish tab saves it.
+/// Writes `description` for `video_id` the way the Publish tab keeps it.
 fn write_description(cx: &mut TestAppContext, workspace: &Workspace, video_id: VideoId, description: &str) {
     workspace.state.update(cx, |state, cx| {
         let mut video = state.video(video_id).cloned().unwrap();
@@ -377,6 +388,12 @@ fn write_description(cx: &mut TestAppContext, workspace: &Workspace, video_id: V
     });
     let fields = DetailFields { description: true, ..DetailFields::default() };
     workspace.service.update(cx, |service, cx| service.change_youtube_details(video_id, fields, cx));
+}
+
+/// Saves the description of `video_id` to YouTube, as the Publish tab's Save does.
+fn save_description(cx: &mut TestAppContext, workspace: &Workspace, video_id: VideoId) {
+    let fields = DetailFields { description: true, ..DetailFields::default() };
+    workspace.service.update(cx, |service, cx| service.send_youtube_details(video_id, fields, cx));
 }
 
 #[gpui_kit::test]

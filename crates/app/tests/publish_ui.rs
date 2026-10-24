@@ -19,8 +19,8 @@ use gpui_kit::{
 use publish_support::{Emulators, Workspace, wait_until};
 use rushes::ai_edit::{AiEditPanel, PipelineService};
 use rushes::publish::{
-    AccountBadge, BlockingReason, CHAPTERS_HEADING, Connection, DETAILS_SEND_DELAY, DetailFields, DetailsSync,
-    PublishPanel, ThumbnailSync, UploadsPage, VisibilitySync, YoutubeService, YoutubeSettings,
+    AccountBadge, BlockingReason, CHAPTERS_HEADING, Connection, DetailFields, DetailsSync, PublishPanel, ThumbnailSync,
+    UploadsPage, VisibilitySync, YoutubeService, YoutubeSettings,
 };
 use rushes::route::{Route, SettingsSection, VideoTab};
 use rushes::state::{AppEvent, Severity};
@@ -54,6 +54,12 @@ fn window(cx: &mut TestAppContext, handle: AnyWindowHandle, f: impl FnOnce(&mut 
 /// Lets the views' debounced saves run.
 fn settle(cx: &mut TestAppContext) {
     cx.executor().advance_clock(SAVED);
+    cx.run_until_parked();
+}
+
+/// Saves the Publish tab's changes to the video on YouTube, as its Save does.
+fn save(cx: &mut TestAppContext, panel: &Entity<PublishPanel>) {
+    panel.update(cx, |panel, cx| panel.save_to_youtube(cx));
     cx.run_until_parked();
 }
 
@@ -291,6 +297,7 @@ fn a_finished_upload_says_why_it_cannot_go_up_again(cx: &mut TestAppContext) {
             uploaded_at: Utc::now(),
             thumbnail: None,
             publish_at: None,
+            details: None,
         });
     });
     let done = UploadJob {
@@ -335,6 +342,7 @@ fn after_a_failed_reupload_the_button_still_says_upload_again(cx: &mut TestAppCo
             uploaded_at: Utc::now(),
             thumbnail: None,
             publish_at: None,
+            details: None,
         });
     });
     // "Upload again…" ran out of quota.
@@ -515,6 +523,7 @@ fn the_uploads_page_offers_what_each_job_allows(cx: &mut TestAppContext) {
             uploaded_at: Utc::now(),
             thumbnail: None,
             publish_at: None,
+            details: None,
         });
     });
     let job = |status: UploadStatus, session_url: Option<&str>| UploadJob {
@@ -1275,7 +1284,7 @@ fn a_thumbnail_chosen_after_the_upload_goes_to_youtube(cx: &mut TestAppContext) 
     };
     assert!(!thumbnail_on_youtube(cx), "YouTube shows a frame of the video");
 
-    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
     // YouTube refuses the image at first: the card says why and offers another try.
     emulators.inject_fault(
         json!({"method": "POST", "path": "/upload/youtube/v3/thumbnails/set", "status": 403, "reason": "forbidden"}),
@@ -1285,6 +1294,8 @@ fn a_thumbnail_chosen_after_the_upload_goes_to_youtube(cx: &mut TestAppContext) 
         window.render_frame(cx);
         drop_files(window, "thumbnail-drop", vec![image.clone()], cx);
     });
+    settle(cx);
+    save(cx, &panel);
     let problem = wait_until(cx, "the refusal", |cx| {
         service.read_with(cx, |s, _| match s.thumbnail_sync(&youtube_id) {
             Some(ThumbnailSync::Failed { problem, .. }) => Some(problem.clone()),
@@ -1326,7 +1337,7 @@ fn who_can_watch_changes_on_youtube_after_the_upload(cx: &mut TestAppContext) {
     workspace.sign_in(cx, "creator@example.com");
     let service = workspace.service.clone();
     let (video_id, youtube_id) = uploaded_without_thumbnail(cx, &workspace);
-    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         // The section says where its changes go.
@@ -1334,6 +1345,7 @@ fn who_can_watch_changes_on_youtube_after_the_upload(cx: &mut TestAppContext) {
         window.within("publish-privacy").click(2usize, cx);
     });
     settle(cx);
+    save(cx, &panel);
     wait_until(cx, "the change on YouTube", |cx| {
         service.read_with(cx, |s, _| s.visibility_sync(&youtube_id).is_none()).then_some(())
     });
@@ -1349,6 +1361,7 @@ fn who_can_watch_changes_on_youtube_after_the_upload(cx: &mut TestAppContext) {
         window.click("publish-schedule", cx);
     });
     settle(cx);
+    save(cx, &panel);
     let scheduled = wait_until(cx, "the schedule on YouTube", |cx| {
         let on_youtube = visibility_on_youtube(cx, &service, &youtube_id);
         on_youtube.publish_at.is_some().then_some(on_youtube)
@@ -1370,13 +1383,14 @@ fn a_visibility_youtube_refused_goes_again(cx: &mut TestAppContext) {
     workspace.sign_in(cx, "creator@example.com");
     let service = workspace.service.clone();
     let (video_id, youtube_id) = uploaded_without_thumbnail(cx, &workspace);
-    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
     emulators.inject_fault(json!({"method": "PUT", "path": "/youtube/v3/videos", "status": 503}));
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         window.within("publish-privacy").click(1usize, cx);
     });
     settle(cx);
+    save(cx, &panel);
     let problem = wait_until(cx, "the refusal", |cx| {
         service.read_with(cx, |s, _| match s.visibility_sync(&youtube_id) {
             Some(VisibilitySync::Failed { problem, reconnect: None }) => Some(problem.clone()),
@@ -1416,12 +1430,13 @@ fn an_older_sign_in_reconnects_to_change_who_can_watch(cx: &mut TestAppContext) 
     let service = workspace.restart(cx);
     assert!(service.read_with(cx, |s, _| s.is_connected()), "uploads still work");
 
-    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         window.within("publish-privacy").click(2usize, cx);
     });
     settle(cx);
+    save(cx, &panel);
     let problem = service.read_with(cx, |s, _| match s.visibility_sync(&youtube_id) {
         Some(VisibilitySync::Failed { problem, reconnect: Some(_) }) => problem.clone(),
         other => panic!("expected a reconnect, got {other:?}"),
@@ -1445,7 +1460,7 @@ fn an_older_sign_in_reconnects_to_change_who_can_watch(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
-fn a_visibility_changed_in_youtube_studio_shows_beside_the_choice(cx: &mut TestAppContext) {
+fn a_visibility_changed_in_youtube_studio_comes_into_the_form(cx: &mut TestAppContext) {
     let Some(emulators) = Emulators::start() else { return };
     let workspace = Workspace::open(cx, emulators.backend());
     workspace.sign_in(cx, "creator@example.com");
@@ -1461,31 +1476,21 @@ fn a_visibility_changed_in_youtube_studio_shows_beside_the_choice(cx: &mut TestA
         service
             .read_with(cx, |s, _| s.youtube_video(&youtube_id).filter(|info| info.privacy == public.privacy).map(drop))
     });
-    // The form keeps the creator's choice and says what YouTube has, which the
+    // The form had no change of its own, so it takes what YouTube has, which the
     // table and the planner show.
     let video = workspace.video(cx, video_id);
-    assert_eq!(video.publish.privacy, Privacy::Private);
+    assert_eq!(video.publish.privacy, Privacy::Public);
     assert_eq!(video.youtube.map(|link| link.privacy), Some(Privacy::Public));
     assert_eq!(video.status, VideoStatus::Published);
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
-        assert_eq!(window.within("publish-privacy").find(0usize).checked(), Some(true));
-        assert!(window.find("youtube-visibility-sync").visible());
-        window.within("youtube-visibility-sync").click("visibility-send", cx);
-    });
-    wait_until(cx, "the choice on YouTube", |cx| {
-        let on_youtube = visibility_on_youtube(cx, &service, &youtube_id);
-        (on_youtube.privacy == rushes_youtube::Privacy::Private).then_some(())
-    });
-    cx.run_until_parked();
-    window(cx, handle, |window, cx| {
-        window.render_frame(cx);
-        assert!(window.try_find("youtube-visibility-sync").is_none(), "YouTube has the choice");
+        assert_eq!(window.within("publish-privacy").find(2usize).checked(), Some(true));
+        assert!(window.try_find("youtube-visibility-sync").is_none(), "nothing to save");
     });
 }
 
 #[gpui_kit::test]
-fn a_schedule_youtube_carried_out_asks_for_a_new_choice(cx: &mut TestAppContext) {
+fn a_schedule_youtube_carried_out_comes_into_the_form(cx: &mut TestAppContext) {
     let Some(emulators) = Emulators::start() else { return };
     let workspace = Workspace::open(cx, emulators.backend());
     workspace.sign_in(cx, "creator@example.com");
@@ -1518,11 +1523,11 @@ fn a_schedule_youtube_carried_out_asks_for_a_new_choice(cx: &mut TestAppContext)
         (video.youtube.as_ref().map(|link| link.privacy) == Some(Privacy::Unlisted)).then_some(video)
     });
     assert_eq!(video.status, VideoStatus::Published);
-    // YouTube takes no schedule in the past, so there is nothing to send back.
+    // The form takes what YouTube made of its schedule.
+    assert_eq!((video.publish.privacy, video.publish.publish_at), (Privacy::Unlisted, None));
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
-        assert!(window.find("youtube-visibility-sync").visible());
-        assert!(window.try_find("visibility-send").is_none());
+        assert!(window.try_find("youtube-visibility-sync").is_none());
     });
 }
 
@@ -1532,29 +1537,31 @@ fn a_change_that_did_not_reach_youtube_is_offered_again_after_a_restart(cx: &mut
     let workspace = Workspace::open(cx, emulators.backend());
     workspace.sign_in(cx, "creator@example.com");
     let (video_id, youtube_id) = uploaded_without_thumbnail(cx, &workspace);
-    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
     emulators.inject_fault(json!({"method": "PUT", "path": "/youtube/v3/videos", "status": 503}));
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         window.within("publish-privacy").click(2usize, cx);
     });
     settle(cx);
+    save(cx, &panel);
     wait_until(cx, "the refusal", |cx| {
         workspace.service.read_with(cx, |s, _| {
             matches!(s.visibility_sync(&youtube_id), Some(VisibilitySync::Failed { .. })).then_some(())
         })
     });
 
-    // Quit before trying again: the next start still has the choice, and offers it.
+    // Quit before trying again: the next start still has the choice, and saves it.
     let service = workspace.restart(cx);
-    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
     wait_until(cx, "YouTube’s visibility", |cx| service.read_with(cx, |s, _| s.youtube_video(&youtube_id).map(drop)));
     assert_eq!(workspace.video(cx, video_id).publish.privacy, Privacy::Public);
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         assert_eq!(window.within("publish-privacy").find(2usize).checked(), Some(true));
-        window.within("youtube-visibility-sync").click("visibility-send", cx);
+        assert!(window.find("youtube-visibility-sync").visible());
     });
+    save(cx, &panel);
     wait_until(cx, "the change on YouTube", |cx| {
         let on_youtube = visibility_on_youtube(cx, &service, &youtube_id);
         (on_youtube.privacy == rushes_youtube::Privacy::Public).then_some(())
@@ -1567,16 +1574,21 @@ fn details_on_youtube(cx: &mut TestAppContext, service: &Entity<YoutubeService>,
     client.get_video(youtube_id).unwrap().unwrap().details()
 }
 
-/// Lets the details saved last wait out their delay and go to YouTube.
-fn send_details(cx: &mut TestAppContext, service: &Entity<YoutubeService>, youtube_id: &str) {
-    cx.executor().advance_clock(DETAILS_SEND_DELAY);
+/// Saves the form's details to YouTube and waits for them to get there.
+fn send_details(
+    cx: &mut TestAppContext,
+    panel: &Entity<PublishPanel>,
+    service: &Entity<YoutubeService>,
+    youtube_id: &str,
+) {
+    save(cx, panel);
     wait_until(cx, "the details on YouTube", |cx| {
         service.read_with(cx, |s, _| s.details_sync(youtube_id).is_none()).then_some(())
     });
 }
 
 #[gpui_kit::test]
-fn details_change_on_youtube_once_the_typing_stops(cx: &mut TestAppContext) {
+fn details_change_on_youtube_once_saved(cx: &mut TestAppContext) {
     let Some(emulators) = Emulators::start() else { return };
     let workspace = Workspace::open(cx, emulators.backend());
     workspace.sign_in(cx, "creator@example.com");
@@ -1584,7 +1596,7 @@ fn details_change_on_youtube_once_the_typing_stops(cx: &mut TestAppContext) {
     let (video_id, youtube_id) = uploaded_without_thumbnail(cx, &workspace);
     let uploaded = details_on_youtube(cx, &service, &youtube_id);
     assert_eq!(uploaded.title, "It’s Just Autocomplete");
-    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         // The section says where its changes go; the audience still goes with the next upload.
@@ -1594,21 +1606,16 @@ fn details_change_on_youtube_once_the_typing_stops(cx: &mut TestAppContext) {
         window.input("Ownership, Explained", cx);
     });
     settle(cx);
-    cx.executor().advance_clock(DETAILS_SEND_DELAY / 2);
-    cx.run_until_parked();
-    // A pause shorter than the wait: what comes next goes with it, once that waited.
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         window.click("publish-description", cx);
         window.input("Links below.", cx);
     });
     settle(cx);
-    cx.executor().advance_clock(DETAILS_SEND_DELAY / 2);
-    cx.run_until_parked();
-    assert_eq!(service.read_with(cx, |s, _| s.details_sync(&youtube_id).cloned()), None, "still waiting");
+    assert_eq!(service.read_with(cx, |s, _| s.details_sync(&youtube_id).cloned()), None, "not saved yet");
     assert_eq!(details_on_youtube(cx, &service, &youtube_id), uploaded);
 
-    send_details(cx, &service, &youtube_id);
+    send_details(cx, &panel, &service, &youtube_id);
     let on_youtube = details_on_youtube(cx, &service, &youtube_id);
     assert_eq!(on_youtube.title, "Ownership, Explained");
     assert_eq!(on_youtube.description, "Links below.");
@@ -1622,41 +1629,12 @@ fn details_change_on_youtube_once_the_typing_stops(cx: &mut TestAppContext) {
         window.press("enter", cx);
     });
     settle(cx);
-    send_details(cx, &service, &youtube_id);
+    send_details(cx, &panel, &service, &youtube_id);
     assert_eq!(details_on_youtube(cx, &service, &youtube_id).tags, ["rust"]);
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         assert!(window.try_find("youtube-details-sync").is_none(), "YouTube has the form’s details");
     });
-}
-
-#[gpui_kit::test]
-fn details_wait_while_the_typing_goes_on(cx: &mut TestAppContext) {
-    let Some(emulators) = Emulators::start() else { return };
-    let workspace = Workspace::open(cx, emulators.backend());
-    workspace.sign_in(cx, "creator@example.com");
-    let service = workspace.service.clone();
-    let (video_id, youtube_id) = uploaded_without_thumbnail(cx, &workspace);
-    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
-    window(cx, handle, |window, cx| {
-        window.render_frame(cx);
-        window.click("publish-description", cx);
-        window.input("Links", cx);
-    });
-    settle(cx);
-    cx.executor().advance_clock(DETAILS_SEND_DELAY / 2);
-    cx.run_until_parked();
-    // Typing again, faster than the form saves, past when "Links" would have gone.
-    for word in [" below", " and", " in", " the", " pinned", " comment."] {
-        window(cx, handle, |window, cx| window.input(word, cx));
-        cx.executor().advance_clock(Duration::from_millis(300));
-        cx.run_until_parked();
-    }
-    assert_eq!(service.read_with(cx, |s, _| s.details_sync(&youtube_id).cloned()), None, "still waiting");
-    assert_eq!(details_on_youtube(cx, &service, &youtube_id).description, "");
-    settle(cx);
-    send_details(cx, &service, &youtube_id);
-    assert_eq!(details_on_youtube(cx, &service, &youtube_id).description, "Links below and in the pinned comment.");
 }
 
 #[gpui_kit::test]
@@ -1698,7 +1676,7 @@ fn details_youtube_refused_go_with_the_next_try(cx: &mut TestAppContext) {
     workspace.sign_in(cx, "creator@example.com");
     let service = workspace.service.clone();
     let (video_id, youtube_id) = uploaded_without_thumbnail(cx, &workspace);
-    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
     emulators.inject_fault(json!({"method": "PUT", "path": "/youtube/v3/videos", "status": 503}));
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
@@ -1706,7 +1684,7 @@ fn details_youtube_refused_go_with_the_next_try(cx: &mut TestAppContext) {
         window.input("Links below.", cx);
     });
     settle(cx);
-    cx.executor().advance_clock(DETAILS_SEND_DELAY);
+    save(cx, &panel);
     let problem = wait_until(cx, "the refusal", |cx| {
         service.read_with(cx, |s, _| match s.details_sync(&youtube_id) {
             Some(DetailsSync::Failed { problem, reconnect: None }) => Some(problem.clone()),
@@ -1720,13 +1698,13 @@ fn details_youtube_refused_go_with_the_next_try(cx: &mut TestAppContext) {
         assert!(window.within("youtube-details-sync").find("details-try-again").visible());
     });
 
-    // The next change takes the one that didn't get there along.
+    // The next save takes the one that didn't get there along.
     window(cx, handle, |window, cx| {
         window.click("publish-title", cx);
         window.input("Autocomplete, Explained", cx);
     });
     settle(cx);
-    send_details(cx, &service, &youtube_id);
+    send_details(cx, &panel, &service, &youtube_id);
     let on_youtube = details_on_youtube(cx, &service, &youtube_id);
     assert_eq!(
         (on_youtube.title.as_str(), on_youtube.description.as_str()),
@@ -1740,7 +1718,7 @@ fn details_youtube_refused_go_with_the_next_try(cx: &mut TestAppContext) {
         window.input(" More soon.", cx);
     });
     settle(cx);
-    cx.executor().advance_clock(DETAILS_SEND_DELAY);
+    save(cx, &panel);
     wait_until(cx, "the refusal", |cx| {
         service
             .read_with(cx, |s, _| matches!(s.details_sync(&youtube_id), Some(DetailsSync::Failed { .. })).then_some(()))
@@ -1768,15 +1746,14 @@ fn an_older_sign_in_reconnects_to_change_the_details(cx: &mut TestAppContext) {
     CredentialStore::new(&path).save(&login).unwrap();
     let service = workspace.restart(cx);
 
-    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         window.click("publish-description", cx);
         window.input("Links below.", cx);
     });
     settle(cx);
-    cx.executor().advance_clock(DETAILS_SEND_DELAY);
-    cx.run_until_parked();
+    save(cx, &panel);
     let problem = service.read_with(cx, |s, _| match s.details_sync(&youtube_id) {
         Some(DetailsSync::Failed { problem, reconnect: Some(_) }) => problem.clone(),
         other => panic!("expected a reconnect, got {other:?}"),
@@ -1799,7 +1776,7 @@ fn an_older_sign_in_reconnects_to_change_the_details(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn details_changed_in_youtube_studio_show_beside_the_form(cx: &mut TestAppContext) {
+fn details_changed_in_youtube_studio_come_into_the_form(cx: &mut TestAppContext) {
     let Some(emulators) = Emulators::start() else { return };
     let workspace = Workspace::open(cx, emulators.backend());
     workspace.sign_in(cx, "creator@example.com");
@@ -1810,14 +1787,16 @@ fn details_changed_in_youtube_studio_show_beside_the_form(cx: &mut TestAppContex
     let studio = DetailsChange { description: Some("Sponsored by Example.".into()), ..DetailsChange::default() };
     client.set_details(&youtube_id, &studio).unwrap();
 
-    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
     wait_until(cx, "YouTube’s details", |cx| {
         service.read_with(cx, |s, _| s.youtube_video(&youtube_id).filter(|info| !info.description.is_empty()).map(drop))
     });
+    cx.run_until_parked();
+    // The form hadn't changed the description: it takes YouTube's.
+    assert_eq!(workspace.video(cx, video_id).publish.description, "Sponsored by Example.");
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
-        assert!(window.find("youtube-details-sync").visible());
-        assert!(window.within("youtube-details-sync").find("details-send").visible());
+        assert!(window.try_find("youtube-details-sync").is_none(), "nothing to save");
     });
 
     // A tag added in Rushes goes alone: the Studio description stays on YouTube.
@@ -1827,14 +1806,14 @@ fn details_changed_in_youtube_studio_show_beside_the_form(cx: &mut TestAppContex
         window.press("enter", cx);
     });
     settle(cx);
-    send_details(cx, &service, &youtube_id);
+    send_details(cx, &panel, &service, &youtube_id);
     let on_youtube = details_on_youtube(cx, &service, &youtube_id);
     assert_eq!(
         (on_youtube.description.as_str(), on_youtube.tags.as_slice()),
         ("Sponsored by Example.", ["ai".to_owned()].as_slice())
     );
 
-    // The form takes YouTube's description, over an edit to it the form hadn't saved yet.
+    // The form takes YouTube's description back, over an edit to it the form hadn't kept yet.
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         window.click("publish-description", cx);
@@ -1846,8 +1825,6 @@ fn details_changed_in_youtube_studio_show_beside_the_form(cx: &mut TestAppContex
         window.within("youtube-details-sync").click("details-use-youtube", cx);
     });
     settle(cx);
-    cx.executor().advance_clock(DETAILS_SEND_DELAY);
-    cx.run_until_parked();
     assert_eq!(workspace.video(cx, video_id).publish.description, "Sponsored by Example.");
     assert_eq!(details_on_youtube(cx, &service, &youtube_id).description, "Sponsored by Example.");
     window(cx, handle, |window, cx| {
@@ -1855,29 +1832,18 @@ fn details_changed_in_youtube_studio_show_beside_the_form(cx: &mut TestAppContex
         assert!(window.try_find("youtube-details-sync").is_none(), "the form has YouTube’s details");
     });
 
-    // Renamed in YouTube Studio: the form's title goes back on request.
+    // Renamed in YouTube Studio: coming back later asks YouTube again, and the form follows.
     let studio = DetailsChange { title: Some("Renamed in Studio".into()), ..DetailsChange::default() };
     client.set_details(&youtube_id, &studio).unwrap();
-    // Coming back later asks YouTube again.
     cx.executor().advance_clock(Duration::from_secs(31));
     let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
     wait_until(cx, "YouTube’s title", |cx| {
-        service.read_with(cx, |s, _| {
-            s.youtube_video(&youtube_id).filter(|info| info.title == "Renamed in Studio").map(drop)
-        })
+        (workspace.video(cx, video_id).publish.title == "Renamed in Studio").then_some(())
     });
-    window(cx, handle, |window, cx| {
-        window.render_frame(cx);
-        window.within("youtube-details-sync").click("details-send", cx);
-    });
-    wait_until(cx, "the form’s title on YouTube", |cx| {
-        (details_on_youtube(cx, &service, &youtube_id).title == "It’s Just Autocomplete").then_some(())
-    });
-    assert_eq!(details_on_youtube(cx, &service, &youtube_id).description, "Sponsored by Example.");
     cx.run_until_parked();
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
-        assert!(window.try_find("youtube-details-sync").is_none(), "YouTube has the form’s details");
+        assert!(window.try_find("youtube-details-sync").is_none(), "the form has YouTube’s details");
     });
 }
 
@@ -1888,9 +1854,9 @@ fn an_image_chosen_again_while_the_last_one_sends_follows_it(cx: &mut TestAppCon
     workspace.sign_in(cx, "creator@example.com");
     let service = workspace.service.clone();
     let (video_id, youtube_id) = uploaded_without_thumbnail(cx, &workspace);
-    let (handle, _panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
+    let (handle, panel) = open(cx, |window, cx| cx.new(|cx| PublishPanel::new(video_id, window, cx)));
     // YouTube refuses the first send; the same file chosen again meanwhile (it may
-    // have new contents) goes once that one is done.
+    // have new contents) is saved again, and goes once that one is done.
     emulators.inject_fault(
         json!({"method": "POST", "path": "/upload/youtube/v3/thumbnails/set", "status": 403, "reason": "forbidden"}),
     );
@@ -1898,8 +1864,15 @@ fn an_image_chosen_again_while_the_last_one_sends_follows_it(cx: &mut TestAppCon
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         drop_files(window, "thumbnail-drop", vec![image.clone()], cx);
+    });
+    settle(cx);
+    panel.update(cx, |panel, cx| panel.save_to_youtube(cx));
+    window(cx, handle, |window, cx| {
+        window.render_frame(cx);
         drop_files(window, "thumbnail-drop", vec![image.clone()], cx);
     });
+    settle(cx);
+    service.update(cx, |service, cx| service.set_youtube_thumbnail(video_id, cx));
     let link = wait_until(cx, "the thumbnail on YouTube", |cx| {
         workspace.video(cx, video_id).youtube.filter(|link| link.thumbnail.is_some())
     });

@@ -284,6 +284,22 @@ pub struct YoutubeLink {
     /// when it isn't scheduled, or before Rushes recorded schedules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_at: Option<DateTime<Utc>>,
+    /// The title, description, tags and category YouTube last had; `None` before
+    /// Rushes recorded them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<YoutubeDetails>,
+}
+
+/// What viewers read about a video on YouTube.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct YoutubeDetails {
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub category_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

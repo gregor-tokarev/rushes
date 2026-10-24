@@ -32,7 +32,7 @@ use rushes_core::{RunStatus, VideoId, VideoRow, VideoStatus, ViewId};
 use crate::ai_edit::PipelinesPage;
 use crate::database::{DatabaseEvent, DatabasePanel};
 use crate::onboarding::Onboarding;
-use crate::publish::{AccountBadge, UploadsPage};
+use crate::publish::{AccountBadge, SaveToYoutube, UploadsPage};
 use crate::route::{Route, SettingsSection, VideoTab};
 use crate::settings_page::SettingsPage;
 use crate::state::{AppEvent, AppState, Problem, Remedy, Severity};
@@ -111,6 +111,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-2", ShowNotes, None),
         KeyBinding::new("secondary-3", ShowFootage, None),
         KeyBinding::new("secondary-4", ShowPublish, None),
+        KeyBinding::new("secondary-s", SaveToYoutube, None),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-[", GoBack, None),
         #[cfg(target_os = "macos")]
@@ -478,6 +479,13 @@ impl Workspace {
         self.state.update(cx, |state, cx| state.open_video(id, tab, cx));
     }
 
+    /// Saves the Publish tab shown to the video on YouTube.
+    fn save_to_youtube(&mut self, _: &SaveToYoutube, _: &mut Window, cx: &mut Context<Self>) {
+        let Route::Video { tab: VideoTab::Publish, .. } = *self.state.read(cx).route() else { return };
+        let Some(panel) = self.video_page.as_ref().and_then(|page| page.read(cx).publish().cloned()) else { return };
+        panel.update(cx, |panel, cx| panel.save_to_youtube(cx));
+    }
+
     fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
         let route = self.state.read(cx).route().clone();
         let page: Option<AnyElement> = match route {
@@ -607,6 +615,7 @@ impl Render for Workspace {
                     .on_action(cx.listener(|this, _: &ShowNotes, _, cx| this.show_video_tab(VideoTab::Notes, cx)))
                     .on_action(cx.listener(|this, _: &ShowFootage, _, cx| this.show_video_tab(VideoTab::Footage, cx)))
                     .on_action(cx.listener(|this, _: &ShowPublish, _, cx| this.show_video_tab(VideoTab::Publish, cx)))
+                    .on_action(cx.listener(Self::save_to_youtube))
             })
             .size_full()
             .bg(cx.theme().background)

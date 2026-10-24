@@ -169,6 +169,7 @@ mod tests {
             uploaded_at: now,
             thumbnail: None,
             publish_at: None,
+            details: None,
         };
         let live = YoutubeState::Live(&link);
         assert_eq!(youtube(live, false), "Unlisted");

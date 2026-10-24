@@ -16,9 +16,7 @@ use gpui_kit::{
     size,
 };
 use publish_support::{Emulators, Workspace, wait_until};
-use rushes::publish::{
-    ChatMessage, ChatRole, DETAILS_SEND_DELAY, DetailsJob, PublishAssistant, PublishPanel, ThumbnailChat, ThumbnailJob,
-};
+use rushes::publish::{ChatMessage, ChatRole, DetailsJob, PublishAssistant, PublishPanel, ThumbnailChat, ThumbnailJob};
 use rushes_core::settings::YoutubeBackend;
 use rushes_core::{Block, BlockKind, DocumentKind, UploadStatus, VideoId};
 
@@ -162,7 +160,7 @@ fn the_agent_writes_the_details_and_undo_puts_them_back(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
-fn details_the_agent_writes_go_to_the_video_on_youtube(cx: &mut TestAppContext) {
+fn details_the_agent_writes_go_to_the_video_on_youtube_once_saved(cx: &mut TestAppContext) {
     if !tools_available() {
         return;
     }
@@ -188,14 +186,14 @@ fn details_the_agent_writes_go_to_the_video_on_youtube(cx: &mut TestAppContext) 
         let client = service.read_with(cx, |s, _| s.client()).unwrap();
         client.get_video(&youtube_id).unwrap().unwrap().details()
     };
+    let (handle, panel) = open_panel(cx, video_id);
     let sent = |cx: &mut TestAppContext| {
-        cx.executor().advance_clock(DETAILS_SEND_DELAY);
+        panel.update(cx, |panel, cx| panel.save_to_youtube(cx));
         wait_until(cx, "the details on YouTube", |cx| {
             service.read_with(cx, |s, _| s.details_sync(&youtube_id).is_none()).then_some(())
         });
     };
 
-    let (handle, _panel) = open_panel(cx, video_id);
     window(cx, handle, |window, cx| {
         window.render_frame(cx);
         window.click("write-details", cx);
