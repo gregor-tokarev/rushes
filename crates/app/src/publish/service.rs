@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt as _;
 use futures::channel::mpsc;
-use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Subscription, Task};
+use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, SharedString, Subscription};
 use rushes_core::settings::{self, YoutubeBackend};
 use rushes_core::{PublishChannel, UploadId, UploadJob, UploadStatus, Video, VideoId, YoutubeLink};
 use rushes_youtube::{
@@ -160,13 +160,14 @@ pub struct YoutubeService {
     /// YouTube videos whose thumbnail was chosen again while one was on its way, maybe
     /// the same file with new contents: it goes once that one is done.
     pub(super) thumbnails_chosen_again: HashSet<String>,
+    /// How many images were chosen for each video, for this run of the app: a
+    /// thumbnail YouTube took is recorded only when none was chosen since.
+    pub(super) thumbnail_choices: HashMap<VideoId, u64>,
     /// Changes of who can watch videos on their way to YouTube, or that YouTube didn't
     /// make, by YouTube video id, for this run of the app.
     pub(super) visibility: HashMap<String, VisibilitySync>,
     /// YouTube videos whose visibility changed again while a change was on its way.
     pub(super) visibility_changed_again: HashSet<String>,
-    /// Videos whose visibility changed while they uploaded again.
-    pub(super) visibility_after_upload: HashSet<VideoId>,
     /// How many visibility changes went to each YouTube video, by YouTube video id.
     pub(super) visibility_changes: HashMap<String, u64>,
     /// Changes of videos' details on their way to YouTube, or that YouTube didn't
@@ -174,8 +175,8 @@ pub struct YoutubeService {
     pub(super) details: HashMap<String, DetailsSync>,
     /// The details of videos that changed and didn't go to YouTube yet, by video.
     pub(super) details_waiting: HashMap<VideoId, DetailFields>,
-    /// The waits for the last change before details go, by video.
-    pub(super) details_timers: HashMap<VideoId, Task<()>>,
+    /// Videos whose details were saved again while a change was on its way.
+    pub(super) details_again: HashSet<VideoId>,
     /// How many details changes went to each YouTube video, by YouTube video id.
     pub(super) details_changes: HashMap<String, u64>,
     /// What YouTube answered the last details change of each YouTube video, by
@@ -355,13 +356,13 @@ impl YoutubeService {
             outcomes: HashMap::new(),
             thumbnails: HashMap::new(),
             thumbnails_chosen_again: HashSet::new(),
+            thumbnail_choices: HashMap::new(),
             visibility: HashMap::new(),
             visibility_changed_again: HashSet::new(),
-            visibility_after_upload: HashSet::new(),
             visibility_changes: HashMap::new(),
             details: HashMap::new(),
             details_waiting: HashMap::new(),
-            details_timers: HashMap::new(),
+            details_again: HashSet::new(),
             details_changes: HashMap::new(),
             details_answered: HashMap::new(),
             retired: HashMap::new(),

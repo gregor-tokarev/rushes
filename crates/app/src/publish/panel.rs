@@ -1,5 +1,6 @@
 //! The Publish tab: YouTube metadata on the left, account, file, thumbnail and the
-//! upload itself on the right.
+//! upload itself on the right. The form keeps its edits as they're made; for a
+//! video on YouTube, they go there when the creator saves them ([`SaveToYoutube`]).
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -25,7 +26,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Div, Entity, ExternalPaths, FontWeight, InteractiveElement as _,
     IntoElement, ObjectFit, ParentElement as _, PathPromptOptions, Pixels, Rems, Render, SharedString, Styled as _,
-    StyledImage as _, Subscription, Task, Window, canvas, div, img, rems,
+    StyledImage as _, Subscription, Task, Window, actions, canvas, div, img, rems,
 };
 use rushes_core::document::DEFAULT_WPM;
 use rushes_core::media::{self, MediaKind};
@@ -62,13 +63,25 @@ use crate::ui::date_field::{DateField, DateFieldEvent, DateFieldState};
 use crate::ui::path_prompt::{self, PathKind, PathRequest};
 use crate::ui::{menu_item, notification, scrolling_menu, state_tooltip, warning_text};
 
-/// Form edits are saved this long after the last keystroke.
+actions!(
+    publish,
+    [
+        /// Save the Publish tab's changes to the video on YouTube.
+        SaveToYoutube,
+    ]
+);
+
+/// Form edits are kept this long after the last keystroke.
 const SAVE_DELAY: Duration = Duration::from_millis(500);
 const PRIVACY_HELP: [&str; 3] =
     ["Only you can watch it.", "Anyone with the link can watch it.", "Everyone can find and watch it."];
 /// What YouTube takes as a custom thumbnail.
 const THUMBNAIL_EXTENSIONS: [&str; 3] = ["jpg", "jpeg", "png"];
 const NOT_A_THUMBNAIL: &str = "Choose a JPG or PNG image.";
+/// What a section of a video on YouTube says about its changes.
+const SAVED_TO_YOUTUBE: &str = "Changes here go to the video on YouTube when you save.";
+/// A change the form has and the video on YouTube doesn't.
+const NOT_SAVED_TO_YOUTUBE: &str = "Not saved to YouTube";
 /// Wide enough for the cards' buttons; the form takes the rest of the page column.
 const SIDE_COLUMN_WIDTH: Rems = Rems(17.);
 /// The narrowest the form gets beside the side column.
@@ -126,8 +139,7 @@ impl FileTarget {
 enum YoutubeThumbnail {
     Sending,
     Set,
-    /// Chosen while YouTube couldn't be asked, or before Rushes set thumbnails of
-    /// uploaded videos.
+    /// Chosen and not saved to YouTube yet.
     NotSet,
     /// YouTube didn't take it; why, as the creator should read it.
     Failed(SharedString),
@@ -167,6 +179,21 @@ enum Field {
     Channel,
 }
 
+/// What the form has that the video on YouTube doesn't, as YouTube last said:
+/// what saving sends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Unsaved {
+    details: DetailFields,
+    visibility: bool,
+    thumbnail: bool,
+}
+
+impl Unsaved {
+    fn is_empty(self) -> bool {
+        self == Self::default()
+    }
+}
+
 /// The fields the form changed since its last save.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Edited(u16);
@@ -178,10 +205,6 @@ impl Edited {
 
     fn contains(self, field: Field) -> bool {
         self.0 & (1 << field as u8) != 0
-    }
-
-    fn remove(&mut self, field: Field) {
-        self.0 &= !(1 << field as u8);
     }
 
     fn is_empty(self) -> bool {
@@ -457,73 +480,130 @@ impl PublishPanel {
         self.service.update(cx, |service, cx| service.connect_for(video_id, cx));
     }
 
-    /// Saves pending form edits now instead of after the delay. Only the fields the form
-    /// changed are written, so a file chosen elsewhere meanwhile stays.
+    /// Keeps pending form edits now instead of after the delay. Only the fields the form
+    /// changed are written, so a file chosen elsewhere meanwhile stays. Nothing goes
+    /// to YouTube until the creator saves there.
     pub fn save_pending(&mut self, cx: &mut App) {
-        self.save_edits(cx);
-    }
-
-    /// [`Self::save_pending`]; returns whether a new visibility went to YouTube with it.
-    fn save_edits(&mut self, cx: &mut App) -> bool {
         if self.edited.is_empty() {
-            return false;
+            return;
         }
         let edited = std::mem::take(&mut self.edited);
-        let Some(mut video) = self.state.read(cx).video(self.video_id).cloned() else { return false };
+        let Some(mut video) = self.state.read(cx).video(self.video_id).cloned() else { return };
         let publish = edited.merge(&video.publish, &self.draft);
         if video.publish == publish {
-            return false;
+            return;
         }
-        let visibility_changed =
-            (video.publish.privacy, video.publish.publish_at) != (publish.privacy, publish.publish_at);
         let details = rules::details(&video);
         video.publish = publish;
         let details_changed = DetailFields::between(&details, &rules::details(&video));
         self.state.update(cx, |state, cx| state.update_video(video, cx));
-        // Who can watch the video changes on YouTube too, or on the video an upload
-        // under way puts there; so do the details, once the creator stops changing them.
-        let video_id = self.video_id;
-        if visibility_changed {
-            self.service.update(cx, |service, cx| service.set_youtube_visibility(video_id, cx));
-        }
         if !details_changed.is_empty() {
+            let video_id = self.video_id;
             self.service.update(cx, |service, cx| service.change_youtube_details(video_id, details_changed, cx));
         }
-        visibility_changed
     }
 
-    /// Sends who can watch the video to YouTube, after it didn't get there or YouTube
-    /// has another.
-    fn send_visibility(&mut self, cx: &mut Context<Self>) {
-        if !self.save_edits(cx) {
-            let video_id = self.video_id;
-            self.service.update(cx, |service, cx| service.set_youtube_visibility(video_id, cx));
+    /// What saving sends to the video on YouTube; nothing while it isn't there.
+    fn unsaved(&self, cx: &App) -> Unsaved {
+        let Some(video) = self.draft_video(cx).filter(|video| video.youtube.is_some()) else {
+            return Unsaved::default();
+        };
+        let service = self.service.read(cx);
+        Unsaved {
+            details: service.unsaved_details(&video),
+            visibility: service.unsaved_visibility(&video),
+            thumbnail: service.unsaved_thumbnail(&video),
         }
     }
 
-    /// Sends the details to YouTube now, `fields` with those waiting: after they
-    /// didn't get there, or YouTube has others.
-    fn send_details(&mut self, fields: DetailFields, cx: &mut Context<Self>) {
+    /// Whether a change is on its way to the video on YouTube.
+    fn is_saving(&self, cx: &App) -> bool {
+        let Some(link) = self.state.read(cx).video(self.video_id).and_then(|video| video.youtube.as_ref()) else {
+            return false;
+        };
+        let service = self.service.read(cx);
+        service.details_sync(&link.video_id) == Some(&DetailsSync::Sending)
+            || service.visibility_sync(&link.video_id) == Some(&VisibilitySync::Sending)
+            || matches!(service.thumbnail_sync(&link.video_id), Some(ThumbnailSync::Sending(_)))
+    }
+
+    /// Sends what the form has that the video on YouTube doesn't: the details that
+    /// differ, who can watch it and the thumbnail. Nothing while a change is on its
+    /// way, or while the video uploads again.
+    pub fn save_to_youtube(&mut self, cx: &mut Context<Self>) {
+        let unsaved = self.unsaved(cx);
+        if unsaved.is_empty() || self.is_saving(cx) || self.is_uploading(cx) {
+            return;
+        }
+        self.save_pending(cx);
+        let video_id = self.video_id;
+        self.service.update(cx, |service, cx| {
+            if !unsaved.details.is_empty() {
+                service.send_youtube_details(video_id, unsaved.details, cx);
+            }
+            if unsaved.visibility {
+                service.set_youtube_visibility(video_id, cx);
+            }
+            if unsaved.thumbnail {
+                service.set_youtube_thumbnail(video_id, cx);
+            }
+        });
+    }
+
+    /// The Publish tab's Save, beside the video page's tabs, where it stays in view
+    /// however far the form scrolls: `None` while the video isn't on YouTube. It
+    /// can be pressed once the form has something YouTube doesn't.
+    pub fn save_button(panel: &Entity<Self>, id: SharedString, cx: &App) -> Option<AnyElement> {
+        let this = panel.read(cx);
+        if !this.uploaded_before(cx) {
+            return None;
+        }
+        let saving = this.is_saving(cx);
+        let reason = if this.is_uploading(cx) {
+            Some("Save once the upload finishes.")
+        } else if !saving && this.unsaved(cx).is_empty() {
+            Some("No changes to save. YouTube has what’s here.")
+        } else {
+            None
+        };
+        let panel = panel.clone();
+        let button = Button::new(id.clone())
+            .label(if saving { "Saving…" } else { "Save" })
+            .primary()
+            .small()
+            .loading(saving)
+            .disabled(saving || reason.is_some())
+            .when(reason.is_none() && !saving, |this| {
+                this.tooltip_with_action("Save the changes to YouTube", &SaveToYoutube, None)
+            })
+            .on_click(move |_, _, cx| panel.update(cx, |panel, cx| panel.save_to_youtube(cx)));
+        Some(
+            state_tooltip(SharedString::from(format!("{id}-reason")), reason.map(SharedString::from), button)
+                .into_any_element(),
+        )
+    }
+
+    /// Sends who can watch the video to YouTube again, after it didn't get there.
+    fn send_visibility(&mut self, cx: &mut Context<Self>) {
+        self.save_pending(cx);
+        let video_id = self.video_id;
+        self.service.update(cx, |service, cx| service.set_youtube_visibility(video_id, cx));
+    }
+
+    /// Sends the details YouTube doesn't have to it again, after they didn't get there.
+    fn send_details(&mut self, cx: &mut Context<Self>) {
+        let fields = self.unsaved(cx).details;
         self.save_pending(cx);
         let video_id = self.video_id;
         self.service.update(cx, |service, cx| service.send_youtube_details(video_id, fields, cx));
     }
 
-    /// Takes the details YouTube has into the form where they differ. Edits of the
-    /// form's own to those, waiting to be saved, go: the creator chose YouTube's.
+    /// Takes the details YouTube has into the form where they differ, also over
+    /// edits typed a moment ago: the creator chose YouTube's.
     fn use_youtube_details(&mut self, cx: &mut Context<Self>) {
+        self.save_pending(cx);
         let video_id = self.video_id;
-        let taken = self.service.update(cx, |service, cx| service.use_youtube_details(video_id, cx));
-        for (taken, field) in [
-            (taken.title, Field::Title),
-            (taken.description, Field::Description),
-            (taken.tags, Field::Tags),
-            (taken.category, Field::Category),
-        ] {
-            if taken {
-                self.edited.remove(field);
-            }
-        }
+        self.service.update(cx, |service, cx| service.use_youtube_details(video_id, cx));
     }
 
     fn schedule_save(&mut self, field: Field, cx: &mut Context<Self>) {
@@ -534,11 +614,6 @@ impl PublishPanel {
         {
             let video_id = self.video_id;
             assistant.update(cx, |assistant, cx| assistant.dismiss_details(video_id, cx));
-        }
-        // Details waiting to go to YouTube wait for this change too.
-        if matches!(field, Field::Title | Field::Description | Field::Tags | Field::Category) {
-            let video_id = self.video_id;
-            self.service.update(cx, |service, cx| service.postpone_youtube_details(video_id, cx));
         }
         self.edited.insert(field);
         self.save_task = Some(cx.spawn(async move |this, cx| {
@@ -793,18 +868,18 @@ impl PublishPanel {
             window.push_notification(notification::warning(NOT_A_THUMBNAIL, cx), cx);
             return;
         }
-        let chosen = path.is_some();
+        // Saving sends it to the video on YouTube; an upload under way takes it to
+        // its new video when it finishes.
+        let video_id = self.video_id;
+        self.service.update(cx, |service, cx| service.choose_youtube_thumbnail(video_id, path.as_deref(), cx));
         self.draft.thumbnail = path;
         self.thumbnail_size = None;
         self.refresh_thumbnail(cx);
         self.schedule_save(Field::Thumbnail, cx);
-        // An upload under way takes the image to YouTube when it finishes.
-        if chosen && self.uploaded_before(cx) && !self.is_uploading(cx) {
-            self.send_thumbnail(cx);
-        }
     }
 
-    /// Sets the chosen image as the thumbnail of the video on YouTube.
+    /// Sets the chosen image as the thumbnail of the video on YouTube again, after
+    /// YouTube didn't take it.
     fn send_thumbnail(&mut self, cx: &mut Context<Self>) {
         self.save_pending(cx);
         let video_id = self.video_id;
@@ -817,14 +892,16 @@ impl PublishPanel {
         if self.is_uploading(cx) {
             return None;
         }
-        let link = self.state.read(cx).video(self.video_id)?.youtube.as_ref()?;
+        let video = self.draft_video(cx)?;
+        let link = video.youtube.as_ref()?;
         let chosen = self.draft.thumbnail.as_ref();
-        Some(match (self.service.read(cx).thumbnail_sync(&link.video_id), chosen) {
+        let service = self.service.read(cx);
+        Some(match (service.thumbnail_sync(&link.video_id), chosen) {
             (Some(ThumbnailSync::Sending(_)), _) => YoutubeThumbnail::Sending,
             (Some(ThumbnailSync::Failed { image, problem }), Some(chosen)) if image == chosen => {
                 YoutubeThumbnail::Failed(problem.clone().into())
             }
-            (_, Some(chosen)) if link.thumbnail.as_ref() == Some(chosen) => YoutubeThumbnail::Set,
+            (_, Some(_)) if !service.unsaved_thumbnail(&video) => YoutubeThumbnail::Set,
             (_, Some(_)) => YoutubeThumbnail::NotSet,
             (_, None) if link.thumbnail.is_some() => YoutubeThumbnail::Kept,
             (_, None) => return None,
@@ -1068,13 +1145,13 @@ impl PublishPanel {
         }
         // Tests check which note is on screen.
         .test_support();
-        let video = self.state.read(cx).video(self.video_id);
-        let link = video.and_then(|video| video.youtube.clone());
+        let video = self.draft_video(cx);
+        let link = video.as_ref().and_then(|video| video.youtube.clone());
         let sync = link.as_ref().and_then(|link| self.service.read(cx).details_sync(&link.video_id).cloned());
-        // An upload under way takes the form's details to its new video.
+        // Changes made while the video uploads again wait for its new video.
         let other = video
             .filter(|_| !self.is_uploading(cx))
-            .and_then(|video| self.service.read(cx).other_details_on_youtube(video));
+            .and_then(|video| self.service.read(cx).other_details_on_youtube(&video));
         let status = match (sync, other) {
             (Some(sync), _) => Some(self.render_details_sync(sync, cx)),
             (None, Some((fields, _))) => Some(self.render_other_details(fields, writing, cx)),
@@ -1089,7 +1166,7 @@ impl PublishPanel {
                         .id("publish-details-note")
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Changes here go to the video on YouTube.")
+                        .child(SAVED_TO_YOUTUBE)
                         .test_support(),
                 )
             }))
@@ -1126,39 +1203,29 @@ impl PublishPanel {
             .children(status)
     }
 
-    /// YouTube has other details than the form: they didn't get there, or the
-    /// video changed in YouTube Studio. The form's go on request, or YouTube's
-    /// come into the form.
+    /// YouTube has other details than the form: changes not saved yet, or the
+    /// video changed in YouTube Studio. Saving sends the form's, or YouTube's come
+    /// into the form.
     fn render_other_details(&self, fields: DetailFields, writing: bool, cx: &mut Context<Self>) -> AnyElement {
         let detail = format!("On YouTube {} different.", fields.sentence_subject());
         let body = v_flex()
             .gap_2()
             .child(status_line(
-                IconName::TriangleAlert,
-                cx.theme().warning,
-                "Not on YouTube yet",
+                IconName::CircleDot,
+                cx.theme().muted_foreground,
+                NOT_SAVED_TO_YOUTUBE,
                 Some(detail.into()),
                 cx,
             ))
             .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("details-send")
-                            .label("Change on YouTube")
-                            .small()
-                            .outline()
-                            .disabled(writing)
-                            .on_click(cx.listener(move |this, _, _, cx| this.send_details(fields, cx))),
-                    )
-                    .child(
-                        Button::new("details-use-youtube")
-                            .label("Use YouTube’s")
-                            .small()
-                            .outline()
-                            .disabled(writing)
-                            .on_click(cx.listener(|this, _, _, cx| this.use_youtube_details(cx))),
-                    ),
+                h_flex().child(
+                    Button::new("details-use-youtube")
+                        .label("Use YouTube’s")
+                        .small()
+                        .outline()
+                        .disabled(writing)
+                        .on_click(cx.listener(|this, _, _, cx| this.use_youtube_details(cx))),
+                ),
             );
         // Tests check what the section says.
         div().id("youtube-details-sync").child(body).test_support().into_any_element()
@@ -1169,13 +1236,9 @@ impl PublishPanel {
     fn render_details_sync(&self, sync: DetailsSync, cx: &mut Context<Self>) -> AnyElement {
         let body = match sync {
             DetailsSync::Sending => sending_to_youtube(cx),
-            DetailsSync::Failed { problem, reconnect } => self.render_change_failed(
-                "details",
-                problem,
-                reconnect,
-                |this, cx| this.send_details(DetailFields::default(), cx),
-                cx,
-            ),
+            DetailsSync::Failed { problem, reconnect } => {
+                self.render_change_failed("details", problem, reconnect, Self::send_details, cx)
+            }
         };
         // Tests check what the section says.
         div().id("youtube-details-sync").child(body).test_support().into_any_element()
@@ -1273,7 +1336,14 @@ impl PublishPanel {
                     IconName::Sparkles,
                     theme.muted_foreground,
                     "Written with AI",
-                    Some("Read them over before you upload.".into()),
+                    Some(
+                        if self.uploaded_before(cx) {
+                            "Read them over before you save."
+                        } else {
+                            "Read them over before you upload."
+                        }
+                        .into(),
+                    ),
                     cx,
                 ),
                 vec![
@@ -1336,13 +1406,13 @@ impl PublishPanel {
         let scheduled = self.draft.publish_at.is_some();
         let privacy_ix = Privacy::ALL.iter().position(|privacy| *privacy == self.draft.privacy).unwrap_or(0);
         let google = self.service.read(cx).config().is_ok_and(|config| config.is_google());
-        let video = self.state.read(cx).video(self.video_id);
-        let link = video.and_then(|video| video.youtube.clone());
+        let video = self.draft_video(cx);
+        let link = video.as_ref().and_then(|video| video.youtube.clone());
         let sync = link.as_ref().and_then(|link| self.service.read(cx).visibility_sync(&link.video_id).cloned());
-        // An upload under way takes the form's choice to its new video.
+        // Changes made while the video uploads again wait for its new video.
         let other = video
             .filter(|_| !self.is_uploading(cx))
-            .and_then(|video| self.service.read(cx).other_visibility_on_youtube(video));
+            .and_then(|video| self.service.read(cx).other_visibility_on_youtube(&video));
         let status = match (sync, other) {
             (Some(sync), _) => Some(self.render_visibility_sync(sync, cx)),
             (None, Some(other)) => Some(self.render_other_visibility(other, cx)),
@@ -1357,7 +1427,7 @@ impl PublishPanel {
                         .id("publish-visibility-note")
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Changes here go to the video on YouTube.")
+                        .child(SAVED_TO_YOUTUBE)
                         .test_support(),
                 )
             }))
@@ -1423,33 +1493,31 @@ impl PublishPanel {
             })
     }
 
-    /// YouTube has `other` instead of the form's choice: it didn't get there, or the
-    /// video changed in YouTube Studio. The form's choice goes on request, unless
+    /// YouTube has `other` instead of the form's choice: a change not saved yet, or
+    /// the video changed in YouTube Studio. Saving sends the form's choice, unless
     /// its schedule is over: YouTube takes no schedule in the past.
     fn render_other_visibility(&self, other: Visibility, cx: &mut Context<Self>) -> AnyElement {
         let text = visibility_text(rules::core_privacy(other.privacy), other.publish_at);
         let mut chars = text.chars();
         let text: String = chars.next().map(|first| first.to_lowercase().chain(chars).collect()).unwrap_or_default();
         let over = self.draft.publish_at.is_some_and(|at| at <= Utc::now());
-        let (title, detail) = if over {
-            ("Changed on YouTube", format!("On YouTube it’s {text}. Turn off Schedule to choose who can watch it."))
+        let body = if over {
+            status_line(
+                IconName::TriangleAlert,
+                cx.theme().warning,
+                "Changed on YouTube",
+                Some(format!("On YouTube it’s {text}. Turn off Schedule to choose who can watch it.").into()),
+                cx,
+            )
         } else {
-            ("Not on YouTube yet", format!("On YouTube it’s {text}."))
+            status_line(
+                IconName::CircleDot,
+                cx.theme().muted_foreground,
+                NOT_SAVED_TO_YOUTUBE,
+                Some(format!("On YouTube it’s {text}.").into()),
+                cx,
+            )
         };
-        let body = v_flex()
-            .gap_2()
-            .child(status_line(IconName::TriangleAlert, cx.theme().warning, title, Some(detail.into()), cx))
-            .when(!over, |this| {
-                this.child(
-                    h_flex().child(
-                        Button::new("visibility-send")
-                            .label("Change on YouTube")
-                            .small()
-                            .outline()
-                            .on_click(cx.listener(|this, _, _, cx| this.send_visibility(cx))),
-                    ),
-                )
-            });
         // Tests check what the section says.
         div().id("youtube-visibility-sync").child(body).test_support().into_any_element()
     }
@@ -2478,28 +2546,30 @@ fn file_choices(footage_dir: &Path, cuts: &[PathBuf]) -> Vec<FileChoice> {
 /// The chosen thumbnail on YouTube, under the image on the Thumbnail card.
 fn render_youtube_thumbnail(state: YoutubeThumbnail, cx: &mut Context<PublishPanel>) -> AnyElement {
     let theme = cx.theme();
-    let send = |label: &'static str| {
-        h_flex().child(
-            Button::new("set-thumbnail-on-youtube")
-                .label(label)
-                .small()
-                .outline()
-                .on_click(cx.listener(|this, _, _, cx| this.send_thumbnail(cx))),
-        )
-    };
+    let try_again = h_flex().child(
+        Button::new("set-thumbnail-on-youtube")
+            .label("Try again")
+            .small()
+            .outline()
+            .on_click(cx.listener(|this, _, _, cx| this.send_thumbnail(cx))),
+    );
     let body = match state {
         YoutubeThumbnail::Sending => h_flex()
             .gap_2()
             .child(Spinner::new().small().color(theme.muted_foreground))
             .child(div().text_sm().child("Sending to YouTube…")),
         YoutubeThumbnail::Set => status_line(IconName::CircleCheck, theme.success, "On YouTube", None, cx),
-        YoutubeThumbnail::NotSet => {
-            v_flex().gap_2().child(help_text("YouTube doesn’t have this image yet.", cx)).child(send("Set on YouTube"))
-        }
+        YoutubeThumbnail::NotSet => status_line(
+            IconName::CircleDot,
+            theme.muted_foreground,
+            NOT_SAVED_TO_YOUTUBE,
+            Some("YouTube doesn’t have this image yet.".into()),
+            cx,
+        ),
         YoutubeThumbnail::Failed(problem) => v_flex()
             .gap_2()
             .child(status_line(IconName::TriangleAlert, theme.warning, "Not set on YouTube", Some(problem), cx))
-            .child(send("Try again")),
+            .child(try_again),
         YoutubeThumbnail::Kept => help_text("YouTube keeps its thumbnail until you choose another image.", cx),
     };
     // Tests check what the card says.

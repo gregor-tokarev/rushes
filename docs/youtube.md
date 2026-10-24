@@ -284,7 +284,8 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   window is activated while it shows, or the account connects, at most every 30 s per
   video; and every processing poll): "Private · goes public Mon, 12 Oct at 09:00", "Unlisted", ... It links
   to the video and to YouTube Studio. The Details and Visibility sections say that their
-  changes go to the video on YouTube; Audience says its answer applies to the next upload.
+  changes go to the video on YouTube when the creator saves; Audience says its answer
+  applies to the next upload.
   When YouTube answers that it has no such video (deleted in YouTube Studio, or
   removed by YouTube) and the connected channel is the one it was uploaded to, the video's
   link is dropped (`is_off_youtube`): the card says "Not on YouTube anymore" and offers a
@@ -337,25 +338,40 @@ The views draw Lucide icons outside GPUI Kit's default set (`Film`, `Image`, `Li
   three chapters and Shorts have none, so the button is disabled then and says why; when
   the chosen file is shorter than the list (its last chapter needs 10 s before the end),
   a warning says so.
-- **Changes after the upload** (`publish/visibility.rs`, `publish/details.rs`) go to the
-  video on YouTube with `videos.update`, which needs `MANAGE_SCOPE`
+- **Changes after the upload** (`publish/visibility.rs`, `publish/details.rs`,
+  `publish/thumbnail.rs`) wait for **Save**. The form keeps every edit at once (in the
+  database, so a restart keeps them too), but nothing goes to YouTube until the creator
+  saves. **Save** sits beside the video page's tabs while the Publish tab of a video on
+  YouTube shows (`PublishPanel::save_button`), so it stays in view however far the form
+  scrolls, and Ctrl/⌘+S (`SaveToYoutube`) does the same. It can be pressed once the form
+  has something YouTube doesn't: details that differ (trailing spaces and line breaks of
+  the description don't count), another visibility or schedule, or an image YouTube
+  doesn't have (also the same file chosen again). Otherwise its tooltip says why it's
+  disabled: nothing to save, or an upload of the video under way. While the changes are on
+  their way it reads "Saving…" and each section shows "Sending to YouTube…".
+- What YouTube has is recorded on the video's `YoutubeLink`: `privacy` and `publish_at`
+  as before, and `details` (title, description, tags, category) since this change. It's
+  recorded at the upload, from each save's answer and from each `videos.list`
+  (`on_youtube_video`). Unsaved changes are the form's differences from that record, so
+  they light up Save offline and after a restart. A field changed on YouTube since it was
+  recorded (in YouTube Studio, or a schedule that came) comes into the form, unless the
+  form changed that field too and hasn't saved it; then the form's edit stays and saving
+  sends it. Videos recorded before `details` existed compare with YouTube's answer, or
+  with the fields edited this run until YouTube answers.
+- Saving sends only what differs, with `videos.update`, which needs `MANAGE_SCOPE`
   (`youtube.force-ssl`); older sign-ins get "Reconnect" first, and the change goes once
-  signed in again. Who can watch and the schedule go when the form saves them. The title,
-  description, tags and category go `DETAILS_SEND_DELAY` (3 s) after the last change to
-  one of them (typing postpones it), so a description typed in bursts costs one update (50 quota units, plus 1
-  to read the snippet), and only the fields that changed go: `set_details` reads the
-  video's snippet and sends it back with those fields, so a description changed in
-  YouTube Studio stays when only the tags change in Rushes. **Write with AI…** and its
-  **Undo** go the same way. A change made while the video uploads goes to the video the
-  upload puts there, also after a resume. While a change is on its way the section shows
-  "Sending to YouTube…"; one that fails says why with **Try again** (or **Reconnect**),
-  and goes along with the next change. When YouTube has other details than the form (a
-  change that didn't get there, also in an earlier run, or one made in YouTube Studio;
-  trailing spaces and line breaks of the description don't count), the Details section
-  says which ("Not on YouTube yet · On YouTube the description is different.") and offers
-  **Change on YouTube** (sends the form's) and **Use YouTube’s** (takes YouTube's into the
-  form, over edits to those fields the form hadn't saved yet). The form keeps the creator's
-  choice until then.
+  signed in again. `set_details` reads the video's snippet and sends it back with the
+  changed fields, so what YouTube Studio changed in the others stays (50 quota units, plus
+  1 to read the snippet). **Write with AI…** and its **Undo** change the form the same way
+  typing does. Each section says what Save would change ("Not saved to YouTube · On
+  YouTube the title is different.", "On YouTube it’s private.", "YouTube doesn’t have
+  this image yet."), and Details offers **Use YouTube’s** (takes YouTube's into the form,
+  over edits typed a moment ago). A change that fails says why with **Try again** (or
+  **Reconnect**); Save stays enabled. Changes made while the video uploads wait for its new
+  video: the upload sends what the form had when it started (a resume keeps that), and
+  what changed since lights up Save once it's there. A visibility whose schedule is over
+  can't be saved (YouTube takes no schedule in the past): "Changed on YouTube · Turn off
+  Schedule to choose who can watch it."
 - **Schedule** forces private (YouTube makes the video public at the publish time) and
   restores the earlier visibility when turned off.
 - The Upload card lists what blocks an upload in every state, so a disabled **Upload to

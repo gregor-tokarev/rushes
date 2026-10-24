@@ -1,11 +1,11 @@
-//! Custom thumbnails of videos on YouTube: set when an upload finishes, and again
-//! whenever another image is chosen for a video that is already there.
+//! Custom thumbnails of videos on YouTube: set when an upload finishes, and when
+//! the creator saves another image chosen for a video that is already there.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui_kit::{AppContext as _, Context};
-use rushes_core::{UploadId, UploadStatus, VideoId};
+use rushes_core::{UploadId, UploadStatus, Video, VideoId};
 use rushes_youtube::{Error as YoutubeError, YoutubeClient};
 
 use super::service::{YoutubeService, describe_error};
@@ -29,6 +29,13 @@ pub(super) struct ThumbnailTarget {
     pub channel: String,
 }
 
+/// What is sent as a thumbnail: the image, as the form chose it last.
+struct SentImage {
+    path: PathBuf,
+    /// How many images had been chosen for the video when it went.
+    choice: u64,
+}
+
 impl YoutubeService {
     /// Where setting the thumbnail of the YouTube video `youtube_id` stands, while the
     /// image is on its way or after YouTube didn't take it.
@@ -47,6 +54,28 @@ impl YoutubeService {
             ThumbnailSync::Failed { problem, .. } => Some(problem),
             ThumbnailSync::Sending(_) => None,
         }
+    }
+
+    /// The form chose `image` for `video_id`, or none. The file YouTube's thumbnail
+    /// was set from, chosen again, may have new contents: the video no longer
+    /// records YouTube having it, so saving sends it, also after a restart.
+    pub fn choose_youtube_thumbnail(&mut self, video_id: VideoId, image: Option<&Path>, cx: &mut Context<Self>) {
+        *self.thumbnail_choices.entry(video_id).or_default() += 1;
+        let Some(mut video) = self.state.read(cx).video(video_id).cloned() else { return };
+        if let (Some(image), Some(link)) = (image, video.youtube.as_mut())
+            && link.thumbnail.as_deref() == Some(image)
+        {
+            link.thumbnail = None;
+            self.state.update(cx, |state, cx| state.update_video(video, cx));
+        }
+        cx.notify();
+    }
+
+    /// Whether saving sends the image `video` chooses to its video on YouTube: the
+    /// video doesn't record YouTube having it.
+    pub fn unsaved_thumbnail(&self, video: &Video) -> bool {
+        let (Some(link), Some(image)) = (&video.youtube, &video.publish.thumbnail) else { return false };
+        link.thumbnail.as_ref() != Some(image)
     }
 
     /// Sets the image chosen for `video_id` as the custom thumbnail of its video on
@@ -89,10 +118,12 @@ impl YoutubeService {
     ) {
         self.thumbnails.insert(target.youtube_id.clone(), ThumbnailSync::Sending(image.clone()));
         cx.notify();
+        let choice = self.thumbnail_choices.get(&target.video_id).copied().unwrap_or_default();
         cx.spawn(async move |this, cx| {
             let (youtube_id, sent) = (target.youtube_id.clone(), image.clone());
             let result = cx.background_spawn(async move { client.set_thumbnail(&youtube_id, &sent) }).await;
-            this.update(cx, |this, cx| this.on_thumbnail_sent(target, image, result.map(drop), announce, cx)).ok();
+            let sent = SentImage { path: image, choice };
+            this.update(cx, |this, cx| this.on_thumbnail_sent(target, sent, result.map(drop), announce, cx)).ok();
         })
         .detach();
     }
@@ -100,18 +131,22 @@ impl YoutubeService {
     fn on_thumbnail_sent(
         &mut self,
         target: ThumbnailTarget,
-        image: PathBuf,
+        sent: SentImage,
         result: Result<(), YoutubeError>,
         announce: bool,
         cx: &mut Context<Self>,
     ) {
+        let image = sent.path;
+        // An image chosen since (maybe the same file with new contents) isn't what went.
+        let chosen_since = self.thumbnail_choices.get(&target.video_id).copied().unwrap_or_default() != sent.choice;
         let video = self.state.read(cx).video(target.video_id).cloned();
         // The video may have gone, or uploaded again to another YouTube video.
         let video = video.filter(|video| video.youtube.as_ref().is_some_and(|link| link.video_id == target.youtube_id));
         match result {
             Ok(()) => {
                 self.thumbnails.remove(&target.youtube_id);
-                if let Some(mut video) = video.clone()
+                if !chosen_since
+                    && let Some(mut video) = video.clone()
                     && let Some(link) = video.youtube.as_mut()
                     && link.thumbnail.as_ref() != Some(&image)
                 {
@@ -138,11 +173,9 @@ impl YoutubeService {
             }
         }
         cx.notify();
-        // An image chosen while this one was on its way follows it: chosen again, or
-        // saved since (the form saves a moment after the choice).
+        // An image saved while this one was on its way follows it.
         let chosen_again = self.thumbnails_chosen_again.remove(&target.youtube_id);
-        let changed = video.as_ref().is_some_and(|video| video.publish.thumbnail.as_ref() != Some(&image));
-        if video.is_some() && (chosen_again || changed) {
+        if video.is_some() && chosen_again {
             self.set_youtube_thumbnail(target.video_id, cx);
         }
     }

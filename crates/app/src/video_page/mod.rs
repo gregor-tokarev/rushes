@@ -254,6 +254,10 @@ impl VideoPage {
         self.script.as_ref()
     }
 
+    pub fn publish(&self) -> Option<&Entity<PublishPanel>> {
+        self.publish.as_ref()
+    }
+
     pub fn notes(&self) -> Option<&Entity<DocumentTab>> {
         self.notes.as_ref()
     }
@@ -617,14 +621,20 @@ impl VideoPage {
             ))
     }
 
-    /// The tabs with the save state, the script menu of narrow windows and the
-    /// page menu after them. The copy `pinned` to the top of the page names its
+    /// The tabs with the save state, the script menu of narrow windows, the
+    /// Publish tab's Save and the page menu after them. The copy `pinned` to the top of the page names its
     /// parts apart from the strip in the page, which stays laid out under it.
     fn render_tabs(&self, wide: bool, pinned: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let id = |name: &str| SharedString::from(if pinned { format!("pinned-{name}") } else { name.to_string() });
         let selected = VideoTab::ALL.iter().position(|tab| *tab == self.tab).unwrap_or(0);
         // Without the rail, its content is one menu away next to the tabs.
         let script_menu = self.script.as_ref().filter(|_| !wide && self.tab == VideoTab::Script);
+        // Where it stays in view however far the form scrolls.
+        let publish_save = self
+            .publish
+            .as_ref()
+            .filter(|_| self.tab == VideoTab::Publish)
+            .and_then(|panel| PublishPanel::save_button(panel, id("publish-save"), cx));
         let unsaved = self.state.read(cx).is_save_failing(self.video_id)
             || [&self.script, &self.notes].into_iter().flatten().any(|tab| tab.read(cx).is_save_failing(cx));
         let tabs = TabBar::new(id("video-tabs"))
@@ -655,6 +665,7 @@ impl VideoPage {
                     .when_some(script_menu, |this, script| {
                         this.child(document::script_menu_button(id("script-menu"), script, cx))
                     })
+                    .children(publish_save)
                     .child(self.render_page_menu(id("page-menu"), cx)),
             )
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
