@@ -160,9 +160,9 @@ pub struct YoutubeService {
     /// YouTube videos whose thumbnail was chosen again while one was on its way, maybe
     /// the same file with new contents: it goes once that one is done.
     pub(super) thumbnails_chosen_again: HashSet<String>,
-    /// Videos on YouTube whose thumbnail was chosen since it last went there, maybe
-    /// the same file with new contents: saving sends it.
-    pub(super) thumbnails_chosen: HashSet<VideoId>,
+    /// How many images were chosen for each video, for this run of the app: a
+    /// thumbnail YouTube took is recorded only when none was chosen since.
+    pub(super) thumbnail_choices: HashMap<VideoId, u64>,
     /// Changes of who can watch videos on their way to YouTube, or that YouTube didn't
     /// make, by YouTube video id, for this run of the app.
     pub(super) visibility: HashMap<String, VisibilitySync>,
@@ -356,7 +356,7 @@ impl YoutubeService {
             outcomes: HashMap::new(),
             thumbnails: HashMap::new(),
             thumbnails_chosen_again: HashSet::new(),
-            thumbnails_chosen: HashSet::new(),
+            thumbnail_choices: HashMap::new(),
             visibility: HashMap::new(),
             visibility_changed_again: HashSet::new(),
             visibility_changes: HashMap::new(),

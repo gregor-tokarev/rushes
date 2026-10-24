@@ -7,7 +7,7 @@ use gpui_kit::{AppContext as _, Context};
 use rushes_core::{Privacy, Video, VideoId, VideoStatus};
 use rushes_youtube::{Error as YoutubeError, VideoInfo, Visibility};
 
-use super::details::record_details;
+use super::details::{DetailFields, record_details};
 use super::rules::{core_privacy, youtube_privacy};
 use super::service::{Changes, YoutubeService, describe_error};
 
@@ -271,7 +271,7 @@ impl YoutubeService {
             .filter(|video| video.youtube.as_ref().is_some_and(|link| link.video_id == youtube_id))
             .filter_map(|video| {
                 let mut changed = video.clone();
-                let mut any = record_details(&mut changed, &details);
+                let mut any = record_details(&mut changed, &details, DetailFields::default());
                 if !recorded(video, visibility) {
                     follow(&mut changed, visibility);
                     any = true;

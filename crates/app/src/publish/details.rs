@@ -261,9 +261,10 @@ impl YoutubeService {
                 if let Some(info) = self.remote.get_mut(&youtube_id) {
                     info.set_details(now.clone());
                 }
+                // What it changed there was the form's; edits made since stay.
                 if linked
                     && let Some(mut video) = self.state.read(cx).video(video_id).cloned()
-                    && record_details(&mut video, &now)
+                    && record_details(&mut video, &now, sent)
                 {
                     self.state.update(cx, |state, cx| state.update_video(video, cx));
                 }
@@ -370,18 +371,19 @@ fn take_details(video: &mut Video, fields: DetailFields, on_youtube: Details) {
     }
 }
 
-/// Records that YouTube has `on_youtube` for `video`. What changed there since
-/// the video last recorded it (in YouTube Studio) comes into its publish
-/// settings, unless the form changed it too and hasn't saved it to YouTube yet.
-/// Returns whether `video` changed.
-pub(super) fn record_details(video: &mut Video, on_youtube: &Details) -> bool {
+/// Records that YouTube has `on_youtube` for `video`, after a save of the form's
+/// `saved` fields (none for a lookup). What else changed there since the video
+/// last recorded it (in YouTube Studio) comes into its publish settings, unless
+/// the form changed it too and hasn't saved it to YouTube yet. Returns whether
+/// `video` changed.
+pub(super) fn record_details(video: &mut Video, on_youtube: &Details, saved: DetailFields) -> bool {
     let Some(link) = &video.youtube else { return false };
     let recorded = link.details.as_ref().map(rules::recorded_details);
     if recorded.as_ref() == Some(on_youtube) {
         return false;
     }
     if let Some(recorded) = recorded {
-        let changed_there = DetailFields::between(&recorded, on_youtube);
+        let changed_there = DetailFields::between(&recorded, on_youtube).without(saved);
         let changed_here = DetailFields::between(&rules::details(video), &recorded);
         take_details(video, changed_there.without(changed_here), on_youtube.clone());
     }

@@ -600,7 +600,7 @@ impl YoutubeService {
         let state = self.state.read(cx);
         self.details_waiting.retain(|video_id, _| state.video(*video_id).is_some());
         self.details_again.retain(|video_id| state.video(*video_id).is_some());
-        self.thumbnails_chosen.retain(|video_id| state.video(*video_id).is_some());
+        self.thumbnail_choices.retain(|video_id, _| state.video(*video_id).is_some());
         cx.emit(YoutubeEvent::UploadsChanged);
         cx.notify();
     }

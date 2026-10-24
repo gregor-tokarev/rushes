@@ -868,17 +868,14 @@ impl PublishPanel {
             window.push_notification(notification::warning(NOT_A_THUMBNAIL, cx), cx);
             return;
         }
-        let chosen = path.is_some();
+        // Saving sends it to the video on YouTube; an upload under way takes it to
+        // its new video when it finishes.
+        let video_id = self.video_id;
+        self.service.update(cx, |service, cx| service.choose_youtube_thumbnail(video_id, path.as_deref(), cx));
         self.draft.thumbnail = path;
         self.thumbnail_size = None;
         self.refresh_thumbnail(cx);
         self.schedule_save(Field::Thumbnail, cx);
-        // Saving sends it to the video on YouTube; an upload under way takes it to
-        // its new video when it finishes.
-        if self.uploaded_before(cx) {
-            let video_id = self.video_id;
-            self.service.update(cx, |service, cx| service.choose_youtube_thumbnail(video_id, chosen, cx));
-        }
     }
 
     /// Sets the chosen image as the thumbnail of the video on YouTube again, after
