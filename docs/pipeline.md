@@ -113,10 +113,13 @@ are saved separately for each agent. Thumbnail chats always use Codex.
 Codex runs as `codex exec --json --skip-git-repo-check --sandbox=workspace-write`,
 with `approval_policy="never"` and the prompt on stdin. Follow-ups use
 `codex exec ... resume -- <session_id> -`. Rushes' MCP server is passed as a TOML
-`mcp_servers` override, with a one-hour tool timeout; video-use receives its skill
+`mcp_servers` override, with a one-hour tool timeout and automatic tool approval; video-use receives its skill
 folder through `--add-dir`. Network access is enabled for the editing shell so
 video-use can transcribe. Instructions accompany every phase and both agents stream
-the same `AgentEvent`s. Process-group cancellation is shared.
+the same `AgentEvent`s, including paired MCP tool starts and results. Process-group cancellation is shared.
+Before launch, a short-lived app-server reads effective configuration locally via
+`config/read`, without remote MCP authentication discovery. Unrelated configured
+servers are explicitly disabled; plugin and app tools are disabled for the run.
 
 YouTube-details requests use a read-only sandbox, no shell or MCP servers, an
 ephemeral session and a temporary `--output-schema` file. The final assistant message

@@ -225,6 +225,30 @@ pub fn parse_codex_line(line: &str) -> Vec<AgentEvent> {
             is_error: item.get("exit_code").and_then(Value::as_i64).is_none_or(|code| code != 0),
             summary: truncate(str_field(item, "aggregated_output"), RESULT_SUMMARY_CHARS),
         }],
+        ("item.started", "mcp_tool_call") => {
+            let name = format!("mcp__{}__{}", str_field(item, "server"), str_field(item, "tool"));
+            vec![AgentEvent::ToolUse {
+                id: item_id(),
+                summary: tool_use_summary(&name, item.get("arguments").unwrap_or(&Value::Null)),
+                name,
+            }]
+        }
+        ("item.completed", "mcp_tool_call") => {
+            let result = item.get("result").filter(|result| !result.is_null());
+            let error = item.get("error").filter(|error| !error.is_null());
+            let summary = error
+                .and_then(|error| error.get("message").and_then(Value::as_str).map(str::to_owned))
+                .or_else(|| result.map(|result| content_text(result.get("content").unwrap_or(result))))
+                .or_else(|| error.map(Value::to_string))
+                .unwrap_or_default();
+            vec![AgentEvent::ToolResult {
+                tool_use_id: item_id(),
+                is_error: error.is_some()
+                    || str_field(item, "status") == "failed"
+                    || result.and_then(|result| result.get("isError")).and_then(Value::as_bool).unwrap_or(false),
+                summary: truncate(&summary, RESULT_SUMMARY_CHARS),
+            }]
+        }
         ("item.completed", "agent_message") => non_empty(str_field(item, "text"))
             .map(|text| AgentEvent::AssistantText { text: text.to_owned() })
             .into_iter()
@@ -240,7 +264,6 @@ pub fn parse_codex_line(line: &str) -> Vec<AgentEvent> {
                     changes.iter().map(|change| str_field(change, "path")).collect::<Vec<_>>().join(", ")
                 }),
                 "web_search" => non_empty(str_field(item, "query")).map(str::to_owned),
-                "mcp_tool_call" => Some(format!("{}/{}", str_field(item, "server"), str_field(item, "tool"))),
                 _ => None,
             };
             match summary {
