@@ -172,8 +172,9 @@ fn requirements<'a>(doctor: &'a Doctor, cx: &App) -> Vec<Requirement<'a>> {
         check: &doctor.agent,
         fix: match harness {
             AgentHarness::Codex => {
-                "Install it with `npm install -g @openai/codex` and run `codex` once to sign in, \
-              or set the Codex command in Settings > AI editing."
+                "Use your existing Codex installation (Vite+, Homebrew or npm). \
+                 Run `codex --version` in Terminal to check it, and run `codex` once to sign in. \
+                 Set a custom path in Settings > AI editing if needed, then Re-check."
             }
             AgentHarness::Claude => {
                 "Install it with `npm install -g @anthropic-ai/claude-code` and run `claude` once to sign in, \

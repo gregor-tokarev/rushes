@@ -3,7 +3,8 @@
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -50,34 +51,83 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let mut child = Command::new(program)
-        .args(args)
-        .envs(env.iter().map(|(key, value)| (key, value)))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut stdout = child.stdout.take()?;
-    // Read concurrently so a chatty child never blocks on a full pipe.
-    let reader = thread::spawn(move || {
-        let mut buf = Vec::new();
-        stdout.read_to_end(&mut buf).map(|_| buf)
-    });
+    run_captured_checked(program, args, env, timeout).ok()
+}
+
+/// Like [`run_captured`], with a reason when a launcher fails (for example, a
+/// JavaScript entrypoint whose Node runtime is missing from the desktop's PATH).
+pub(crate) fn run_captured_checked<I, S>(
+    program: &Path,
+    args: I,
+    env: &[(String, String)],
+    timeout: Duration,
+) -> Result<String, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut command = Command::new(program);
+    command.args(args).envs(env.iter().map(|(key, value)| (key, value)));
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    // Drain both pipes concurrently, including when a managed launcher starts a
+    // second process. Receiving, rather than joining, also bounds the pipe wait.
+    let stdout = capture_stream(child.stdout.take().expect("piped stdout"), u64::MAX);
+    let stderr = capture_stream(child.stderr.take().expect("piped stderr"), 4096);
     let deadline = Instant::now() + timeout;
+    let timed_out = || format!("timed out after {} seconds", timeout.as_secs());
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+            result => {
+                stop_capture(&mut child);
+                return Err(result.err().map_or_else(timed_out, |error| error.to_string()));
             }
         }
     };
-    let stdout = reader.join().ok()?.ok()?;
-    status.success().then(|| String::from_utf8_lossy(&stdout).into_owned())
+    let receive = |stream: mpsc::Receiver<std::io::Result<Vec<u8>>>| {
+        stream
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| timed_out())?
+            .map_err(|error| error.to_string())
+    };
+    let output = receive(stdout).and_then(|stdout| receive(stderr).map(|stderr| (stdout, stderr)));
+    let (stdout, stderr) = output.inspect_err(|_| stop_capture(&mut child))?;
+    if status.success() {
+        Ok(String::from_utf8_lossy(&stdout).into_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&stderr);
+        let detail: String =
+            stderr.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default().chars().take(500).collect();
+        Err(if detail.is_empty() { status.to_string() } else { format!("{status}: {detail}") })
+    }
+}
+
+fn capture_stream(mut stream: impl Read + Send + 'static, limit: u64) -> mpsc::Receiver<std::io::Result<Vec<u8>>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        let result = stream.by_ref().take(limit).read_to_end(&mut buf).and_then(|_| {
+            // Retain only the diagnostic prefix, but drain everything so the
+            // command can finish even when it writes more than a pipe holds.
+            std::io::copy(&mut stream, &mut std::io::sink()).map(|_| buf)
+        });
+        _ = tx.send(result);
+    });
+    rx
+}
+
+fn stop_capture(child: &mut Child) {
+    #[cfg(unix)]
+    // SAFETY: this process group was created for the captured command.
+    unsafe {
+        libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+    }
+    _ = child.kill();
+    _ = child.wait();
 }
 
 #[cfg(all(test, unix))]

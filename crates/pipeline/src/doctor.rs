@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::agent::{AgentConfig, AgentKind};
-use crate::exec::{find_executable, run_captured};
+use crate::exec::{find_executable, run_captured, run_captured_checked};
 
 const VERSION_TIMEOUT: Duration = Duration::from_secs(15);
 const ELEVENLABS_KEY: &str = "ELEVENLABS_API_KEY";
@@ -108,8 +108,9 @@ fn check_agent(config: &AgentConfig) -> Check {
     let Some(program) = config.resolve_command() else {
         return Check::fail(format!("{} not found", config.command.display()));
     };
-    let Some(output) = run_captured(&program, ["--version"], &config.env, VERSION_TIMEOUT) else {
-        return Check::fail(format!("{} does not run: --version failed", program.display()));
+    let output = match run_captured_checked(&program, ["--version"], &config.env, VERSION_TIMEOUT) {
+        Ok(output) => output,
+        Err(reason) => return Check::fail(format!("{} does not run: --version failed ({reason})", program.display())),
     };
     let version = first_line(&output);
     let name = match config.kind {

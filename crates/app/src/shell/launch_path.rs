@@ -1,10 +1,10 @@
 //! The `PATH` of an app started from Finder, the Dock or a desktop launcher.
 //!
 //! Such a start gets a bare `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin` on macOS), without
-//! Homebrew or the folders installers put user tools in, so ffmpeg, ffprobe and Claude
-//! Code would be missing although a terminal finds them. The AI edit's requirement
-//! checks and the agent (and the shell commands it runs) all inherit this process's
-//! `PATH`, so the usual install folders that exist are appended to it at startup.
+//! Homebrew or the folders installers put user tools in, so ffmpeg, ffprobe and the
+//! agent CLIs (or their Node runtime) can be missing although a terminal finds them.
+//! The AI edit's requirement checks and the agent (and the shell commands it runs)
+//! inherit this process's `PATH`, so existing install folders are appended at startup.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -19,8 +19,16 @@ const SYSTEM_TOOL_DIRS: &[&str] = &[
     "/snap/bin",
 ];
 
-/// The same, inside the home folder: Claude Code's installer, uv/pipx, npm, cargo.
-const HOME_TOOL_DIRS: &[&str] = &[".local/bin", ".claude/local", ".npm-global/bin", ".cargo/bin", "bin"];
+/// The same, inside the home folder: native installers, Vite+, npm and cargo.
+const HOME_TOOL_DIRS: &[&str] = &[
+    ".local/bin",
+    ".claude/local",
+    ".vite-plus/bin",
+    ".local/share/vite-plus/bin",
+    ".npm-global/bin",
+    ".cargo/bin",
+    "bin",
+];
 
 /// What a process without any `PATH` would search.
 const DEFAULT_PATH: &[&str] = &["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
@@ -32,7 +40,16 @@ const DEFAULT_PATH: &[&str] = &["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 pub fn extend_tool_path() {
     let home = std::env::var_os("HOME").filter(|home| !home.is_empty()).map(PathBuf::from);
     let current = std::env::var_os("PATH");
-    if let Some(path) = extended_path(current.as_deref(), &tool_dirs(home.as_deref()), |dir| dir.is_dir()) {
+    let mut candidates = Vec::new();
+    // Vite+ supports a single root, a split install, and XDG data directories.
+    // Keep the shim path: resolving its symlink to `vp` would lose the tool name.
+    for (name, suffix) in [("VP_HOME", "bin"), ("VP_BIN_DIR", ""), ("XDG_DATA_HOME", "vite-plus/bin")] {
+        if let Some(root) = std::env::var_os(name).map(PathBuf::from).filter(|root| root.is_absolute()) {
+            candidates.push(root.join(suffix));
+        }
+    }
+    candidates.extend(tool_dirs(home.as_deref()));
+    if let Some(path) = extended_path(current.as_deref(), &candidates, |dir| dir.is_dir()) {
         // SAFETY: `main` calls this before it starts any thread, so nothing reads the
         // environment concurrently.
         unsafe { std::env::set_var("PATH", path) };
