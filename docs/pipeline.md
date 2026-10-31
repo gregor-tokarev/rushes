@@ -293,7 +293,8 @@ in video-use's `.env`.
 
 - **Agent**: the selected CLI; `--version` must print `Claude Code` or start with
   `codex-cli `, matching the selection (any other program
-  answers `--version` too, but cannot run an edit). Login is not checked.
+  answers `--version` too, but cannot run an edit). Login is not checked. A failed
+  launch reports the OS error, exit status and first stderr line, or the timeout.
 - **Skill**: `SKILL.md` in the configured folder, default `~/.claude/skills/video-use`
   (symlinks resolved; the resolved folder is returned as `Doctor::skill_dir`).
 - **ffmpeg** and **ffprobe** on `PATH`.
@@ -307,8 +308,12 @@ in video-use's `.env`.
 An app started from a desktop launcher (Finder, a `.desktop` file) often gets a minimal
 `PATH` without `~/.local/bin` or `/opt/homebrew/bin`. The Rushes app appends the usual
 install folders that exist (Homebrew, `/usr/local/bin`, `~/.local/bin`, `~/.claude/local`,
-`~/.npm-global/bin`, `~/.cargo/bin`, `~/bin`) to its own `PATH` at startup
-(`shell::extend_tool_path`), and the agent's shell inherits it. Tools elsewhere need
+`~/.npm-global/bin`, `~/.cargo/bin`, `~/bin`, and Vite+'s `~/.vite-plus/bin` and
+`~/.local/share/vite-plus/bin`) to its own `PATH` at startup (`shell::extend_tool_path`).
+Absolute `VP_HOME`, `VP_BIN_DIR`, and `XDG_DATA_HOME` overrides also supply Vite+ shim
+directories, following [Vite+'s installation layouts](https://www.viteplus.dev/guide/global-cli).
+Existing PATH entries keep their precedence. The checks, agent and its shell inherit
+the same PATH, including Node for JavaScript CLI entrypoints. Tools elsewhere need
 `command` set to the agent's full path, or a complete `PATH` in `AgentConfig::env`.
 
 ## Configuration
