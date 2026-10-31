@@ -1,7 +1,7 @@
 //! AI video-editing pipelines for Rushes.
 //!
-//! Drives a headless coding agent (Claude Code: `claude -p --output-format
-//! stream-json`) that edits with Rushes' own tools (`rushes-edit`, over MCP) or with
+//! Drives a headless coding agent (Codex: `codex exec --json`, or Claude Code:
+//! `claude -p --output-format stream-json`) that edits with Rushes' own tools (`rushes-edit`, over MCP) or with
 //! the [video-use](https://github.com/browser-use/video-use) skill. The same agent
 //! writes a video's YouTube details ([`write_details`]), and Codex draws its
 //! thumbnails in a chat that remembers earlier turns ([`generate_thumbnails`]).
@@ -9,6 +9,7 @@
 //! a cancellation flag. See `docs/pipeline.md`.
 
 mod agent;
+mod codex;
 mod details;
 mod doctor;
 mod error;
@@ -19,7 +20,7 @@ mod pipeline;
 mod process;
 mod thumbnails;
 
-pub use agent::{AgentConfig, DEFAULT_ALLOWED_TOOLS, DEFAULT_COMMAND, DEFAULT_PERMISSION_MODE};
+pub use agent::{AgentConfig, AgentKind, DEFAULT_ALLOWED_TOOLS, DEFAULT_COMMAND, DEFAULT_PERMISSION_MODE};
 pub use details::{
     DETAILS_SCHEMA, DetailsRequest, VideoDetails, WrittenDetails, details_prompt, has_transcript, parse_details,
     read_edit_notes, read_transcript, write_details,

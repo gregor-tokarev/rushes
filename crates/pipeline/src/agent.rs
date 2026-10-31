@@ -1,4 +1,4 @@
-//! Running the coding agent (Claude Code in print mode) and streaming its events.
+//! Running Claude Code or Codex and streaming their events.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -16,6 +16,13 @@ use crate::exec::find_executable;
 use crate::process::AgentProcess;
 
 pub const DEFAULT_COMMAND: &str = "claude";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AgentKind {
+    #[default]
+    Claude,
+    Codex,
+}
 /// Accepts file edits inside the working directories; every other tool must be in
 /// [`AgentConfig::allowed_tools`] because nobody can answer a permission prompt.
 pub const DEFAULT_PERMISSION_MODE: &str = "acceptEdits";
@@ -54,6 +61,7 @@ done
 /// How to launch the agent CLI.
 #[derive(Clone, PartialEq)]
 pub struct AgentConfig {
+    pub kind: AgentKind,
     /// Executable: a bare name looked up on `PATH`, or a path.
     pub command: PathBuf,
     /// `--model` alias or full name; `None` keeps the CLI default.
@@ -78,6 +86,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
+            kind: AgentKind::default(),
             command: PathBuf::from(DEFAULT_COMMAND),
             model: None,
             permission_mode: DEFAULT_PERMISSION_MODE.to_owned(),
@@ -96,6 +105,7 @@ impl fmt::Debug for AgentConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let env: Vec<&str> = self.env.iter().map(|(name, _)| name.as_str()).collect();
         f.debug_struct("AgentConfig")
+            .field("kind", &self.kind)
             .field("command", &self.command)
             .field("model", &self.model)
             .field("permission_mode", &self.permission_mode)
@@ -257,6 +267,9 @@ pub(crate) fn run_agent(
     on_event: &mut dyn FnMut(&AgentEvent),
     cancel: &AtomicBool,
 ) -> Result<(ExitStatus, AgentRun), PipelineError> {
+    if config.kind == AgentKind::Codex {
+        return crate::codex::run(config, program, invocation, on_event, cancel);
+    }
     // The config's environment comes last, so it wins over the invocation's.
     let env: Vec<(String, String)> = invocation.env.iter().chain(&config.env).cloned().collect();
     let spec = ProcessSpec {

@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::agent::AgentConfig;
+use crate::agent::{AgentConfig, AgentKind};
 use crate::exec::{find_executable, run_captured};
 
 const VERSION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -112,14 +112,21 @@ fn check_agent(config: &AgentConfig) -> Check {
         return Check::fail(format!("{} does not run: --version failed", program.display()));
     };
     let version = first_line(&output);
-    // Any program runs; only Claude Code can run the edit.
-    if !version.contains(CLAUDE_CODE) {
-        return Check::fail(format!("{} is not Claude Code: --version printed “{version}”", program.display()));
+    let name = match config.kind {
+        AgentKind::Claude => CLAUDE_CODE,
+        AgentKind::Codex => "Codex",
+    };
+    let matches = match config.kind {
+        AgentKind::Claude => version.contains(CLAUDE_CODE),
+        AgentKind::Codex => version.starts_with("codex-cli "),
+    };
+    if !matches {
+        return Check::fail(format!("{} is not {name}: --version printed “{version}”", program.display()));
     }
-    let number = version.split_whitespace().next().filter(|word| word.starts_with(|c: char| c.is_ascii_digit()));
+    let number = version.split_whitespace().find(|word| word.starts_with(|c: char| c.is_ascii_digit()));
     match number {
-        Some(number) => Check::pass(format!("{CLAUDE_CODE} {number} · {}", program.display())),
-        None => Check::pass(format!("{CLAUDE_CODE} · {}", program.display())),
+        Some(number) => Check::pass(format!("{name} {number} · {}", program.display())),
+        None => Check::pass(format!("{name} · {}", program.display())),
     }
 }
 

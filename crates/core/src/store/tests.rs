@@ -29,6 +29,7 @@ fn run(video_id: VideoId, status: RunStatus, age_minutes: i64) -> PipelineRun {
         footage_dir: "/media/video/footage".into(),
         session_id: None,
         harness: None,
+        agent_harness: Default::default(),
         summary: None,
         output: None,
         error: None,

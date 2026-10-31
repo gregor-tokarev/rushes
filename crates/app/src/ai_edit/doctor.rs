@@ -12,6 +12,7 @@ use gpui_kit::{
     App, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     SharedString, Stateful, Styled as _, Subscription, Window, div,
 };
+use rushes_core::settings::AgentHarness;
 use rushes_pipeline::{Check, Doctor, default_skill_dir};
 
 use super::service::PipelineService;
@@ -148,6 +149,7 @@ impl Render for DoctorChecklist {
 }
 
 fn requirements<'a>(doctor: &'a Doctor, cx: &App) -> Vec<Requirement<'a>> {
+    let harness = PipelineService::global(cx).read(cx).state().read(cx).settings().pipeline.agent_harness;
     let skill_dir = doctor
         .skill_dir
         .clone()
@@ -166,11 +168,19 @@ fn requirements<'a>(doctor: &'a Doctor, cx: &App) -> Vec<Requirement<'a>> {
     };
     let mut requirements = vec![Requirement {
         key: "agent",
-        name: "Claude Code",
+        name: harness.label(),
         check: &doctor.agent,
-        fix: "Install it with `npm install -g @anthropic-ai/claude-code` and run `claude` once to sign in, \
+        fix: match harness {
+            AgentHarness::Codex => {
+                "Install it with `npm install -g @openai/codex` and run `codex` once to sign in, \
+              or set the Codex command in Settings > AI editing."
+            }
+            AgentHarness::Claude => {
+                "Install it with `npm install -g @anthropic-ai/claude-code` and run `claude` once to sign in, \
               or set the agent command in Settings > AI editing."
-            .to_owned(),
+            }
+        }
+        .to_owned(),
     }];
     if let Some(check) = &doctor.skill {
         requirements.push(Requirement {

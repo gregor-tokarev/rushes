@@ -1250,6 +1250,7 @@ mod tests {
             footage_dir: "/media/desk/footage".into(),
             session_id: None,
             harness: None,
+            agent_harness: Default::default(),
             summary: None,
             output: None,
             error: None,

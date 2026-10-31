@@ -11,7 +11,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::settings::EditHarness;
+use crate::settings::{AgentHarness, EditHarness};
 
 macro_rules! id_type {
     ($(#[$meta:meta])* $name:ident) => {
@@ -733,6 +733,9 @@ pub struct PipelineRun {
     /// session with the tools it began with; `None` for runs from before it was kept.
     #[serde(default)]
     pub harness: Option<EditHarness>,
+    /// Fixed for the lifetime of the session. Older runs belong to Claude Code.
+    #[serde(default)]
+    pub agent_harness: AgentHarness,
     /// Latest strategy / summary text from the agent (Markdown).
     pub summary: Option<String>,
     pub output: Option<PathBuf>,
