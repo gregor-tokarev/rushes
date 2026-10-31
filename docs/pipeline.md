@@ -1,7 +1,8 @@
 # AI edit pipelines (`rushes-pipeline`)
 
 A pipeline turns a folder of raw takes into `edit/final.mp4` with a headless coding agent
-(Claude Code in print mode) that edits with one of two harnesses (`RunContext::harness`):
+(Codex or Claude Code, selected in Settings > AI editing > Agent harness)
+that edits with one of two tool harnesses (`RunContext::harness`):
 
 - `Harness::Rushes { tools }`: Rushes' own editing tools ([editing-harness.md](editing-harness.md)),
   served over MCP by `tools` (the app's binary: `rushes edit-tools --footage <dir>`). The
@@ -102,6 +103,30 @@ named in a run's log, or the file the upload form already has. `edit/preview.mp4
 for the footage.
 
 ## Agent invocation
+
+`AgentConfig::kind` selects `AgentKind::Claude` (the default) or `AgentKind::Codex`.
+Each run persists its agent in `PipelineRun::agent_harness`; changing the selection
+only affects new edits and new YouTube-details requests. Old runs default to Claude
+Code, including sessions recovered from the unsaved write queue. Commands and models
+are saved separately for each agent. Thumbnail chats always use Codex.
+
+Codex runs as `codex exec --json --skip-git-repo-check --sandbox=workspace-write`,
+with `approval_policy="never"` and the prompt on stdin. Follow-ups use
+`codex exec ... resume -- <session_id> -`. Rushes' MCP server is passed as a TOML
+`mcp_servers` override, with a one-hour tool timeout and automatic tool approval; video-use receives its skill
+folder through `--add-dir`. Network access is enabled for the editing shell so
+video-use can transcribe. Instructions accompany every phase and both agents stream
+the same `AgentEvent`s, including paired MCP tool starts and results. Process-group cancellation is shared.
+Before launch, a short-lived app-server reads effective configuration locally via
+`config/read`, without remote MCP authentication discovery. Unrelated configured
+servers are explicitly disabled; plugin and app tools are disabled for the run.
+
+YouTube-details requests use a read-only sandbox, no shell or MCP servers, an
+ephemeral session and a temporary `--output-schema` file. The final assistant message
+supplies the JSON answer. Claude-specific options (`allowed_tools`, `permission_mode`
+and `max_turns`) apply only to Claude Code.
+
+Claude Code retains its existing invocation:
 
 ```text
 # Rushes' tools
@@ -266,7 +291,8 @@ first). The app passes the ElevenLabs key saved in Settings (`<data dir>/elevenl
 mode 0600) in the agent's environment; with Rushes' tools and no saved key it uses the one
 in video-use's `.env`.
 
-- **Agent**: Claude Code CLI; `--version` must print `Claude Code` (any other program
+- **Agent**: the selected CLI; `--version` must print `Claude Code` or start with
+  `codex-cli `, matching the selection (any other program
   answers `--version` too, but cannot run an edit). Login is not checked.
 - **Skill**: `SKILL.md` in the configured folder, default `~/.claude/skills/video-use`
   (symlinks resolved; the resolved folder is returned as `Doctor::skill_dir`).

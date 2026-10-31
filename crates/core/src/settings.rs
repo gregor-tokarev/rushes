@@ -148,6 +148,24 @@ impl Default for YoutubeBackend {
     }
 }
 
+/// The coding agent used for edits and YouTube details.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentHarness {
+    #[default]
+    Claude,
+    Codex,
+}
+
+impl AgentHarness {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            Self::Codex => "Codex",
+        }
+    }
+}
+
 /// What the AI edit agent edits with.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -163,29 +181,34 @@ pub enum EditHarness {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PipelineSettings {
-    /// Executable of the headless coding agent.
+    pub agent_harness: AgentHarness,
+    /// Executable of Claude Code (kept under its original settings key).
     pub agent_command: String,
     pub harness: EditHarness,
     /// video-use skill directory. `None` lets the pipeline look in its default locations.
     pub skill_dir: Option<PathBuf>,
     /// Model passed to the agent. `None` uses the agent's default.
     pub model: Option<String>,
+    /// Codex model for edits and YouTube details, independent of Claude's model.
+    pub codex_model: Option<String>,
     /// Appended to every edit brief (house style, channel branding, ...).
     pub extra_instructions: String,
     /// Skip the strategy approval step and render straight away.
     pub auto_approve: bool,
     pub default_preferences: EditPreferences,
-    /// Executable of Codex, which draws thumbnails on the Publish tab.
+    /// Executable of Codex, also used to draw thumbnails on the Publish tab.
     pub codex_command: String,
 }
 
 impl Default for PipelineSettings {
     fn default() -> Self {
         Self {
+            agent_harness: AgentHarness::default(),
             agent_command: DEFAULT_AGENT_COMMAND.to_string(),
             harness: EditHarness::default(),
             skill_dir: None,
             model: None,
+            codex_model: None,
             extra_instructions: String::new(),
             auto_approve: false,
             default_preferences: EditPreferences::default(),

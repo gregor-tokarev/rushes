@@ -14,11 +14,12 @@ use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui_kit::{App, AppContext as _, Context, Entity, Global, SharedString, Subscription, Task};
 use rushes_core::input::expand_user_path;
 use rushes_core::media::{self, MediaKind};
-use rushes_core::settings::{EditHarness, PipelineSettings, data_dir, read_elevenlabs_key};
+use rushes_core::settings::{AgentHarness, EditHarness, PipelineSettings, data_dir, read_elevenlabs_key};
 use rushes_core::{PipelineRun, RunEvent, RunId, RunStatus, StoreError, VideoId, VideoStatus};
 use rushes_pipeline::{
-    AgentConfig, AgentEvent, AgentProcess, Doctor, Harness, Phase, PhaseOutcome, PipelineError, RunContext, ToolServer,
-    default_skill_dir, doctor, doctor_rushes, keep_final_cut, run_phase, set_aside_final_cut, stop_leftover_agent,
+    AgentConfig, AgentEvent, AgentKind, AgentProcess, Doctor, Harness, Phase, PhaseOutcome, PipelineError, RunContext,
+    ToolServer, default_skill_dir, doctor, doctor_rushes, keep_final_cut, run_phase, set_aside_final_cut,
+    stop_leftover_agent,
 };
 use serde::{Deserialize, Serialize};
 
@@ -466,6 +467,7 @@ impl PipelineService {
             footage_dir,
             session_id: None,
             harness: Some(self.state.read(cx).settings().pipeline.harness),
+            agent_harness: self.state.read(cx).settings().pipeline.agent_harness,
             summary: None,
             output: None,
             error: None,
@@ -625,6 +627,7 @@ impl PipelineService {
         let (phase, text) = (started.phase, started.text.clone());
         let run = self.run(id).ok_or(RunError::RunNotFound)?.clone();
         let mut settings = self.state.read(cx).settings().pipeline.clone();
+        settings.agent_harness = run.agent_harness;
         // A run keeps editing with what it started with: its agent session knows those
         // tools. A run from before that was kept takes the setting now and keeps it.
         match run.harness {
@@ -1099,6 +1102,8 @@ impl PipelineService {
         let settings = &self.state.read(cx).settings().pipeline;
         let changed = self.checked.as_ref().is_none_or(|checked| {
             checked.agent_command != settings.agent_command
+                || checked.codex_command != settings.codex_command
+                || checked.agent_harness != settings.agent_harness
                 || checked.skill_dir != settings.skill_dir
                 || checked.harness != settings.harness
         });
@@ -1141,9 +1146,14 @@ impl PipelineService {
 
 /// How the settings launch the agent, with extra environment `env`.
 pub(crate) fn agent_config(settings: &PipelineSettings, env: Vec<(String, String)>) -> AgentConfig {
+    let (kind, command, default, model) = match settings.agent_harness {
+        AgentHarness::Claude => (AgentKind::Claude, &settings.agent_command, "claude", &settings.model),
+        AgentHarness::Codex => (AgentKind::Codex, &settings.codex_command, "codex", &settings.codex_model),
+    };
     AgentConfig {
-        command: command_path(&settings.agent_command, &AgentConfig::default().command),
-        model: settings.model.as_deref().map(str::trim).filter(|model| !model.is_empty()).map(str::to_owned),
+        kind,
+        command: command_path(command, Path::new(default)),
+        model: model.as_deref().map(str::trim).filter(|model| !model.is_empty()).map(str::to_owned),
         env,
         ..AgentConfig::default()
     }
@@ -1379,6 +1389,7 @@ mod tests {
             footage_dir: PathBuf::new(),
             session_id: None,
             harness: None,
+            agent_harness: Default::default(),
             summary: None,
             output: None,
             error: None,

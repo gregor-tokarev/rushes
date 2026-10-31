@@ -16,8 +16,8 @@ use gpui_kit::{
 };
 use rushes_core::input::{PathInputError, display_user_path, expand_user_path};
 use rushes_core::settings::{
-    DEFAULT_AGENT_COMMAND, DEFAULT_CODEX_COMMAND, EditHarness, PipelineSettings, data_dir, read_elevenlabs_key,
-    write_elevenlabs_key,
+    AgentHarness, DEFAULT_AGENT_COMMAND, DEFAULT_CODEX_COMMAND, EditHarness, PipelineSettings, data_dir,
+    read_elevenlabs_key, write_elevenlabs_key,
 };
 use rushes_pipeline::default_skill_dir;
 
@@ -94,6 +94,7 @@ pub struct AiSettings {
     elevenlabs_key: Entity<InputState>,
     extra_instructions: Entity<TextareaState>,
     target_length: Entity<InputState>,
+    agent_harness: AgentHarness,
     model: ModelChoice,
     /// Why the typed skill folder was not saved.
     skill_dir_error: Option<SharedString>,
@@ -111,10 +112,11 @@ impl AiSettings {
         };
         let agent_command = input(display_command(&settings.agent_command), DEFAULT_AGENT_COMMAND, window, cx);
         let codex_command = input(display_command(&settings.codex_command), DEFAULT_CODEX_COMMAND, window, cx);
-        let model = ModelChoice::of(settings.model.as_deref());
+        let selected_model = selected_model(&settings);
+        let model = model_choice(settings.agent_harness, selected_model);
         let custom_model = input(
-            if model == ModelChoice::Custom { settings.model.clone().unwrap_or_default() } else { String::new() },
-            "Model name, e.g. claude-opus-4-1",
+            if model == ModelChoice::Custom { selected_model.unwrap_or_default().to_owned() } else { String::new() },
+            "Model name",
             window,
             cx,
         );
@@ -175,6 +177,7 @@ impl AiSettings {
             elevenlabs_key,
             extra_instructions,
             target_length,
+            agent_harness: settings.agent_harness,
             model,
             skill_dir_error: None,
             doctor,
@@ -232,7 +235,10 @@ impl AiSettings {
                 }
                 pipeline.extra_instructions = extra_instructions;
                 pipeline.default_preferences.target_length = target_length;
-                pipeline.model = model;
+                match self.agent_harness {
+                    AgentHarness::Claude => pipeline.model = model,
+                    AgentHarness::Codex => pipeline.codex_model = model,
+                }
             })
         });
     }
@@ -257,7 +263,17 @@ impl AiSettings {
             self.custom_model.update(cx, |input, cx| input.focus(window, cx));
         }
         let value = self.model_value(cx);
-        self.update(cx, |pipeline| pipeline.model = value);
+        let harness = self.agent_harness;
+        self.update(cx, |pipeline| match harness {
+            AgentHarness::Claude => pipeline.model = value,
+            AgentHarness::Codex => pipeline.codex_model = value,
+        });
+    }
+
+    fn set_agent_harness(&mut self, harness: AgentHarness, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_text(cx);
+        self.update(cx, |pipeline| pipeline.agent_harness = harness);
+        self.sync_from_settings(window, cx);
     }
 
     fn choose_skill_dir(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -313,6 +329,13 @@ impl AiSettings {
     /// that are not being edited.
     fn sync_from_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pipeline = self.state.read(cx).settings().pipeline.clone();
+        if self.agent_harness != pipeline.agent_harness {
+            self.agent_harness = pipeline.agent_harness;
+            let model = selected_model(&pipeline);
+            self.model = model_choice(pipeline.agent_harness, model);
+            let value = if self.model == ModelChoice::Custom { model.unwrap_or_default() } else { "" };
+            self.custom_model.update(cx, |input, cx| input.set_value(value, window, cx));
+        }
         let skill_dir = pipeline.skill_dir.as_deref().map(display_user_path).unwrap_or_default();
         let fields = [
             (&self.agent_command, display_command(&pipeline.agent_command)),
@@ -363,6 +386,10 @@ impl AiSettings {
         let settings = cx.weak_entity();
         let current = self.model;
         let custom = current == ModelChoice::Custom;
+        let choices: &[ModelChoice] = match self.agent_harness {
+            AgentHarness::Claude => &ModelChoice::ALL,
+            AgentHarness::Codex => &[ModelChoice::Default, ModelChoice::Custom],
+        };
         v_flex()
             .gap_2()
             .when(custom, |this| this.w(TRAILING_FIELD_WIDTH))
@@ -372,7 +399,7 @@ impl AiSettings {
                     .label(current.label().trim_end_matches('…'))
                     .dropdown_caret(true)
                     .dropdown_menu(move |mut menu, _, _| {
-                        for choice in ModelChoice::ALL {
+                        for &choice in choices {
                             let settings = settings.clone();
                             menu = menu.item(menu_item(choice.label()).checked(choice == current).on_click(
                                 move |_, window, cx| {
@@ -384,6 +411,24 @@ impl AiSettings {
                     }),
             )
             .when(custom, |this| this.child(Input::new(&self.custom_model).id("ai-settings-custom-model")))
+    }
+
+    fn render_agent_harness(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let settings = cx.weak_entity();
+        let current = self.agent_harness;
+        Button::new("ai-settings-agent-harness").outline().label(current.label()).dropdown_caret(true).dropdown_menu(
+            move |mut menu, _, _| {
+                for harness in [AgentHarness::Codex, AgentHarness::Claude] {
+                    let settings = settings.clone();
+                    menu = menu.item(menu_item(harness.label()).checked(harness == current).on_click(
+                        move |_, window, cx| {
+                            _ = settings.update(cx, |this, cx| this.set_agent_harness(harness, window, cx));
+                        },
+                    ));
+                }
+                menu
+            },
+        )
     }
 
     fn render_harness(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -462,15 +507,26 @@ impl AiSettings {
             SettingsSection::new()
                 .title("Agent")
                 .field(
-                    SettingsField::new("Agent command", |this: &mut Self, _, _| {
+                    SettingsField::new("Agent harness", |this: &mut Self, _, cx| this.render_agent_harness(cx))
+                        .description("Choose Codex or Claude Code for new AI edits and YouTube details. Existing edits keep their original harness."),
+                )
+                .field(
+                    SettingsField::new("Claude Code command", |this: &mut Self, _, _| {
                         Input::new(&this.agent_command).id("ai-settings-agent-command")
                     })
                     .description("The Claude Code CLI: a command on PATH or the full path to it.")
                     .stacked(),
                 )
                 .field(
+                    SettingsField::new("Codex command", |this: &mut Self, _, _| {
+                        Input::new(&this.codex_command).id("ai-settings-codex-command")
+                    })
+                    .description("The Codex CLI, signed in. Also used to draw thumbnails, whichever harness you choose.")
+                    .stacked(),
+                )
+                .field(
                     SettingsField::new("Model", |this: &mut Self, _, cx| this.render_model(cx))
-                        .description("Agent default is the model Claude Code is set to use."),
+                        .description("Agent default uses the selected harness’s model. Each harness keeps its own choice."),
                 )
                 .field(
                     SettingsField::new("Editing tools", |this: &mut Self, _, cx| this.render_harness(cx)).description(
@@ -520,20 +576,6 @@ impl AiSettings {
                     ),
                 ),
             SettingsSection::new()
-                .title("Publishing")
-                .description(
-                    "On the Publish tab the agent writes the title, description and tags, and Codex draws \
-                     thumbnails.",
-                )
-                .keywords(["thumbnail", "codex", "openai", "title", "description", "tags"])
-                .field(
-                    SettingsField::new("Codex command", |this: &mut Self, _, _| {
-                        Input::new(&this.codex_command).id("ai-settings-codex-command")
-                    })
-                    .description("The Codex CLI, signed in: a command on PATH or the full path to it.")
-                    .stacked(),
-                ),
-            SettingsSection::new()
                 .title("New edits")
                 .description("Where every new edit brief starts.")
                 .field(SettingsField::new("Remove fillers", |this: &mut Self, _, cx| {
@@ -564,12 +606,26 @@ impl AiSettings {
             SettingsSection::new()
                 .title("Requirements")
                 .description(
-                    "AI edits run Claude Code on this computer with Rushes’ editing tools or video-use. The footage, the key and the tools stay local.",
+                    "AI edits run the selected harness on this computer with Rushes’ editing tools or video-use. The footage, the key and the tools stay local.",
                 )
                 // The checklist's rows, which the search can't see.
-                .keywords(["claude", "video-use", "editing tools", "ffmpeg", "ffprobe", "elevenlabs", "python", "re-check"])
+                .keywords(["claude", "codex", "video-use", "editing tools", "ffmpeg", "ffprobe", "elevenlabs", "python", "re-check"])
                 .element(|this: &mut Self, _, _| this.doctor.clone()),
         ]
+    }
+}
+
+fn selected_model(settings: &PipelineSettings) -> Option<&str> {
+    match settings.agent_harness {
+        AgentHarness::Claude => settings.model.as_deref(),
+        AgentHarness::Codex => settings.codex_model.as_deref(),
+    }
+}
+
+fn model_choice(harness: AgentHarness, model: Option<&str>) -> ModelChoice {
+    match (harness, model.filter(|model| !model.trim().is_empty())) {
+        (AgentHarness::Codex, Some(_)) => ModelChoice::Custom,
+        _ => ModelChoice::of(model),
     }
 }
 

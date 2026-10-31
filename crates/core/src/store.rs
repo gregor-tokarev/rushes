@@ -30,7 +30,7 @@ use crate::model::{
     UploadStatus, Video, VideoFormat, VideoId, VideoRow, VideoStatus, ViewId, ViewKind,
 };
 use crate::sample;
-use crate::settings::{AppSettings, EditHarness};
+use crate::settings::{AgentHarness, AppSettings, EditHarness};
 use crate::templates::{TemplateKind, script_template};
 
 /// Settings key holding [`AppSettings`].
@@ -717,7 +717,7 @@ type Migration = fn(&Transaction<'_>) -> rusqlite::Result<()>;
 
 /// Applied in order; after `MIGRATIONS[i]` the database is at `user_version = i + 1`.
 /// Append new migrations, never edit released ones.
-const MIGRATIONS: &[Migration] = &[migration_1, migration_2, migration_3, migration_4];
+const MIGRATIONS: &[Migration] = &[migration_1, migration_2, migration_3, migration_4, migration_5];
 
 fn migrate(conn: &mut Connection) -> StoreResult<()> {
     while pending_migration(conn)?.is_some() {
@@ -852,6 +852,11 @@ fn migration_3(tx: &Transaction<'_>) -> rusqlite::Result<()> {
 /// Edit runs remember what the agent edits with (`PipelineRun::harness`).
 fn migration_4(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute_batch("ALTER TABLE pipeline_runs ADD COLUMN harness TEXT;  -- EditHarness")
+}
+
+/// Existing sessions were all created by Claude Code.
+fn migration_5(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch("ALTER TABLE pipeline_runs ADD COLUMN agent_harness TEXT NOT NULL DEFAULT 'claude';")
 }
 
 /// "All videos" (table) and "Board" (kanban by status).
@@ -1101,12 +1106,12 @@ fn upsert_view(conn: &Connection, view: &DatabaseView) -> rusqlite::Result<()> {
 }
 
 const RUN_COLUMNS: &str = "id, video_id, status, brief, footage_dir, session_id, summary, output, error, cost_usd, \
-                           created_at, updated_at, harness";
+                           created_at, updated_at, harness, agent_harness";
 const INSERT_RUN: &str = "INSERT INTO pipeline_runs (id, video_id, status, brief, footage_dir, session_id, summary, \
-                          output, error, cost_usd, created_at, updated_at, harness) \
-                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
+                          output, error, cost_usd, created_at, updated_at, harness, agent_harness) \
+                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
 const UPDATE_RUN: &str = "UPDATE pipeline_runs SET status = ?3, brief = ?4, footage_dir = ?5, session_id = ?6, \
-                          summary = ?7, output = ?8, error = ?9, cost_usd = ?10, updated_at = ?12, harness = ?13 \
+                          summary = ?7, output = ?8, error = ?9, cost_usd = ?10, updated_at = ?12, harness = ?13, agent_harness = ?14 \
                           WHERE id = ?1";
 
 /// Runs `INSERT_RUN` or `UPDATE_RUN`, which share parameter numbering.
@@ -1125,6 +1130,7 @@ fn write_run(conn: &Connection, sql: &str, run: &PipelineRun) -> rusqlite::Resul
         run.created_at,
         run.updated_at,
         run.harness,
+        run.agent_harness,
     ])
 }
 
@@ -1143,6 +1149,7 @@ fn run_from_row(row: &Row<'_>) -> rusqlite::Result<PipelineRun> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         harness: row.get("harness")?,
+        agent_harness: row.get("agent_harness")?,
     })
 }
 
@@ -1268,6 +1275,7 @@ sql_as_serde_string!(
     ViewKind,
     RunStatus,
     EditHarness,
+    AgentHarness,
 );
 
 #[cfg(test)]

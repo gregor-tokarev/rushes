@@ -294,7 +294,7 @@ fn step_copy(step: Step) -> (&'static str, &'static str) {
         }
         Step::AiEditing => (
             "Set up AI editing",
-            "AI edits run on this computer through Claude Code with Rushes’ editing tools. This is optional; everything else works without it.",
+            "AI edits run on this computer through Codex or Claude Code with Rushes’ editing tools. Choose your harness in Settings > AI editing. This is optional; everything else works without it.",
         ),
         Step::GetStarted => ("How do you want to start?", "You can add, change or delete videos at any time."),
     }
