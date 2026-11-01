@@ -339,7 +339,7 @@ fn videos_are_listed_by_position() {
 }
 
 #[test]
-fn create_video_uses_template_and_appends() {
+fn create_video_starts_empty_and_appends() {
     let mut store = store();
     insert(&mut store, "Existing", 4.0);
     let (video, documents) = store
@@ -348,18 +348,18 @@ fn create_video_uses_template_and_appends() {
             format: VideoFormat::Short,
             hook: "Your debugger is one line away.".into(),
             publish_date: NaiveDate::from_ymd_opt(2026, 10, 20),
-            template: TemplateKind::Short,
         })
         .unwrap();
 
     assert_eq!(video.position, 5.0);
-    assert_eq!(video.icon.as_deref(), Some("⚡"));
+    assert_eq!(video.icon, None);
     assert_eq!(video.status, VideoStatus::Idea);
     assert_eq!(store.get_video(video.id).unwrap(), Some(video.clone()));
 
     let kinds: Vec<_> = documents.iter().map(|d| (d.kind, d.title.as_str(), d.position)).collect();
     assert_eq!(kinds, [(DocumentKind::Script, "Script", 0), (DocumentKind::Notes, "Notes", 1)]);
-    assert!(documents[0].blocks.iter().any(|b| b.text == "Your debugger is one line away."));
+    assert_eq!(video.hook, "Your debugger is one line away.");
+    assert_eq!(shape_of(&documents[0].blocks), [(BlockKind::Paragraph, String::new())]);
     assert_eq!(shape_of(&documents[1].blocks), [(BlockKind::Paragraph, String::new())]);
     assert_eq!(store.list_documents(video.id).unwrap(), documents);
 
@@ -496,13 +496,8 @@ fn deleting_a_video_cascades_to_children() {
 #[test]
 fn duplicate_copies_content_but_not_publishing_state() {
     let mut store = store();
-    let (mut original, documents) = store
-        .create_video(NewVideo {
-            title: "Mini PC review".into(),
-            template: TemplateKind::Review,
-            ..NewVideo::default()
-        })
-        .unwrap();
+    let (mut original, documents) =
+        store.create_video(NewVideo { title: "Mini PC review".into(), ..NewVideo::default() }).unwrap();
     original.status = VideoStatus::Published;
     original.tags = vec!["review".into()];
     original.folder = Some("/media/mini-pc".into());
@@ -898,7 +893,6 @@ fn sample_workspace_is_complete() {
     let rows = store.list_video_rows().unwrap();
     assert_eq!(rows.len(), videos.len() + 1);
     for row in rows.iter().skip(1) {
-        // Videos still on a template have only their hook written; guidance is not script.
         assert!(row.script_words > 5, "{} has a script", row.video.title);
         if row.video.format == VideoFormat::Short {
             assert!(row.script_seconds < 60, "{} fits a Short", row.video.title);

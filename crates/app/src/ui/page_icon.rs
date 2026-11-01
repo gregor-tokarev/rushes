@@ -2,7 +2,7 @@
 //!
 //! The text system picks an emoji's font by coverage and weight, so the same
 //! emoji came out in colour in one place and as a thin outline glyph in another.
-//! Every emoji the app offers (the icon picker, the script templates, the sample
+//! Every emoji the app offers (the icon picker, the former script templates, the sample
 //! videos) therefore ships as a Noto Emoji image (`assets/emoji`, Apache-2.0)
 //! and renders the same everywhere. Any other emoji, typed into older data, is
 //! drawn as text.
@@ -212,9 +212,7 @@ mod tests {
 
     #[test]
     fn offered_emoji_have_images() {
-        let offered = crate::video_page::ICON_CHOICES.iter().copied();
-        let templates = rushes_core::templates::TemplateKind::ALL.iter().filter_map(|kind| kind.icon());
-        for emoji in offered.chain(templates) {
+        for emoji in crate::video_page::ICON_CHOICES.iter().copied() {
             assert!(has_page_icon_image(emoji), "{emoji} has no bundled image");
         }
         // With or without the emoji presentation selector.

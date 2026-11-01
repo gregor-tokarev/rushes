@@ -284,7 +284,7 @@ impl AppState {
         self.row(id).map(|row| &row.video)
     }
 
-    /// Creates a video from a template, creates its media folder, and returns its id.
+    /// Creates a video, creates its media folder, and returns its id.
     pub fn create_video(&mut self, new: NewVideo, cx: &mut Context<Self>) -> Option<VideoId> {
         let media_root = self.settings.resolved_media_root();
         let last = self.rows.iter().map(|row| row.video.position).reduce(f64::max);

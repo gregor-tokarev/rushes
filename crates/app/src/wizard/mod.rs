@@ -1,4 +1,4 @@
-//! "New video" dialog: title, hook, format, template, status and publish date.
+//! "New video" dialog: title, hook, format, status and publish date.
 
 use chrono::NaiveDate;
 use gpui_kit::assets::IconName;
@@ -17,15 +17,14 @@ use gpui_kit::{
     TestSupportExt as _, Window, actions, div,
 };
 use rushes_core::input::normalize_title;
-use rushes_core::templates::TemplateKind;
 use rushes_core::{NewVideo, VideoFormat, VideoStatus};
 
 use crate::database::Chip;
 use crate::state::AppState;
+use crate::ui::KeyboardFocus as _;
 use crate::ui::date_field::{DateField, DateFieldEvent, DateFieldState};
 use crate::ui::dialog::form_footer;
 use crate::ui::zoom::zoomed_tabs;
-use crate::ui::{ChoiceCard, KeyboardFocus as _, PageIcon};
 
 actions!(new_video, [PreviousFormat, NextFormat]);
 
@@ -79,13 +78,8 @@ struct NewVideoForm {
     title: Entity<InputState>,
     hook: Entity<InputState>,
     format: VideoFormat,
-    /// Whether the user picked the format, so a template change keeps it.
-    format_chosen: bool,
     /// The Format choice is one Tab stop; the arrow keys move within it.
     format_focus: FocusHandle,
-    template: TemplateKind,
-    /// Whether the user picked the template, so a format change keeps it.
-    template_chosen: bool,
     status: VideoStatus,
     publish_date: Entity<DateFieldState>,
     publish_on: Option<NaiveDate>,
@@ -117,10 +111,7 @@ impl NewVideoForm {
             title,
             hook,
             format: VideoFormat::LongForm,
-            format_chosen: false,
             format_focus: cx.focus_handle().tab_stop(true),
-            template: TemplateKind::Blank,
-            template_chosen: false,
             status,
             publish_date,
             publish_on: None,
@@ -131,10 +122,6 @@ impl NewVideoForm {
 
     fn set_format(&mut self, format: VideoFormat, cx: &mut Context<Self>) {
         self.format = format;
-        self.format_chosen = true;
-        if !self.template_chosen {
-            self.template = default_template(format);
-        }
         cx.notify();
     }
 
@@ -145,15 +132,6 @@ impl NewVideoForm {
         if next != current {
             self.set_format(VideoFormat::ALL[next], cx);
         }
-    }
-
-    fn set_template(&mut self, template: TemplateKind, cx: &mut Context<Self>) {
-        self.template = template;
-        self.template_chosen = true;
-        if !self.format_chosen {
-            self.format = default_format(template);
-        }
-        cx.notify();
     }
 
     fn set_status(&mut self, status: VideoStatus, cx: &mut Context<Self>) {
@@ -180,7 +158,6 @@ impl NewVideoForm {
             format: self.format,
             hook: self.hook.read(cx).value().trim().to_string(),
             publish_date: self.publish_on,
-            template: self.template,
         };
         let status = self.status;
         let state = AppState::global(cx);
@@ -249,40 +226,6 @@ impl NewVideoForm {
                 })
             })
     }
-
-    fn render_templates(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let cards = TemplateKind::ALL.iter().map(|kind| {
-            let kind = *kind;
-            ChoiceCard::new(
-                SharedString::from(format!("template-{}", kind.label().to_lowercase())),
-                // The page icon the video starts with; the blank template has none.
-                PageIcon::new(kind.icon()),
-                kind.label(),
-                kind.description(),
-            )
-            .selected(kind == self.template)
-            .on_click(cx.listener(move |this, _, _, cx| this.set_template(kind, cx)))
-        });
-        div().grid().grid_cols(3).gap_2().children(cards)
-    }
-}
-
-/// The template a format starts with until the user picks one.
-fn default_template(format: VideoFormat) -> TemplateKind {
-    match format {
-        VideoFormat::Short => TemplateKind::Short,
-        VideoFormat::LongForm | VideoFormat::Livestream => TemplateKind::Blank,
-    }
-}
-
-/// The format a template gives the video until the user picks one.
-fn default_format(template: TemplateKind) -> VideoFormat {
-    match template {
-        TemplateKind::Short => VideoFormat::Short,
-        TemplateKind::Blank | TemplateKind::Tutorial | TemplateKind::Review | TemplateKind::Vlog => {
-            VideoFormat::default()
-        }
-    }
 }
 
 impl Render for NewVideoForm {
@@ -342,8 +285,7 @@ impl Render for NewVideoForm {
                                         ),
                                 ),
                         ),
-                    )
-                    .child(Field::new().label("Template").child(self.render_templates(cx))),
+                    ),
             )
     }
 }

@@ -17,7 +17,6 @@ use rushes::shell::{self, Workspace};
 use rushes::state::AppState;
 use rushes::ui::CollectionTable;
 use rushes_core::settings::{AppSettings, Zoom};
-use rushes_core::templates::TemplateKind;
 use rushes_core::{NewVideo, PipelineRun, RunId, RunStatus, Store, VideoId, media};
 
 struct Fixture {
@@ -139,7 +138,7 @@ fn ai_settings_end_on_one_edge_in_a_large_window(cx: &mut TestAppContext) {
 /// A finished edit of a video whose footage list is long: the run is far below the
 /// top of the Footage & AI edit tab.
 fn video_with_long_footage(store: &mut Store, media_root: &Path) -> (VideoId, RunId) {
-    let new = NewVideo { title: "Fifteen takes".into(), template: TemplateKind::Blank, ..NewVideo::default() };
+    let new = NewVideo { title: "Fifteen takes".into(), ..NewVideo::default() };
     let (mut video, _) = store.create_video(new).expect("create video");
     let folder = media::ensure_video_folder(media_root, &mut video).expect("media folder");
     store.update_video(&mut video).expect("save folder");
@@ -192,7 +191,7 @@ fn the_ai_edits_table_scrolls_under_its_header_and_sideways(cx: &mut TestAppCont
     let window_size = size(px(960.), px(600.));
     let app = Fixture::open(cx, window_size, |store, media_root| {
         for take in 0..30 {
-            let new = NewVideo { title: format!("Take {take}"), template: TemplateKind::Blank, ..NewVideo::default() };
+            let new = NewVideo { title: format!("Take {take}"), ..NewVideo::default() };
             let (mut video, _) = store.create_video(new).expect("create video");
             let folder = media::ensure_video_folder(media_root, &mut video).expect("media folder");
             store.update_video(&mut video).expect("save folder");

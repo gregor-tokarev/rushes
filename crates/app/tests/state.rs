@@ -22,7 +22,6 @@ use rushes::shell::{self, Workspace};
 use rushes::state::{AppEvent, AppState, QUIT_SAVE_TIMEOUT, SAVE_RETRY_DELAY, Severity};
 use rushes::video_page::SAVE_DELAY;
 use rushes_core::settings::{AppSettings, ThemeMode};
-use rushes_core::templates::TemplateKind;
 use rushes_core::{
     BlockId, DocumentKind, NewVideo, PipelineRun, PropertyDef, PropertyId, PropertyKind, PropertyValue, RunId,
     RunStatus, SelectOption, Store, TagColor, UploadId, UploadJob, UploadStatus, VideoId,
@@ -62,7 +61,7 @@ impl Fixture {
         };
         store.save_settings(&settings).expect("save settings");
         for title in titles {
-            let new = NewVideo { title: title.to_string(), template: TemplateKind::Blank, ..NewVideo::default() };
+            let new = NewVideo { title: title.to_string(), ..NewVideo::default() };
             store.create_video(new).expect("create video");
         }
         let state = AppState::new(store).expect("load state");
@@ -593,7 +592,7 @@ fn a_video_created_while_the_disk_is_full_keeps_its_edits_until_it_lands(cx: &mu
         "CREATE TRIGGER no_room BEFORE INSERT ON videos BEGIN SELECT abs(-9223372036854775807 - 1); END;",
     )
     .expect("fill the disk");
-    let new = NewVideo { title: "Full disk test".into(), template: TemplateKind::Blank, ..NewVideo::default() };
+    let new = NewVideo { title: "Full disk test".into(), ..NewVideo::default() };
     let video = cx.update(|cx| app.state.update(cx, |state, cx| state.create_video(new, cx))).expect("created");
     let state = app.state.clone();
     app.step(cx, move |_, cx| {
