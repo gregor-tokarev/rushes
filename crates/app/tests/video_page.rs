@@ -18,7 +18,6 @@ use rushes::shell::{self, Workspace};
 use rushes::state::AppState;
 use rushes::video_page::{PathPurpose, VideoPage};
 use rushes_core::settings::AppSettings;
-use rushes_core::templates::TemplateKind;
 use rushes_core::{
     BlockId, Column, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, SelectOption, Store,
     TagColor, UploadId, UploadJob, UploadStatus, VideoFormat, VideoId, ViewKind,
@@ -55,7 +54,7 @@ impl Fixture {
         };
         store.save_settings(&settings).expect("save settings");
         for title in titles {
-            let new = NewVideo { title: title.to_string(), template: TemplateKind::Blank, ..NewVideo::default() };
+            let new = NewVideo { title: title.to_string(), ..NewVideo::default() };
             store.create_video(new).expect("create video");
         }
         let state = AppState::new(store).expect("load state");
@@ -206,7 +205,7 @@ fn a_missing_title_is_explained_under_the_field_in_the_smallest_window(cx: &mut 
     app.press(cx, "ctrl-n");
     app.type_text(cx, "   ");
     // The pointer takes the keyboard away from the title.
-    app.click(cx, "template-tutorial");
+    app.click(cx, "new-video-hook");
     app.click(cx, "new-video-create");
     assert!(app.has_dialog(cx), "nothing is created");
 
@@ -263,25 +262,23 @@ fn the_format_is_chosen_with_the_keyboard(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_created_video_keeps_the_caret_in_its_script(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, &["Desk setup tour"]);
-    for (title, template) in [("Launch day vlog", "template-blank"), ("Build a home studio", "template-tutorial")] {
-        app.press(cx, "ctrl-n");
-        app.type_text(cx, title);
-        app.click(cx, template);
-        app.press(cx, "enter");
-        assert!(!app.has_dialog(cx));
-        let id = app.video_id(cx, title);
-        assert_eq!(app.route(cx), Route::Video { id, tab: VideoTab::Script });
+    let title = "Launch day vlog";
+    app.press(cx, "ctrl-n");
+    app.type_text(cx, title);
+    app.press(cx, "enter");
+    assert!(!app.has_dialog(cx));
+    let id = app.video_id(cx, title);
+    assert_eq!(app.route(cx), Route::Video { id, tab: VideoTab::Script });
 
-        // The dialog's close animation ends after the page took focus.
-        app.wait(cx, Duration::from_secs(1));
-        let first = app.script_blocks(cx)[0];
-        assert_eq!(app.script_focused_block(cx), Some(first), "{template}: caret in the first block");
+    // The dialog's close animation ends after the page took focus.
+    app.wait(cx, Duration::from_secs(1));
+    let first = app.script_blocks(cx)[0];
+    assert_eq!(app.script_focused_block(cx), Some(first), "caret in the first block");
 
-        app.type_text(cx, "Typed right away ");
-        app.navigate(cx, Route::default());
-        let stored = app.stored_blocks(cx, id, DocumentKind::Script);
-        assert!(stored[0].starts_with("Typed right away "), "{template}: typing lands in the script: {stored:?}");
-    }
+    app.type_text(cx, "Typed right away ");
+    app.navigate(cx, Route::default());
+    let stored = app.stored_blocks(cx, id, DocumentKind::Script);
+    assert!(stored[0].starts_with("Typed right away "), "typing lands in the script: {stored:?}");
 }
 
 /// Adds a custom property through the app state, as the database does.
@@ -736,10 +733,10 @@ fn a_value_picked_from_a_menu_keeps_what_was_typed(cx: &mut TestAppContext) {
 
 // Layout and scrolling
 
-/// Creates a video from `template` through the app state, as the wizard does.
-fn create_video(app: &Fixture, cx: &mut TestAppContext, title: &str, template: TemplateKind) -> VideoId {
+/// Creates a video through the app state, as the wizard does.
+fn create_video(app: &Fixture, cx: &mut TestAppContext, title: &str) -> VideoId {
     let state = app.state.clone();
-    let new = NewVideo { title: title.to_string(), template, ..NewVideo::default() };
+    let new = NewVideo { title: title.to_string(), ..NewVideo::default() };
     cx.update(|cx| state.update(cx, |state, cx| state.create_video(new, cx))).expect("video created")
 }
 
@@ -863,7 +860,7 @@ fn a_tab_opened_at_its_top_shows_its_first_section(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_narrow_window_keeps_the_script_tools_in_a_menu(cx: &mut TestAppContext) {
     let app = Fixture::open_sized(cx, &[], 960., 600.);
-    let id = create_video(&app, cx, "Build a home studio", TemplateKind::Tutorial);
+    let id = create_video(&app, cx, "Build a home studio");
     app.open_video(cx, id, VideoTab::Script);
     assert!(!app.has(cx, "script-rail"));
     assert!(app.has(cx, "script-menu"), "stats and actions are next to the tabs");
@@ -907,7 +904,7 @@ fn the_outline_puts_a_later_heading_at_the_top(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn clicked_rail_rows_and_template_cards_show_no_focus_ring(cx: &mut TestAppContext) {
+fn clicked_rail_rows_show_no_focus_ring(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, &["Desk setup tour"]);
     let id = app.video_id(cx, "Desk setup tour");
     app.open_video(cx, id, VideoTab::Script);
@@ -928,26 +925,6 @@ fn clicked_rail_rows_and_template_cards_show_no_focus_ring(cx: &mut TestAppConte
     app.wait(cx, Duration::from_secs(1));
     assert!(!app.has_dialog(cx));
     assert_eq!(focus(&app, cx, "import-markdown"), (false, false), "the dialog hands no focus back to it");
-
-    // Tab reaches a template card, ringed.
-    app.press(cx, "ctrl-n");
-    for _ in 0..20 {
-        if focus(&app, cx, "template-blank").0 {
-            break;
-        }
-        app.press(cx, "tab");
-    }
-    assert_eq!(focus(&app, cx, "template-blank"), (true, true));
-
-    // One picked with the mouse is selected, not ringed, and the mouse hides
-    // the ring of the one the keyboard left.
-    app.click(cx, "template-tutorial");
-    let selected = cx
-        .update_window(app.window, |_, window, _| window.find("template-tutorial").selected())
-        .expect("window is open");
-    assert_eq!(selected, Some(true));
-    assert_eq!(focus(&app, cx, "template-tutorial"), (false, false));
-    assert_eq!(focus(&app, cx, "template-blank"), (true, false));
 }
 
 #[gpui_kit::test]
@@ -972,7 +949,7 @@ fn a_click_below_the_document_puts_the_caret_after_it(cx: &mut TestAppContext) {
 fn enter_and_down_in_the_hook_continue_in_the_script(cx: &mut TestAppContext) {
     for key in ["enter", "down"] {
         let app = Fixture::open(cx, &[]);
-        let id = create_video(&app, cx, "Build a home studio", TemplateKind::Tutorial);
+        let id = create_video(&app, cx, "Build a home studio");
         app.open_video(cx, id, VideoTab::Script);
         app.click(cx, "page-hook");
         app.type_text(cx, "Cheap gear, real sound");
@@ -989,7 +966,7 @@ fn enter_and_down_in_the_hook_continue_in_the_script(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn enter_on_a_table_row_opens_the_script_to_write(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, &[]);
-    let id = create_video(&app, cx, "Build a home studio", TemplateKind::Tutorial);
+    let id = create_video(&app, cx, "Build a home studio");
     let row = ElementId::Name(format!("video-row-{id}").into());
     for typed in ["K5 ", "K6 "] {
         app.navigate(cx, Route::default());
@@ -1072,7 +1049,13 @@ fn a_failed_script_save_is_retried_and_written_on_quit(cx: &mut TestAppContext) 
 #[gpui_kit::test]
 fn without_a_file_chooser_markdown_exports_to_a_typed_path(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, &[]);
-    let id = create_video(&app, cx, "Build a home studio", TemplateKind::Tutorial);
+    let id = create_video(&app, cx, "Build a home studio");
+    set_script(
+        &app,
+        cx,
+        id,
+        "## Hook\n\nBetter sound for under a hundred dollars.\n\n## Step 1\n\nTreat the room first.\n",
+    );
     app.open_video(cx, id, VideoTab::Script);
     let page = app.page(cx);
     let script = cx.read(|cx| page.read(cx).script().cloned().expect("script"));
@@ -1120,7 +1103,13 @@ fn without_a_file_chooser_markdown_exports_to_a_typed_path(cx: &mut TestAppConte
 #[gpui_kit::test]
 fn export_writes_where_the_file_chooser_says(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, &[]);
-    let id = create_video(&app, cx, "Build a home studio", TemplateKind::Tutorial);
+    let id = create_video(&app, cx, "Build a home studio");
+    set_script(
+        &app,
+        cx,
+        id,
+        "## Hook\n\nBetter sound for under a hundred dollars.\n\n## Step 1\n\nTreat the room first.\n",
+    );
     app.open_video(cx, id, VideoTab::Script);
     app.click(cx, "export-markdown");
     let target = app._media.path().join("chosen.md");

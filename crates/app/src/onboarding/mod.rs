@@ -265,7 +265,7 @@ impl Onboarding {
                         StartChoice::FirstVideo,
                         IconName::Plus,
                         "Create my first video",
-                        "Open the New video dialog and start with a script template.",
+                        "Open the New video dialog and start writing.",
                     ))
                     .child(choice(
                         "start-empty",

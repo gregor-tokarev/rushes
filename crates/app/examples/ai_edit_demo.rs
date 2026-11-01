@@ -23,7 +23,6 @@ use gpui_kit::{
 use rushes::ai_edit::{AiEditPanel, AiSettings, PipelineService, PipelinesPage, WithAiEditIcons};
 use rushes::state::AppState;
 use rushes_core::settings::DATA_DIR_ENV;
-use rushes_core::templates::TemplateKind;
 use rushes_core::{NewVideo, Store, VideoFormat, VideoId};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -179,7 +178,6 @@ fn main() {
                             format: VideoFormat::LongForm,
                             hook: "Everything on my desk, and the three things I regret buying.".into(),
                             publish_date: None,
-                            template: TemplateKind::Review,
                         },
                         cx,
                     )

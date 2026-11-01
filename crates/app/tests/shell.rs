@@ -20,7 +20,6 @@ use rushes::state::AppState;
 use rushes::ui::path_prompt;
 use rushes::video_page::{DocumentTab, PathPurpose, SAVE_DELAY};
 use rushes_core::settings::{AppSettings, ThemeMode, WeekStart, Zoom};
-use rushes_core::templates::TemplateKind;
 use rushes_core::{
     BlockId, DatabaseView, DocumentKind, NewVideo, PropertyDef, PropertyId, PropertyKind, PropertyValue, Store,
     VideoId, VideoStatus, ViewId,
@@ -57,7 +56,7 @@ impl Fixture {
         };
         store.save_settings(&settings).expect("save settings");
         for title in titles {
-            let new = NewVideo { title: title.to_string(), template: TemplateKind::Blank, ..NewVideo::default() };
+            let new = NewVideo { title: title.to_string(), ..NewVideo::default() };
             store.create_video(new).expect("create video");
         }
         let state = AppState::new(store).expect("load state");
@@ -240,14 +239,13 @@ fn the_wizard_creates_a_video_and_opens_its_script(cx: &mut TestAppContext) {
 
     app.click(cx, "new-video-title");
     app.type_text(cx, "Launch day vlog");
-    app.click(cx, "template-vlog");
     app.click(cx, "new-video-create");
 
     assert!(!app.has_dialog(cx));
     let id = app.video_id(cx, "Launch day vlog");
     assert_eq!(app.route(cx), Route::Video { id, tab: VideoTab::Script });
     let video = cx.read(|cx| app.state.read(cx).video(id).cloned().expect("video"));
-    assert_eq!(video.icon.as_deref(), TemplateKind::Vlog.icon());
+    assert_eq!(video.icon, None);
     assert_eq!(video.status, VideoStatus::Idea);
     // The script opens with the caret in its first block.
     let first = app.script_first_block(cx);
@@ -713,17 +711,42 @@ fn a_table_cell_being_edited_is_saved_on_leaving_and_on_quit(cx: &mut TestAppCon
     assert_eq!(stored.as_deref(), Some("Desk setup tour 2026 review"));
 }
 
-/// Creates a video from `template` through the app state, as the wizard does.
-fn create_video(app: &Fixture, cx: &mut TestAppContext, title: &str, template: TemplateKind) -> VideoId {
+/// Creates a video through the app state, as the wizard does.
+fn create_video(app: &Fixture, cx: &mut TestAppContext, title: &str) -> VideoId {
     let state = app.state.clone();
-    let new = NewVideo { title: title.to_string(), template, ..NewVideo::default() };
+    let new = NewVideo { title: title.to_string(), ..NewVideo::default() };
     cx.update(|cx| state.update(cx, |state, cx| state.create_video(new, cx))).expect("video created")
+}
+
+/// Replaces a video's script with `markdown`, saved.
+fn set_script(app: &Fixture, cx: &mut TestAppContext, id: VideoId, markdown: &str) {
+    let blocks = rushes_core::document::from_markdown(markdown);
+    let state = app.state.clone();
+    cx.update(|cx| {
+        let store = state.read(cx).store();
+        let mut store = store.lock().expect("store lock");
+        let mut script = store
+            .list_documents(id)
+            .expect("list documents")
+            .into_iter()
+            .find(|document| document.kind == DocumentKind::Script)
+            .expect("script");
+        script.blocks = blocks;
+        store.save_document(&mut script).expect("save script");
+    });
+    cx.update(|cx| state.update(cx, |state, cx| state.reload(cx)));
 }
 
 #[gpui_kit::test]
 fn the_outline_jumps_to_a_heading(cx: &mut TestAppContext) {
     let app = Fixture::open(cx, true, &[]);
-    let id = create_video(&app, cx, "Build a home studio", TemplateKind::Tutorial);
+    let id = create_video(&app, cx, "Build a home studio");
+    set_script(
+        &app,
+        cx,
+        id,
+        "## Hook\n\nBetter sound for cheap.\n\n## Step 1\n\nTreat the room.\n\n## Step 2\n\nPick a mic.\n",
+    );
     app.navigate(cx, Route::Video { id, tab: VideoTab::Script });
 
     let (outline, words) = cx.read(|cx| {
@@ -731,7 +754,7 @@ fn the_outline_jumps_to_a_heading(cx: &mut TestAppContext) {
         let stats = page.script().expect("script tab").read(cx).stats().clone();
         (stats.outline, stats.words)
     });
-    assert!(outline.len() > 2, "the tutorial template has sections");
+    assert!(outline.len() > 2, "the script has sections");
     assert_eq!(cx.read(|cx| app.state.read(cx).row(id).map(|row| row.script_words)), Some(words));
 
     let heading = outline[2].block_id;
@@ -1076,7 +1099,7 @@ fn folder_errors_explain_themselves_and_lead_to_the_settings(cx: &mut TestAppCon
         state.update(cx, |state, cx| state.update_settings(cx, |settings| settings.media_root = Some(media_root)))
     });
 
-    let id = create_video(&app, cx, "Folder error", TemplateKind::Blank);
+    let id = create_video(&app, cx, "Folder error");
     app.step(cx, |_, _| {});
     assert_eq!(cx.read(|cx| app.state.read(cx).video(id).and_then(|video| video.folder.clone())), None);
     let notifications =
@@ -1157,7 +1180,7 @@ fn the_media_folder_saves_only_folders_it_can_use(cx: &mut TestAppContext) {
     assert_eq!(app.field_value(cx, "settings-media-root"), Some(footage.display().to_string()));
 
     // New videos go where the field says.
-    let id = create_video(&app, cx, "Launch day", TemplateKind::Blank);
+    let id = create_video(&app, cx, "Launch day");
     let folder = cx.read(|cx| app.state.read(cx).video(id).and_then(|video| video.folder.clone()));
     assert!(folder.is_some_and(|folder| folder.starts_with(&footage)));
 }

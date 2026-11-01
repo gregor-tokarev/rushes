@@ -8,7 +8,7 @@ a media folder per video.
 
 ```text
 crates/
-  core/       rushes-core      domain model, SQLite store, documents, templates, media folders
+  core/       rushes-core      domain model, SQLite store, documents, media folders
   youtube/    rushes-youtube   Google OAuth (loopback + PKCE), YouTube Data API v3 client, resumable upload
   edit/       rushes-edit      Rushes' editing tools (transcribe, cut plans, render, checks), served to the agent over MCP
   pipeline/   rushes-pipeline  AI edit pipelines: drives a coding agent (Codex or Claude Code) with rushes-edit or the video-use skill;
@@ -119,8 +119,6 @@ database's write lock for seconds. The UI thread never waits for it:
   `> [!onscreen]` callout syntax), teleprompter text (spoken blocks plus talking points
   marked `[Talking point]`, inline markdown stripped). Talking points are ideas the creator
   says in their own words, so they count toward neither the word count nor the runtime.
-- `templates.rs` — script templates (Tutorial, Review, Vlog, Short, Blank) producing
-  `Vec<Block>` personalised with title/hook/format.
 - `media.rs` — media root, per-video folder creation, footage listing (video/audio
   extensions, size, mtime), finding edit outputs (`footage/edit/final.mp4`, `preview.mp4`).
 - `settings.rs` — typed `AppSettings` stored in the settings table: media root,
@@ -222,7 +220,7 @@ GPUI Kit app. Main pieces:
   is pinned to its top (`VideoPage::render_pinned_tabs`), and what the tabs scroll into
   view (the caret, an outline heading, a revealed AI edit) stays below it. Each tab keeps
   its scroll position, and Ctrl/⌘ with `1`–`4` show the tabs from anywhere on the page.
-- Onboarding (first run) and New-video wizard (templates).
+- Onboarding (first run) and New-video wizard (title, hook, format, status, publish date; the script starts empty).
 - Publish: the video's YouTube account (one of several connected accounts, or the
   default one), metadata form, upload with progress, resume. The thumbnail goes up
   when the upload finishes (`publish/thumbnail.rs`). For a video already on YouTube the
@@ -256,7 +254,7 @@ new version once the app quits. Details in [updates.md](updates.md).
 
 ## Testing
 
-- `cargo test -p rushes-core` — store, documents, templates.
+- `cargo test -p rushes-core` — store, documents.
 - `cargo test -p rushes-youtube` — unit tests + integration tests against the emulators
   (`emulators/`; skipped with a message when Node is unavailable).
 - `cargo test -p rushes-pipeline` — with `scripts/fake-agent` and `scripts/fake-codex`.

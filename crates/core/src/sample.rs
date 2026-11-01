@@ -6,12 +6,10 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
 use uuid::Uuid;
 
+use crate::blocks::{broll, bullet, callout, h2, h3, onscreen, p, talking_point, todo};
 use crate::model::{
     Block, BlockKind, Document, DocumentId, DocumentKind, Privacy, PropertyDef, PropertyId, PropertyKind,
     PropertyValue, PublishSettings, SelectOption, TagColor, Video, VideoFormat, VideoStatus, YoutubeLink,
-};
-use crate::templates::{
-    TemplateKind, broll, bullet, callout, h2, h3, onscreen, p, script_template, talking_point, todo,
 };
 
 pub(crate) struct SampleWorkspace {
@@ -372,7 +370,14 @@ fn sqlite_idea(options: &Options) -> Sample {
         "SQLite is the most deployed database in the world, and you're already using it.",
     );
     video.properties = options.values("Low", None);
-    let script = script_template(TemplateKind::Tutorial, &video);
+    let script = vec![
+        h2("Hook"),
+        p(&video.hook),
+        h2("Why SQLite"),
+        talking_point("Zero setup: the database is a single file next to your app"),
+        talking_point("WAL mode handles far more concurrent reads than people expect"),
+        talking_point("Backups and replication with Litestream"),
+    ];
     (video, script, vec![p("Angle: SQLite in production, WAL mode, backups with Litestream.")])
 }
 
@@ -389,7 +394,16 @@ fn notion_livestream(options: &Options, today: NaiveDate) -> Sample {
     video.properties = options.values("Medium", Some("Skillforge"));
     video.publish.privacy = Privacy::Private;
     video.publish.publish_at = at_hour(video.publish_date, 17);
-    let script = script_template(TemplateKind::Tutorial, &video);
+    let script = vec![
+        h2("Intro"),
+        p(&video.hook),
+        h2("Plan"),
+        talking_point("Data model: pages made of typed blocks"),
+        talking_point("Rendering and editing blocks"),
+        talking_point("Saving to SQLite and taking questions from chat"),
+        h3("Before going live"),
+        todo("Test stream key, scenes and audio"),
+    ];
     (video, script, Vec::new())
 }
 
@@ -403,6 +417,13 @@ fn channel_trailer(options: &Options) -> Sample {
         "Tech that earns its place on your desk, tested for a month before I say a word.",
     );
     video.properties = options.values("Low", None);
-    let script = script_template(TemplateKind::Short, &video);
+    let script = vec![
+        h2("Hook"),
+        p(&video.hook),
+        onscreen(&video.title),
+        h2("Payoff"),
+        p("Reviews, setups and tutorials every week. Subscribe so you don't miss the next one."),
+        broll("Fast cuts of desk setups, framed vertically."),
+    ];
     (video, script, Vec::new())
 }

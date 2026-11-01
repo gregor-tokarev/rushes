@@ -31,7 +31,6 @@ use crate::model::{
 };
 use crate::sample;
 use crate::settings::{AgentHarness, AppSettings, EditHarness};
-use crate::templates::{TemplateKind, script_template};
 
 /// Settings key holding [`AppSettings`].
 const APP_SETTINGS_KEY: &str = "app";
@@ -77,16 +76,13 @@ pub struct NewVideo {
     pub format: VideoFormat,
     pub hook: String,
     pub publish_date: Option<NaiveDate>,
-    pub template: TemplateKind,
 }
 
 impl NewVideo {
-    /// The video at `position` with a Script document from the chosen template
-    /// and an empty Notes document, not stored yet. The template's icon becomes
-    /// the video icon.
+    /// The video at `position` with empty Script and Notes documents, not
+    /// stored yet.
     pub fn build(self, position: f64) -> (Video, Vec<Document>) {
         let video = Video {
-            icon: self.template.icon().map(str::to_string),
             format: self.format,
             hook: self.hook,
             publish_date: self.publish_date,
@@ -100,7 +96,7 @@ impl NewVideo {
                 video_id: video.id,
                 kind: DocumentKind::Script,
                 title: "Script".to_string(),
-                blocks: script_template(self.template, &video),
+                blocks: vec![Block::paragraph("")],
                 position: 0,
                 updated_at: now,
             },
@@ -367,8 +363,8 @@ impl Store {
         Ok(next_video_position(&self.conn)?)
     }
 
-    /// Creates a video at the end of the list with a Script document from the
-    /// chosen template and an empty Notes document, see [`NewVideo::build`].
+    /// Creates a video at the end of the list with empty Script and Notes
+    /// documents, see [`NewVideo::build`].
     pub fn create_video(&mut self, new: NewVideo) -> StoreResult<(Video, Vec<Document>)> {
         let tx = self.conn.transaction()?;
         let (video, documents) = new.build(next_video_position(&tx)?);
