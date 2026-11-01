@@ -5764,7 +5764,7 @@ dependencies = [
 
 [[package]]
 name = "rushes"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "async-signal",
  "base64 0.22.1",
@@ -5787,7 +5787,7 @@ dependencies = [
 
 [[package]]
 name = "rushes-core"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -5801,7 +5801,7 @@ dependencies = [
 
 [[package]]
 name = "rushes-edit"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "base64 0.22.1",
  "dirs 6.0.0",
@@ -5815,7 +5815,7 @@ dependencies = [
 
 [[package]]
 name = "rushes-pipeline"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "libc",
  "rushes-edit",
@@ -5827,7 +5827,7 @@ dependencies = [
 
 [[package]]
 name = "rushes-update"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "flate2",
  "libc",
@@ -5842,7 +5842,7 @@ dependencies = [
 
 [[package]]
 name = "rushes-youtube"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "base64 0.22.1",
  "chrono",
