@@ -123,6 +123,13 @@ impl AiSettings {
                 }
             }),
         ];
+        // Typing a model name keeps the field open, even while the name matches a
+        // model the menu lists or is empty.
+        subscriptions.push(cx.subscribe(&custom_model, |this, _, event: &InputEvent, _| {
+            if matches!(event, InputEvent::Change) {
+                this.custom_model_picked = true;
+            }
+        }));
         for input in [&agent_command, &codex_command, &custom_model, &skill_dir, &target_length, &elevenlabs_key] {
             subscriptions.push(cx.subscribe(input, |this, _, event: &InputEvent, cx| this.on_text_event(event, cx)));
         }
@@ -425,6 +432,32 @@ impl AiSettings {
                     }),
             )
             .when(custom, |this| this.child(Input::new(&self.custom_model).id("ai-settings-custom-model")))
+            .when_some(self.render_model_error(cx), |this, error| this.child(error))
+    }
+
+    /// Under the model menu: why Codex could not list its models.
+    fn render_model_error(&self, cx: &App) -> Option<impl IntoElement + use<>> {
+        if self.agent_harness != AgentHarness::Codex {
+            return None;
+        }
+        let service = PipelineService::global(cx);
+        let error = service.read(cx).codex_models_error(cx)?;
+        let reason = error
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("no reason given")
+            .trim_end_matches('.');
+        let message = format!("Couldn’t list Codex’s models: {reason}. Re-check under Requirements to try again.");
+        Some(
+            div()
+                .id("ai-settings-model-error")
+                .test_support()
+                .w(TRAILING_FIELD_WIDTH)
+                .text_sm()
+                .text_color(cx.theme().danger)
+                .child(message),
+        )
     }
 
     fn render_agent_harness(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {

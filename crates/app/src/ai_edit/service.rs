@@ -174,9 +174,9 @@ pub struct PipelineService {
     doctor_task: Option<Task<()>>,
     /// The settings the last requirement check ran with.
     checked: Option<PipelineSettings>,
-    /// The models the Codex CLI offers, with the command that listed them; `None`
-    /// until the first list arrives.
-    codex_models: Option<(String, Vec<CodexModel>)>,
+    /// The models the Codex CLI offers, or why it could not list them, with the
+    /// command that was asked; `None` until the first answer arrives.
+    codex_models: Option<(String, Result<Vec<CodexModel>, String>)>,
     codex_models_task: Option<Task<()>>,
     agent_env: Vec<(String, String)>,
     /// A run another view asked to show; taken by the panel of its video.
@@ -1077,8 +1077,17 @@ impl PipelineService {
     /// The models the configured Codex CLI offers: `None` while they are being
     /// listed for the first time, empty when Codex could not list them.
     pub fn codex_models(&self, cx: &App) -> Option<&[CodexModel]> {
+        self.codex_catalog(cx).map(|models| models.as_ref().map_or(&[][..], Vec::as_slice))
+    }
+
+    /// Why the configured Codex CLI could not list its models.
+    pub fn codex_models_error(&self, cx: &App) -> Option<&str> {
+        self.codex_catalog(cx)?.as_ref().err().map(String::as_str)
+    }
+
+    fn codex_catalog(&self, cx: &App) -> Option<&Result<Vec<CodexModel>, String>> {
         let command = &self.state.read(cx).settings().pipeline.codex_command;
-        self.codex_models.as_ref().filter(|(listed_by, _)| listed_by == command).map(|(_, models)| models.as_slice())
+        self.codex_models.as_ref().filter(|(listed_by, _)| listed_by == command).map(|(_, models)| models)
     }
 
     pub fn is_checking(&self) -> bool {
@@ -1120,10 +1129,9 @@ impl PipelineService {
         self.codex_models_task = Some(cx.spawn(async move |this, cx| {
             let models = cx.background_spawn(async move { codex_models(&config) }).await;
             _ = this.update(cx, |this, cx| {
-                let models = models.unwrap_or_else(|error| {
+                if let Err(error) = &models {
                     log_line!("rushes: couldn’t list Codex models: {error}");
-                    Vec::new()
-                });
+                }
                 this.codex_models = Some((command, models));
                 this.codex_models_task = None;
                 cx.notify();
