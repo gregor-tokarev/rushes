@@ -21,6 +21,7 @@ mod process;
 mod thumbnails;
 
 pub use agent::{AgentConfig, AgentKind, DEFAULT_ALLOWED_TOOLS, DEFAULT_COMMAND, DEFAULT_PERMISSION_MODE};
+pub use codex::{CodexModel, codex_models};
 pub use details::{
     DETAILS_SCHEMA, DetailsRequest, VideoDetails, WrittenDetails, details_prompt, has_transcript, parse_details,
     read_edit_notes, read_transcript, write_details,

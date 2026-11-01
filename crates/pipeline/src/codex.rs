@@ -11,7 +11,57 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::agent::{AgentConfig, AgentRun, Invocation, ProcessSpec, run_process};
+use crate::exec::run_captured_checked;
 use crate::{AgentEvent, PipelineError, parse_codex_line};
+
+/// How long listing Codex's models may take: it may refresh the catalog online.
+const MODELS_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A model Codex offers in its model picker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodexModel {
+    /// What `--model` takes, e.g. `gpt-5.5`.
+    pub slug: String,
+    /// The name Codex shows for it.
+    pub display_name: String,
+}
+
+/// The models the Codex CLI in `config` offers, in Codex's own order, from its
+/// model catalog (`codex debug models`). Hidden models are left out.
+pub fn codex_models(config: &AgentConfig) -> Result<Vec<CodexModel>, String> {
+    let program = config.resolve_command().ok_or_else(|| format!("{} not found", config.command.display()))?;
+    let output = run_captured_checked(&program, ["debug", "models"], &config.env, MODELS_TIMEOUT)?;
+    parse_models(&output).ok_or_else(|| "Codex printed no model catalog".to_owned())
+}
+
+fn parse_models(output: &str) -> Option<Vec<CodexModel>> {
+    let catalog: Value = serde_json::from_str(output.trim()).ok()?;
+    let mut models: Vec<(i64, CodexModel)> = catalog
+        .get("models")?
+        .as_array()?
+        .iter()
+        .filter(|model| model.get("visibility").and_then(Value::as_str).is_none_or(|visibility| visibility == "list"))
+        .filter_map(|model| {
+            let slug = model.get("slug")?.as_str()?.trim();
+            if slug.is_empty() {
+                return None;
+            }
+            let display_name = model
+                .get("display_name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(slug);
+            let priority = model.get("priority").and_then(Value::as_i64).unwrap_or(i64::MAX);
+            Some((priority, CodexModel { slug: slug.to_owned(), display_name: display_name.to_owned() }))
+        })
+        .collect();
+    models.sort_by_key(|(priority, _)| *priority);
+    let mut models: Vec<CodexModel> = models.into_iter().map(|(_, model)| model).collect();
+    let mut seen = std::collections::HashSet::new();
+    models.retain(|model| seen.insert(model.slug.clone()));
+    Some(models)
+}
 
 pub(crate) fn run(
     config: &AgentConfig,

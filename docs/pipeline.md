@@ -110,6 +110,11 @@ only affects new edits and new YouTube-details requests. Old runs default to Cla
 Code, including sessions recovered from the unsaved write queue. Commands and models
 are saved separately for each agent. Thumbnail chats always use Codex.
 
+The model menu in Settings names Claude Code's `opus`, `sonnet` and `haiku` aliases, and
+for Codex the models its catalog lists: `codex_models` runs `codex debug models` with the
+configured command and keeps the entries with `visibility: "list"`, in Codex's priority
+order. Any other model name can still be typed as a custom model.
+
 Codex runs as `codex exec --json --skip-git-repo-check --sandbox=workspace-write`,
 with `approval_policy="never"` and the prompt on stdin. Follow-ups use
 `codex exec ... resume -- <session_id> -`. Rushes' MCP server is passed as a TOML

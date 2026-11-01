@@ -17,9 +17,9 @@ use rushes_core::media::{self, MediaKind};
 use rushes_core::settings::{AgentHarness, EditHarness, PipelineSettings, data_dir, read_elevenlabs_key};
 use rushes_core::{PipelineRun, RunEvent, RunId, RunStatus, StoreError, VideoId, VideoStatus};
 use rushes_pipeline::{
-    AgentConfig, AgentEvent, AgentKind, AgentProcess, Doctor, Harness, Phase, PhaseOutcome, PipelineError, RunContext,
-    ToolServer, default_skill_dir, doctor, doctor_rushes, keep_final_cut, run_phase, set_aside_final_cut,
-    stop_leftover_agent,
+    AgentConfig, AgentEvent, AgentKind, AgentProcess, CodexModel, Doctor, Harness, Phase, PhaseOutcome, PipelineError,
+    RunContext, ToolServer, codex_models, default_skill_dir, doctor, doctor_rushes, keep_final_cut, run_phase,
+    set_aside_final_cut, stop_leftover_agent,
 };
 use serde::{Deserialize, Serialize};
 
@@ -174,6 +174,10 @@ pub struct PipelineService {
     doctor_task: Option<Task<()>>,
     /// The settings the last requirement check ran with.
     checked: Option<PipelineSettings>,
+    /// The models the Codex CLI offers, or why it could not list them, with the
+    /// command that was asked; `None` until the first answer arrives.
+    codex_models: Option<(String, Result<Vec<CodexModel>, String>)>,
+    codex_models_task: Option<Task<()>>,
     agent_env: Vec<(String, String)>,
     /// A run another view asked to show; taken by the panel of its video.
     revealed: Option<RunId>,
@@ -227,6 +231,8 @@ impl PipelineService {
                 doctor: None,
                 doctor_task: None,
                 checked: None,
+                codex_models: None,
+                codex_models_task: None,
                 agent_env: Vec::new(),
                 revealed: None,
                 drafts: HashMap::new(),
@@ -1068,6 +1074,22 @@ impl PipelineService {
         self.doctor.as_ref()
     }
 
+    /// The models the configured Codex CLI offers: `None` while they are being
+    /// listed for the first time, empty when Codex could not list them.
+    pub fn codex_models(&self, cx: &App) -> Option<&[CodexModel]> {
+        self.codex_catalog(cx).map(|models| models.as_ref().map_or(&[][..], Vec::as_slice))
+    }
+
+    /// Why the configured Codex CLI could not list its models.
+    pub fn codex_models_error(&self, cx: &App) -> Option<&str> {
+        self.codex_catalog(cx)?.as_ref().err().map(String::as_str)
+    }
+
+    fn codex_catalog(&self, cx: &App) -> Option<&Result<Vec<CodexModel>, String>> {
+        let command = &self.state.read(cx).settings().pipeline.codex_command;
+        self.codex_models.as_ref().filter(|(listed_by, _)| listed_by == command).map(|(_, models)| models)
+    }
+
     pub fn is_checking(&self) -> bool {
         self.doctor_task.is_some()
     }
@@ -1079,6 +1101,9 @@ impl PipelineService {
         let config = self.agent_config(&settings);
         let skill_dir = skill_dir(&settings);
         let harness = settings.harness;
+        if settings.agent_harness == AgentHarness::Codex {
+            self.refresh_codex_models(config.clone(), settings.codex_command.clone(), cx);
+        }
         self.checked = Some(settings);
         self.doctor_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -1096,6 +1121,22 @@ impl PipelineService {
             });
         }));
         cx.notify();
+    }
+
+    /// Lists the models `command` offers on a background thread. The previous list
+    /// stays until the new one arrives.
+    fn refresh_codex_models(&mut self, config: AgentConfig, command: String, cx: &mut Context<Self>) {
+        self.codex_models_task = Some(cx.spawn(async move |this, cx| {
+            let models = cx.background_spawn(async move { codex_models(&config) }).await;
+            _ = this.update(cx, |this, cx| {
+                if let Err(error) = &models {
+                    log_line!("rushes: couldn’t list Codex models: {error}");
+                }
+                this.codex_models = Some((command, models));
+                this.codex_models_task = None;
+                cx.notify();
+            });
+        }));
     }
 
     fn on_settings_changed(&mut self, cx: &mut Context<Self>) {
