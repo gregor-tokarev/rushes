@@ -36,48 +36,20 @@ const SAVE_DELAY: Duration = Duration::from_millis(600);
 /// of the row, which leaves about this much beside it at the smallest window.
 const TRAILING_FIELD_WIDTH: Rems = Rems(10.);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The Claude Code `--model` aliases the model menu names, with their labels.
+const CLAUDE_MODELS: [(&str, &str); 3] = [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")];
+
+const DEFAULT_MODEL_LABEL: &str = "Agent default";
+const CUSTOM_MODEL_LABEL: &str = "Custom…";
+
+/// What the model menu shows as chosen.
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ModelChoice {
     Default,
-    Opus,
-    Sonnet,
-    Haiku,
+    /// A model the menu names, by its `--model` value.
+    Named(SharedString),
+    /// A model name typed in the field under the menu.
     Custom,
-}
-
-impl ModelChoice {
-    const ALL: [ModelChoice; 5] =
-        [ModelChoice::Default, ModelChoice::Opus, ModelChoice::Sonnet, ModelChoice::Haiku, ModelChoice::Custom];
-
-    fn of(model: Option<&str>) -> Self {
-        match model.map(str::trim) {
-            None | Some("") => ModelChoice::Default,
-            Some("opus") => ModelChoice::Opus,
-            Some("sonnet") => ModelChoice::Sonnet,
-            Some("haiku") => ModelChoice::Haiku,
-            Some(_) => ModelChoice::Custom,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            ModelChoice::Default => "Agent default",
-            ModelChoice::Opus => "Opus",
-            ModelChoice::Sonnet => "Sonnet",
-            ModelChoice::Haiku => "Haiku",
-            ModelChoice::Custom => "Custom…",
-        }
-    }
-
-    /// The `--model` alias, for the named choices.
-    fn alias(self) -> Option<&'static str> {
-        match self {
-            ModelChoice::Opus => Some("opus"),
-            ModelChoice::Sonnet => Some("sonnet"),
-            ModelChoice::Haiku => Some("haiku"),
-            ModelChoice::Default | ModelChoice::Custom => None,
-        }
-    }
 }
 
 /// AI editing section of the Settings page: how the agent is launched, the creator's
@@ -95,7 +67,9 @@ pub struct AiSettings {
     extra_instructions: Entity<TextareaState>,
     target_length: Entity<InputState>,
     agent_harness: AgentHarness,
-    model: ModelChoice,
+    /// Custom was chosen in the model menu, so the field shows even for a model the
+    /// menu names.
+    custom_model_picked: bool,
     /// Why the typed skill folder was not saved.
     skill_dir_error: Option<SharedString>,
     doctor: Entity<DoctorChecklist>,
@@ -112,14 +86,7 @@ impl AiSettings {
         };
         let agent_command = input(display_command(&settings.agent_command), DEFAULT_AGENT_COMMAND, window, cx);
         let codex_command = input(display_command(&settings.codex_command), DEFAULT_CODEX_COMMAND, window, cx);
-        let selected_model = selected_model(&settings);
-        let model = model_choice(settings.agent_harness, selected_model);
-        let custom_model = input(
-            if model == ModelChoice::Custom { selected_model.unwrap_or_default().to_owned() } else { String::new() },
-            "Model name",
-            window,
-            cx,
-        );
+        let custom_model = input(selected_model(&settings).unwrap_or_default().to_owned(), "Model name", window, cx);
         let skill_dir = input(
             settings.skill_dir.as_deref().map(display_user_path).unwrap_or_default(),
             "~/.claude/skills/video-use",
@@ -178,7 +145,7 @@ impl AiSettings {
             extra_instructions,
             target_length,
             agent_harness: settings.agent_harness,
-            model,
+            custom_model_picked: false,
             skill_dir_error: None,
             doctor,
             save_task: None,
@@ -213,7 +180,7 @@ impl AiSettings {
         self.skill_dir_error = skill_dir.as_ref().err().map(|error| error.clone().into());
         let extra_instructions = self.extra_instructions.read(cx).value().to_string();
         let target_length = self.target_length.read(cx).value().trim().to_string();
-        let model = self.model_value(cx);
+        let custom_model = (self.model_choice(cx) == ModelChoice::Custom).then(|| self.custom_model_value(cx));
         let key = self.elevenlabs_key.read(cx).value().trim().to_string();
         if read_elevenlabs_key(&data_dir()).unwrap_or_default() != key {
             match write_elevenlabs_key(&data_dir(), &key) {
@@ -235,20 +202,48 @@ impl AiSettings {
                 }
                 pipeline.extra_instructions = extra_instructions;
                 pipeline.default_preferences.target_length = target_length;
-                match self.agent_harness {
-                    AgentHarness::Claude => pipeline.model = model,
-                    AgentHarness::Codex => pipeline.codex_model = model,
+                if let Some(model) = custom_model {
+                    match self.agent_harness {
+                        AgentHarness::Claude => pipeline.model = model,
+                        AgentHarness::Codex => pipeline.codex_model = model,
+                    }
                 }
             })
         });
     }
 
-    fn model_value(&self, cx: &App) -> Option<String> {
-        match self.model {
-            ModelChoice::Custom => {
-                Some(self.custom_model.read(cx).value().trim().to_string()).filter(|model| !model.is_empty())
+    /// The model typed in the custom field; `None` when it is empty.
+    fn custom_model_value(&self, cx: &App) -> Option<String> {
+        Some(self.custom_model.read(cx).value().trim().to_string()).filter(|model| !model.is_empty())
+    }
+
+    /// The models the menu names for the selected harness, as `(--model value, label)`:
+    /// Claude Code's aliases, or the models the Codex CLI lists. `None` while Codex
+    /// is listing them.
+    fn named_models(&self, cx: &App) -> Option<Vec<(SharedString, SharedString)>> {
+        match self.agent_harness {
+            AgentHarness::Claude => {
+                Some(CLAUDE_MODELS.iter().map(|&(slug, label)| (slug.into(), label.into())).collect())
             }
-            choice => choice.alias().map(str::to_owned),
+            AgentHarness::Codex => PipelineService::global(cx).read(cx).codex_models(cx).map(|models| {
+                models.iter().map(|model| (model.slug.clone().into(), model.display_name.clone().into())).collect()
+            }),
+        }
+    }
+
+    fn model_choice(&self, cx: &App) -> ModelChoice {
+        if self.custom_model_picked {
+            return ModelChoice::Custom;
+        }
+        let settings = &self.state.read(cx).settings().pipeline;
+        let Some(model) = selected_model(settings).map(str::trim).filter(|model| !model.is_empty()) else {
+            return ModelChoice::Default;
+        };
+        match self.named_models(cx) {
+            // Still listing: a saved model is most likely one Codex lists.
+            None => ModelChoice::Named(model.to_owned().into()),
+            Some(named) if named.iter().any(|(slug, _)| slug == model) => ModelChoice::Named(model.to_owned().into()),
+            Some(_) => ModelChoice::Custom,
         }
     }
 
@@ -257,12 +252,20 @@ impl AiSettings {
         cx.notify();
     }
 
-    fn set_model(&mut self, model: ModelChoice, window: &mut Window, cx: &mut Context<Self>) {
-        self.model = model;
-        if model == ModelChoice::Custom {
+    fn set_model(&mut self, choice: ModelChoice, window: &mut Window, cx: &mut Context<Self>) {
+        let value = match &choice {
+            ModelChoice::Default => None,
+            ModelChoice::Named(slug) => Some(slug.to_string()),
+            // A custom model stays; a named one leaves an empty field to type in.
+            ModelChoice::Custom if self.model_choice(cx) == ModelChoice::Custom => self.custom_model_value(cx),
+            ModelChoice::Custom => None,
+        };
+        self.custom_model_picked = choice == ModelChoice::Custom;
+        let text = value.clone().unwrap_or_default();
+        self.custom_model.update(cx, |input, cx| input.set_value(text, window, cx));
+        if self.custom_model_picked {
             self.custom_model.update(cx, |input, cx| input.focus(window, cx));
         }
-        let value = self.model_value(cx);
         let harness = self.agent_harness;
         self.update(cx, |pipeline| match harness {
             AgentHarness::Claude => pipeline.model = value,
@@ -331,9 +334,8 @@ impl AiSettings {
         let pipeline = self.state.read(cx).settings().pipeline.clone();
         if self.agent_harness != pipeline.agent_harness {
             self.agent_harness = pipeline.agent_harness;
-            let model = selected_model(&pipeline);
-            self.model = model_choice(pipeline.agent_harness, model);
-            let value = if self.model == ModelChoice::Custom { model.unwrap_or_default() } else { "" };
+            self.custom_model_picked = false;
+            let value = selected_model(&pipeline).unwrap_or_default();
             self.custom_model.update(cx, |input, cx| input.set_value(value, window, cx));
         }
         let skill_dir = pipeline.skill_dir.as_deref().map(display_user_path).unwrap_or_default();
@@ -384,28 +386,40 @@ impl AiSettings {
     /// side they would not fit beside the label in a narrow window.
     fn render_model(&self, cx: &mut Context<Self>) -> Div {
         let settings = cx.weak_entity();
-        let current = self.model;
+        let current = self.model_choice(cx);
         let custom = current == ModelChoice::Custom;
-        let choices: &[ModelChoice] = match self.agent_harness {
-            AgentHarness::Claude => &ModelChoice::ALL,
-            AgentHarness::Codex => &[ModelChoice::Default, ModelChoice::Custom],
-        };
+        let mut named = self.named_models(cx).unwrap_or_default();
+        if let ModelChoice::Named(slug) = &current
+            && !named.iter().any(|(named, _)| named == slug)
+        {
+            // Codex is still listing its models.
+            named.push((slug.clone(), slug.clone()));
+        }
+        let mut choices = vec![(ModelChoice::Default, SharedString::from(DEFAULT_MODEL_LABEL))];
+        choices.extend(named.into_iter().map(|(slug, label)| (ModelChoice::Named(slug), label)));
+        choices.push((ModelChoice::Custom, CUSTOM_MODEL_LABEL.into()));
+        let label = choices
+            .iter()
+            .find(|(choice, _)| *choice == current)
+            .map_or_else(|| SharedString::from(CUSTOM_MODEL_LABEL), |(_, label)| label.clone());
         v_flex()
             .gap_2()
             .when(custom, |this| this.w(TRAILING_FIELD_WIDTH))
             .child(
                 Button::new("ai-settings-model")
                     .outline()
-                    .label(current.label().trim_end_matches('…'))
+                    .label(SharedString::from(label.trim_end_matches('…').to_owned()))
                     .dropdown_caret(true)
                     .dropdown_menu(move |mut menu, _, _| {
-                        for &choice in choices {
+                        for (choice, label) in &choices {
                             let settings = settings.clone();
-                            menu = menu.item(menu_item(choice.label()).checked(choice == current).on_click(
-                                move |_, window, cx| {
+                            let checked = *choice == current;
+                            let choice = choice.clone();
+                            menu =
+                                menu.item(menu_item(label.clone()).checked(checked).on_click(move |_, window, cx| {
+                                    let choice = choice.clone();
                                     _ = settings.update(cx, |this, cx| this.set_model(choice, window, cx));
-                                },
-                            ));
+                                }));
                         }
                         menu
                     }),
@@ -619,13 +633,6 @@ fn selected_model(settings: &PipelineSettings) -> Option<&str> {
     match settings.agent_harness {
         AgentHarness::Claude => settings.model.as_deref(),
         AgentHarness::Codex => settings.codex_model.as_deref(),
-    }
-}
-
-fn model_choice(harness: AgentHarness, model: Option<&str>) -> ModelChoice {
-    match (harness, model.filter(|model| !model.trim().is_empty())) {
-        (AgentHarness::Codex, Some(_)) => ModelChoice::Custom,
-        _ => ModelChoice::of(model),
     }
 }
 
