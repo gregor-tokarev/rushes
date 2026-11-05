@@ -21,7 +21,7 @@ use gpui_kit::{
 use rushes_core::{Block, BlockId, BlockKind, Document};
 
 use self::geometry::{CaretEnd, Geometry};
-use self::history::{DocumentHistory, Snapshot, Typing};
+use self::history::{DocumentHistory, Focus, Snapshot, Typing};
 use super::blocks::{self, Merge};
 use super::inline::{Marker, toggle_marker};
 use super::markdown::{Shortcut, detect_quote_marker, detect_shortcut, is_list, parse_pasted};
@@ -284,10 +284,10 @@ impl DocumentEditor {
         cx.notify();
     }
 
-    /// The focused block and the caret's offset in it.
-    fn caret(&self, cx: &App) -> Option<(BlockId, usize)> {
+    /// The focused block and the selection in it.
+    fn caret(&self, cx: &App) -> Focus {
         let id = self.focused?;
-        Some((id, self.inputs.get(&id).map_or(0, |input| input.state.read(cx).cursor())))
+        Some((id, self.inputs.get(&id).map_or(0..0, |input| input.state.read(cx).selected_range())))
     }
 
     /// Keeps the history's caret where the user put it, so undoing the next
@@ -348,9 +348,17 @@ impl DocumentEditor {
         self.selected = None;
         let focus = focus
             .filter(|(id, _)| self.index(*id).is_some())
-            .or_else(|| self.document.blocks.first().map(|block| (block.id, 0)));
-        if let Some((id, offset)) = focus {
-            self.focus_block(id, Caret::At(offset), window, cx);
+            .or_else(|| self.document.blocks.first().map(|block| (block.id, 0..0)));
+        if let Some((id, range)) = &focus {
+            self.focus_block(*id, Caret::At(range.end), window, cx);
+            if !range.is_empty()
+                && let Some(input) = self.inputs.get(id)
+            {
+                input.state.update(cx, |state, cx| {
+                    let len = state.text().len();
+                    state.set_selected_range(range.start.min(len)..range.end.min(len), cx);
+                });
+            }
         }
         self.history.set_focus(focus);
         cx.emit(DocumentEditorEvent::Changed);
@@ -516,19 +524,34 @@ impl DocumentEditor {
         }
     }
 
-    /// Records the text change just applied to block `ix` as typing.
+    /// Records the text change just applied to block `ix`: a single typed or
+    /// deleted character at a plain caret is typing, anything else a step of
+    /// its own.
     fn record_typing(&mut self, ix: usize, previous: &str, cursor: usize) {
         let block = &self.document.blocks[ix];
-        let kind = if block.text.len() >= previous.len() { Typing::Insert } else { Typing::Delete };
+        let id = block.id;
+        let caret = match self.history.focus() {
+            Some((focused, range)) if *focused == id && range.is_empty() => Some(range.start),
+            _ => None,
+        };
+        let (chars, previous_chars) = (block.text.chars().count(), previous.chars().count());
+        let kind = match caret {
+            Some(at) if chars == previous_chars + 1 && cursor > at => Some(Typing::Insert),
+            Some(_) if chars + 1 == previous_chars => Some(Typing::Delete),
+            _ => None,
+        };
         // A word typed after whitespace starts a new step.
-        let word_start = kind == Typing::Insert
-            && self.history.focus().is_some_and(|(focused, at)| {
-                focused == block.id
-                    && block.text.get(..at).is_some_and(|before| before.ends_with(char::is_whitespace))
+        let word_start = kind == Some(Typing::Insert)
+            && caret.is_some_and(|at| {
+                block.text.get(..at).is_some_and(|before| before.ends_with(char::is_whitespace))
                     && block.text.get(at..cursor).is_some_and(|typed| typed.starts_with(|c: char| !c.is_whitespace()))
             });
-        let id = block.id;
-        self.history.record_typing(&self.document.blocks, Some((id, cursor)), id, kind, word_start);
+        self.history.record_text(
+            &self.document.blocks,
+            Some((id, cursor..cursor)),
+            kind.map(|kind| (id, kind)),
+            word_start,
+        );
     }
 
     /// Opens the slash menu after a `/` typed at the start of a block or

@@ -4,10 +4,12 @@
 //! The editor answers Undo / Redo itself instead of leaving them to the
 //! focused block's input, so typing and structural edits (insert, delete,
 //! move, convert, duplicate, split, merge, paste) share one history in the
-//! order they were made. Consecutive typing in one block is one step, until
-//! the caret moves, a new word starts or the edit turns from inserting to
-//! deleting.
+//! order they were made. Consecutive typing of single characters in one
+//! block is one step, until the caret moves, a new word starts or the edit
+//! turns from inserting to deleting. Any other text change (replacing a
+//! selection, pasting, formatting) is a step of its own.
 
+use std::ops::Range;
 use std::rc::Rc;
 
 use rushes_core::{Block, BlockId};
@@ -15,8 +17,9 @@ use rushes_core::{Block, BlockId};
 /// Steps kept for Undo.
 const MAX_STEPS: usize = 500;
 
-/// The block with keyboard focus and the caret's byte offset in it.
-pub(super) type Focus = Option<(BlockId, usize)>;
+/// The block with keyboard focus and the selected byte range in it (empty
+/// for a plain caret).
+pub(super) type Focus = Option<(BlockId, Range<usize>)>;
 
 /// The blocks and where the caret was, restored together.
 #[derive(Clone, Debug)]
@@ -64,8 +67,8 @@ impl DocumentHistory {
     }
 
     /// The caret as of the last step or [`Self::set_focus`].
-    pub fn focus(&self) -> Focus {
-        self.base.focus
+    pub fn focus(&self) -> &Focus {
+        &self.base.focus
     }
 
     /// Records a structural edit that left the document as `blocks`, unless
@@ -79,11 +82,17 @@ impl DocumentHistory {
         self.push(blocks, focus);
     }
 
-    /// Records a text change in `block`, extending the typing step before it
-    /// when it continues that typing at the same caret. `word_start` breaks
-    /// the step so Undo removes typed text a word at a time.
-    pub fn record_typing(&mut self, blocks: &[Block], focus: Focus, block: BlockId, kind: Typing, word_start: bool) {
-        let extends = self.typing == Some((block, kind))
+    /// Records a text change. `typing` is the block and direction of a
+    /// single typed or deleted character, which extends the typing step
+    /// before it when it continues that typing at the same caret; `None` is
+    /// any other change, a step of its own. `word_start` breaks the step so
+    /// Undo removes typed text a word at a time.
+    pub fn record_text(&mut self, blocks: &[Block], focus: Focus, typing: Option<(BlockId, Typing)>, word_start: bool) {
+        let Some(typing) = typing else {
+            self.record(blocks, focus);
+            return;
+        };
+        let extends = self.typing == Some(typing)
             && !word_start
             && self.undos.last().is_some_and(|step| step.after.focus == self.base.focus);
         if extends && let Some(step) = self.undos.last_mut() {
@@ -97,7 +106,7 @@ impl DocumentHistory {
             return;
         }
         self.push(blocks, focus);
-        self.typing = Some((block, kind));
+        self.typing = Some(typing);
     }
 
     fn push(&mut self, blocks: &[Block], focus: Focus) {
