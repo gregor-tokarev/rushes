@@ -215,9 +215,10 @@ GPUI Kit app. Main pieces:
   menu, add property, sort/filter/search) and board view (kanban by status, drag cards).
 - `editor/` — block-based rich document editor (slash menu, markdown shortcuts,
   keyboard navigation between blocks, drag to reorder, inline formatting, live stats).
-  Undo / Redo cover the whole document: typing is undone by the focused block's own
-  input, and structural edits (insert, delete, move, convert, duplicate, split, merge,
-  paste) are snapshots of the block list in `document_editor/history.rs`.
+  Undo / Redo cover the whole document: the editor answers them itself, and typing
+  (grouped by word) and structural edits (insert, delete, move, convert, duplicate,
+  split, merge, paste) share one history of block-list snapshots in
+  `document_editor/history.rs`; the block inputs' own histories are never used.
 - Video page: icon + title, properties panel, tabs Script / Notes / Footage & AI edit / Publish.
   The page scrolls as a whole; once it is scrolled past the tab strip, a copy of the strip
   is pinned to its top (`VideoPage::render_pinned_tabs`), and what the tabs scroll into
