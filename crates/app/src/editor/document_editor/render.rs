@@ -216,6 +216,8 @@ impl Render for DocumentEditor {
             .capture_action(cx.listener(Self::on_outdent))
             .capture_action(cx.listener(Self::on_escape))
             .capture_action(cx.listener(Self::on_paste))
+            .capture_action(cx.listener(Self::on_undo))
+            .capture_action(cx.listener(Self::on_redo))
             .on_action(cx.listener(Self::toggle_bold))
             .on_action(cx.listener(Self::toggle_italic))
             .on_action(cx.listener(Self::toggle_code))

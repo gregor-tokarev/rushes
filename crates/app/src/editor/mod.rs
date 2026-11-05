@@ -15,6 +15,7 @@ mod markdown;
 mod palette;
 mod slash;
 
+use gpui_kit::component::input::{Redo, Undo};
 use gpui_kit::{App, Global, KeyBinding, actions};
 
 pub use document_editor::{DocumentEditor, DocumentEditorEvent};
@@ -71,5 +72,11 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", InsertParagraphBelow, Some(CONTEXT)),
         KeyBinding::new("escape", ClearBlockSelection, Some(CONTEXT)),
         KeyBinding::new("secondary-/", OpenBlockMenu, Some(CONTEXT)),
+        // The input's own Undo / Redo, bound here too so they work with no
+        // input focused (a selected divider), plus the usual Redo shortcut.
+        KeyBinding::new("secondary-z", Undo, Some(CONTEXT)),
+        KeyBinding::new("secondary-shift-z", Redo, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-y", Redo, Some(CONTEXT)),
     ]);
 }
