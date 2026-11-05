@@ -2,6 +2,7 @@
 //! Presentation lives in [`render`].
 
 mod geometry;
+mod history;
 mod render;
 
 use std::cell::{Cell, RefCell};
@@ -10,7 +11,7 @@ use std::rc::Rc;
 
 use gpui_kit::component::input::{
     Backspace, Delete, Enter, Escape, IndentInline, InputEvent, MoveDown, MoveLeft, MoveRight, MoveUp, OutdentInline,
-    Paste, TextareaState,
+    Paste, Redo, TextareaState, Undo,
 };
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::{
@@ -20,6 +21,7 @@ use gpui_kit::{
 use rushes_core::{Block, BlockId, BlockKind, Document};
 
 use self::geometry::{CaretEnd, Geometry};
+use self::history::{DocumentHistory, Focus, Snapshot, Typing};
 use super::blocks::{self, Merge};
 use super::inline::{Marker, toggle_marker};
 use super::markdown::{Shortcut, detect_quote_marker, detect_shortcut, is_list, parse_pasted};
@@ -49,6 +51,8 @@ pub enum DocumentEditorEvent {
 pub struct DocumentEditor {
     document: Document,
     inputs: HashMap<BlockId, BlockInput>,
+    /// Every edit, typing included, for Undo / Redo across blocks.
+    history: DocumentHistory,
     /// Block with keyboard focus: a text block whose input is focused or a
     /// selected divider. Kept while a menu inside the editor takes focus.
     focused: Option<BlockId>,
@@ -73,7 +77,7 @@ pub struct DocumentEditor {
 
 struct BlockInput {
     state: Entity<TextareaState>,
-    _subscription: Subscription,
+    _subscriptions: [Subscription; 2],
 }
 
 /// The slash command menu, open while the text after a typed `/` filters it.
@@ -160,6 +164,7 @@ impl DocumentEditor {
             }
         });
         Self {
+            history: DocumentHistory::new(document.blocks.clone()),
             document,
             inputs: HashMap::new(),
             focused: None,
@@ -195,6 +200,7 @@ impl DocumentEditor {
     /// Does not emit [`DocumentEditorEvent::Changed`].
     pub fn set_document(&mut self, document: Document, window: &mut Window, cx: &mut Context<Self>) {
         let had_focus = self.focus_handle.contains_focused(window, cx);
+        self.history = DocumentHistory::new(document.blocks.clone());
         self.document = document;
         self.inputs.clear();
         self.slash = None;
@@ -271,7 +277,90 @@ impl DocumentEditor {
         self.focus_block(id, Caret::Start, window, cx);
     }
 
+    /// A structural edit was made: records it for Undo and tells the owner.
     fn changed(&mut self, cx: &mut Context<Self>) {
+        self.history.record(&self.document.blocks, self.caret(cx));
+        cx.emit(DocumentEditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// The focused block and the selection in it.
+    fn caret(&self, cx: &App) -> Focus {
+        let id = self.focused?;
+        Some((id, self.inputs.get(&id).map_or(0..0, |input| input.state.read(cx).selected_range())))
+    }
+
+    /// Keeps the history's caret where the user put it, so undoing the next
+    /// edit returns it there. Skipped while the focused input has text the
+    /// document has not seen yet: that caret belongs after the typing.
+    fn track_caret(&mut self, cx: &App) {
+        let caret = self.caret(cx);
+        if let Some((id, _)) = caret
+            && let Some(input) = self.inputs.get(&id)
+            && self.index(id).is_some_and(|ix| self.document.blocks[ix].text != input.state.read(cx).value().as_ref())
+        {
+            return;
+        }
+        self.history.set_focus(caret);
+    }
+
+    /// Undo for the whole document, typing included. The focused input's
+    /// own history is never used, so the two cannot disagree.
+    fn on_undo(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        self.record_pending_text(cx);
+        if let Some(snapshot) = self.history.undo() {
+            self.restore(snapshot, window, cx);
+        }
+    }
+
+    fn on_redo(&mut self, _: &Redo, window: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        self.record_pending_text(cx);
+        if let Some(snapshot) = self.history.redo() {
+            self.restore(snapshot, window, cx);
+        }
+    }
+
+    /// Records text the focused input holds whose change event has not
+    /// arrived yet, so Undo does not skip it.
+    fn record_pending_text(&mut self, cx: &mut Context<Self>) {
+        let blocks = self.document(cx).blocks;
+        if blocks != self.document.blocks {
+            self.document.blocks = blocks;
+            self.history.record(&self.document.blocks, self.caret(cx));
+        }
+    }
+
+    /// Puts back the blocks of an undo or redo step, and the caret with them.
+    fn restore(&mut self, snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) {
+        let Snapshot { blocks, focus } = snapshot;
+        self.document.blocks = Rc::unwrap_or_clone(blocks);
+        let kept = &self.document.blocks;
+        self.inputs.retain(|id, _| kept.iter().any(|block| block.id == *id && block.kind.has_text()));
+        let inputs: Vec<BlockId> = self.inputs.keys().copied().collect();
+        for id in inputs {
+            self.sync_input(id, window, cx);
+        }
+        self.slash = None;
+        self.block_menu = None;
+        self.drop_target = None;
+        self.selected = None;
+        let focus = focus
+            .filter(|(id, _)| self.index(*id).is_some())
+            .or_else(|| self.document.blocks.first().map(|block| (block.id, 0..0)));
+        if let Some((id, range)) = &focus {
+            self.focus_block(*id, Caret::At(range.end), window, cx);
+            if !range.is_empty()
+                && let Some(input) = self.inputs.get(id)
+            {
+                input.state.update(cx, |state, cx| {
+                    let len = state.text().len();
+                    state.set_selected_range(range.start.min(len)..range.end.min(len), cx);
+                });
+            }
+        }
+        self.history.set_focus(focus);
         cx.emit(DocumentEditorEvent::Changed);
         cx.notify();
     }
@@ -323,7 +412,9 @@ impl DocumentEditor {
         let subscription = cx.subscribe_in(&state, window, move |this, state, event, window, cx| {
             this.on_input_event(id, state, event, window, cx)
         });
-        self.inputs.insert(id, BlockInput { state: state.clone(), _subscription: subscription });
+        // The input notifies when its caret moves.
+        let observer = cx.observe(&state, |this, _, cx| this.track_caret(cx));
+        self.inputs.insert(id, BlockInput { state: state.clone(), _subscriptions: [subscription, observer] });
         Some(state)
     }
 
@@ -360,6 +451,8 @@ impl DocumentEditor {
         self.slash = None;
         self.focus_handle.focus(window, cx);
         self.set_focused(Some(id), cx);
+        // After the edit that selected it, if any, is recorded.
+        cx.defer_in(window, |this, _, cx| this.track_caret(cx));
         self.geometry.borrow_mut().request_reveal(None);
         cx.notify();
     }
@@ -377,6 +470,7 @@ impl DocumentEditor {
             InputEvent::Focus => {
                 self.selected = None;
                 self.set_focused(Some(id), cx);
+                self.track_caret(cx);
                 cx.notify();
             }
             InputEvent::Blur => {
@@ -405,6 +499,7 @@ impl DocumentEditor {
             return;
         }
         let previous = std::mem::replace(&mut self.document.blocks[ix].text, text);
+        self.record_typing(ix, &previous, cursor);
         self.geometry.borrow_mut().request_reveal(None);
         self.update_slash(ix, &previous, cursor);
         let block = &self.document.blocks[ix];
@@ -415,10 +510,48 @@ impl DocumentEditor {
             BlockKind::Quote => detect_quote_marker(&block.text, cursor),
             _ => None,
         };
-        if let Some(shortcut) = shortcut {
-            self.apply_shortcut(ix, shortcut, window, cx);
+        match shortcut {
+            // The typed marker stays a step of its own, so Undo first turns
+            // the block back into the text that was typed.
+            Some(shortcut) => {
+                self.apply_shortcut(ix, shortcut, window, cx);
+                self.changed(cx);
+            }
+            None => {
+                cx.emit(DocumentEditorEvent::Changed);
+                cx.notify();
+            }
         }
-        self.changed(cx);
+    }
+
+    /// Records the text change just applied to block `ix`: a single typed or
+    /// deleted character at a plain caret is typing, anything else a step of
+    /// its own.
+    fn record_typing(&mut self, ix: usize, previous: &str, cursor: usize) {
+        let block = &self.document.blocks[ix];
+        let id = block.id;
+        let caret = match self.history.focus() {
+            Some((focused, range)) if *focused == id && range.is_empty() => Some(range.start),
+            _ => None,
+        };
+        let (chars, previous_chars) = (block.text.chars().count(), previous.chars().count());
+        let kind = match caret {
+            Some(at) if chars == previous_chars + 1 && cursor > at => Some(Typing::Insert),
+            Some(_) if chars + 1 == previous_chars => Some(Typing::Delete),
+            _ => None,
+        };
+        // A word typed after whitespace starts a new step.
+        let word_start = kind == Some(Typing::Insert)
+            && caret.is_some_and(|at| {
+                block.text.get(..at).is_some_and(|before| before.ends_with(char::is_whitespace))
+                    && block.text.get(at..cursor).is_some_and(|typed| typed.starts_with(|c: char| !c.is_whitespace()))
+            });
+        self.history.record_text(
+            &self.document.blocks,
+            Some((id, cursor..cursor)),
+            kind.map(|kind| (id, kind)),
+            word_start,
+        );
     }
 
     /// Opens the slash menu after a `/` typed at the start of a block or
