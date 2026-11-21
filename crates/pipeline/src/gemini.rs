@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::agent::{AgentConfig, AgentRun, Invocation, ProcessSpec, run_process};
@@ -26,6 +27,9 @@ const MCP_TOOL_TIMEOUT_MS: u64 = 3_600_000;
 /// Non-empty MCP server allowlist sentinel that matches no real server, blocking all
 /// user-configured MCP servers when a run needs none.
 const NO_MCP_SERVERS: &str = "__rushes_none__";
+/// Recoverable backup of `<cwd>/.gemini/settings.json` kept while a Rushes-managed
+/// Gemini run is active, so a crash or forced kill never loses the creator's file.
+const BACKUP_FILE: &str = ".rushes-settings-backup.json";
 /// Built-in Gemini CLI model aliases, used when an older CLI lacks `--list-models`.
 const FALLBACK_MODELS: [(&str, &str); 4] =
     [("auto", "Auto"), ("pro", "Pro"), ("flash", "Flash"), ("flash-lite", "Flash Lite")];
@@ -51,6 +55,25 @@ pub fn gemini_models(config: &AgentConfig) -> Result<Vec<GeminiModel>, String> {
         Err(reason) if unsupported_list_models(&reason) => Ok(fallback_models()),
         Err(reason) => Err(reason),
     }
+}
+
+/// Restores `<cwd>/.gemini/settings.json` from an on-disk backup left behind by an
+/// earlier crashed or killed Gemini CLI run. Does nothing while a run in this process
+/// still holds `cwd`, or when no backup exists.
+pub fn restore_leftover_gemini_workspace(cwd: &Path) {
+    let key = match fs::canonicalize(cwd).or_else(|_| std::path::absolute(cwd)) {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+    let map = ACTIVE_WORKSPACES.lock().unwrap_or_else(|poison| poison.into_inner());
+    if map.contains_key(&key) {
+        return;
+    }
+    let gemini_dir = cwd.join(".gemini");
+    let backup_path = gemini_dir.join(BACKUP_FILE);
+    let Ok(bytes) = fs::read(&backup_path) else { return };
+    let Ok(backup) = serde_json::from_slice::<WorkspaceBackup>(&bytes) else { return };
+    restore_workspace_files(&gemini_dir, &gemini_dir.join("settings.json"), &backup_path, &backup);
 }
 
 fn unsupported_list_models(reason: &str) -> bool {
@@ -130,8 +153,8 @@ pub(crate) fn run(
 
     if invocation.one_off {
         // One-off requests (YouTube details) need no tools and nothing from the footage
-        // folder. Running in a private temporary folder disables built-in tools via
-        // `tools.core = []` without touching the user's directory or session history.
+        // folder. Running in a private temporary folder disables built-in, discovered,
+        // MCP, skill and hook execution without touching the user's directory or history.
         let dir = tempfile::tempdir()?;
         write_one_off_settings(dir.path())?;
         args.push("--approval-mode=default".into());
@@ -146,15 +169,22 @@ pub(crate) fn run(
             arg.push(dir);
             args.push(arg);
         }
-        let (servers, allowed_env_vars) = gemini_mcp_servers(invocation, &env);
+        let allowed_env_vars = forwarded_env_vars(&env);
+        let servers = gemini_mcp_servers(invocation, &allowed_env_vars);
         if servers.is_empty() {
             args.push(format!("--allowed-mcp-server-names={NO_MCP_SERVERS}").into());
-            _workspace_guard = None;
         } else {
             let allowed_names: Vec<String> = servers.keys().cloned().collect();
             args.push(format!("--allowed-mcp-server-names={}", allowed_names.join(",")).into());
-            _workspace_guard = Some(WorkspaceSettingsGuard::install(&invocation.cwd, servers, allowed_env_vars)?);
         }
+        // Install temporary workspace settings whenever we need to register Rushes' MCP
+        // server or allowlist forwarded environment variables (such as ELEVENLABS_API_KEY
+        // for video-use shell transcription when Gemini's env redaction is enabled).
+        _workspace_guard = if servers.is_empty() && allowed_env_vars.is_empty() {
+            None
+        } else {
+            Some(WorkspaceSettingsGuard::install(&invocation.cwd, servers, allowed_env_vars)?)
+        };
         cwd = invocation.cwd.clone();
         _one_off_dir = None;
     }
@@ -197,10 +227,25 @@ fn build_prompt(config: &AgentConfig, invocation: &Invocation) -> String {
     parts.join("\n\n")
 }
 
+/// Environment variable names that must survive Gemini CLI's environment redaction
+/// for both MCP servers and video-use shell commands (e.g. `ELEVENLABS_API_KEY`).
+fn forwarded_env_vars(env: &[(String, String)]) -> Vec<String> {
+    let mut names: Vec<String> = env
+        .iter()
+        .map(|(name, _)| name.clone())
+        .chain(std::iter::once("ELEVENLABS_API_KEY".to_owned()))
+        .filter(|name| name != "PATH" && name != "GEMINI_CLI_TRUST_WORKSPACE" && name != "NO_BROWSER")
+        .filter(|name| effective_env_is_set(name, env))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Converts `invocation.mcp_config`'s `mcpServers` into Gemini CLI's workspace
-/// settings format, forwarding configured environment variable names as `${VAR}`
-/// placeholders (never writing secret values to disk).
-fn gemini_mcp_servers(invocation: &Invocation, env: &[(String, String)]) -> (Map<String, Value>, Vec<String>) {
+/// settings format, forwarding `env_names` as `${VAR}` placeholders (never writing
+/// secret values to disk).
+fn gemini_mcp_servers(invocation: &Invocation, env_names: &[String]) -> Map<String, Value> {
     let Some(configured) = invocation
         .mcp_config
         .as_deref()
@@ -211,21 +256,11 @@ fn gemini_mcp_servers(invocation: &Invocation, env: &[(String, String)]) -> (Map
             _ => None,
         })
     else {
-        return (Map::new(), Vec::new());
+        return Map::new();
     };
 
-    let mut env_names: Vec<String> = env
-        .iter()
-        .map(|(name, _)| name.clone())
-        .chain(std::iter::once("ELEVENLABS_API_KEY".to_owned()))
-        .filter(|name| name != "PATH" && name != "GEMINI_CLI_TRUST_WORKSPACE" && name != "NO_BROWSER")
-        .filter(|name| effective_env_is_set(name, env))
-        .collect();
-    env_names.sort();
-    env_names.dedup();
-
     let mut forwarded = Map::new();
-    for name in &env_names {
+    for name in env_names {
         forwarded.insert(name.clone(), Value::String(format!("${{{name}}}")));
     }
 
@@ -244,7 +279,7 @@ fn gemini_mcp_servers(invocation: &Invocation, env: &[(String, String)]) -> (Map
         }
         servers.insert(name, Value::Object(server));
     }
-    (servers, env_names)
+    servers
 }
 
 /// Whether `key` has a non-empty value in the child process's effective environment
@@ -259,30 +294,51 @@ fn effective_env_is_set(key: &str, env: &[(String, String)]) -> bool {
 fn write_one_off_settings(dir: &Path) -> std::io::Result<()> {
     let gemini_dir = dir.join(".gemini");
     fs::create_dir_all(&gemini_dir)?;
+    // Explicitly override scalar/array tool, discovery, MCP, skill and hook settings
+    // from user global config so no tool can run during a YouTube-details request.
     let settings = serde_json::json!({
-        "tools": { "core": [] },
-        "mcp": { "allowed": [NO_MCP_SERVERS] },
+        "tools": {
+            "core": [],
+            "allowed": [],
+            "discoveryCommand": "",
+            "callCommand": "",
+        },
+        "mcp": {
+            "allowed": [NO_MCP_SERVERS],
+            "serverCommand": "",
+        },
+        "skills": { "enabled": false },
+        "hooksConfig": { "enabled": false },
     });
     write_private_atomic(&gemini_dir.join("settings.json"), &serde_json::to_vec_pretty(&settings)?)
+}
+
+/// On-disk backup written before replacing `<cwd>/.gemini/settings.json`.
+#[derive(Clone, Serialize, Deserialize)]
+struct WorkspaceBackup {
+    created_dir: bool,
+    /// Exact original bytes of `<cwd>/.gemini/settings.json` (`None` if absent).
+    original: Option<Vec<u8>>,
 }
 
 /// Reference-counted backup of `<cwd>/.gemini/settings.json` while one or more
 /// Rushes-managed Gemini runs are active in `cwd`.
 struct ActiveWorkspace {
     count: usize,
-    created_dir: bool,
-    original: Option<Vec<u8>>,
+    backup: WorkspaceBackup,
 }
 
 static ACTIVE_WORKSPACES: LazyLock<Mutex<HashMap<PathBuf, ActiveWorkspace>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Temporarily merges Rushes' MCP server into `<cwd>/.gemini/settings.json` and
-/// restores the previous file (or removes `.gemini/`) when the last active run ends.
+/// Temporarily merges Rushes' MCP server and env allowlist into
+/// `<cwd>/.gemini/settings.json`, keeping a recoverable on-disk backup until the
+/// last active run restores the original file (or removes `.gemini/`).
 struct WorkspaceSettingsGuard {
     key: PathBuf,
     gemini_dir: PathBuf,
     settings_path: PathBuf,
+    backup_path: PathBuf,
 }
 
 impl WorkspaceSettingsGuard {
@@ -290,20 +346,46 @@ impl WorkspaceSettingsGuard {
         let key = fs::canonicalize(cwd).or_else(|_| std::path::absolute(cwd))?;
         let gemini_dir = cwd.join(".gemini");
         let settings_path = gemini_dir.join("settings.json");
+        let backup_path = gemini_dir.join(BACKUP_FILE);
 
         let mut map = ACTIVE_WORKSPACES.lock().unwrap_or_else(|poison| poison.into_inner());
-        let (base_bytes, inserted_new) = if let Some(active) = map.get_mut(&key) {
+        let (base_bytes, inserted_new, created_backup_now) = if let Some(active) = map.get_mut(&key) {
             active.count += 1;
-            (active.original.clone(), false)
+            // Layer onto the currently active settings file so concurrent runs do not
+            // drop each other's additions; `active.backup` still holds the untouched original.
+            let current = fs::read(&settings_path).ok().or_else(|| active.backup.original.clone());
+            (current, false, false)
         } else {
-            let created_dir = !gemini_dir.exists();
-            let original = match fs::read(&settings_path) {
-                Ok(bytes) => Some(bytes),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            let (backup, created_backup_now) = match fs::read(&backup_path) {
+                Ok(bytes) => {
+                    // A previous Rushes process died before Drop ran: reuse its backup
+                    // instead of treating the temporary replacement as the original.
+                    let backup: WorkspaceBackup = serde_json::from_slice(&bytes).map_err(|error| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("unreadable Gemini settings backup {}: {error}", backup_path.display()),
+                        )
+                    })?;
+                    (backup, false)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let created_dir = !gemini_dir.exists();
+                    let original = match fs::read(&settings_path) {
+                        Ok(bytes) => Some(bytes),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(error) => return Err(error),
+                    };
+                    let backup = WorkspaceBackup { created_dir, original };
+                    fs::create_dir_all(&gemini_dir)?;
+                    let encoded = serde_json::to_vec(&backup).map_err(std::io::Error::other)?;
+                    write_private_atomic(&backup_path, &encoded)?;
+                    (backup, true)
+                }
                 Err(error) => return Err(error),
             };
-            map.insert(key.clone(), ActiveWorkspace { count: 1, created_dir, original: original.clone() });
-            (original, true)
+            let base = backup.original.clone();
+            map.insert(key.clone(), ActiveWorkspace { count: 1, backup });
+            (base, true, created_backup_now)
         };
 
         let merged = merge_workspace_settings(base_bytes.as_deref(), servers, &allowed_env_vars);
@@ -316,15 +398,18 @@ impl WorkspaceSettingsGuard {
                 active.count -= 1;
                 if active.count == 0 {
                     let active = map.remove(&key).expect("active entry");
-                    if inserted_new && active.created_dir {
-                        _ = fs::remove_dir(&gemini_dir);
+                    if inserted_new && created_backup_now {
+                        _ = fs::remove_file(&backup_path);
+                        if active.backup.created_dir {
+                            _ = fs::remove_dir(&gemini_dir);
+                        }
                     }
                 }
             }
             return Err(error);
         }
 
-        Ok(Self { key, gemini_dir, settings_path })
+        Ok(Self { key, gemini_dir, settings_path, backup_path })
     }
 }
 
@@ -337,14 +422,23 @@ impl Drop for WorkspaceSettingsGuard {
             return;
         }
         let Some(active) = map.remove(&self.key) else { return };
-        match active.original {
-            Some(bytes) => _ = write_private_atomic(&self.settings_path, &bytes),
-            None => {
-                _ = fs::remove_file(&self.settings_path);
-                if active.created_dir {
-                    _ = fs::remove_dir(&self.gemini_dir);
-                }
-            }
+        restore_workspace_files(&self.gemini_dir, &self.settings_path, &self.backup_path, &active.backup);
+    }
+}
+
+fn restore_workspace_files(gemini_dir: &Path, settings_path: &Path, backup_path: &Path, backup: &WorkspaceBackup) {
+    let restored = match &backup.original {
+        Some(bytes) => write_private_atomic(settings_path, bytes).is_ok(),
+        None => match fs::remove_file(settings_path) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(_) => false,
+        },
+    };
+    if restored {
+        _ = fs::remove_file(backup_path);
+        if backup.created_dir {
+            _ = fs::remove_dir(gemini_dir);
         }
     }
 }
@@ -354,21 +448,17 @@ fn merge_workspace_settings(
     servers: Map<String, Value>,
     allowed_env_vars: &[String],
 ) -> Value {
-    let mut root = original
-        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
-        .and_then(|value| match value {
-            Value::Object(map) => Some(map),
-            _ => None,
-        })
-        .unwrap_or_default();
+    let mut root = original.and_then(parse_jsonc_object).unwrap_or_default();
 
-    let mcp_servers = root.entry("mcpServers".to_owned()).or_insert_with(|| Value::Object(Map::new()));
-    if !mcp_servers.is_object() {
-        *mcp_servers = Value::Object(Map::new());
-    }
-    if let Some(existing) = mcp_servers.as_object_mut() {
-        for (name, server) in servers {
-            existing.insert(name, server);
+    if !servers.is_empty() {
+        let mcp_servers = root.entry("mcpServers".to_owned()).or_insert_with(|| Value::Object(Map::new()));
+        if !mcp_servers.is_object() {
+            *mcp_servers = Value::Object(Map::new());
+        }
+        if let Some(existing) = mcp_servers.as_object_mut() {
+            for (name, server) in servers {
+                existing.insert(name, server);
+            }
         }
     }
 
@@ -401,6 +491,110 @@ fn merge_workspace_settings(
     }
 
     Value::Object(root)
+}
+
+/// Parses a Gemini CLI settings file (JSON with `//` and `/* ... */` comments and
+/// optional trailing commas) into a JSON object map.
+fn parse_jsonc_object(bytes: &[u8]) -> Option<Map<String, Value>> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let uncommented = strip_json_comments(text);
+    let cleaned = strip_trailing_commas(&uncommented);
+    match serde_json::from_str::<Value>(&cleaned).ok()? {
+        Value::Object(map) => Some(map),
+        _ => None,
+    }
+}
+
+/// Removes `//` and `/* ... */` comments outside JSON string literals.
+fn strip_json_comments(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    let mut in_string = false;
+    while i < bytes.len() {
+        let ch = input[i..].chars().next().expect("valid utf-8 boundary");
+        if in_string {
+            out.push(ch);
+            i += ch.len_utf8();
+            if ch == '\\' && i < bytes.len() {
+                let escaped = input[i..].chars().next().expect("valid utf-8 boundary");
+                out.push(escaped);
+                i += escaped.len_utf8();
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < bytes.len() {
+            if bytes[i + 1] == b'/' {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' && bytes[i] != b'\r' {
+                    i += 1;
+                }
+                continue;
+            }
+            if bytes[i + 1] == b'*' {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+        }
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Removes trailing commas before `}` or `]` outside JSON string literals.
+fn strip_trailing_commas(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    let mut in_string = false;
+    while i < bytes.len() {
+        let ch = input[i..].chars().next().expect("valid utf-8 boundary");
+        if in_string {
+            out.push(ch);
+            i += ch.len_utf8();
+            if ch == '\\' && i < bytes.len() {
+                let escaped = input[i..].chars().next().expect("valid utf-8 boundary");
+                out.push(escaped);
+                i += escaped.len_utf8();
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == ',' {
+            let mut lookahead = i + 1;
+            while lookahead < bytes.len() && bytes[lookahead].is_ascii_whitespace() {
+                lookahead += 1;
+            }
+            if lookahead < bytes.len() && matches!(bytes[lookahead], b'}' | b']') {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

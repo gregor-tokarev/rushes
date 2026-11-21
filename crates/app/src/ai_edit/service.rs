@@ -22,7 +22,7 @@ use rushes_core::{PipelineRun, RunEvent, RunId, RunStatus, StoreError, VideoId, 
 use rushes_pipeline::{
     AgentConfig, AgentEvent, AgentKind, AgentProcess, CodexModel, Doctor, GeminiModel, Harness, Phase, PhaseOutcome,
     PipelineError, RunContext, ToolServer, codex_models, default_skill_dir, doctor, doctor_rushes, gemini_models,
-    keep_final_cut, run_phase, set_aside_final_cut, stop_leftover_agent,
+    keep_final_cut, restore_leftover_gemini_workspace, run_phase, set_aside_final_cut, stop_leftover_agent,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1005,6 +1005,9 @@ impl PipelineService {
             if unfinished {
                 if let Some(process) = leftover_agent(&events) {
                     stop_leftover_agent(&process, LEFTOVER_GRACE);
+                }
+                if run.agent_harness == AgentHarness::Gemini {
+                    restore_leftover_gemini_workspace(&run.footage_dir);
                 }
                 run.status = unfinished_status(last_phase, &run, true);
                 run.error = Some(INTERRUPTED.to_owned());

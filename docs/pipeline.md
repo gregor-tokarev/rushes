@@ -131,16 +131,23 @@ servers are explicitly disabled; plugin and app tools are disabled for the run.
 
 Gemini CLI runs as `gemini --output-format=stream-json -p "" --extensions=none` with the
 prompt on stdin, `GEMINI_CLI_TRUST_WORKSPACE=true`, and `NO_BROWSER=1`. Editing runs use
-`--approval-mode=yolo` and follow-ups pass `--resume=<session_id>`. With Rushes' tools,
-Rushes' MCP server is temporarily merged into `<footage>/.gemini/settings.json` (with a
-one-hour timeout, `trust: true`, and `${VAR}` placeholders for forwarded environment
-variables — never writing secrets to disk) and restored on exit, while
+`--approval-mode=yolo` and follow-ups pass `--resume=<session_id>`. Before editing
+`<footage>/.gemini/settings.json`, Rushes saves a recoverable backup at
+`<footage>/.gemini/.rushes-settings-backup.json` and parses JSONC comments so existing
+workspace settings stay intact during the run and the original bytes are restored on exit
+or after an interrupted session. With Rushes' tools, Rushes' MCP server is merged into
+workspace settings (with a one-hour timeout, `trust: true`, and `${VAR}` placeholders for
+forwarded environment variables — never writing secrets to disk) while
 `--allowed-mcp-server-names=rushes` blocks unrelated configured servers; video-use passes
-its skill folder via `--include-directories=<skill dir>` and blocks all MCP servers.
-Streamed assistant deltas (`delta: true`) are merged into complete `AssistantText` events
-and `mcp_rushes_<tool>` names normalize to `mcp__rushes__<tool>`. One-off YouTube-details
-requests run in a temporary workspace with `tools.core: []`, no MCP servers or extensions,
-`--approval-mode=default`, and the JSON schema appended to the prompt.
+its skill folder via `--include-directories=<skill dir>`, blocks all MCP servers, and
+still adds forwarded variables (such as `ELEVENLABS_API_KEY`) to
+`security.environmentVariableRedaction.allowed`. Streamed assistant deltas (`delta: true`)
+are merged into complete `AssistantText` events and `mcp_rushes_<tool>` names normalize to
+`mcp__rushes__<tool>`. One-off YouTube-details requests run in a temporary workspace with
+`tools.core: []`, `tools.allowed: []`, empty `tools.discoveryCommand` / `tools.callCommand`
+/ `mcp.serverCommand`, `skills.enabled: false`, `hooksConfig.enabled: false`, no MCP
+servers or extensions, `--approval-mode=default`, and the JSON schema appended to the
+prompt.
 
 YouTube-details requests for Codex use a read-only sandbox, no shell or MCP servers, an
 ephemeral session and a temporary `--output-schema` file. The final assistant message

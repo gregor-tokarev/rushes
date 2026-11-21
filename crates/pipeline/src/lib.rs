@@ -31,7 +31,7 @@ pub use details::{
 pub use doctor::{Check, Doctor, default_skill_dir, doctor, doctor_rushes};
 pub use error::PipelineError;
 pub use event::{AgentEvent, GeminiStreamParser, RUSHES_TOOL_PREFIX, parse_codex_line, parse_line};
-pub use gemini::{DEFAULT_GEMINI_COMMAND, GeminiModel, gemini_models};
+pub use gemini::{DEFAULT_GEMINI_COMMAND, GeminiModel, gemini_models, restore_leftover_gemini_workspace};
 pub use media::{FOOTAGE_EXTENSIONS, FootageFile, MediaInfo, list_footage, probe_media};
 pub use pipeline::{
     Harness, Phase, PhaseOutcome, RunContext, ToolServer, build_prompt, build_rushes_prompt, keep_final_cut, kept_cuts,
