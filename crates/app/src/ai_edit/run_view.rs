@@ -565,7 +565,7 @@ impl RunView {
         let message =
             if restorable { "Restore it to approve or change it, or plan again." } else { message }.to_owned();
         let stderr = stderr.map(str::to_owned);
-        let resumable = run.session_id.is_some() && !restorable;
+        let resumable = self.service.read(cx).can_continue(run.id);
         let feedback = self.render_feedback(FeedbackPurpose::Continue, window, cx);
         let theme = cx.theme();
         let (icon, title, color) = if restorable {

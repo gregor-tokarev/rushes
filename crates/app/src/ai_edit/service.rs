@@ -622,6 +622,27 @@ impl PipelineService {
         discarded && self.run(id).is_some_and(|run| run.status == RunStatus::Cancelled && run.summary.is_some())
     }
 
+    /// Whether a failed or cancelled run can continue with feedback: either it still has
+    /// an agent session id to resume, or an earlier phase already produced a strategy or
+    /// ran a session (such as a migrated Gemini CLI run whose incompatible session id was
+    /// cleared) so a fresh session can pick up from `edit/project.md`. Reads the loaded
+    /// event log.
+    pub fn can_continue(&self, id: RunId) -> bool {
+        let Some(run) = self.run(id) else { return false };
+        if !matches!(run.status, RunStatus::Failed | RunStatus::Cancelled) || self.can_restore(id) {
+            return false;
+        }
+        run.session_id.is_some()
+            || run.summary.is_some()
+            || self.timeline(id).iter().any(|entry| match &entry.event {
+                LogEvent::Agent(AgentEvent::Init { session_id, .. } | AgentEvent::Result { session_id, .. }) => {
+                    !session_id.trim().is_empty()
+                }
+                LogEvent::Phase(started) => matches!(started.phase, PhaseKind::Approve | PhaseKind::Feedback),
+                _ => false,
+            })
+    }
+
     /// What stopped the run's last phase, when the run still offers what an earlier
     /// phase made: a strategy awaiting approval after a revision failed or was
     /// cancelled, a rendered cut after a change to it did not finish. Reads the loaded
