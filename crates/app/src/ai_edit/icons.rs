@@ -76,6 +76,7 @@ pub(crate) fn media_icon(kind: MediaKind) -> IconName {
 pub(crate) fn tool_label(name: &str) -> &str {
     match name.strip_prefix(RUSHES_TOOL_PREFIX) {
         Some("inventory") => "Footage",
+        Some("add_footage") => "Add footage",
         Some("transcribe") => "Transcribe",
         Some("read_transcript") => "Read transcript",
         Some("phrase_words") => "Read words",
@@ -93,6 +94,7 @@ pub(crate) fn tool_icon(name: &str) -> IconName {
     if let Some(tool) = name.strip_prefix(RUSHES_TOOL_PREFIX) {
         return match tool {
             "inventory" => IconName::ListVideo,
+            "add_footage" => IconName::FilePlus,
             "transcribe" => IconName::Captions,
             "read_transcript" | "phrase_words" => IconName::FileText,
             "silences" => IconName::AudioLines,
@@ -104,15 +106,22 @@ pub(crate) fn tool_icon(name: &str) -> IconName {
         };
     }
     match name {
-        "Bash" | "Shell" | "run_shell_command" => IconName::SquareTerminal,
-        "Read" | "read_file" | "read_many_files" | "list_directory" => IconName::FileText,
-        "Write" | "write_file" => IconName::FilePlus,
-        "Edit" | "MultiEdit" | "NotebookEdit" | "replace" => IconName::FilePen,
-        "Glob" | "Grep" | "glob" | "grep_search" => IconName::Search,
-        "Skill" | "activate_skill" => IconName::Sparkles,
-        "Agent" | "Task" => IconName::Bot,
-        "TodoWrite" | "write_todos" => IconName::ListTodo,
-        "WebFetch" | "WebSearch" | "web_fetch" | "google_web_search" => IconName::Globe,
+        "Bash" | "Shell" | "run_command" => IconName::SquareTerminal,
+        "Read" | "read_file" | "view_file" | "list_dir" => IconName::FileText,
+        "Write" | "write_file" | "write_to_file" => IconName::FilePlus,
+        "Edit"
+        | "MultiEdit"
+        | "NotebookEdit"
+        | "edit_file"
+        | "replace_file_content"
+        | "multi_replace_file_content"
+        | "sed_file"
+        | "notebook_edit" => IconName::FilePen,
+        "Glob" | "Grep" | "find_by_name" | "grep_search" => IconName::Search,
+        "Skill" => IconName::Sparkles,
+        "Agent" | "Task" | "invoke_subagent" => IconName::Bot,
+        "TodoWrite" => IconName::ListTodo,
+        "WebFetch" | "WebSearch" | "read_url_content" | "search_web" => IconName::Globe,
         _ => IconName::Wrench,
     }
 }

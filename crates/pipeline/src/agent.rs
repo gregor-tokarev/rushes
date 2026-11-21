@@ -1,4 +1,4 @@
-//! Running Claude Code, Codex or Gemini CLI and streaming their events.
+//! Running Claude Code, Codex or Antigravity CLI and streaming their events.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -22,7 +22,7 @@ pub enum AgentKind {
     #[default]
     Claude,
     Codex,
-    Gemini,
+    Antigravity,
 }
 /// Accepts file edits inside the working directories; every other tool must be in
 /// [`AgentConfig::allowed_tools`] because nobody can answer a permission prompt.
@@ -270,7 +270,7 @@ pub(crate) fn run_agent(
 ) -> Result<(ExitStatus, AgentRun), PipelineError> {
     match config.kind {
         AgentKind::Codex => return crate::codex::run(config, program, invocation, on_event, cancel),
-        AgentKind::Gemini => return crate::gemini::run(config, program, invocation, on_event, cancel),
+        AgentKind::Antigravity => return crate::antigravity::run(config, program, invocation, on_event, cancel),
         AgentKind::Claude => {}
     }
     // The config's environment comes last, so it wins over the invocation's.

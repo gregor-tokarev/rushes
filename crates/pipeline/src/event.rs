@@ -4,6 +4,7 @@
 //! `serde_json::Value`, so new fields, content blocks and event types never fail a run:
 //! anything unrecognised becomes [`AgentEvent::Unknown`].
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -293,20 +294,22 @@ fn codex_command(item: &Value) -> String {
     truncate(&summary, TOOL_SUMMARY_CHARS)
 }
 
-/// Rushes' editing tools as Gemini CLI names them (`mcp_<server>_<tool>`).
-const GEMINI_RUSHES_TOOL_PREFIX: &str = "mcp_rushes_";
+/// Rushes' editing tools as Antigravity CLI names eager MCP tools (`mcp_<server>_<tool>`).
+const ANTIGRAVITY_RUSHES_TOOL_PREFIX: &str = "mcp_rushes_";
 
-/// Parses Gemini CLI's `--output-format stream-json` stream (one JSON object per stdout
-/// line), merging streamed assistant text deltas (`delta: true`) into whole
-/// [`AgentEvent::AssistantText`] messages and mapping `init`, `tool_use`, `tool_result`,
-/// `error` and `result` onto [`AgentEvent`]s.
+/// Parses Antigravity CLI's `--output-format stream-json` NDJSON stream, merging
+/// streamed `agent_response` `text_delta` fragments into whole
+/// [`AgentEvent::AssistantText`] messages and mapping `init`, `step_update` and
+/// `result` events onto [`AgentEvent`]s.
 #[derive(Debug, Default)]
-pub struct GeminiStreamParser {
+pub struct AntigravityStreamParser {
     pending_assistant: String,
-    last_error: Option<String>,
+    pending_step: Option<u64>,
+    started_tools: HashSet<u64>,
+    finished_tools: HashSet<u64>,
 }
 
-impl GeminiStreamParser {
+impl AntigravityStreamParser {
     pub fn new() -> Self {
         Self::default()
     }
@@ -319,90 +322,138 @@ impl GeminiStreamParser {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             return vec![unknown("non_json", line)];
         };
-        match str_field(&value, "type") {
+        match str_field(&value, "event") {
             "init" => {
                 let mut events = self.flush_assistant();
-                events.push(AgentEvent::Init {
-                    session_id: str_field(&value, "session_id").to_owned(),
-                    model: str_field(&value, "model").to_owned(),
-                    cwd: PathBuf::new(),
-                    tools: Vec::new(),
-                });
-                events
-            }
-            "message" => match str_field(&value, "role") {
-                // Prompt echo.
-                "user" => Vec::new(),
-                "assistant" => {
-                    let content = str_field(&value, "content");
-                    if value.get("delta").and_then(Value::as_bool).unwrap_or(false) {
-                        self.pending_assistant.push_str(content);
-                        Vec::new()
-                    } else {
-                        let mut events = self.flush_assistant();
-                        if let Some(text) = non_empty(content) {
-                            events.push(AgentEvent::AssistantText { text: text.to_owned() });
-                        }
-                        events
-                    }
-                }
-                role => vec![unknown(&format!("message/{role}"), line)],
-            },
-            "tool_use" => {
-                let mut events = self.flush_assistant();
-                let name = normalize_gemini_tool_name(str_field(&value, "tool_name"));
-                let summary = tool_use_summary(&name, value.get("parameters").unwrap_or(&Value::Null));
-                events.push(AgentEvent::ToolUse { id: str_field(&value, "tool_id").to_owned(), name, summary });
-                events
-            }
-            "tool_result" => {
-                let mut events = self.flush_assistant();
-                let error = value.get("error").filter(|error| !error.is_null());
-                let is_error = error.is_some() || str_field(&value, "status") == "error";
-                let summary = error
-                    .and_then(|err| non_empty(str_field(err, "message")).map(str::to_owned))
-                    .or_else(|| non_empty(str_field(&value, "output")).map(str::to_owned))
-                    .or_else(|| error.map(Value::to_string))
+                let init = value.get("init").unwrap_or(&Value::Null);
+                let session_id = non_empty(str_field(&value, "conversation_id"))
+                    .or_else(|| non_empty(str_field(init, "conversation_id")))
+                    .unwrap_or_default()
+                    .to_owned();
+                let tools = init
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .map(|tools| tools.iter().filter_map(Value::as_str).map(str::to_owned).collect())
                     .unwrap_or_default();
-                events.push(AgentEvent::ToolResult {
-                    tool_use_id: str_field(&value, "tool_id").to_owned(),
-                    is_error,
-                    summary: truncate(&summary, RESULT_SUMMARY_CHARS),
+                events.push(AgentEvent::Init {
+                    session_id,
+                    model: str_field(init, "model").to_owned(),
+                    cwd: PathBuf::from(str_field(init, "cwd")),
+                    tools,
                 });
                 events
             }
-            "error" => {
-                let message = str_field(&value, "message");
-                if str_field(&value, "severity") == "error" && !message.trim().is_empty() {
-                    self.last_error = Some(message.to_owned());
-                }
-                vec![AgentEvent::Stderr { line: message.to_owned() }]
-            }
+            "step_update" => self.parse_step_update(value.get("step_update").unwrap_or(&Value::Null), line),
             "result" => {
                 let mut events = self.flush_assistant();
-                let error = value.get("error").filter(|error| !error.is_null());
-                let is_error = error.is_some() || str_field(&value, "status") == "error";
+                let res = value.get("result").unwrap_or(&Value::Null);
+                let status = str_field(res, "status");
+                let is_error = status != "SUCCESS";
+                let session_id = non_empty(str_field(res, "conversation_id"))
+                    .or_else(|| non_empty(str_field(&value, "conversation_id")))
+                    .unwrap_or_default()
+                    .to_owned();
                 let result_text = if is_error {
-                    error
-                        .and_then(|err| non_empty(str_field(err, "message")).map(str::to_owned))
-                        .or_else(|| self.last_error.take())
-                        .unwrap_or_else(|| "the turn failed".to_owned())
+                    non_empty(str_field(res, "error"))
+                        .or_else(|| non_empty(str_field(res, "response")))
+                        .or_else(|| non_empty(status))
+                        .unwrap_or("the turn failed")
+                        .to_owned()
                 } else {
-                    String::new()
+                    non_empty(str_field(res, "response")).map(str::to_owned).unwrap_or_else(|| {
+                        res.get("structured_output")
+                            .filter(|structured| !structured.is_null())
+                            .map(Value::to_string)
+                            .unwrap_or_default()
+                    })
                 };
-                let duration_ms = value.pointer("/stats/duration_ms").and_then(Value::as_u64);
+                let duration_ms = res
+                    .get("duration_seconds")
+                    .and_then(Value::as_f64)
+                    .filter(|secs| secs.is_finite() && *secs >= 0.0)
+                    .map(|secs| (secs * 1000.0).round() as u64);
+                let num_turns = res.get("num_turns").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
                 events.push(AgentEvent::Result {
                     is_error,
                     result_text,
-                    session_id: String::new(),
+                    session_id,
                     cost_usd: None,
                     duration_ms,
-                    num_turns: None,
+                    num_turns,
                 });
                 events
             }
             "" => vec![unknown("untyped", line)],
             kind => vec![unknown(kind, line)],
+        }
+    }
+
+    fn parse_step_update(&mut self, step: &Value, line: &str) -> Vec<AgentEvent> {
+        let step_type = str_field(step, "step_type");
+        let state = str_field(step, "state");
+        let step_index = step.get("step_index").and_then(Value::as_u64);
+        match step_type {
+            "agent_response" => {
+                let mut events = Vec::new();
+                if self.pending_step != step_index {
+                    events.extend(self.flush_assistant());
+                    self.pending_step = step_index;
+                }
+                let delta = str_field(step, "text_delta");
+                if !delta.is_empty() {
+                    self.pending_assistant.push_str(delta);
+                }
+                if state != "ACTIVE" {
+                    events.extend(self.flush_assistant());
+                }
+                events
+            }
+            "tool" => {
+                let mut events = self.flush_assistant();
+                let info = step.get("tool_info").unwrap_or(&Value::Null);
+                let raw_name = non_empty(str_field(step, "tool_name"))
+                    .or_else(|| non_empty(str_field(info, "name")))
+                    .unwrap_or("tool");
+                let params = info.get("parameters").unwrap_or(&Value::Null);
+                let (name, summary_input) = normalize_antigravity_tool(raw_name, params);
+                let id = step_index.map_or_else(|| "tool".to_owned(), |idx| format!("step-{idx}"));
+                let is_new = step_index.is_none_or(|idx| self.started_tools.insert(idx));
+                if is_new {
+                    let summary = tool_use_summary(&name, summary_input);
+                    events.push(AgentEvent::ToolUse { id: id.clone(), name, summary });
+                }
+                if !matches!(state, "ACTIVE" | "PENDING" | "WAITING")
+                    && step_index.is_none_or(|idx| self.finished_tools.insert(idx))
+                {
+                    let error = info.get("error").filter(|error| !error.is_null());
+                    let is_error = state != "DONE" || error.is_some();
+                    let raw_summary = error
+                        .and_then(|err| non_empty(str_field(err, "message")).map(str::to_owned))
+                        .or_else(|| {
+                            non_empty(str_field(info, "output"))
+                                .map(|output| strip_antigravity_timestamps(output).to_owned())
+                        })
+                        .or_else(|| error.map(Value::to_string))
+                        .unwrap_or_default();
+                    events.push(AgentEvent::ToolResult {
+                        tool_use_id: id,
+                        is_error,
+                        summary: truncate(&raw_summary, RESULT_SUMMARY_CHARS),
+                    });
+                }
+                events
+            }
+            "user_input" | "checkpoint" | "finish" | "system_message" => Vec::new(),
+            "error_message" => {
+                let mut events = self.flush_assistant();
+                if let Some(message) =
+                    non_empty(str_field(step, "message")).or_else(|| non_empty(str_field(step, "error")))
+                {
+                    events.push(AgentEvent::Stderr { line: message.to_owned() });
+                }
+                events
+            }
+            other => vec![unknown(&format!("step_update/{other}"), line)],
         }
     }
 
@@ -412,21 +463,47 @@ impl GeminiStreamParser {
     }
 
     fn flush_assistant(&mut self) -> Vec<AgentEvent> {
+        self.pending_step = None;
         let text = std::mem::take(&mut self.pending_assistant);
         if text.trim().is_empty() { Vec::new() } else { vec![AgentEvent::AssistantText { text }] }
     }
 }
 
-/// Normalizes Gemini CLI's MCP tool name (`mcp_rushes_<tool>`) to [`RUSHES_TOOL_PREFIX`]
+/// Normalizes Antigravity CLI's MCP tool calls (`mcp_rushes_<tool>` when eager, or
+/// `call_mcp_tool` with `ServerName: "rushes"` when lazy) to [`RUSHES_TOOL_PREFIX`]
 /// (`mcp__rushes__<tool>`), matching Claude Code and Codex.
-fn normalize_gemini_tool_name(raw: &str) -> String {
+fn normalize_antigravity_tool<'a>(raw: &str, params: &'a Value) -> (String, &'a Value) {
+    if raw == "call_mcp_tool"
+        && str_field(params, "ServerName") == rushes_edit::SERVER_NAME
+        && let Some(tool) = non_empty(str_field(params, "ToolName"))
+    {
+        let args = params.get("Arguments").unwrap_or(&Value::Null);
+        return (format!("{RUSHES_TOOL_PREFIX}{tool}"), args);
+    }
     if raw.starts_with(RUSHES_TOOL_PREFIX) {
-        return raw.to_owned();
+        return (raw.to_owned(), params);
     }
-    if let Some(tool) = raw.strip_prefix(GEMINI_RUSHES_TOOL_PREFIX) {
-        return format!("{RUSHES_TOOL_PREFIX}{tool}");
+    if let Some(tool) = raw.strip_prefix(ANTIGRAVITY_RUSHES_TOOL_PREFIX) {
+        return (format!("{RUSHES_TOOL_PREFIX}{tool}"), params);
     }
-    raw.to_owned()
+    (raw.to_owned(), params)
+}
+
+/// Strips the leading `Created At:` / `Completed At:` header lines Antigravity CLI
+/// prepends to tool output when content follows them.
+fn strip_antigravity_timestamps(output: &str) -> &str {
+    let mut rest = output;
+    if let Some(after) = rest.strip_prefix("Created At:")
+        && let Some((_, next)) = after.split_once('\n')
+    {
+        rest = next;
+    }
+    if let Some(after) = rest.strip_prefix("Completed At:")
+        && let Some((_, next)) = after.split_once('\n')
+    {
+        rest = next;
+    }
+    if rest.trim().is_empty() { output } else { rest }
 }
 
 /// Blocks of `message.content`; a plain-string content has none.
@@ -444,6 +521,7 @@ fn rushes_tool_summary(tool: &str, input: &Value) -> Option<String> {
     let text = |key: &str| non_empty(str_field(input, key)).map(str::to_owned);
     match tool {
         "inventory" => Some(String::new()),
+        "add_footage" => Some(text("name").or_else(|| text("path")).unwrap_or_default()),
         "transcribe" => Some(text("language").map(|language| format!("language {language}")).unwrap_or_default()),
         "read_transcript" => Some(match (text("take"), text("from")) {
             (_, Some(from)) => format!("from {from}"),
@@ -475,28 +553,38 @@ fn rushes_tool_summary(tool: &str, input: &Value) -> Option<String> {
 fn tool_use_summary(name: &str, input: &Value) -> String {
     let field = |key: &str| non_empty(str_field(input, key));
     let summary = match name {
-        "Bash" | "run_shell_command" => field("command").map(|command| {
+        "Bash" | "run_command" => field("CommandLine").or_else(|| field("command")).map(|command| {
             let mut lines = command.lines().map(str::trim).filter(|line| !line.is_empty());
             let first = lines.next().unwrap_or_default();
             if lines.next().is_some() { format!("{first} …") } else { first.to_owned() }
         }),
-        "Read" | "Write" | "Edit" | "MultiEdit" | "read_file" | "write_file" | "replace" => {
-            field("file_path").map(str::to_owned)
+        "Read"
+        | "Write"
+        | "Edit"
+        | "MultiEdit"
+        | "read_file"
+        | "view_file"
+        | "write_file"
+        | "write_to_file"
+        | "edit_file"
+        | "replace_file_content"
+        | "multi_replace_file_content"
+        | "sed_file" => field("Path")
+            .or_else(|| field("TargetFile"))
+            .or_else(|| field("AbsolutePath"))
+            .or_else(|| field("file_path"))
+            .map(str::to_owned),
+        "list_dir" => field("DirectoryPath").or_else(|| field("dir_path")).map(str::to_owned),
+        "find_by_name" => field("Pattern").or_else(|| field("SearchDirectory")).map(str::to_owned),
+        "NotebookEdit" | "notebook_edit" | "notebook_execution" => {
+            field("NotebookPath").or_else(|| field("notebook_path")).map(str::to_owned)
         }
-        "list_directory" => field("dir_path").map(str::to_owned),
-        "read_many_files" => input
-            .get("include")
-            .or_else(|| input.get("paths"))
-            .and_then(Value::as_array)
-            .map(|paths| paths.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")),
-        "NotebookEdit" => field("notebook_path").map(str::to_owned),
-        "Glob" | "Grep" | "glob" | "grep_search" => field("pattern").map(str::to_owned),
+        "Glob" | "Grep" | "grep_search" => field("Query").or_else(|| field("pattern")).map(str::to_owned),
         "Skill" => field("skill").map(str::to_owned),
-        "activate_skill" => field("name").map(str::to_owned),
         "Agent" | "Task" => field("description").map(str::to_owned),
-        "WebFetch" => field("url").map(str::to_owned),
-        "web_fetch" => field("prompt").or_else(|| field("url")).map(str::to_owned),
-        "WebSearch" | "ToolSearch" | "google_web_search" => field("query").map(str::to_owned),
+        "invoke_subagent" => field("Role").or_else(|| field("Prompt")).map(str::to_owned),
+        "WebFetch" | "read_url_content" => field("Url").or_else(|| field("url")).map(str::to_owned),
+        "WebSearch" | "ToolSearch" | "search_web" => field("query").map(str::to_owned),
         "TaskCreate" => field("subject").map(str::to_owned),
         _ => name.strip_prefix(RUSHES_TOOL_PREFIX).and_then(|tool| rushes_tool_summary(tool, input)),
     };

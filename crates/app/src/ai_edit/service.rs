@@ -16,14 +16,15 @@ use gpui_kit::{App, AppContext as _, Context, Entity, Global, SharedString, Subs
 use rushes_core::input::expand_user_path;
 use rushes_core::media::{self, MediaKind};
 use rushes_core::settings::{
-    AgentHarness, DEFAULT_AGENT_COMMAND, DEFAULT_CODEX_COMMAND, DEFAULT_GEMINI_COMMAND, EditHarness, PipelineSettings,
-    data_dir, read_elevenlabs_key,
+    AgentHarness, DEFAULT_AGENT_COMMAND, DEFAULT_ANTIGRAVITY_COMMAND, DEFAULT_CODEX_COMMAND, EditHarness,
+    PipelineSettings, data_dir, read_elevenlabs_key,
 };
 use rushes_core::{PipelineRun, RunEvent, RunId, RunStatus, StoreError, VideoId, VideoStatus};
 use rushes_pipeline::{
-    AgentConfig, AgentEvent, AgentKind, AgentProcess, CodexModel, Doctor, GeminiModel, Harness, Phase, PhaseOutcome,
-    PipelineError, RunContext, ToolServer, codex_models, default_skill_dir, doctor, doctor_rushes, gemini_models,
-    keep_final_cut, restore_leftover_gemini_workspace, run_phase, set_aside_final_cut, stop_leftover_agent,
+    AgentConfig, AgentEvent, AgentKind, AgentProcess, AntigravityModel, CodexModel, Doctor, Harness, Phase,
+    PhaseOutcome, PipelineError, RunContext, ToolServer, antigravity_models, codex_models, default_skill_dir, doctor,
+    doctor_rushes, keep_final_cut, restore_leftover_antigravity_workspace, run_phase, set_aside_final_cut,
+    stop_leftover_agent,
 };
 use serde::{Deserialize, Serialize};
 
@@ -49,9 +50,9 @@ const STDERR_SEPARATOR: &str = "\n\nAgent output:\n";
 /// Settings key of the brief forms kept across restarts.
 const DRAFTS_KEY: &str = "ai_edit.brief_drafts";
 
-/// Settings key of footage folders whose leftover Gemini CLI workspace settings
-/// still need restoration; persisted until background recovery confirms cleanup.
-const PENDING_GEMINI_RESTORES_KEY: &str = "ai_edit.pending_gemini_restores";
+/// Settings key of footage folders whose leftover Antigravity CLI workspace MCP config
+/// still needs restoration; persisted until background recovery confirms cleanup.
+const PENDING_ANTIGRAVITY_RESTORES_KEY: &str = "ai_edit.pending_antigravity_restores";
 
 /// How long quitting waits for agents to stop, beyond their kill grace period.
 const QUIT_MARGIN: Duration = Duration::from_secs(1);
@@ -63,7 +64,7 @@ pub enum RunError {
     RunNotFound,
     /// Another run of the same video is still working.
     AlreadyRunning,
-    /// Leftover Gemini CLI workspace files from an interrupted run are still being restored.
+    /// Leftover Antigravity CLI workspace files from an interrupted run are still being restored.
     WorkspaceRecovering,
     /// The media folder could not be created.
     NoMediaFolder,
@@ -191,10 +192,10 @@ pub struct PipelineService {
     /// command that was asked; `None` until the first answer arrives.
     codex_models: Option<(String, Result<Vec<CodexModel>, String>)>,
     codex_models_task: Option<Task<()>>,
-    /// The models the Gemini CLI offers, or why it could not list them, with the
+    /// The models the Antigravity CLI offers, or why it could not list them, with the
     /// command that was asked; `None` until the first answer arrives.
-    gemini_models: Option<(String, Result<Vec<GeminiModel>, String>)>,
-    gemini_models_task: Option<Task<()>>,
+    antigravity_models: Option<(String, Result<Vec<AntigravityModel>, String>)>,
+    antigravity_models_task: Option<Task<()>>,
     agent_env: Vec<(String, String)>,
     /// A run another view asked to show; taken by the panel of its video.
     revealed: Option<RunId>,
@@ -203,11 +204,11 @@ pub struct PipelineService {
     drafts: HashMap<VideoId, BriefDraft>,
     /// Copies into footage folders, whichever card started them.
     footage_imports: Entity<FootageImports>,
-    /// Footage folders whose leftover Gemini CLI settings still need restoration;
+    /// Footage folders whose leftover Antigravity CLI MCP config still needs restoration;
     /// persisted across restarts so quitting while a mount stalls does not abandon
     /// recovery.
-    pending_gemini_restores: BTreeSet<PathBuf>,
-    /// Footage folders whose leftover Gemini CLI settings are being restored in the
+    pending_antigravity_restores: BTreeSet<PathBuf>,
+    /// Footage folders whose leftover Antigravity CLI MCP config is being restored in the
     /// background after an interrupted run; new edits in these workspaces wait until
     /// recovery finishes.
     restoring_workspaces: HashMap<PathBuf, Task<()>>,
@@ -258,13 +259,13 @@ impl PipelineService {
                 checked: None,
                 codex_models: None,
                 codex_models_task: None,
-                gemini_models: None,
-                gemini_models_task: None,
+                antigravity_models: None,
+                antigravity_models_task: None,
                 agent_env: Vec::new(),
                 revealed: None,
                 drafts: HashMap::new(),
                 footage_imports: cx.new(|_| FootageImports::new()),
-                pending_gemini_restores: BTreeSet::new(),
+                pending_antigravity_restores: BTreeSet::new(),
                 restoring_workspaces: HashMap::new(),
                 _subscriptions: subscriptions,
             };
@@ -325,13 +326,13 @@ impl PipelineService {
         self.live.iter().find(|(_, live)| live.video_id == video_id).map(|(id, _)| *id)
     }
 
-    /// Whether leftover Gemini CLI workspace settings are still being restored for
+    /// Whether leftover Antigravity CLI workspace config is still being restored for
     /// `footage_dir`.
     pub fn is_restoring_workspace(&self, footage_dir: &Path) -> bool {
         self.restoring_workspaces.contains_key(footage_dir)
     }
 
-    /// Whether leftover Gemini CLI workspace settings are still being restored for
+    /// Whether leftover Antigravity CLI workspace config is still being restored for
     /// `video_id`'s footage folder.
     pub fn is_restoring_video(&self, video_id: VideoId, cx: &App) -> bool {
         if self.restoring_workspaces.is_empty() {
@@ -1037,10 +1038,10 @@ impl PipelineService {
     /// before the window opens, so a retry can't race with it. That waits at most
     /// [`LEFTOVER_GRACE`], and only after a crash.
     fn recover_interrupted(&mut self, cx: &mut Context<Self>) -> Result<bool, StoreError> {
-        match self.state.read(cx).read_setting::<Vec<PathBuf>>(PENDING_GEMINI_RESTORES_KEY) {
-            Ok(Some(paths)) => self.pending_gemini_restores.extend(paths),
+        match self.state.read(cx).read_setting::<Vec<PathBuf>>(PENDING_ANTIGRAVITY_RESTORES_KEY) {
+            Ok(Some(paths)) => self.pending_antigravity_restores.extend(paths),
             Ok(None) => {}
-            Err(error) => log_line!("rushes: couldn't read pending Gemini workspace restores: {error}"),
+            Err(error) => log_line!("rushes: couldn't read pending Antigravity workspace restores: {error}"),
         }
         let mut recovered = false;
         for mut run in self.state.read(cx).read_runs()? {
@@ -1062,12 +1063,12 @@ impl PipelineService {
                 if let Some(process) = leftover_agent(&events) {
                     stop_leftover_agent(&process, LEFTOVER_GRACE);
                 }
-                if run.agent_harness == AgentHarness::Gemini
-                    && self.pending_gemini_restores.insert(run.footage_dir.clone())
+                if run.agent_harness == AgentHarness::Antigravity
+                    && self.pending_antigravity_restores.insert(run.footage_dir.clone())
                 {
                     // Persist before marking the run inactive so quitting while recovery
                     // waits on a stalled mount still restores the workspace on next startup.
-                    self.save_pending_gemini_restores(cx);
+                    self.save_pending_antigravity_restores(cx);
                 }
                 run.status = unfinished_status(last_phase, &run, true);
                 run.error = Some(INTERRUPTED.to_owned());
@@ -1099,35 +1100,35 @@ impl PipelineService {
                 recovered = true;
             }
         }
-        let pending: Vec<PathBuf> = self.pending_gemini_restores.iter().cloned().collect();
+        let pending: Vec<PathBuf> = self.pending_antigravity_restores.iter().cloned().collect();
         for footage_dir in pending {
-            self.restore_gemini_workspace(footage_dir, cx);
+            self.restore_antigravity_workspace(footage_dir, cx);
         }
         Ok(recovered)
     }
 
-    fn save_pending_gemini_restores(&mut self, cx: &mut Context<Self>) {
-        let paths: Vec<&Path> = self.pending_gemini_restores.iter().map(PathBuf::as_path).collect();
-        self.state.update(cx, |state, cx| state.save_setting(PENDING_GEMINI_RESTORES_KEY, &paths, cx));
+    fn save_pending_antigravity_restores(&mut self, cx: &mut Context<Self>) {
+        let paths: Vec<&Path> = self.pending_antigravity_restores.iter().map(PathBuf::as_path).collect();
+        self.state.update(cx, |state, cx| state.save_setting(PENDING_ANTIGRAVITY_RESTORES_KEY, &paths, cx));
     }
 
-    /// Restores a leftover Gemini CLI `.gemini/settings.json` backup on a dedicated
-    /// background thread so a stalled network mount never blocks app startup or the
-    /// background executor pool. While recovery runs, new edits in `footage_dir` are
-    /// rejected so they cannot race with restoration; the pending entry stays
+    /// Restores a leftover Antigravity CLI `.agents/mcp_config.json` backup on a
+    /// dedicated background thread so a stalled network mount never blocks app startup
+    /// or the background executor pool. While recovery runs, new edits in `footage_dir`
+    /// are rejected so they cannot race with restoration; the pending entry stays
     /// persisted until cleanup is confirmed so quitting early retries next startup.
-    fn restore_gemini_workspace(&mut self, footage_dir: PathBuf, cx: &mut Context<Self>) {
+    fn restore_antigravity_workspace(&mut self, footage_dir: PathBuf, cx: &mut Context<Self>) {
         if self.restoring_workspaces.contains_key(&footage_dir) {
             return;
         }
         let (done_tx, done_rx) = oneshot::channel();
         let thread_dir = footage_dir.clone();
-        let spawned = std::thread::Builder::new().name("gemini-restore".to_owned()).spawn(move || {
-            let cleared = restore_leftover_gemini_workspace(&thread_dir);
+        let spawned = std::thread::Builder::new().name("antigravity-restore".to_owned()).spawn(move || {
+            let cleared = restore_leftover_antigravity_workspace(&thread_dir);
             _ = done_tx.send(cleared);
         });
         if let Err(error) = spawned {
-            log_line!("rushes: couldn't start Gemini workspace recovery for {}: {error}", footage_dir.display());
+            log_line!("rushes: couldn't start Antigravity workspace recovery for {}: {error}", footage_dir.display());
             return;
         }
         let key = footage_dir.clone();
@@ -1135,8 +1136,8 @@ impl PipelineService {
             let cleared = done_rx.await.unwrap_or(false);
             _ = this.update(cx, |this, cx| {
                 this.restoring_workspaces.remove(&key);
-                if cleared && this.pending_gemini_restores.remove(&key) {
-                    this.save_pending_gemini_restores(cx);
+                if cleared && this.pending_antigravity_restores.remove(&key) {
+                    this.save_pending_antigravity_restores(cx);
                 }
                 cx.notify();
             });
@@ -1204,20 +1205,20 @@ impl PipelineService {
         self.codex_models.as_ref().filter(|(listed_by, _)| listed_by == command).map(|(_, models)| models)
     }
 
-    /// The models the configured Gemini CLI offers: `None` while they are being
-    /// listed for the first time, empty when Gemini CLI could not list them.
-    pub fn gemini_models(&self, cx: &App) -> Option<&[GeminiModel]> {
-        self.gemini_catalog(cx).map(|models| models.as_ref().map_or(&[][..], Vec::as_slice))
+    /// The models the configured Antigravity CLI offers: `None` while they are being
+    /// listed for the first time, empty when Antigravity CLI could not list them.
+    pub fn antigravity_models(&self, cx: &App) -> Option<&[AntigravityModel]> {
+        self.antigravity_catalog(cx).map(|models| models.as_ref().map_or(&[][..], Vec::as_slice))
     }
 
-    /// Why the configured Gemini CLI could not list its models.
-    pub fn gemini_models_error(&self, cx: &App) -> Option<&str> {
-        self.gemini_catalog(cx)?.as_ref().err().map(String::as_str)
+    /// Why the configured Antigravity CLI could not list its models.
+    pub fn antigravity_models_error(&self, cx: &App) -> Option<&str> {
+        self.antigravity_catalog(cx)?.as_ref().err().map(String::as_str)
     }
 
-    fn gemini_catalog(&self, cx: &App) -> Option<&Result<Vec<GeminiModel>, String>> {
-        let command = &self.state.read(cx).settings().pipeline.gemini_command;
-        self.gemini_models.as_ref().filter(|(listed_by, _)| listed_by == command).map(|(_, models)| models)
+    fn antigravity_catalog(&self, cx: &App) -> Option<&Result<Vec<AntigravityModel>, String>> {
+        let command = &self.state.read(cx).settings().pipeline.antigravity_command;
+        self.antigravity_models.as_ref().filter(|(listed_by, _)| listed_by == command).map(|(_, models)| models)
     }
 
     pub fn is_checking(&self) -> bool {
@@ -1233,7 +1234,9 @@ impl PipelineService {
         let harness = settings.harness;
         match settings.agent_harness {
             AgentHarness::Codex => self.refresh_codex_models(config.clone(), settings.codex_command.clone(), cx),
-            AgentHarness::Gemini => self.refresh_gemini_models(config.clone(), settings.gemini_command.clone(), cx),
+            AgentHarness::Antigravity => {
+                self.refresh_antigravity_models(config.clone(), settings.antigravity_command.clone(), cx)
+            }
             AgentHarness::Claude => {}
         }
         self.checked = Some(settings);
@@ -1271,17 +1274,17 @@ impl PipelineService {
         }));
     }
 
-    /// Lists the models Gemini CLI `command` offers on a background thread. The
+    /// Lists the models Antigravity CLI `command` offers on a background thread. The
     /// previous list stays until the new one arrives.
-    fn refresh_gemini_models(&mut self, config: AgentConfig, command: String, cx: &mut Context<Self>) {
-        self.gemini_models_task = Some(cx.spawn(async move |this, cx| {
-            let models = cx.background_spawn(async move { gemini_models(&config) }).await;
+    fn refresh_antigravity_models(&mut self, config: AgentConfig, command: String, cx: &mut Context<Self>) {
+        self.antigravity_models_task = Some(cx.spawn(async move |this, cx| {
+            let models = cx.background_spawn(async move { antigravity_models(&config) }).await;
             _ = this.update(cx, |this, cx| {
                 if let Err(error) = &models {
-                    log_line!("rushes: couldn’t list Gemini CLI models: {error}");
+                    log_line!("rushes: couldn’t list Antigravity CLI models: {error}");
                 }
-                this.gemini_models = Some((command, models));
-                this.gemini_models_task = None;
+                this.antigravity_models = Some((command, models));
+                this.antigravity_models_task = None;
                 cx.notify();
             });
         }));
@@ -1292,7 +1295,7 @@ impl PipelineService {
         let changed = self.checked.as_ref().is_none_or(|checked| {
             checked.agent_command != settings.agent_command
                 || checked.codex_command != settings.codex_command
-                || checked.gemini_command != settings.gemini_command
+                || checked.antigravity_command != settings.antigravity_command
                 || checked.agent_harness != settings.agent_harness
                 || checked.skill_dir != settings.skill_dir
                 || checked.harness != settings.harness
@@ -1341,9 +1344,12 @@ pub(crate) fn agent_config(settings: &PipelineSettings, env: Vec<(String, String
         AgentHarness::Codex => {
             (AgentKind::Codex, &settings.codex_command, DEFAULT_CODEX_COMMAND, &settings.codex_model)
         }
-        AgentHarness::Gemini => {
-            (AgentKind::Gemini, &settings.gemini_command, DEFAULT_GEMINI_COMMAND, &settings.gemini_model)
-        }
+        AgentHarness::Antigravity => (
+            AgentKind::Antigravity,
+            &settings.antigravity_command,
+            DEFAULT_ANTIGRAVITY_COMMAND,
+            &settings.antigravity_model,
+        ),
     };
     AgentConfig {
         kind,
