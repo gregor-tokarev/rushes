@@ -632,7 +632,7 @@ impl PipelineService {
         if !matches!(run.status, RunStatus::Failed | RunStatus::Cancelled) || self.can_restore(id) {
             return false;
         }
-        run.session_id.is_some()
+        run.session_id.as_deref().is_some_and(|id| !id.trim().is_empty())
             || run.summary.is_some()
             || self.timeline(id).iter().any(|entry| match &entry.event {
                 LogEvent::Agent(AgentEvent::Init { session_id, .. } | AgentEvent::Result { session_id, .. }) => {
@@ -735,12 +735,26 @@ impl PipelineService {
         };
         let config = self.agent_config(&settings);
         let context = RunContext { footage_dir: run.footage_dir.clone(), harness, session_id: run.session_id.clone() };
+        let fresh_session = run.session_id.as_deref().is_none_or(|id| id.trim().is_empty());
         let pipeline_phase = match phase {
             PhaseKind::Plan => Phase::Plan { brief: run.brief.clone() },
             PhaseKind::Auto => Phase::Auto { brief: run.brief.clone() },
             PhaseKind::Revise => Phase::Plan { brief: revision_brief(&run.brief, text.as_deref().unwrap_or_default()) },
             PhaseKind::Approve => Phase::Approve { notes: text.clone() },
-            PhaseKind::Feedback => Phase::Feedback { message: text.clone().unwrap_or_default() },
+            PhaseKind::Feedback => {
+                let message = text.clone().unwrap_or_default();
+                if fresh_session && run.summary.is_none() && run.output.is_none() {
+                    // Starting fresh before any strategy or render exists (for example, a migrated
+                    // Gemini Auto run that failed during transcription): run a full Auto pass with
+                    // both the creator's feedback and the original brief rather than assuming
+                    // `edit/project.md` already describes the edit.
+                    Phase::Auto { brief: continuation_brief(&run.brief, &message) }
+                } else if fresh_session {
+                    Phase::Feedback { message: fresh_feedback_message(&run.brief, &message) }
+                } else {
+                    Phase::Feedback { message }
+                }
+            }
         };
 
         if phase.renders() {
@@ -1549,6 +1563,36 @@ fn revision_brief(brief: &str, feedback: &str) -> String {
         feedback.trim(),
         brief.trim()
     )
+}
+
+/// Auto prompt for continuing a failed or interrupted render in a fresh session when no
+/// strategy or cut was saved yet: keeps the creator's feedback and the original brief.
+fn continuation_brief(brief: &str, feedback: &str) -> String {
+    let feedback = feedback.trim();
+    let brief = brief.trim();
+    if brief.is_empty() {
+        return feedback.to_owned();
+    }
+    if feedback.is_empty() {
+        return brief.to_owned();
+    }
+    format!(
+        "Continue this edit in a fresh session (any earlier strategy, notes or transcripts are in \
+         ./edit/project.md and ./edit/). The creator asks for these changes:\n\n{feedback}\n\n\
+         The original brief was:\n\n{brief}"
+    )
+}
+
+/// Feedback message when starting a fresh session for a run that already has a saved
+/// strategy or cut: includes the original brief so requirements missing from
+/// `edit/project.md` are not lost.
+fn fresh_feedback_message(brief: &str, feedback: &str) -> String {
+    let feedback = feedback.trim();
+    let brief = brief.trim();
+    if brief.is_empty() {
+        return feedback.to_owned();
+    }
+    format!("{feedback}\n\nFor context (this is a fresh session), the original brief was:\n\n{brief}")
 }
 
 /// A pipeline message as a sentence: capitalised, ending in a full stop.
