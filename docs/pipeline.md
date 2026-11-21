@@ -1,7 +1,7 @@
 # AI edit pipelines (`rushes-pipeline`)
 
 A pipeline turns a folder of raw takes into `edit/final.mp4` with a headless coding agent
-(Codex, Claude Code or Gemini CLI, selected in Settings > AI editing > Agent harness)
+(Codex, Claude Code or Antigravity CLI, selected in Settings > AI editing > Agent harness)
 that edits with one of two tool harnesses (`RunContext::harness`):
 
 - `Harness::Rushes { tools }`: Rushes' own editing tools ([editing-harness.md](editing-harness.md)),
@@ -104,7 +104,7 @@ for the footage.
 
 ## Agent invocation
 
-`AgentConfig::kind` selects `AgentKind::Claude` (the default), `AgentKind::Codex`, or `AgentKind::Gemini`.
+`AgentConfig::kind` selects `AgentKind::Claude` (the default), `AgentKind::Codex`, or `AgentKind::Antigravity`.
 Each run persists its agent in `PipelineRun::agent_harness`; changing the selection
 only affects new edits and new YouTube-details requests. Old runs default to Claude
 Code, including sessions recovered from the unsaved write queue. Commands and models
@@ -113,10 +113,8 @@ are saved separately for each agent. Thumbnail chats always use Codex.
 The model menu in Settings names Claude Code's `opus`, `sonnet` and `haiku` aliases;
 for Codex the models its catalog lists (`codex_models` runs `codex debug models` with the
 configured command and keeps the entries with `visibility: "list"`, in Codex's priority
-order); and for Gemini CLI the models `gemini_models` reads from
-`gemini --list-models --output-format json` (falling back to `auto`, `pro`, `flash` and
-`flash-lite` on older builds without `--list-models`). Any other model name can still be
-typed as a custom model.
+order); and for Antigravity CLI the models `antigravity_models` reads from `agy models`.
+Any other model name can still be typed as a custom model.
 
 Codex runs as `codex exec --json --skip-git-repo-check --sandbox=workspace-write`,
 with `approval_policy="never"` and the prompt on stdin. Follow-ups use
@@ -129,25 +127,27 @@ Before launch, a short-lived app-server reads effective configuration locally vi
 `config/read`, without remote MCP authentication discovery. Unrelated configured
 servers are explicitly disabled; plugin and app tools are disabled for the run.
 
-Gemini CLI runs as `gemini --output-format=stream-json -p "" --extensions=none` with the
-prompt on stdin, `GEMINI_CLI_TRUST_WORKSPACE=true`, and `NO_BROWSER=1`. Editing runs use
-`--approval-mode=yolo` and follow-ups pass `--resume=<session_id>`. Before editing
-`<footage>/.gemini/settings.json`, Rushes saves a recoverable backup at
-`<footage>/.gemini/.rushes-settings-backup.json` and parses JSONC comments so existing
-workspace settings stay intact during the run and the original bytes are restored on exit
-or after an interrupted session. With Rushes' tools, Rushes' MCP server is merged into
-workspace settings (with a one-hour timeout, `trust: true`, and `${VAR}` placeholders for
-forwarded environment variables — never writing secrets to disk) while
-`--allowed-mcp-server-names=rushes` blocks unrelated configured servers; video-use passes
-its skill folder via `--include-directories=<skill dir>`, blocks all MCP servers, and
-still adds forwarded variables (such as `ELEVENLABS_API_KEY`) to
-`security.environmentVariableRedaction.allowed`. Streamed assistant deltas (`delta: true`)
-are merged into complete `AssistantText` events and `mcp_rushes_<tool>` names normalize to
-`mcp__rushes__<tool>`. One-off YouTube-details requests run in a temporary workspace with
-`tools.core: []`, `tools.allowed: []`, empty `tools.discoveryCommand` / `tools.callCommand`
-/ `mcp.serverCommand`, `skills.enabled: false`, `hooksConfig.enabled: false`, no MCP
-servers or extensions, `--approval-mode=default`, and the JSON schema appended to the
-prompt.
+Antigravity CLI runs as `agy --input-format=stream-json --output-format=stream-json --disable-slash-commands`
+with one NDJSON `user` message on stdin and `NO_BROWSER=1`. Editing runs pass session-only
+`--settings` (`agentMode: "accept-edits"`, `toolPermission: "always-proceed"`,
+`artifactReviewPolicy: "always-proceed"`, `enableTerminalSandbox: false`), and follow-ups pass
+`--conversation=<session_id>`. Saved runs from the replaced Gemini CLI harness migrate to
+Antigravity with their incompatible Gemini `session_id` cleared so follow-ups resume cleanly
+from `edit/project.md`. With Rushes' tools, before editing `<footage>/.agents/mcp_config.json`,
+Rushes saves a recoverable backup at `<footage>/.agents/.rushes-mcp-backup.json` so existing
+workspace config stays intact during the run and the original bytes are restored on exit or
+after an interrupted session (recovery also restores any legacy `<footage>/.gemini/.rushes-settings-backup.json`
+left over from an interrupted Gemini CLI run). Rushes' MCP server is merged into workspace config with a one-hour
+timeout (`timeoutSeconds: 3600`) and eager tool registration while session deny rules
+(`mcp(<name>/*)`) and workspace `disabled: true` entries block unrelated configured servers;
+stdio MCP servers inherit the agent's environment directly so secrets are never written to disk.
+video-use passes its skill folder via `--add-dir=<skill dir>` and denies all MCP servers
+(`mcp(*)`). Streamed `agent_response` `text_delta` fragments merge into complete `AssistantText`
+events, and `mcp_rushes_<tool>` (or lazy `call_mcp_tool` calls targeting `rushes`) normalize to
+`mcp__rushes__<tool>`. One-off YouTube-details requests run in a temporary workspace with a
+no-tools custom agent (`--agent=rushes-one-off`, `tools: []`), the JSON Schema embedded in the
+prompt, `toolPermission: "strict"`, `allowNonWorkspaceAccess: false`, and deny rules for shell,
+file, web and MCP tools.
 
 YouTube-details requests for Codex use a read-only sandbox, no shell or MCP servers, an
 ephemeral session and a temporary `--output-schema` file. The final assistant message
@@ -320,7 +320,7 @@ mode 0600) in the agent's environment; with Rushes' tools and no saved key it us
 in video-use's `.env`.
 
 - **Agent**: the selected CLI; `--version` must print `Claude Code`, start with
-  `codex-cli `, or print a semver number with `Gemini CLI` in `--help`, matching the
+  `codex-cli `, or print a semver number whose `--help` identifies Antigravity CLI, matching the
   selection (any other program answers `--version` too, but cannot run an edit). Login is
   not checked. A failed launch reports the OS error, exit status and first stderr line, or
   the timeout.

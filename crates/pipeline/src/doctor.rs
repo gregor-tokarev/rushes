@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::agent::{AgentConfig, AgentKind};
-use crate::exec::{find_executable, run_captured, run_captured_checked};
+use crate::exec::{find_executable, run_captured, run_captured_checked, run_captured_combined};
 
 const VERSION_TIMEOUT: Duration = Duration::from_secs(15);
 const ELEVENLABS_KEY: &str = "ELEVENLABS_API_KEY";
@@ -103,8 +103,8 @@ pub fn doctor_rushes(config: &AgentConfig) -> Doctor {
 
 /// What `claude --version` prints after the version number: `2.1.284 (Claude Code)`.
 const CLAUDE_CODE: &str = "Claude Code";
-/// What `gemini --help` prints in its usage line (`gemini --version` prints only the version number).
-const GEMINI_CLI: &str = "Gemini CLI";
+/// Display name of Antigravity CLI (`agy --version` prints only a semver number).
+const ANTIGRAVITY_CLI: &str = "Antigravity CLI";
 
 fn check_agent(config: &AgentConfig) -> Check {
     let Some(program) = config.resolve_command() else {
@@ -118,12 +118,12 @@ fn check_agent(config: &AgentConfig) -> Check {
     let name = match config.kind {
         AgentKind::Claude => CLAUDE_CODE,
         AgentKind::Codex => "Codex",
-        AgentKind::Gemini => GEMINI_CLI,
+        AgentKind::Antigravity => ANTIGRAVITY_CLI,
     };
     let matches = match config.kind {
         AgentKind::Claude => version.contains(CLAUDE_CODE),
         AgentKind::Codex => version.starts_with("codex-cli "),
-        AgentKind::Gemini => match check_gemini_cli(&program, version, &config.env) {
+        AgentKind::Antigravity => match check_antigravity_cli(&program, version, &config.env) {
             Ok(matched) => matched,
             Err(reason) => return Check::fail(format!("{} does not run: --help failed ({reason})", program.display())),
         },
@@ -138,10 +138,11 @@ fn check_agent(config: &AgentConfig) -> Check {
     }
 }
 
-/// Gemini CLI's `--version` prints a bare semver number (`0.70.0`), so `--help` confirms
-/// the binary is actually Gemini CLI rather than any other tool that answers `--version`.
-fn check_gemini_cli(program: &Path, version: &str, env: &[(String, String)]) -> Result<bool, String> {
-    if version.contains(GEMINI_CLI) || version.starts_with("gemini-cli ") {
+/// Antigravity CLI's `--version` prints a bare semver number (`1.5.14`), so `--help`
+/// confirms the binary is actually Antigravity CLI rather than any other tool that
+/// answers `--version`.
+fn check_antigravity_cli(program: &Path, version: &str, env: &[(String, String)]) -> Result<bool, String> {
+    if version.contains(ANTIGRAVITY_CLI) || version.starts_with("agy ") {
         return Ok(true);
     }
     if !is_semver(version) {
@@ -149,8 +150,10 @@ fn check_gemini_cli(program: &Path, version: &str, env: &[(String, String)]) -> 
     }
     let mut help_env = vec![("NO_BROWSER".to_owned(), "1".to_owned())];
     help_env.extend(env.iter().cloned());
-    let help = run_captured_checked(program, ["--help"], &help_env, VERSION_TIMEOUT)?;
-    Ok(help.contains(GEMINI_CLI))
+    let help = run_captured_combined(program, ["--help"], &help_env, VERSION_TIMEOUT)?;
+    Ok(help.contains(ANTIGRAVITY_CLI)
+        || help.contains("Usage of agy:")
+        || (help.contains("--input-format") && help.contains("--conversation") && help.contains("models")))
 }
 
 fn is_semver(text: &str) -> bool {

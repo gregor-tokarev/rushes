@@ -66,6 +66,43 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    run_captured_streams(program, args, env, timeout, 4096).map(|(stdout, _)| stdout)
+}
+
+/// Like [`run_captured_checked`], returning both stdout and stderr (capped at 64 KiB
+/// for stderr) for tools such as Go CLIs whose `--help` writes to stderr.
+pub(crate) fn run_captured_combined<I, S>(
+    program: &Path,
+    args: I,
+    env: &[(String, String)],
+    timeout: Duration,
+) -> Result<String, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    run_captured_streams(program, args, env, timeout, 65_536).map(|(stdout, stderr)| {
+        if stdout.is_empty() {
+            stderr
+        } else if stderr.is_empty() {
+            stdout
+        } else {
+            format!("{stdout}\n{stderr}")
+        }
+    })
+}
+
+fn run_captured_streams<I, S>(
+    program: &Path,
+    args: I,
+    env: &[(String, String)],
+    timeout: Duration,
+    stderr_limit: u64,
+) -> Result<(String, String), String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let mut command = Command::new(program);
     command.args(args).envs(env.iter().map(|(key, value)| (key, value)));
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -75,7 +112,7 @@ where
     // Drain both pipes concurrently, including when a managed launcher starts a
     // second process. Receiving, rather than joining, also bounds the pipe wait.
     let stdout = capture_stream(child.stdout.take().expect("piped stdout"), u64::MAX);
-    let stderr = capture_stream(child.stderr.take().expect("piped stderr"), 4096);
+    let stderr = capture_stream(child.stderr.take().expect("piped stderr"), stderr_limit);
     let deadline = Instant::now() + timeout;
     let timed_out = || format!("timed out after {} seconds", timeout.as_secs());
     let status = loop {
@@ -97,7 +134,7 @@ where
     let output = receive(stdout).and_then(|stdout| receive(stderr).map(|stderr| (stdout, stderr)));
     let (stdout, stderr) = output.inspect_err(|_| stop_capture(&mut child))?;
     if status.success() {
-        Ok(String::from_utf8_lossy(&stdout).into_owned())
+        Ok((String::from_utf8_lossy(&stdout).into_owned(), String::from_utf8_lossy(&stderr).into_owned()))
     } else {
         let stderr = String::from_utf8_lossy(&stderr);
         let detail: String =

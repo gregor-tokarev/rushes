@@ -11,7 +11,7 @@ crates/
   core/       rushes-core      domain model, SQLite store, documents, media folders
   youtube/    rushes-youtube   Google OAuth (loopback + PKCE), YouTube Data API v3 client, resumable upload
   edit/       rushes-edit      Rushes' editing tools (transcribe, cut plans, render, checks), served to the agent over MCP
-  pipeline/   rushes-pipeline  AI edit pipelines: drives a coding agent (Codex, Claude Code or Gemini CLI) with rushes-edit or the video-use skill;
+  pipeline/   rushes-pipeline  AI edit pipelines: drives a coding agent (Codex, Claude Code or Antigravity CLI) with rushes-edit or the video-use skill;
                                writes YouTube details with it and draws thumbnails with Codex in a chat
   update/     rushes-update    self-update: newest GitHub release, verified download, install in place, relaunch
   app/        rushes           GPUI Kit desktop app (the only crate that depends on gpui-kit)
@@ -123,7 +123,7 @@ database's write lock for seconds. The UI thread never waits for it:
   extensions, size, mtime), finding edit outputs (`footage/edit/final.mp4`, `preview.mp4`).
 - `settings.rs` — typed `AppSettings` stored in the settings table: media root,
   YouTube backend (`Google { client_id, client_secret }` | `Emulator { google_url, youtube_url }`),
-  pipeline config (Codex/Claude/Gemini agent harness, separate commands and models, editing harness: Rushes' tools or video-use, video-use
+  pipeline config (Codex/Claude/Antigravity agent harness, separate commands and models, editing harness: Rushes' tools or video-use, video-use
   skill dir, extra instructions, auto-approve),
   `onboarding_completed`, theme, zoom, week start, updates, and whether video pages open
   with their properties folded (`properties_collapsed`).
@@ -163,7 +163,7 @@ as `rushes edit-tools --footage <dir>`. See [editing-harness.md](editing-harness
 ## pipeline (`rushes-pipeline`)
 
 Drives the selected headless coding agent (Claude Code via `claude -p --output-format stream-json --verbose`,
-Codex via `codex exec --json`, or Gemini CLI via `gemini --output-format=stream-json`) that
+Codex via `codex exec --json`, or Antigravity CLI via `agy --input-format=stream-json --output-format=stream-json`) that
 edits with Rushes' tools (`Harness::Rushes`, over MCP, next to its shell) or with
 [video-use](https://github.com/browser-use/video-use) (`Harness::VideoUse`); a run keeps the
 one it started with (`PipelineRun::harness`). The agent harness is also fixed for the run
@@ -173,7 +173,7 @@ proposes a strategy and waits for approval, so a run has two phases:
 1. **Plan** — agent inventories footage, transcribes, proposes a strategy, stops.
    Run status `Planning -> AwaitingApproval`; the strategy text is the run summary.
 2. **Render** — user approves (optionally with notes) or sends feedback; the app resumes
-   the same agent session (`--resume <session_id>` for Claude and Gemini CLI, `exec resume` for Codex). Status `Rendering -> Succeeded`
+   the same agent session (`--resume <session_id>` for Claude, `exec resume` for Codex, `--conversation <session_id>` for Antigravity CLI). Status `Rendering -> Succeeded`
    once `footage/edit/final.mp4` exists. Further feedback resumes again.
 
 `auto_approve` collapses both phases into one prompt. `doctor_rushes()` reports whether the

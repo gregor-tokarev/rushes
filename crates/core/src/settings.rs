@@ -25,7 +25,7 @@ pub const DEFAULT_EMULATOR_GOOGLE_URL: &str = "http://127.0.0.1:4002";
 pub const DEFAULT_EMULATOR_YOUTUBE_URL: &str = "http://127.0.0.1:4020";
 pub const DEFAULT_AGENT_COMMAND: &str = "claude";
 pub const DEFAULT_CODEX_COMMAND: &str = "codex";
-pub const DEFAULT_GEMINI_COMMAND: &str = "gemini";
+pub const DEFAULT_ANTIGRAVITY_COMMAND: &str = "agy";
 
 /// Directory holding the database and credentials: `$RUSHES_DATA_DIR` when set,
 /// otherwise `<platform data dir>/rushes`.
@@ -156,7 +156,8 @@ pub enum AgentHarness {
     #[default]
     Claude,
     Codex,
-    Gemini,
+    #[serde(alias = "gemini")]
+    Antigravity,
 }
 
 impl AgentHarness {
@@ -164,7 +165,7 @@ impl AgentHarness {
         match self {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
-            Self::Gemini => "Gemini CLI",
+            Self::Antigravity => "Antigravity CLI",
         }
     }
 }
@@ -194,8 +195,8 @@ pub struct PipelineSettings {
     pub model: Option<String>,
     /// Codex model for edits and YouTube details, independent of Claude's model.
     pub codex_model: Option<String>,
-    /// Gemini CLI model for edits and YouTube details, independent of other agents' models.
-    pub gemini_model: Option<String>,
+    /// Antigravity CLI model for edits and YouTube details, independent of other agents' models.
+    pub antigravity_model: Option<String>,
     /// Appended to every edit brief (house style, channel branding, ...).
     pub extra_instructions: String,
     /// Skip the strategy approval step and render straight away.
@@ -203,8 +204,8 @@ pub struct PipelineSettings {
     pub default_preferences: EditPreferences,
     /// Executable of Codex, also used to draw thumbnails on the Publish tab.
     pub codex_command: String,
-    /// Executable of Gemini CLI.
-    pub gemini_command: String,
+    /// Executable of Antigravity CLI.
+    pub antigravity_command: String,
 }
 
 impl Default for PipelineSettings {
@@ -216,12 +217,12 @@ impl Default for PipelineSettings {
             skill_dir: None,
             model: None,
             codex_model: None,
-            gemini_model: None,
+            antigravity_model: None,
             extra_instructions: String::new(),
             auto_approve: false,
             default_preferences: EditPreferences::default(),
             codex_command: DEFAULT_CODEX_COMMAND.to_string(),
-            gemini_command: DEFAULT_GEMINI_COMMAND.to_string(),
+            antigravity_command: DEFAULT_ANTIGRAVITY_COMMAND.to_string(),
         }
     }
 }
