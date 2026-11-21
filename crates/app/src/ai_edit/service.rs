@@ -1,7 +1,7 @@
 //! [`PipelineService`]: starts and steers AI edit runs and keeps their state.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,6 +48,10 @@ const STDERR_SEPARATOR: &str = "\n\nAgent output:\n";
 
 /// Settings key of the brief forms kept across restarts.
 const DRAFTS_KEY: &str = "ai_edit.brief_drafts";
+
+/// Settings key of footage folders whose leftover Gemini CLI workspace settings
+/// still need restoration; persisted until background recovery confirms cleanup.
+const PENDING_GEMINI_RESTORES_KEY: &str = "ai_edit.pending_gemini_restores";
 
 /// How long quitting waits for agents to stop, beyond their kill grace period.
 const QUIT_MARGIN: Duration = Duration::from_secs(1);
@@ -199,6 +203,10 @@ pub struct PipelineService {
     drafts: HashMap<VideoId, BriefDraft>,
     /// Copies into footage folders, whichever card started them.
     footage_imports: Entity<FootageImports>,
+    /// Footage folders whose leftover Gemini CLI settings still need restoration;
+    /// persisted across restarts so quitting while a mount stalls does not abandon
+    /// recovery.
+    pending_gemini_restores: BTreeSet<PathBuf>,
     /// Footage folders whose leftover Gemini CLI settings are being restored in the
     /// background after an interrupted run; new edits in these workspaces wait until
     /// recovery finishes.
@@ -256,6 +264,7 @@ impl PipelineService {
                 revealed: None,
                 drafts: HashMap::new(),
                 footage_imports: cx.new(|_| FootageImports::new()),
+                pending_gemini_restores: BTreeSet::new(),
                 restoring_workspaces: HashMap::new(),
                 _subscriptions: subscriptions,
             };
@@ -1028,6 +1037,11 @@ impl PipelineService {
     /// before the window opens, so a retry can't race with it. That waits at most
     /// [`LEFTOVER_GRACE`], and only after a crash.
     fn recover_interrupted(&mut self, cx: &mut Context<Self>) -> Result<bool, StoreError> {
+        match self.state.read(cx).read_setting::<Vec<PathBuf>>(PENDING_GEMINI_RESTORES_KEY) {
+            Ok(Some(paths)) => self.pending_gemini_restores.extend(paths),
+            Ok(None) => {}
+            Err(error) => log_line!("rushes: couldn't read pending Gemini workspace restores: {error}"),
+        }
         let mut recovered = false;
         for mut run in self.state.read(cx).read_runs()? {
             let unfinished = run.status.is_active();
@@ -1048,8 +1062,12 @@ impl PipelineService {
                 if let Some(process) = leftover_agent(&events) {
                     stop_leftover_agent(&process, LEFTOVER_GRACE);
                 }
-                if run.agent_harness == AgentHarness::Gemini {
-                    self.restore_gemini_workspace(run.footage_dir.clone(), cx);
+                if run.agent_harness == AgentHarness::Gemini
+                    && self.pending_gemini_restores.insert(run.footage_dir.clone())
+                {
+                    // Persist before marking the run inactive so quitting while recovery
+                    // waits on a stalled mount still restores the workspace on next startup.
+                    self.save_pending_gemini_restores(cx);
                 }
                 run.status = unfinished_status(last_phase, &run, true);
                 run.error = Some(INTERRUPTED.to_owned());
@@ -1081,13 +1099,23 @@ impl PipelineService {
                 recovered = true;
             }
         }
+        let pending: Vec<PathBuf> = self.pending_gemini_restores.iter().cloned().collect();
+        for footage_dir in pending {
+            self.restore_gemini_workspace(footage_dir, cx);
+        }
         Ok(recovered)
+    }
+
+    fn save_pending_gemini_restores(&mut self, cx: &mut Context<Self>) {
+        let paths: Vec<&Path> = self.pending_gemini_restores.iter().map(PathBuf::as_path).collect();
+        self.state.update(cx, |state, cx| state.save_setting(PENDING_GEMINI_RESTORES_KEY, &paths, cx));
     }
 
     /// Restores a leftover Gemini CLI `.gemini/settings.json` backup on a dedicated
     /// background thread so a stalled network mount never blocks app startup or the
     /// background executor pool. While recovery runs, new edits in `footage_dir` are
-    /// rejected so they cannot race with restoration.
+    /// rejected so they cannot race with restoration; the pending entry stays
+    /// persisted until cleanup is confirmed so quitting early retries next startup.
     fn restore_gemini_workspace(&mut self, footage_dir: PathBuf, cx: &mut Context<Self>) {
         if self.restoring_workspaces.contains_key(&footage_dir) {
             return;
@@ -1095,8 +1123,8 @@ impl PipelineService {
         let (done_tx, done_rx) = oneshot::channel();
         let thread_dir = footage_dir.clone();
         let spawned = std::thread::Builder::new().name("gemini-restore".to_owned()).spawn(move || {
-            restore_leftover_gemini_workspace(&thread_dir);
-            _ = done_tx.send(());
+            let cleared = restore_leftover_gemini_workspace(&thread_dir);
+            _ = done_tx.send(cleared);
         });
         if let Err(error) = spawned {
             log_line!("rushes: couldn't start Gemini workspace recovery for {}: {error}", footage_dir.display());
@@ -1104,9 +1132,12 @@ impl PipelineService {
         }
         let key = footage_dir.clone();
         let task = cx.spawn(async move |this, cx| {
-            _ = done_rx.await;
+            let cleared = done_rx.await.unwrap_or(false);
             _ = this.update(cx, |this, cx| {
                 this.restoring_workspaces.remove(&key);
+                if cleared && this.pending_gemini_restores.remove(&key) {
+                    this.save_pending_gemini_restores(cx);
+                }
                 cx.notify();
             });
         });

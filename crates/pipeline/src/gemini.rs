@@ -61,22 +61,33 @@ pub fn gemini_models(config: &AgentConfig) -> Result<Vec<GeminiModel>, String> {
 /// earlier crashed or killed Gemini CLI run. Does nothing while a run in this process
 /// still holds `cwd`, or when no backup exists.
 ///
+/// Returns `true` when no backup remains to be restored (or an active run in this
+/// process now owns it), and `false` when the workspace could not be accessed or
+/// restored so the caller should retry it later.
+///
 /// Performs filesystem I/O in `cwd`, so callers should run it off the UI thread.
-pub fn restore_leftover_gemini_workspace(cwd: &Path) {
-    let key = match fs::canonicalize(cwd).or_else(|_| std::path::absolute(cwd)) {
-        Ok(path) => path,
-        Err(_) => return,
+pub fn restore_leftover_gemini_workspace(cwd: &Path) -> bool {
+    let Ok(key) = fs::canonicalize(cwd) else {
+        return false;
     };
     let slot = workspace_slot(&key);
     let active = slot.lock().unwrap_or_else(|poison| poison.into_inner());
     if active.is_some() {
-        return;
+        return true;
     }
     let gemini_dir = cwd.join(".gemini");
     let backup_path = gemini_dir.join(BACKUP_FILE);
-    let Ok(bytes) = fs::read(&backup_path) else { return };
-    let Ok(backup) = serde_json::from_slice::<WorkspaceBackup>(&bytes) else { return };
-    restore_workspace_files(&gemini_dir, &gemini_dir.join("settings.json"), &backup_path, &backup);
+    let bytes = match fs::read(&backup_path) {
+        Ok(bytes) => bytes,
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {
+            return true;
+        }
+        Err(_) => return false,
+    };
+    let Ok(backup) = serde_json::from_slice::<WorkspaceBackup>(&bytes) else {
+        return true;
+    };
+    restore_workspace_files(&gemini_dir, &gemini_dir.join("settings.json"), &backup_path, &backup)
 }
 
 fn unsupported_list_models(reason: &str) -> bool {
@@ -444,11 +455,16 @@ impl Drop for WorkspaceSettingsGuard {
             return;
         }
         let Some(active) = active_slot.take() else { return };
-        restore_workspace_files(&self.gemini_dir, &self.settings_path, &self.backup_path, &active.backup);
+        _ = restore_workspace_files(&self.gemini_dir, &self.settings_path, &self.backup_path, &active.backup);
     }
 }
 
-fn restore_workspace_files(gemini_dir: &Path, settings_path: &Path, backup_path: &Path, backup: &WorkspaceBackup) {
+fn restore_workspace_files(
+    gemini_dir: &Path,
+    settings_path: &Path,
+    backup_path: &Path,
+    backup: &WorkspaceBackup,
+) -> bool {
     let restored = match &backup.original {
         Some(bytes) => write_private_atomic(settings_path, bytes).is_ok(),
         None => match fs::remove_file(settings_path) {
@@ -457,12 +473,18 @@ fn restore_workspace_files(gemini_dir: &Path, settings_path: &Path, backup_path:
             Err(_) => false,
         },
     };
-    if restored {
-        _ = fs::remove_file(backup_path);
-        if backup.created_dir {
-            _ = fs::remove_dir(gemini_dir);
-        }
+    if !restored {
+        return false;
     }
+    let backup_removed = match fs::remove_file(backup_path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    };
+    if backup_removed && backup.created_dir {
+        _ = fs::remove_dir(gemini_dir);
+    }
+    backup_removed
 }
 
 fn merge_workspace_settings(
