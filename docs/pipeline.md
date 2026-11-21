@@ -1,7 +1,7 @@
 # AI edit pipelines (`rushes-pipeline`)
 
 A pipeline turns a folder of raw takes into `edit/final.mp4` with a headless coding agent
-(Codex or Claude Code, selected in Settings > AI editing > Agent harness)
+(Codex, Claude Code or Gemini CLI, selected in Settings > AI editing > Agent harness)
 that edits with one of two tool harnesses (`RunContext::harness`):
 
 - `Harness::Rushes { tools }`: Rushes' own editing tools ([editing-harness.md](editing-harness.md)),
@@ -104,29 +104,45 @@ for the footage.
 
 ## Agent invocation
 
-`AgentConfig::kind` selects `AgentKind::Claude` (the default) or `AgentKind::Codex`.
+`AgentConfig::kind` selects `AgentKind::Claude` (the default), `AgentKind::Codex`, or `AgentKind::Gemini`.
 Each run persists its agent in `PipelineRun::agent_harness`; changing the selection
 only affects new edits and new YouTube-details requests. Old runs default to Claude
 Code, including sessions recovered from the unsaved write queue. Commands and models
 are saved separately for each agent. Thumbnail chats always use Codex.
 
-The model menu in Settings names Claude Code's `opus`, `sonnet` and `haiku` aliases, and
-for Codex the models its catalog lists: `codex_models` runs `codex debug models` with the
+The model menu in Settings names Claude Code's `opus`, `sonnet` and `haiku` aliases;
+for Codex the models its catalog lists (`codex_models` runs `codex debug models` with the
 configured command and keeps the entries with `visibility: "list"`, in Codex's priority
-order. Any other model name can still be typed as a custom model.
+order); and for Gemini CLI the models `gemini_models` reads from
+`gemini --list-models --output-format json` (falling back to `auto`, `pro`, `flash` and
+`flash-lite` on older builds without `--list-models`). Any other model name can still be
+typed as a custom model.
 
 Codex runs as `codex exec --json --skip-git-repo-check --sandbox=workspace-write`,
 with `approval_policy="never"` and the prompt on stdin. Follow-ups use
 `codex exec ... resume -- <session_id> -`. Rushes' MCP server is passed as a TOML
 `mcp_servers` override, with a one-hour tool timeout and automatic tool approval; video-use receives its skill
 folder through `--add-dir`. Network access is enabled for the editing shell so
-video-use can transcribe. Instructions accompany every phase and both agents stream
+video-use can transcribe. Instructions accompany every phase and all agents stream
 the same `AgentEvent`s, including paired MCP tool starts and results. Process-group cancellation is shared.
 Before launch, a short-lived app-server reads effective configuration locally via
 `config/read`, without remote MCP authentication discovery. Unrelated configured
 servers are explicitly disabled; plugin and app tools are disabled for the run.
 
-YouTube-details requests use a read-only sandbox, no shell or MCP servers, an
+Gemini CLI runs as `gemini --output-format=stream-json -p "" --extensions=none` with the
+prompt on stdin, `GEMINI_CLI_TRUST_WORKSPACE=true`, and `NO_BROWSER=1`. Editing runs use
+`--approval-mode=yolo` and follow-ups pass `--resume=<session_id>`. With Rushes' tools,
+Rushes' MCP server is temporarily merged into `<footage>/.gemini/settings.json` (with a
+one-hour timeout, `trust: true`, and `${VAR}` placeholders for forwarded environment
+variables — never writing secrets to disk) and restored on exit, while
+`--allowed-mcp-server-names=rushes` blocks unrelated configured servers; video-use passes
+its skill folder via `--include-directories=<skill dir>` and blocks all MCP servers.
+Streamed assistant deltas (`delta: true`) are merged into complete `AssistantText` events
+and `mcp_rushes_<tool>` names normalize to `mcp__rushes__<tool>`. One-off YouTube-details
+requests run in a temporary workspace with `tools.core: []`, no MCP servers or extensions,
+`--approval-mode=default`, and the JSON schema appended to the prompt.
+
+YouTube-details requests for Codex use a read-only sandbox, no shell or MCP servers, an
 ephemeral session and a temporary `--output-schema` file. The final assistant message
 supplies the JSON answer. Claude-specific options (`allowed_tools`, `permission_mode`
 and `max_turns`) apply only to Claude Code.
@@ -296,10 +312,11 @@ first). The app passes the ElevenLabs key saved in Settings (`<data dir>/elevenl
 mode 0600) in the agent's environment; with Rushes' tools and no saved key it uses the one
 in video-use's `.env`.
 
-- **Agent**: the selected CLI; `--version` must print `Claude Code` or start with
-  `codex-cli `, matching the selection (any other program
-  answers `--version` too, but cannot run an edit). Login is not checked. A failed
-  launch reports the OS error, exit status and first stderr line, or the timeout.
+- **Agent**: the selected CLI; `--version` must print `Claude Code`, start with
+  `codex-cli `, or print a semver number with `Gemini CLI` in `--help`, matching the
+  selection (any other program answers `--version` too, but cannot run an edit). Login is
+  not checked. A failed launch reports the OS error, exit status and first stderr line, or
+  the timeout.
 - **Skill**: `SKILL.md` in the configured folder, default `~/.claude/skills/video-use`
   (symlinks resolved; the resolved folder is returned as `Doctor::skill_dir`).
 - **ffmpeg** and **ffprobe** on `PATH`.

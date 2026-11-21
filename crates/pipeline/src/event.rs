@@ -293,6 +293,142 @@ fn codex_command(item: &Value) -> String {
     truncate(&summary, TOOL_SUMMARY_CHARS)
 }
 
+/// Rushes' editing tools as Gemini CLI names them (`mcp_<server>_<tool>`).
+const GEMINI_RUSHES_TOOL_PREFIX: &str = "mcp_rushes_";
+
+/// Parses Gemini CLI's `--output-format stream-json` stream (one JSON object per stdout
+/// line), merging streamed assistant text deltas (`delta: true`) into whole
+/// [`AgentEvent::AssistantText`] messages and mapping `init`, `tool_use`, `tool_result`,
+/// `error` and `result` onto [`AgentEvent`]s.
+#[derive(Debug, Default)]
+pub struct GeminiStreamParser {
+    pending_assistant: String,
+    last_error: Option<String>,
+}
+
+impl GeminiStreamParser {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn parse_line(&mut self, line: &str) -> Vec<AgentEvent> {
+        let line = line.trim();
+        if line.is_empty() {
+            return Vec::new();
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            return vec![unknown("non_json", line)];
+        };
+        match str_field(&value, "type") {
+            "init" => {
+                let mut events = self.flush_assistant();
+                events.push(AgentEvent::Init {
+                    session_id: str_field(&value, "session_id").to_owned(),
+                    model: str_field(&value, "model").to_owned(),
+                    cwd: PathBuf::new(),
+                    tools: Vec::new(),
+                });
+                events
+            }
+            "message" => match str_field(&value, "role") {
+                // Prompt echo.
+                "user" => Vec::new(),
+                "assistant" => {
+                    let content = str_field(&value, "content");
+                    if value.get("delta").and_then(Value::as_bool).unwrap_or(false) {
+                        self.pending_assistant.push_str(content);
+                        Vec::new()
+                    } else {
+                        let mut events = self.flush_assistant();
+                        if let Some(text) = non_empty(content) {
+                            events.push(AgentEvent::AssistantText { text: text.to_owned() });
+                        }
+                        events
+                    }
+                }
+                role => vec![unknown(&format!("message/{role}"), line)],
+            },
+            "tool_use" => {
+                let mut events = self.flush_assistant();
+                let name = normalize_gemini_tool_name(str_field(&value, "tool_name"));
+                let summary = tool_use_summary(&name, value.get("parameters").unwrap_or(&Value::Null));
+                events.push(AgentEvent::ToolUse { id: str_field(&value, "tool_id").to_owned(), name, summary });
+                events
+            }
+            "tool_result" => {
+                let mut events = self.flush_assistant();
+                let error = value.get("error").filter(|error| !error.is_null());
+                let is_error = error.is_some() || str_field(&value, "status") == "error";
+                let summary = error
+                    .and_then(|err| non_empty(str_field(err, "message")).map(str::to_owned))
+                    .or_else(|| non_empty(str_field(&value, "output")).map(str::to_owned))
+                    .or_else(|| error.map(Value::to_string))
+                    .unwrap_or_default();
+                events.push(AgentEvent::ToolResult {
+                    tool_use_id: str_field(&value, "tool_id").to_owned(),
+                    is_error,
+                    summary: truncate(&summary, RESULT_SUMMARY_CHARS),
+                });
+                events
+            }
+            "error" => {
+                let message = str_field(&value, "message");
+                if str_field(&value, "severity") == "error" && !message.trim().is_empty() {
+                    self.last_error = Some(message.to_owned());
+                }
+                vec![AgentEvent::Stderr { line: message.to_owned() }]
+            }
+            "result" => {
+                let mut events = self.flush_assistant();
+                let error = value.get("error").filter(|error| !error.is_null());
+                let is_error = error.is_some() || str_field(&value, "status") == "error";
+                let result_text = if is_error {
+                    error
+                        .and_then(|err| non_empty(str_field(err, "message")).map(str::to_owned))
+                        .or_else(|| self.last_error.take())
+                        .unwrap_or_else(|| "the turn failed".to_owned())
+                } else {
+                    String::new()
+                };
+                let duration_ms = value.pointer("/stats/duration_ms").and_then(Value::as_u64);
+                events.push(AgentEvent::Result {
+                    is_error,
+                    result_text,
+                    session_id: String::new(),
+                    cost_usd: None,
+                    duration_ms,
+                    num_turns: None,
+                });
+                events
+            }
+            "" => vec![unknown("untyped", line)],
+            kind => vec![unknown(kind, line)],
+        }
+    }
+
+    /// Flushes any buffered assistant deltas at EOF.
+    pub fn finish(&mut self) -> Vec<AgentEvent> {
+        self.flush_assistant()
+    }
+
+    fn flush_assistant(&mut self) -> Vec<AgentEvent> {
+        let text = std::mem::take(&mut self.pending_assistant);
+        if text.trim().is_empty() { Vec::new() } else { vec![AgentEvent::AssistantText { text }] }
+    }
+}
+
+/// Normalizes Gemini CLI's MCP tool name (`mcp_rushes_<tool>`) to [`RUSHES_TOOL_PREFIX`]
+/// (`mcp__rushes__<tool>`), matching Claude Code and Codex.
+fn normalize_gemini_tool_name(raw: &str) -> String {
+    if raw.starts_with(RUSHES_TOOL_PREFIX) {
+        return raw.to_owned();
+    }
+    if let Some(tool) = raw.strip_prefix(GEMINI_RUSHES_TOOL_PREFIX) {
+        return format!("{RUSHES_TOOL_PREFIX}{tool}");
+    }
+    raw.to_owned()
+}
+
 /// Blocks of `message.content`; a plain-string content has none.
 fn content_blocks(value: &Value) -> impl Iterator<Item = &Value> {
     value.pointer("/message/content").and_then(Value::as_array).into_iter().flatten()
@@ -339,18 +475,28 @@ fn rushes_tool_summary(tool: &str, input: &Value) -> Option<String> {
 fn tool_use_summary(name: &str, input: &Value) -> String {
     let field = |key: &str| non_empty(str_field(input, key));
     let summary = match name {
-        "Bash" => field("command").map(|command| {
+        "Bash" | "run_shell_command" => field("command").map(|command| {
             let mut lines = command.lines().map(str::trim).filter(|line| !line.is_empty());
             let first = lines.next().unwrap_or_default();
             if lines.next().is_some() { format!("{first} …") } else { first.to_owned() }
         }),
-        "Read" | "Write" | "Edit" | "MultiEdit" => field("file_path").map(str::to_owned),
+        "Read" | "Write" | "Edit" | "MultiEdit" | "read_file" | "write_file" | "replace" => {
+            field("file_path").map(str::to_owned)
+        }
+        "list_directory" => field("dir_path").map(str::to_owned),
+        "read_many_files" => input
+            .get("include")
+            .or_else(|| input.get("paths"))
+            .and_then(Value::as_array)
+            .map(|paths| paths.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")),
         "NotebookEdit" => field("notebook_path").map(str::to_owned),
-        "Glob" | "Grep" => field("pattern").map(str::to_owned),
+        "Glob" | "Grep" | "glob" | "grep_search" => field("pattern").map(str::to_owned),
         "Skill" => field("skill").map(str::to_owned),
+        "activate_skill" => field("name").map(str::to_owned),
         "Agent" | "Task" => field("description").map(str::to_owned),
         "WebFetch" => field("url").map(str::to_owned),
-        "WebSearch" | "ToolSearch" => field("query").map(str::to_owned),
+        "web_fetch" => field("prompt").or_else(|| field("url")).map(str::to_owned),
+        "WebSearch" | "ToolSearch" | "google_web_search" => field("query").map(str::to_owned),
         "TaskCreate" => field("subject").map(str::to_owned),
         _ => name.strip_prefix(RUSHES_TOOL_PREFIX).and_then(|tool| rushes_tool_summary(tool, input)),
     };

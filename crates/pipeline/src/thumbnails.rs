@@ -205,6 +205,7 @@ pub fn generate_thumbnails(
         None => thumbnail_prompt(request, &drafts, !frames.is_empty()),
         Some(_) => follow_up_prompt(request, &list_thumbnails(&dir), &drafts),
     };
+    let mut parse = |line: Option<&str>| line.map(parse_codex_line).unwrap_or_default();
     let spec = ProcessSpec {
         program: &program,
         args: config.args(&dir, &frames, session_id),
@@ -212,9 +213,9 @@ pub fn generate_thumbnails(
         env: &config.env,
         stdin: Some(prompt),
         kill_grace: config.kill_grace,
-        parse: parse_codex_line,
+        parse: &mut parse,
     };
-    let ran = run_process(&spec, on_event, cancel);
+    let ran = run_process(spec, on_event, cancel);
     let made = match &ran {
         Ok(_) => drafts.iter().filter_map(|draft| keep_draft(draft, &dir, ffmpeg.as_deref(), &config.env)).collect(),
         Err(_) => Vec::new(),

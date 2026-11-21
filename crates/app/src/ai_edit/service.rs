@@ -14,12 +14,15 @@ use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui_kit::{App, AppContext as _, Context, Entity, Global, SharedString, Subscription, Task};
 use rushes_core::input::expand_user_path;
 use rushes_core::media::{self, MediaKind};
-use rushes_core::settings::{AgentHarness, EditHarness, PipelineSettings, data_dir, read_elevenlabs_key};
+use rushes_core::settings::{
+    AgentHarness, DEFAULT_AGENT_COMMAND, DEFAULT_CODEX_COMMAND, DEFAULT_GEMINI_COMMAND, EditHarness, PipelineSettings,
+    data_dir, read_elevenlabs_key,
+};
 use rushes_core::{PipelineRun, RunEvent, RunId, RunStatus, StoreError, VideoId, VideoStatus};
 use rushes_pipeline::{
-    AgentConfig, AgentEvent, AgentKind, AgentProcess, CodexModel, Doctor, Harness, Phase, PhaseOutcome, PipelineError,
-    RunContext, ToolServer, codex_models, default_skill_dir, doctor, doctor_rushes, keep_final_cut, run_phase,
-    set_aside_final_cut, stop_leftover_agent,
+    AgentConfig, AgentEvent, AgentKind, AgentProcess, CodexModel, Doctor, GeminiModel, Harness, Phase, PhaseOutcome,
+    PipelineError, RunContext, ToolServer, codex_models, default_skill_dir, doctor, doctor_rushes, gemini_models,
+    keep_final_cut, run_phase, set_aside_final_cut, stop_leftover_agent,
 };
 use serde::{Deserialize, Serialize};
 
@@ -178,6 +181,10 @@ pub struct PipelineService {
     /// command that was asked; `None` until the first answer arrives.
     codex_models: Option<(String, Result<Vec<CodexModel>, String>)>,
     codex_models_task: Option<Task<()>>,
+    /// The models the Gemini CLI offers, or why it could not list them, with the
+    /// command that was asked; `None` until the first answer arrives.
+    gemini_models: Option<(String, Result<Vec<GeminiModel>, String>)>,
+    gemini_models_task: Option<Task<()>>,
     agent_env: Vec<(String, String)>,
     /// A run another view asked to show; taken by the panel of its video.
     revealed: Option<RunId>,
@@ -233,6 +240,8 @@ impl PipelineService {
                 checked: None,
                 codex_models: None,
                 codex_models_task: None,
+                gemini_models: None,
+                gemini_models_task: None,
                 agent_env: Vec::new(),
                 revealed: None,
                 drafts: HashMap::new(),
@@ -1090,6 +1099,22 @@ impl PipelineService {
         self.codex_models.as_ref().filter(|(listed_by, _)| listed_by == command).map(|(_, models)| models)
     }
 
+    /// The models the configured Gemini CLI offers: `None` while they are being
+    /// listed for the first time, empty when Gemini CLI could not list them.
+    pub fn gemini_models(&self, cx: &App) -> Option<&[GeminiModel]> {
+        self.gemini_catalog(cx).map(|models| models.as_ref().map_or(&[][..], Vec::as_slice))
+    }
+
+    /// Why the configured Gemini CLI could not list its models.
+    pub fn gemini_models_error(&self, cx: &App) -> Option<&str> {
+        self.gemini_catalog(cx)?.as_ref().err().map(String::as_str)
+    }
+
+    fn gemini_catalog(&self, cx: &App) -> Option<&Result<Vec<GeminiModel>, String>> {
+        let command = &self.state.read(cx).settings().pipeline.gemini_command;
+        self.gemini_models.as_ref().filter(|(listed_by, _)| listed_by == command).map(|(_, models)| models)
+    }
+
     pub fn is_checking(&self) -> bool {
         self.doctor_task.is_some()
     }
@@ -1101,8 +1126,10 @@ impl PipelineService {
         let config = self.agent_config(&settings);
         let skill_dir = skill_dir(&settings);
         let harness = settings.harness;
-        if settings.agent_harness == AgentHarness::Codex {
-            self.refresh_codex_models(config.clone(), settings.codex_command.clone(), cx);
+        match settings.agent_harness {
+            AgentHarness::Codex => self.refresh_codex_models(config.clone(), settings.codex_command.clone(), cx),
+            AgentHarness::Gemini => self.refresh_gemini_models(config.clone(), settings.gemini_command.clone(), cx),
+            AgentHarness::Claude => {}
         }
         self.checked = Some(settings);
         self.doctor_task = Some(cx.spawn(async move |this, cx| {
@@ -1139,11 +1166,28 @@ impl PipelineService {
         }));
     }
 
+    /// Lists the models Gemini CLI `command` offers on a background thread. The
+    /// previous list stays until the new one arrives.
+    fn refresh_gemini_models(&mut self, config: AgentConfig, command: String, cx: &mut Context<Self>) {
+        self.gemini_models_task = Some(cx.spawn(async move |this, cx| {
+            let models = cx.background_spawn(async move { gemini_models(&config) }).await;
+            _ = this.update(cx, |this, cx| {
+                if let Err(error) = &models {
+                    log_line!("rushes: couldn’t list Gemini CLI models: {error}");
+                }
+                this.gemini_models = Some((command, models));
+                this.gemini_models_task = None;
+                cx.notify();
+            });
+        }));
+    }
+
     fn on_settings_changed(&mut self, cx: &mut Context<Self>) {
         let settings = &self.state.read(cx).settings().pipeline;
         let changed = self.checked.as_ref().is_none_or(|checked| {
             checked.agent_command != settings.agent_command
                 || checked.codex_command != settings.codex_command
+                || checked.gemini_command != settings.gemini_command
                 || checked.agent_harness != settings.agent_harness
                 || checked.skill_dir != settings.skill_dir
                 || checked.harness != settings.harness
@@ -1188,8 +1232,13 @@ impl PipelineService {
 /// How the settings launch the agent, with extra environment `env`.
 pub(crate) fn agent_config(settings: &PipelineSettings, env: Vec<(String, String)>) -> AgentConfig {
     let (kind, command, default, model) = match settings.agent_harness {
-        AgentHarness::Claude => (AgentKind::Claude, &settings.agent_command, "claude", &settings.model),
-        AgentHarness::Codex => (AgentKind::Codex, &settings.codex_command, "codex", &settings.codex_model),
+        AgentHarness::Claude => (AgentKind::Claude, &settings.agent_command, DEFAULT_AGENT_COMMAND, &settings.model),
+        AgentHarness::Codex => {
+            (AgentKind::Codex, &settings.codex_command, DEFAULT_CODEX_COMMAND, &settings.codex_model)
+        }
+        AgentHarness::Gemini => {
+            (AgentKind::Gemini, &settings.gemini_command, DEFAULT_GEMINI_COMMAND, &settings.gemini_model)
+        }
     };
     AgentConfig {
         kind,

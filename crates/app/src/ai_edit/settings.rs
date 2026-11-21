@@ -16,8 +16,8 @@ use gpui_kit::{
 };
 use rushes_core::input::{PathInputError, display_user_path, expand_user_path};
 use rushes_core::settings::{
-    AgentHarness, DEFAULT_AGENT_COMMAND, DEFAULT_CODEX_COMMAND, EditHarness, PipelineSettings, data_dir,
-    read_elevenlabs_key, write_elevenlabs_key,
+    AgentHarness, DEFAULT_AGENT_COMMAND, DEFAULT_CODEX_COMMAND, DEFAULT_GEMINI_COMMAND, EditHarness, PipelineSettings,
+    data_dir, read_elevenlabs_key, write_elevenlabs_key,
 };
 use rushes_pipeline::default_skill_dir;
 
@@ -60,6 +60,7 @@ pub struct AiSettings {
     state: Entity<AppState>,
     agent_command: Entity<InputState>,
     codex_command: Entity<InputState>,
+    gemini_command: Entity<InputState>,
     custom_model: Entity<InputState>,
     skill_dir: Entity<InputState>,
     /// Saved to its own owner-only file, not with the settings.
@@ -86,6 +87,7 @@ impl AiSettings {
         };
         let agent_command = input(display_command(&settings.agent_command), DEFAULT_AGENT_COMMAND, window, cx);
         let codex_command = input(display_command(&settings.codex_command), DEFAULT_CODEX_COMMAND, window, cx);
+        let gemini_command = input(display_command(&settings.gemini_command), DEFAULT_GEMINI_COMMAND, window, cx);
         let custom_model = input(selected_model(&settings).unwrap_or_default().to_owned(), "Model name", window, cx);
         let skill_dir = input(
             settings.skill_dir.as_deref().map(display_user_path).unwrap_or_default(),
@@ -130,7 +132,15 @@ impl AiSettings {
                 this.custom_model_picked = true;
             }
         }));
-        for input in [&agent_command, &codex_command, &custom_model, &skill_dir, &target_length, &elevenlabs_key] {
+        for input in [
+            &agent_command,
+            &codex_command,
+            &gemini_command,
+            &custom_model,
+            &skill_dir,
+            &target_length,
+            &elevenlabs_key,
+        ] {
             subscriptions.push(cx.subscribe(input, |this, _, event: &InputEvent, cx| this.on_text_event(event, cx)));
         }
         subscriptions
@@ -146,6 +156,7 @@ impl AiSettings {
             state,
             agent_command,
             codex_command,
+            gemini_command,
             custom_model,
             skill_dir,
             elevenlabs_key,
@@ -183,6 +194,7 @@ impl AiSettings {
         self.save_task = None;
         let agent_command = command_input(&self.agent_command.read(cx).value(), DEFAULT_AGENT_COMMAND);
         let codex_command = command_input(&self.codex_command.read(cx).value(), DEFAULT_CODEX_COMMAND);
+        let gemini_command = command_input(&self.gemini_command.read(cx).value(), DEFAULT_GEMINI_COMMAND);
         let skill_dir = skill_dir_input(&self.skill_dir.read(cx).value());
         self.skill_dir_error = skill_dir.as_ref().err().map(|error| error.clone().into());
         let extra_instructions = self.extra_instructions.read(cx).value().to_string();
@@ -203,6 +215,7 @@ impl AiSettings {
                 let pipeline = &mut settings.pipeline;
                 pipeline.agent_command = agent_command;
                 pipeline.codex_command = codex_command;
+                pipeline.gemini_command = gemini_command;
                 // A path that can't be used is not saved; the field says why.
                 if let Ok(skill_dir) = skill_dir {
                     pipeline.skill_dir = skill_dir;
@@ -213,6 +226,7 @@ impl AiSettings {
                     match self.agent_harness {
                         AgentHarness::Claude => pipeline.model = model,
                         AgentHarness::Codex => pipeline.codex_model = model,
+                        AgentHarness::Gemini => pipeline.gemini_model = model,
                     }
                 }
             })
@@ -225,14 +239,17 @@ impl AiSettings {
     }
 
     /// The models the menu names for the selected harness, as `(--model value, label)`:
-    /// Claude Code's aliases, or the models the Codex CLI lists. `None` while Codex
-    /// is listing them.
+    /// Claude Code's aliases, or the models the Codex or Gemini CLI lists. `None` while
+    /// the CLI is listing them.
     fn named_models(&self, cx: &App) -> Option<Vec<(SharedString, SharedString)>> {
         match self.agent_harness {
             AgentHarness::Claude => {
                 Some(CLAUDE_MODELS.iter().map(|&(slug, label)| (slug.into(), label.into())).collect())
             }
             AgentHarness::Codex => PipelineService::global(cx).read(cx).codex_models(cx).map(|models| {
+                models.iter().map(|model| (model.slug.clone().into(), model.display_name.clone().into())).collect()
+            }),
+            AgentHarness::Gemini => PipelineService::global(cx).read(cx).gemini_models(cx).map(|models| {
                 models.iter().map(|model| (model.slug.clone().into(), model.display_name.clone().into())).collect()
             }),
         }
@@ -277,6 +294,7 @@ impl AiSettings {
         self.update(cx, |pipeline| match harness {
             AgentHarness::Claude => pipeline.model = value,
             AgentHarness::Codex => pipeline.codex_model = value,
+            AgentHarness::Gemini => pipeline.gemini_model = value,
         });
     }
 
@@ -349,6 +367,7 @@ impl AiSettings {
         let fields = [
             (&self.agent_command, display_command(&pipeline.agent_command)),
             (&self.codex_command, display_command(&pipeline.codex_command)),
+            (&self.gemini_command, display_command(&pipeline.gemini_command)),
             (&self.skill_dir, skill_dir),
             (&self.target_length, pipeline.default_preferences.target_length.clone()),
         ];
@@ -435,20 +454,22 @@ impl AiSettings {
             .when_some(self.render_model_error(cx), |this, error| this.child(error))
     }
 
-    /// Under the model menu: why Codex could not list its models.
+    /// Under the model menu: why the selected CLI could not list its models.
     fn render_model_error(&self, cx: &App) -> Option<impl IntoElement + use<>> {
-        if self.agent_harness != AgentHarness::Codex {
-            return None;
-        }
         let service = PipelineService::global(cx);
-        let error = service.read(cx).codex_models_error(cx)?;
+        let service = service.read(cx);
+        let (owner, error) = match self.agent_harness {
+            AgentHarness::Claude => return None,
+            AgentHarness::Codex => ("Codex’s", service.codex_models_error(cx)?),
+            AgentHarness::Gemini => ("Gemini CLI’s", service.gemini_models_error(cx)?),
+        };
         let reason = error
             .lines()
             .map(str::trim)
             .find(|line| !line.is_empty())
             .unwrap_or("no reason given")
             .trim_end_matches('.');
-        let message = format!("Couldn’t list Codex’s models: {reason}. Re-check under Requirements to try again.");
+        let message = format!("Couldn’t list {owner} models: {reason}. Re-check under Requirements to try again.");
         Some(
             div()
                 .id("ai-settings-model-error")
@@ -465,7 +486,7 @@ impl AiSettings {
         let current = self.agent_harness;
         Button::new("ai-settings-agent-harness").outline().label(current.label()).dropdown_caret(true).dropdown_menu(
             move |mut menu, _, _| {
-                for harness in [AgentHarness::Codex, AgentHarness::Claude] {
+                for harness in [AgentHarness::Codex, AgentHarness::Claude, AgentHarness::Gemini] {
                     let settings = settings.clone();
                     menu = menu.item(menu_item(harness.label()).checked(harness == current).on_click(
                         move |_, window, cx| {
@@ -555,7 +576,7 @@ impl AiSettings {
                 .title("Agent")
                 .field(
                     SettingsField::new("Agent harness", |this: &mut Self, _, cx| this.render_agent_harness(cx))
-                        .description("Choose Codex or Claude Code for new AI edits and YouTube details. Existing edits keep their original harness."),
+                        .description("Choose Codex, Claude Code or Gemini CLI for new AI edits and YouTube details. Existing edits keep their original harness."),
                 )
                 .field(
                     SettingsField::new("Claude Code command", |this: &mut Self, _, _| {
@@ -569,6 +590,13 @@ impl AiSettings {
                         Input::new(&this.codex_command).id("ai-settings-codex-command")
                     })
                     .description("The Codex CLI, signed in. Also used to draw thumbnails, whichever harness you choose.")
+                    .stacked(),
+                )
+                .field(
+                    SettingsField::new("Gemini CLI command", |this: &mut Self, _, _| {
+                        Input::new(&this.gemini_command).id("ai-settings-gemini-command")
+                    })
+                    .description("The Gemini CLI: a command on PATH or the full path to it.")
                     .stacked(),
                 )
                 .field(
@@ -656,7 +684,18 @@ impl AiSettings {
                     "AI edits run the selected harness on this computer with Rushes’ editing tools or video-use. The footage, the key and the tools stay local.",
                 )
                 // The checklist's rows, which the search can't see.
-                .keywords(["claude", "codex", "video-use", "editing tools", "ffmpeg", "ffprobe", "elevenlabs", "python", "re-check"])
+                .keywords([
+                    "claude",
+                    "codex",
+                    "gemini",
+                    "video-use",
+                    "editing tools",
+                    "ffmpeg",
+                    "ffprobe",
+                    "elevenlabs",
+                    "python",
+                    "re-check",
+                ])
                 .element(|this: &mut Self, _, _| this.doctor.clone()),
         ]
     }
@@ -666,6 +705,7 @@ fn selected_model(settings: &PipelineSettings) -> Option<&str> {
     match settings.agent_harness {
         AgentHarness::Claude => settings.model.as_deref(),
         AgentHarness::Codex => settings.codex_model.as_deref(),
+        AgentHarness::Gemini => settings.gemini_model.as_deref(),
     }
 }
 

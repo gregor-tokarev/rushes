@@ -1,7 +1,8 @@
 //! AI video-editing pipelines for Rushes.
 //!
-//! Drives a headless coding agent (Codex: `codex exec --json`, or Claude Code:
-//! `claude -p --output-format stream-json`) that edits with Rushes' own tools (`rushes-edit`, over MCP) or with
+//! Drives a headless coding agent (Codex: `codex exec --json`, Claude Code:
+//! `claude -p --output-format stream-json`, or Gemini CLI:
+//! `gemini --output-format=stream-json`) that edits with Rushes' own tools (`rushes-edit`, over MCP) or with
 //! the [video-use](https://github.com/browser-use/video-use) skill. The same agent
 //! writes a video's YouTube details ([`write_details`]), and Codex draws its
 //! thumbnails in a chat that remembers earlier turns ([`generate_thumbnails`]).
@@ -15,6 +16,7 @@ mod doctor;
 mod error;
 mod event;
 mod exec;
+mod gemini;
 mod media;
 mod pipeline;
 mod process;
@@ -28,7 +30,8 @@ pub use details::{
 };
 pub use doctor::{Check, Doctor, default_skill_dir, doctor, doctor_rushes};
 pub use error::PipelineError;
-pub use event::{AgentEvent, RUSHES_TOOL_PREFIX, parse_codex_line, parse_line};
+pub use event::{AgentEvent, GeminiStreamParser, RUSHES_TOOL_PREFIX, parse_codex_line, parse_line};
+pub use gemini::{DEFAULT_GEMINI_COMMAND, GeminiModel, gemini_models};
 pub use media::{FOOTAGE_EXTENSIONS, FootageFile, MediaInfo, list_footage, probe_media};
 pub use pipeline::{
     Harness, Phase, PhaseOutcome, RunContext, ToolServer, build_prompt, build_rushes_prompt, keep_final_cut, kept_cuts,

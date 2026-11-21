@@ -1,4 +1,4 @@
-//! Running Claude Code or Codex and streaming their events.
+//! Running Claude Code, Codex or Gemini CLI and streaming their events.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -22,6 +22,7 @@ pub enum AgentKind {
     #[default]
     Claude,
     Codex,
+    Gemini,
 }
 /// Accepts file edits inside the working directories; every other tool must be in
 /// [`AgentConfig::allowed_tools`] because nobody can answer a permission prompt.
@@ -267,11 +268,14 @@ pub(crate) fn run_agent(
     on_event: &mut dyn FnMut(&AgentEvent),
     cancel: &AtomicBool,
 ) -> Result<(ExitStatus, AgentRun), PipelineError> {
-    if config.kind == AgentKind::Codex {
-        return crate::codex::run(config, program, invocation, on_event, cancel);
+    match config.kind {
+        AgentKind::Codex => return crate::codex::run(config, program, invocation, on_event, cancel),
+        AgentKind::Gemini => return crate::gemini::run(config, program, invocation, on_event, cancel),
+        AgentKind::Claude => {}
     }
     // The config's environment comes last, so it wins over the invocation's.
     let env: Vec<(String, String)> = invocation.env.iter().chain(&config.env).cloned().collect();
+    let mut parse = |line: Option<&str>| line.map(parse_line).unwrap_or_default();
     let spec = ProcessSpec {
         program,
         args: config.args(invocation),
@@ -279,9 +283,9 @@ pub(crate) fn run_agent(
         env: &env,
         stdin: invocation.prompt_on_stdin.then(|| invocation.prompt.clone()),
         kill_grace: config.kill_grace,
-        parse: parse_line,
+        parse: &mut parse,
     };
-    run_process(&spec, on_event, cancel)
+    run_process(spec, on_event, cancel)
 }
 
 /// How to start an agent CLI and read what it prints.
@@ -293,13 +297,13 @@ pub(crate) struct ProcessSpec<'a> {
     /// Written to the agent's stdin, which is then closed; `None` closes it at once.
     pub stdin: Option<String>,
     pub kill_grace: Duration,
-    /// Turns one stdout line into events.
-    pub parse: fn(&str) -> Vec<AgentEvent>,
+    /// Turns one stdout line into events; `None` flushes any buffered events at EOF.
+    pub parse: &'a mut dyn FnMut(Option<&str>) -> Vec<AgentEvent>,
 }
 
 /// [`run_agent`] for any agent CLI that prints one event per stdout line.
 pub(crate) fn run_process(
-    spec: &ProcessSpec<'_>,
+    spec: ProcessSpec<'_>,
     on_event: &mut dyn FnMut(&AgentEvent),
     cancel: &AtomicBool,
 ) -> Result<(ExitStatus, AgentRun), PipelineError> {
@@ -341,12 +345,9 @@ pub(crate) fn run_process(
     }
     on_event(&AgentEvent::Spawned { process: AgentProcess::of(agent.child.id()) });
 
+    let parse = spec.parse;
     let mut run = AgentRun::default();
-    let mut handle = |line: Line, run: &mut AgentRun| {
-        let events = match line {
-            Line::Stdout(line) => (spec.parse)(&line),
-            Line::Stderr(line) => vec![AgentEvent::Stderr { line }],
-        };
+    let mut emit = |events: Vec<AgentEvent>, run: &mut AgentRun| {
         for event in &events {
             run.observe(event);
             on_event(event);
@@ -360,7 +361,8 @@ pub(crate) fn run_process(
         }
         if streams_open {
             match rx.recv_timeout(POLL_INTERVAL) {
-                Ok(line) => handle(line, &mut run),
+                Ok(Line::Stdout(line)) => emit(parse(Some(&line)), &mut run),
+                Ok(Line::Stderr(line)) => emit(vec![AgentEvent::Stderr { line }], &mut run),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => streams_open = false,
             }
@@ -378,10 +380,12 @@ pub(crate) fn run_process(
     let deadline = Instant::now() + DRAIN_TIMEOUT;
     while streams_open && let Some(left) = deadline.checked_duration_since(Instant::now()) {
         match rx.recv_timeout(left) {
-            Ok(line) => handle(line, &mut run),
+            Ok(Line::Stdout(line)) => emit(parse(Some(&line)), &mut run),
+            Ok(Line::Stderr(line)) => emit(vec![AgentEvent::Stderr { line }], &mut run),
             Err(_) => streams_open = false,
         }
     }
+    emit(parse(None), &mut run);
     Ok((status, run))
 }
 
