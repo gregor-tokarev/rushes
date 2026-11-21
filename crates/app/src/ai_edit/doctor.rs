@@ -180,6 +180,10 @@ fn requirements<'a>(doctor: &'a Doctor, cx: &App) -> Vec<Requirement<'a>> {
                 "Install it with `npm install -g @anthropic-ai/claude-code` and run `claude` once to sign in, \
               or set the agent command in Settings > AI editing."
             }
+            AgentHarness::Gemini => {
+                "Install it with `npm install -g @google/gemini-cli` and run `gemini` once to sign in, \
+                 or set the Gemini CLI command in Settings > AI editing."
+            }
         }
         .to_owned(),
     }];

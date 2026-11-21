@@ -88,7 +88,7 @@ pub(crate) fn tool_label(name: &str) -> &str {
     }
 }
 
-/// The icon of an agent tool, by the name Claude Code reports.
+/// The icon of an agent tool, by the name the agent reports.
 pub(crate) fn tool_icon(name: &str) -> IconName {
     if let Some(tool) = name.strip_prefix(RUSHES_TOOL_PREFIX) {
         return match tool {
@@ -104,15 +104,15 @@ pub(crate) fn tool_icon(name: &str) -> IconName {
         };
     }
     match name {
-        "Bash" => IconName::SquareTerminal,
-        "Read" => IconName::FileText,
-        "Write" => IconName::FilePlus,
-        "Edit" | "MultiEdit" | "NotebookEdit" => IconName::FilePen,
-        "Glob" | "Grep" => IconName::Search,
-        "Skill" => IconName::Sparkles,
+        "Bash" | "Shell" | "run_shell_command" => IconName::SquareTerminal,
+        "Read" | "read_file" | "read_many_files" | "list_directory" => IconName::FileText,
+        "Write" | "write_file" => IconName::FilePlus,
+        "Edit" | "MultiEdit" | "NotebookEdit" | "replace" => IconName::FilePen,
+        "Glob" | "Grep" | "glob" | "grep_search" => IconName::Search,
+        "Skill" | "activate_skill" => IconName::Sparkles,
         "Agent" | "Task" => IconName::Bot,
-        "TodoWrite" => IconName::ListTodo,
-        "WebFetch" | "WebSearch" => IconName::Globe,
+        "TodoWrite" | "write_todos" => IconName::ListTodo,
+        "WebFetch" | "WebSearch" | "web_fetch" | "google_web_search" => IconName::Globe,
         _ => IconName::Wrench,
     }
 }

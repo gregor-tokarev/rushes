@@ -354,6 +354,8 @@ impl AiEditPanel {
             Some("Add footage to start an edit.")
         } else if service.live_run_of(self.video_id).is_some() {
             Some("An edit of this video is running.")
+        } else if service.is_restoring_video(self.video_id, cx) {
+            Some("Restoring workspace settings from an earlier edit…")
         } else {
             match service.doctor() {
                 None => Some("Checking requirements…"),

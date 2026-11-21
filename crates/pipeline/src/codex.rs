@@ -158,15 +158,16 @@ pub(crate) fn run(
             .flatten()
             .collect::<Vec<_>>()
             .join("\n\n");
+    let mut parse = |line: Option<&str>| line.map(parse_codex_line).unwrap_or_default();
     run_process(
-        &ProcessSpec {
+        ProcessSpec {
             program,
             args,
             cwd: &invocation.cwd,
             env: &env,
             stdin: Some(prompt),
             kill_grace: config.kill_grace,
-            parse: parse_codex_line,
+            parse: &mut parse,
         },
         on_event,
         cancel,

@@ -103,6 +103,8 @@ pub fn doctor_rushes(config: &AgentConfig) -> Doctor {
 
 /// What `claude --version` prints after the version number: `2.1.284 (Claude Code)`.
 const CLAUDE_CODE: &str = "Claude Code";
+/// What `gemini --help` prints in its usage line (`gemini --version` prints only the version number).
+const GEMINI_CLI: &str = "Gemini CLI";
 
 fn check_agent(config: &AgentConfig) -> Check {
     let Some(program) = config.resolve_command() else {
@@ -116,10 +118,15 @@ fn check_agent(config: &AgentConfig) -> Check {
     let name = match config.kind {
         AgentKind::Claude => CLAUDE_CODE,
         AgentKind::Codex => "Codex",
+        AgentKind::Gemini => GEMINI_CLI,
     };
     let matches = match config.kind {
         AgentKind::Claude => version.contains(CLAUDE_CODE),
         AgentKind::Codex => version.starts_with("codex-cli "),
+        AgentKind::Gemini => match check_gemini_cli(&program, version, &config.env) {
+            Ok(matched) => matched,
+            Err(reason) => return Check::fail(format!("{} does not run: --help failed ({reason})", program.display())),
+        },
     };
     if !matches {
         return Check::fail(format!("{} is not {name}: --version printed “{version}”", program.display()));
@@ -129,6 +136,34 @@ fn check_agent(config: &AgentConfig) -> Check {
         Some(number) => Check::pass(format!("{name} {number} · {}", program.display())),
         None => Check::pass(format!("{name} · {}", program.display())),
     }
+}
+
+/// Gemini CLI's `--version` prints a bare semver number (`0.70.0`), so `--help` confirms
+/// the binary is actually Gemini CLI rather than any other tool that answers `--version`.
+fn check_gemini_cli(program: &Path, version: &str, env: &[(String, String)]) -> Result<bool, String> {
+    if version.contains(GEMINI_CLI) || version.starts_with("gemini-cli ") {
+        return Ok(true);
+    }
+    if !is_semver(version) {
+        return Ok(false);
+    }
+    let mut help_env = vec![("NO_BROWSER".to_owned(), "1".to_owned())];
+    help_env.extend(env.iter().cloned());
+    let help = run_captured_checked(program, ["--help"], &help_env, VERSION_TIMEOUT)?;
+    Ok(help.contains(GEMINI_CLI))
+}
+
+fn is_semver(text: &str) -> bool {
+    if text.is_empty() || text.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let Some((major, rest)) = text.split_once('.') else { return false };
+    let minor = rest.split(['.', '-', '+']).next().unwrap_or_default();
+    !major.is_empty()
+        && major.bytes().all(|b| b.is_ascii_digit())
+        && !minor.is_empty()
+        && minor.bytes().all(|b| b.is_ascii_digit())
+        && text.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'))
 }
 
 fn check_skill(skill_dir: Option<&Path>) -> (Check, Option<PathBuf>) {
