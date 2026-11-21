@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime};
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
+use futures::channel::oneshot;
 use gpui_kit::{App, AppContext as _, Context, Entity, Global, SharedString, Subscription, Task};
 use rushes_core::input::expand_user_path;
 use rushes_core::media::{self, MediaKind};
@@ -58,6 +59,8 @@ pub enum RunError {
     RunNotFound,
     /// Another run of the same video is still working.
     AlreadyRunning,
+    /// Leftover Gemini CLI workspace files from an interrupted run are still being restored.
+    WorkspaceRecovering,
     /// The media folder could not be created.
     NoMediaFolder,
     /// The footage folder has no video or audio files.
@@ -81,6 +84,9 @@ impl fmt::Display for RunError {
             RunError::RunNotFound => write!(f, "This edit no longer exists."),
             RunError::AlreadyRunning => {
                 write!(f, "An AI edit is already running for this video. Wait for it to finish or cancel it.")
+            }
+            RunError::WorkspaceRecovering => {
+                write!(f, "Workspace settings from an earlier edit are still being restored. Try again in a moment.")
             }
             RunError::NoMediaFolder => {
                 write!(f, "Couldn’t create the video’s media folder. Check the media folder in Settings.")
@@ -193,6 +199,10 @@ pub struct PipelineService {
     drafts: HashMap<VideoId, BriefDraft>,
     /// Copies into footage folders, whichever card started them.
     footage_imports: Entity<FootageImports>,
+    /// Footage folders whose leftover Gemini CLI settings are being restored in the
+    /// background after an interrupted run; new edits in these workspaces wait until
+    /// recovery finishes.
+    restoring_workspaces: HashMap<PathBuf, Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -246,6 +256,7 @@ impl PipelineService {
                 revealed: None,
                 drafts: HashMap::new(),
                 footage_imports: cx.new(|_| FootageImports::new()),
+                restoring_workspaces: HashMap::new(),
                 _subscriptions: subscriptions,
             };
             match service.recover_interrupted(cx) {
@@ -303,6 +314,25 @@ impl PipelineService {
     /// The run of `video_id` whose agent is working, if any.
     pub fn live_run_of(&self, video_id: VideoId) -> Option<RunId> {
         self.live.iter().find(|(_, live)| live.video_id == video_id).map(|(id, _)| *id)
+    }
+
+    /// Whether leftover Gemini CLI workspace settings are still being restored for
+    /// `footage_dir`.
+    pub fn is_restoring_workspace(&self, footage_dir: &Path) -> bool {
+        self.restoring_workspaces.contains_key(footage_dir)
+    }
+
+    /// Whether leftover Gemini CLI workspace settings are still being restored for
+    /// `video_id`'s footage folder.
+    pub fn is_restoring_video(&self, video_id: VideoId, cx: &App) -> bool {
+        if self.restoring_workspaces.is_empty() {
+            return false;
+        }
+        let video_dir = self.state.read(cx).video(video_id).and_then(|video| video.folder.as_ref());
+        if video_dir.is_some_and(|folder| self.is_restoring_workspace(&folder.join("footage"))) {
+            return true;
+        }
+        self.video_runs(video_id).any(|run| self.is_restoring_workspace(&run.footage_dir))
     }
 
     /// The loaded event log of a run; see [`Self::load_timeline`].
@@ -461,14 +491,20 @@ impl PipelineService {
         if self.live_run_of(video_id).is_some() {
             return Err(RunError::AlreadyRunning);
         }
-        if self.state.read(cx).video(video_id).is_none() {
-            return Err(RunError::VideoNotFound);
+        let video_folder = self.state.read(cx).video(video_id).ok_or(RunError::VideoNotFound)?.folder.clone();
+        if video_folder.as_ref().is_some_and(|folder| self.is_restoring_workspace(&folder.join("footage")))
+            || self.video_runs(video_id).any(|run| self.is_restoring_workspace(&run.footage_dir))
+        {
+            return Err(RunError::WorkspaceRecovering);
         }
         let folder = self
             .state
             .update(cx, |state, cx| state.ensure_video_folder(video_id, cx))
             .ok_or(RunError::NoMediaFolder)?;
         let footage_dir = folder.join("footage");
+        if self.is_restoring_workspace(&footage_dir) {
+            return Err(RunError::WorkspaceRecovering);
+        }
         if !has_footage(&footage_dir) {
             return Err(RunError::NoFootage(footage_dir));
         }
@@ -628,9 +664,15 @@ impl PipelineService {
     }
 
     fn continue_run(&mut self, id: RunId, started: PhaseStarted, cx: &mut Context<Self>) -> Result<(), RunError> {
-        let video_id = self.run(id).ok_or(RunError::RunNotFound)?.video_id;
+        let (video_id, footage_dir) = {
+            let run = self.run(id).ok_or(RunError::RunNotFound)?;
+            (run.video_id, run.footage_dir.clone())
+        };
         if self.live_run_of(video_id).is_some() {
             return Err(RunError::AlreadyRunning);
+        }
+        if self.is_restoring_workspace(&footage_dir) {
+            return Err(RunError::WorkspaceRecovering);
         }
         self.launch(id, started, cx)
     }
@@ -1007,7 +1049,7 @@ impl PipelineService {
                     stop_leftover_agent(&process, LEFTOVER_GRACE);
                 }
                 if run.agent_harness == AgentHarness::Gemini {
-                    restore_leftover_gemini_workspace(&run.footage_dir);
+                    self.restore_gemini_workspace(run.footage_dir.clone(), cx);
                 }
                 run.status = unfinished_status(last_phase, &run, true);
                 run.error = Some(INTERRUPTED.to_owned());
@@ -1040,6 +1082,35 @@ impl PipelineService {
             }
         }
         Ok(recovered)
+    }
+
+    /// Restores a leftover Gemini CLI `.gemini/settings.json` backup on a dedicated
+    /// background thread so a stalled network mount never blocks app startup or the
+    /// background executor pool. While recovery runs, new edits in `footage_dir` are
+    /// rejected so they cannot race with restoration.
+    fn restore_gemini_workspace(&mut self, footage_dir: PathBuf, cx: &mut Context<Self>) {
+        if self.restoring_workspaces.contains_key(&footage_dir) {
+            return;
+        }
+        let (done_tx, done_rx) = oneshot::channel();
+        let thread_dir = footage_dir.clone();
+        let spawned = std::thread::Builder::new().name("gemini-restore".to_owned()).spawn(move || {
+            restore_leftover_gemini_workspace(&thread_dir);
+            _ = done_tx.send(());
+        });
+        if let Err(error) = spawned {
+            log_line!("rushes: couldn't start Gemini workspace recovery for {}: {error}", footage_dir.display());
+            return;
+        }
+        let key = footage_dir.clone();
+        let task = cx.spawn(async move |this, cx| {
+            _ = done_rx.await;
+            _ = this.update(cx, |this, cx| {
+                this.restoring_workspaces.remove(&key);
+                cx.notify();
+            });
+        });
+        self.restoring_workspaces.insert(footage_dir, task);
     }
 
     /// Drops the runs of deleted videos (the store deletes them with their video) and

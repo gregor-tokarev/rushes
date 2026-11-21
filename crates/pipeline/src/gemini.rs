@@ -7,7 +7,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::atomic::AtomicBool;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -60,13 +60,16 @@ pub fn gemini_models(config: &AgentConfig) -> Result<Vec<GeminiModel>, String> {
 /// Restores `<cwd>/.gemini/settings.json` from an on-disk backup left behind by an
 /// earlier crashed or killed Gemini CLI run. Does nothing while a run in this process
 /// still holds `cwd`, or when no backup exists.
+///
+/// Performs filesystem I/O in `cwd`, so callers should run it off the UI thread.
 pub fn restore_leftover_gemini_workspace(cwd: &Path) {
     let key = match fs::canonicalize(cwd).or_else(|_| std::path::absolute(cwd)) {
         Ok(path) => path,
         Err(_) => return,
     };
-    let map = ACTIVE_WORKSPACES.lock().unwrap_or_else(|poison| poison.into_inner());
-    if map.contains_key(&key) {
+    let slot = workspace_slot(&key);
+    let active = slot.lock().unwrap_or_else(|poison| poison.into_inner());
+    if active.is_some() {
         return;
     }
     let gemini_dir = cwd.join(".gemini");
@@ -328,14 +331,30 @@ struct ActiveWorkspace {
     backup: WorkspaceBackup,
 }
 
-static ACTIVE_WORKSPACES: LazyLock<Mutex<HashMap<PathBuf, ActiveWorkspace>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+type WorkspaceState = Mutex<Option<ActiveWorkspace>>;
+type WorkspaceSlot = Arc<WorkspaceState>;
+type WorkspaceMap = HashMap<PathBuf, Weak<WorkspaceState>>;
+
+static ACTIVE_WORKSPACES: LazyLock<Mutex<WorkspaceMap>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Returns the per-workspace lock for `key` without holding the global map lock
+/// across filesystem I/O, so a stalled mount in one folder never blocks another.
+fn workspace_slot(key: &Path) -> WorkspaceSlot {
+    let mut map = ACTIVE_WORKSPACES.lock().unwrap_or_else(|poison| poison.into_inner());
+    map.retain(|_, slot| slot.strong_count() > 0);
+    if let Some(slot) = map.get(key).and_then(Weak::upgrade) {
+        return slot;
+    }
+    let slot = Arc::new(Mutex::new(None));
+    map.insert(key.to_path_buf(), Arc::downgrade(&slot));
+    slot
+}
 
 /// Temporarily merges Rushes' MCP server and env allowlist into
 /// `<cwd>/.gemini/settings.json`, keeping a recoverable on-disk backup until the
 /// last active run restores the original file (or removes `.gemini/`).
 struct WorkspaceSettingsGuard {
-    key: PathBuf,
+    slot: WorkspaceSlot,
     gemini_dir: PathBuf,
     settings_path: PathBuf,
     backup_path: PathBuf,
@@ -348,80 +367,83 @@ impl WorkspaceSettingsGuard {
         let settings_path = gemini_dir.join("settings.json");
         let backup_path = gemini_dir.join(BACKUP_FILE);
 
-        let mut map = ACTIVE_WORKSPACES.lock().unwrap_or_else(|poison| poison.into_inner());
-        let (base_bytes, inserted_new, created_backup_now) = if let Some(active) = map.get_mut(&key) {
-            active.count += 1;
-            // Layer onto the currently active settings file so concurrent runs do not
-            // drop each other's additions; `active.backup` still holds the untouched original.
-            let current = fs::read(&settings_path).ok().or_else(|| active.backup.original.clone());
-            (current, false, false)
-        } else {
-            let (backup, created_backup_now) = match fs::read(&backup_path) {
-                Ok(bytes) => {
-                    // A previous Rushes process died before Drop ran: reuse its backup
-                    // instead of treating the temporary replacement as the original.
-                    let backup: WorkspaceBackup = serde_json::from_slice(&bytes).map_err(|error| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("unreadable Gemini settings backup {}: {error}", backup_path.display()),
-                        )
-                    })?;
-                    (backup, false)
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    let created_dir = !gemini_dir.exists();
-                    let original = match fs::read(&settings_path) {
-                        Ok(bytes) => Some(bytes),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                        Err(error) => return Err(error),
-                    };
-                    let backup = WorkspaceBackup { created_dir, original };
-                    fs::create_dir_all(&gemini_dir)?;
-                    let encoded = serde_json::to_vec(&backup).map_err(std::io::Error::other)?;
-                    write_private_atomic(&backup_path, &encoded)?;
-                    (backup, true)
-                }
-                Err(error) => return Err(error),
+        let slot = workspace_slot(&key);
+        {
+            let mut active_slot = slot.lock().unwrap_or_else(|poison| poison.into_inner());
+            let (base_bytes, inserted_new, created_backup_now) = if let Some(active) = active_slot.as_mut() {
+                active.count += 1;
+                // Layer onto the currently active settings file so concurrent runs do not
+                // drop each other's additions; `active.backup` still holds the untouched original.
+                let current = fs::read(&settings_path).ok().or_else(|| active.backup.original.clone());
+                (current, false, false)
+            } else {
+                let (backup, created_backup_now) = match fs::read(&backup_path) {
+                    Ok(bytes) => {
+                        // A previous Rushes process died before Drop ran: reuse its backup
+                        // instead of treating the temporary replacement as the original.
+                        let backup: WorkspaceBackup = serde_json::from_slice(&bytes).map_err(|error| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("unreadable Gemini settings backup {}: {error}", backup_path.display()),
+                            )
+                        })?;
+                        (backup, false)
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        let created_dir = !gemini_dir.exists();
+                        let original = match fs::read(&settings_path) {
+                            Ok(bytes) => Some(bytes),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                            Err(error) => return Err(error),
+                        };
+                        let backup = WorkspaceBackup { created_dir, original };
+                        fs::create_dir_all(&gemini_dir)?;
+                        let encoded = serde_json::to_vec(&backup).map_err(std::io::Error::other)?;
+                        write_private_atomic(&backup_path, &encoded)?;
+                        (backup, true)
+                    }
+                    Err(error) => return Err(error),
+                };
+                let base = backup.original.clone();
+                *active_slot = Some(ActiveWorkspace { count: 1, backup });
+                (base, true, created_backup_now)
             };
-            let base = backup.original.clone();
-            map.insert(key.clone(), ActiveWorkspace { count: 1, backup });
-            (base, true, created_backup_now)
-        };
 
-        let merged = merge_workspace_settings(base_bytes.as_deref(), servers, &allowed_env_vars);
-        let write_result = fs::create_dir_all(&gemini_dir)
-            .and_then(|()| serde_json::to_vec_pretty(&merged).map_err(std::io::Error::other))
-            .and_then(|bytes| write_private_atomic(&settings_path, &bytes));
+            let merged = merge_workspace_settings(base_bytes.as_deref(), servers, &allowed_env_vars);
+            let write_result = fs::create_dir_all(&gemini_dir)
+                .and_then(|()| serde_json::to_vec_pretty(&merged).map_err(std::io::Error::other))
+                .and_then(|bytes| write_private_atomic(&settings_path, &bytes));
 
-        if let Err(error) = write_result {
-            if let Some(active) = map.get_mut(&key) {
-                active.count -= 1;
-                if active.count == 0 {
-                    let active = map.remove(&key).expect("active entry");
-                    if inserted_new && created_backup_now {
-                        _ = fs::remove_file(&backup_path);
-                        if active.backup.created_dir {
-                            _ = fs::remove_dir(&gemini_dir);
+            if let Err(error) = write_result {
+                if let Some(active) = active_slot.as_mut() {
+                    active.count -= 1;
+                    if active.count == 0 {
+                        let active = active_slot.take().expect("active entry");
+                        if inserted_new && created_backup_now {
+                            _ = fs::remove_file(&backup_path);
+                            if active.backup.created_dir {
+                                _ = fs::remove_dir(&gemini_dir);
+                            }
                         }
                     }
                 }
+                return Err(error);
             }
-            return Err(error);
         }
 
-        Ok(Self { key, gemini_dir, settings_path, backup_path })
+        Ok(Self { slot, gemini_dir, settings_path, backup_path })
     }
 }
 
 impl Drop for WorkspaceSettingsGuard {
     fn drop(&mut self) {
-        let mut map = ACTIVE_WORKSPACES.lock().unwrap_or_else(|poison| poison.into_inner());
-        let Some(active) = map.get_mut(&self.key) else { return };
+        let mut active_slot = self.slot.lock().unwrap_or_else(|poison| poison.into_inner());
+        let Some(active) = active_slot.as_mut() else { return };
         active.count = active.count.saturating_sub(1);
         if active.count > 0 {
             return;
         }
-        let Some(active) = map.remove(&self.key) else { return };
+        let Some(active) = active_slot.take() else { return };
         restore_workspace_files(&self.gemini_dir, &self.settings_path, &self.backup_path, &active.backup);
     }
 }
