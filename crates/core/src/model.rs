@@ -718,7 +718,7 @@ impl RunStatus {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PipelineRun {
     pub id: RunId,
     pub video_id: VideoId,
@@ -731,10 +731,8 @@ pub struct PipelineRun {
     pub session_id: Option<String>,
     /// What the agent edits with. Fixed when the run starts, so follow-ups resume the
     /// session with the tools it began with; `None` for runs from before it was kept.
-    #[serde(default)]
     pub harness: Option<EditHarness>,
     /// Fixed for the lifetime of the session. Older runs belong to Claude Code.
-    #[serde(default)]
     pub agent_harness: AgentHarness,
     /// Latest strategy / summary text from the agent (Markdown).
     pub summary: Option<String>,
@@ -743,6 +741,69 @@ pub struct PipelineRun {
     pub cost_usd: Option<f64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl<'de> Deserialize<'de> for PipelineRun {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Default, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum StoredAgentHarness {
+            #[default]
+            Claude,
+            Codex,
+            Antigravity,
+            Gemini,
+        }
+
+        #[derive(Deserialize)]
+        struct Wire {
+            id: RunId,
+            video_id: VideoId,
+            status: RunStatus,
+            brief: String,
+            footage_dir: PathBuf,
+            session_id: Option<String>,
+            #[serde(default)]
+            harness: Option<EditHarness>,
+            #[serde(default)]
+            agent_harness: StoredAgentHarness,
+            summary: Option<String>,
+            output: Option<PathBuf>,
+            error: Option<String>,
+            cost_usd: Option<f64>,
+            created_at: DateTime<Utc>,
+            updated_at: DateTime<Utc>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let (agent_harness, session_id) = match wire.agent_harness {
+            StoredAgentHarness::Claude => (AgentHarness::Claude, wire.session_id),
+            StoredAgentHarness::Codex => (AgentHarness::Codex, wire.session_id),
+            StoredAgentHarness::Antigravity => (AgentHarness::Antigravity, wire.session_id),
+            // Gemini CLI sessions live in a separate store that Antigravity CLI cannot resume;
+            // clearing `session_id` lets follow-ups continue cleanly from `edit/project.md`.
+            StoredAgentHarness::Gemini => (AgentHarness::Antigravity, None),
+        };
+        Ok(Self {
+            id: wire.id,
+            video_id: wire.video_id,
+            status: wire.status,
+            brief: wire.brief,
+            footage_dir: wire.footage_dir,
+            session_id,
+            harness: wire.harness,
+            agent_harness,
+            summary: wire.summary,
+            output: wire.output,
+            error: wire.error,
+            cost_usd: wire.cost_usd,
+            created_at: wire.created_at,
+            updated_at: wire.updated_at,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

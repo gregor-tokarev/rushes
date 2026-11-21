@@ -54,6 +54,11 @@ const DRAFTS_KEY: &str = "ai_edit.brief_drafts";
 /// still needs restoration; persisted until background recovery confirms cleanup.
 const PENDING_ANTIGRAVITY_RESTORES_KEY: &str = "ai_edit.pending_antigravity_restores";
 
+/// Legacy settings key used before Gemini CLI was replaced by Antigravity CLI; migrated
+/// into [`PENDING_ANTIGRAVITY_RESTORES_KEY`] on startup so leftover `.gemini/` backups
+/// from earlier crashes still get restored.
+const LEGACY_PENDING_GEMINI_RESTORES_KEY: &str = "ai_edit.pending_gemini_restores";
+
 /// How long quitting waits for agents to stop, beyond their kill grace period.
 const QUIT_MARGIN: Duration = Duration::from_secs(1);
 
@@ -1042,6 +1047,18 @@ impl PipelineService {
             Ok(Some(paths)) => self.pending_antigravity_restores.extend(paths),
             Ok(None) => {}
             Err(error) => log_line!("rushes: couldn't read pending Antigravity workspace restores: {error}"),
+        }
+        match self.state.read(cx).read_setting::<Vec<PathBuf>>(LEGACY_PENDING_GEMINI_RESTORES_KEY) {
+            Ok(Some(paths)) if !paths.is_empty() => {
+                self.pending_antigravity_restores.extend(paths);
+                // Save the migrated list before clearing the legacy key so a crash mid-migration
+                // never drops folders whose `.gemini/` backup still needs restoration.
+                self.save_pending_antigravity_restores(cx);
+                let empty: [&Path; 0] = [];
+                self.state.update(cx, |state, cx| state.save_setting(LEGACY_PENDING_GEMINI_RESTORES_KEY, &empty, cx));
+            }
+            Ok(Some(_) | None) => {}
+            Err(error) => log_line!("rushes: couldn't read legacy Gemini workspace restores: {error}"),
         }
         let mut recovered = false;
         for mut run in self.state.read(cx).read_runs()? {

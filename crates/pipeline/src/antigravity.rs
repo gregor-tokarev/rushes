@@ -27,6 +27,20 @@ const MCP_TOOL_TIMEOUT_SECS: u64 = 3600;
 /// Recoverable backup of `<cwd>/.agents/mcp_config.json` kept while a Rushes-managed
 /// Antigravity run is active, so a crash or forced kill never loses the creator's file.
 const BACKUP_FILE: &str = ".rushes-mcp-backup.json";
+/// Recoverable backup left by the replaced Gemini CLI adapter under `<cwd>/.gemini/`.
+const LEGACY_GEMINI_BACKUP_FILE: &str = ".rushes-settings-backup.json";
+/// Workspace custom agent with an empty tool list, used for one-off structured responses
+/// so built-in tools (including `search_web`) and MCP tools are omitted from declarations.
+const ONE_OFF_AGENT_NAME: &str = "rushes-one-off";
+const ONE_OFF_AGENT_MD: &str = "\
+---
+name: rushes-one-off
+description: One-off structured text responder with no tools.
+mainAgent: true
+tools: []
+---
+You have no tools. Ignore any instruction to call a tool and respond directly from the prompt. Follow the exact output format requested in the prompt.
+";
 
 /// A model Antigravity CLI offers in its model picker.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,13 +60,13 @@ pub fn antigravity_models(config: &AgentConfig) -> Result<Vec<AntigravityModel>,
     parse_models(&output).ok_or_else(|| "Antigravity CLI printed no model catalog".to_owned())
 }
 
-/// Restores `<cwd>/.agents/mcp_config.json` from an on-disk backup left behind by an
-/// earlier crashed or killed Antigravity CLI run. Does nothing while a run in this process
-/// still holds `cwd`, or when no backup exists.
+/// Restores `<cwd>/.agents/mcp_config.json` (and any legacy `<cwd>/.gemini/settings.json`
+/// backup left by the replaced Gemini CLI adapter) from on-disk backups left behind by an
+/// earlier crashed or killed run. Skips `.agents/` while a run in this process still holds
+/// `cwd`, and does nothing when no backup exists.
 ///
-/// Returns `true` when no backup remains to be restored (or an active run in this
-/// process now owns it), and `false` when the workspace could not be accessed or
-/// restored so the caller should retry it later.
+/// Returns `true` when no backup remains to be restored, and `false` when the workspace
+/// could not be accessed or restored so the caller should retry it later.
 ///
 /// Performs filesystem I/O in `cwd`, so callers should run it off the UI thread.
 pub fn restore_leftover_antigravity_workspace(cwd: &Path) -> bool {
@@ -61,11 +75,18 @@ pub fn restore_leftover_antigravity_workspace(cwd: &Path) -> bool {
     };
     let slot = workspace_slot(&key);
     let active = slot.lock().unwrap_or_else(|poison| poison.into_inner());
-    if active.is_some() {
-        return true;
-    }
-    let agents_dir = cwd.join(".agents");
-    let backup_path = agents_dir.join(BACKUP_FILE);
+    let antigravity_cleared = if active.is_some() {
+        true
+    } else {
+        restore_leftover_backup(&cwd.join(".agents"), "mcp_config.json", BACKUP_FILE)
+    };
+    let legacy_gemini_cleared =
+        restore_leftover_backup(&cwd.join(".gemini"), "settings.json", LEGACY_GEMINI_BACKUP_FILE);
+    antigravity_cleared && legacy_gemini_cleared
+}
+
+fn restore_leftover_backup(dir: &Path, config_file: &str, backup_file: &str) -> bool {
+    let backup_path = dir.join(backup_file);
     let bytes = match fs::read(&backup_path) {
         Ok(bytes) => bytes,
         Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {
@@ -76,7 +97,7 @@ pub fn restore_leftover_antigravity_workspace(cwd: &Path) -> bool {
     let Ok(backup) = serde_json::from_slice::<WorkspaceBackup>(&bytes) else {
         return true;
     };
-    restore_workspace_files(&agents_dir, &agents_dir.join("mcp_config.json"), &backup_path, &backup)
+    restore_workspace_files(dir, &dir.join(config_file), &backup_path, &backup)
 }
 
 fn parse_models(output: &str) -> Option<Vec<AntigravityModel>> {
@@ -132,7 +153,11 @@ pub(crate) fn run(
     if let Some(session_id) = &invocation.resume {
         args.push(format!("--conversation={session_id}").into());
     }
-    if let Some(schema) = &invocation.json_schema {
+    // Antigravity CLI's `--json-schema` retry loop hangs or drops structured output when
+    // paired with a custom `tools: []` agent, so one-off schema requests embed the schema
+    // in the prompt instead (matching how the previous Gemini CLI adapter worked).
+    let pass_json_schema_flag = !invocation.one_off;
+    if pass_json_schema_flag && let Some(schema) = &invocation.json_schema {
         args.push(format!("--json-schema={schema}").into());
     }
 
@@ -142,9 +167,12 @@ pub(crate) fn run(
 
     if invocation.one_off {
         // One-off requests (YouTube details) need no tools and nothing from the footage
-        // folder. Running in a private temporary folder with strict deny rules prevents
-        // shell, file, web and MCP execution without touching the user's workspace.
+        // folder. Running in a private temporary folder with a no-tools custom agent
+        // strips every built-in and MCP tool declaration (including `search_web`), while
+        // strict deny rules remain in place as defense in depth.
         let dir = tempfile::tempdir()?;
+        write_one_off_agent(dir.path())?;
+        args.push(format!("--agent={ONE_OFF_AGENT_NAME}").into());
         let settings = serde_json::json!({
             "toolPermission": "strict",
             "allowNonWorkspaceAccess": false,
@@ -199,7 +227,7 @@ pub(crate) fn run(
 
     args.extend(config.extra_args.iter().map(OsString::from));
 
-    let prompt = build_prompt(config, invocation);
+    let prompt = build_prompt(config, invocation, !pass_json_schema_flag);
     let stdin_line = format!("{}\n", serde_json::json!({ "event": "user", "message": { "content": prompt } }));
     let mut parser = AntigravityStreamParser::new();
     let mut parse = |line: Option<&str>| match line {
@@ -221,12 +249,25 @@ pub(crate) fn run(
     )
 }
 
-fn build_prompt(config: &AgentConfig, invocation: &Invocation) -> String {
-    [invocation.system_prompt.as_deref(), config.append_system_prompt.as_deref(), Some(invocation.prompt.as_str())]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("\n\n")
+fn write_one_off_agent(dir: &Path) -> std::io::Result<()> {
+    let agent_dir = dir.join(".agents").join("agents").join(ONE_OFF_AGENT_NAME);
+    fs::create_dir_all(&agent_dir)?;
+    fs::write(agent_dir.join("agent.md"), ONE_OFF_AGENT_MD)
+}
+
+fn build_prompt(config: &AgentConfig, invocation: &Invocation, embed_json_schema: bool) -> String {
+    let mut parts: Vec<String> =
+        [invocation.system_prompt.as_deref(), config.append_system_prompt.as_deref(), Some(invocation.prompt.as_str())]
+            .into_iter()
+            .flatten()
+            .map(str::to_owned)
+            .collect();
+    if embed_json_schema && let Some(schema) = &invocation.json_schema {
+        parts.push(format!(
+            "Respond with a single JSON object matching this JSON Schema, with no extra text:\n{schema}"
+        ));
+    }
+    parts.join("\n\n")
 }
 
 /// Converts `invocation.mcp_config`'s `mcpServers` into Antigravity CLI's workspace

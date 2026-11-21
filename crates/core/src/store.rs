@@ -713,7 +713,7 @@ type Migration = fn(&Transaction<'_>) -> rusqlite::Result<()>;
 
 /// Applied in order; after `MIGRATIONS[i]` the database is at `user_version = i + 1`.
 /// Append new migrations, never edit released ones.
-const MIGRATIONS: &[Migration] = &[migration_1, migration_2, migration_3, migration_4, migration_5];
+const MIGRATIONS: &[Migration] = &[migration_1, migration_2, migration_3, migration_4, migration_5, migration_6];
 
 fn migrate(conn: &mut Connection) -> StoreResult<()> {
     while pending_migration(conn)?.is_some() {
@@ -853,6 +853,17 @@ fn migration_4(tx: &Transaction<'_>) -> rusqlite::Result<()> {
 /// Existing sessions were all created by Claude Code.
 fn migration_5(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute_batch("ALTER TABLE pipeline_runs ADD COLUMN agent_harness TEXT NOT NULL DEFAULT 'claude';")
+}
+
+/// Gemini CLI was replaced by Antigravity CLI, whose conversation store cannot resume
+/// Gemini CLI sessions. Clearing `session_id` lets follow-ups continue from `edit/project.md`.
+fn migration_6(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "UPDATE pipeline_runs
+            SET agent_harness = 'antigravity',
+                session_id = NULL
+          WHERE agent_harness = 'gemini';",
+    )
 }
 
 /// "All videos" (table) and "Board" (kanban by status).
@@ -1131,13 +1142,15 @@ fn write_run(conn: &Connection, sql: &str, run: &PipelineRun) -> rusqlite::Resul
 }
 
 fn run_from_row(row: &Row<'_>) -> rusqlite::Result<PipelineRun> {
+    let legacy_gemini = row.get::<_, String>("agent_harness")? == "gemini";
+    let session_id = if legacy_gemini { None } else { row.get("session_id")? };
     Ok(PipelineRun {
         id: row.get("id")?,
         video_id: row.get("video_id")?,
         status: row.get("status")?,
         brief: row.get("brief")?,
         footage_dir: PathBuf::from(row.get::<_, String>("footage_dir")?),
-        session_id: row.get("session_id")?,
+        session_id,
         summary: row.get("summary")?,
         output: row.get::<_, Option<String>>("output")?.map(PathBuf::from),
         error: row.get("error")?,

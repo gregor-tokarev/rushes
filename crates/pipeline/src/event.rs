@@ -307,6 +307,7 @@ pub struct AntigravityStreamParser {
     pending_step: Option<u64>,
     started_tools: HashSet<u64>,
     finished_tools: HashSet<u64>,
+    has_json_schema: bool,
 }
 
 impl AntigravityStreamParser {
@@ -330,6 +331,7 @@ impl AntigravityStreamParser {
                     .or_else(|| non_empty(str_field(init, "conversation_id")))
                     .unwrap_or_default()
                     .to_owned();
+                self.has_json_schema = init.get("json_schema").is_some_and(|schema| !schema.is_null());
                 let tools = init
                     .get("tools")
                     .and_then(Value::as_array)
@@ -360,12 +362,14 @@ impl AntigravityStreamParser {
                         .unwrap_or("the turn failed")
                         .to_owned()
                 } else {
-                    non_empty(str_field(res, "response")).map(str::to_owned).unwrap_or_else(|| {
-                        res.get("structured_output")
-                            .filter(|structured| !structured.is_null())
-                            .map(Value::to_string)
-                            .unwrap_or_default()
-                    })
+                    let structured =
+                        res.get("structured_output").filter(|structured| !structured.is_null()).map(Value::to_string);
+                    let response = non_empty(str_field(res, "response")).map(str::to_owned);
+                    if self.has_json_schema {
+                        structured.or(response).unwrap_or_default()
+                    } else {
+                        response.or(structured).unwrap_or_default()
+                    }
                 };
                 let duration_ms = res
                     .get("duration_seconds")
